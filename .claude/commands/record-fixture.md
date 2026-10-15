@@ -1,0 +1,1 @@
+Record a new protocol fixture with `scripts/record-fixture.sh $ARGUMENTS`. Then add a test in `src/test/kotlin/.../protocol/` that parses the new fixture and asserts the facts it was recorded for (message types, model, fallback, permission requests). Check the fixture contains no file contents, secrets or personal paths before committing; redact them if it does.

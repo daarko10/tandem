@@ -1,0 +1,1 @@
+Run `./gradlew test` and then `./gradlew verifyPlugin`. Report test failures with their output, and Plugin Verifier problems grouped by IDE version (compatibility problems first, then deprecated or internal API use). Do not edit code. If Gradle cannot reach its repositories, say so and stop.

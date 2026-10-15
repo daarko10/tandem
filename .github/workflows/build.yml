@@ -1,0 +1,62 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Test
+        run: ./gradlew check
+      - name: Build plugin
+        run: ./gradlew buildPlugin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-distribution
+          path: ./build/distributions/*.zip
+      - name: Upload test reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: ./build/reports/tests
+
+  verify:
+    name: Plugin Verifier
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v2.0.0
+        with:
+          tool-cache: false
+          large-packages: false
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+      - name: Verify against every supported IDE release
+        run: ./gradlew verifyPlugin
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: plugin-verifier-report
+          path: ./build/reports/pluginVerifier

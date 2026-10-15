@@ -1,0 +1,33 @@
+# Nightly: parse the stream-json output of the newest `claude` CLI with Tandem's protocol decoder.
+# Catches protocol drift before users do. Needs an ANTHROPIC_API_KEY repository secret (a low-budget key).
+name: CLI contract
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'daarko10/tandem' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Install latest Claude Code
+        run: npm install -g @anthropic-ai/claude-code && claude --version
+      - name: Record live transcripts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          mkdir -p build/contract
+          ./scripts/record-fixture.sh contract-hello "Reply with the single word: pong" build/contract
+      - name: Decode with Tandem's protocol layer
+        run: ./gradlew test --tests '*ContractTest*' -Dtandem.contractDir=build/contract

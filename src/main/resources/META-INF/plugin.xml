@@ -1,0 +1,23 @@
+<idea-plugin>
+    <id>dev.daarkolabs.tandem</id>
+    <name>Tandem</name>
+    <vendor url="https://daarkolabs.com">DaArKo Labs</vendor>
+
+    <description><![CDATA[
+    A fast, native chat for Claude Code inside JetBrains IDEs.<br/>
+    Uses your own installed <code>claude</code> CLI and its sign-in; Tandem never reads your credentials.
+    Edits go through the IDE, so undo, unsaved buffers and the native diff viewer all work.<br/><br/>
+    Tandem is an independent project and is not affiliated with or endorsed by Anthropic.
+    Claude and Claude Code are trademarks of Anthropic, PBC.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Tandem"
+                    anchor="right"
+                    icon="AllIcons.Toolwindows.ToolWindowMessages"
+                    factoryClass="dev.daarkolabs.tandem.ui.TandemToolWindowFactory"/>
+        <notificationGroup id="Tandem" displayType="BALLOON"/>
+    </extensions>
+</idea-plugin>

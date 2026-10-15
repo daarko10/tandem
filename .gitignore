@@ -6,3 +6,12 @@ __pycache__/
 .env.*
 scratch/
 .claude/settings.local.json
+
+# Gradle / IntelliJ
+.gradle/
+build/
+.intellijPlatform/
+.idea/
+*.iml
+out/
+.kotlin/

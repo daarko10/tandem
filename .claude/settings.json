@@ -2,8 +2,23 @@
   "permissions": {
     "allow": [
       "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
-      "Bash(npm test:*)", "Bash(npm run:*)", "Bash(pytest:*)", "Bash(ruff:*)", "Bash(uv run:*)"
+      "Bash(./gradlew test:*)", "Bash(./gradlew check:*)", "Bash(./gradlew compileKotlin:*)",
+      "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)",
+      "Bash(ktlint:*)"
     ],
-    "deny": ["Bash(git push --force:*)", "Bash(rm -rf /:*)"]
+    "deny": [
+      "Bash(git push --force:*)", "Bash(rm -rf /:*)",
+      "Read(~/.claude/.credentials*)", "Read(**/.credentials.json)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/format-kotlin.sh" }
+        ]
+      }
+    ]
   }
 }
