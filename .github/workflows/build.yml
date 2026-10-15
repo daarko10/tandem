@@ -85,3 +85,42 @@ jobs:
         with:
           name: plugin-verifier-report
           path: ./build/reports/pluginVerifier
+
+  ide-test:
+    name: IDE test
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v2.0.0
+        with:
+          tool-cache: false
+          large-packages: false
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+      # Starts a real IDE with the built plugin installed (IDE Starter + UI Driver); it needs a display.
+      - name: Run the IDE test
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" ./gradlew integrationTest
+      - name: Report IDE test failures
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          grep -ho 'failure message="[^"]*' build/test-results/integrationTest/*.xml 2>/dev/null \
+            | sed -E 's/^failure message="//; s/&#10;/ /g; s/\x1b\[[0-9;]*m//g; s/\?\[[0-9;]*m//g' \
+            | cut -c1-400 | head -n 10 \
+            | while IFS= read -r line; do echo "::error title=IDE test::${line}"; done
+          find out/ide-tests -name idea.log -print0 2>/dev/null | xargs -0 -r grep -h 'Plugin: dev.daarkolabs.tandem' \
+            | sort -u | head -n 10 | while IFS= read -r line; do echo "::error title=IDE log::${line}"; done
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: ide-test-logs
+          path: |
+            out/ide-tests/tests/**/log/**
+            build/reports/tests/integrationTest
