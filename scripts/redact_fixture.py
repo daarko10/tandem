@@ -12,7 +12,11 @@ import json
 import re
 import sys
 
-ID_KEYS = {"session_id", "uuid", "request_id", "parent_uuid", "tool_use_id", "id"}
+ID_KEYS = {
+    "session_id", "uuid", "request_id", "parent_uuid", "tool_use_id", "id",
+    "api_message_id", "summarizes_uuid", "user_message_uuid", "refused_user_message_uuid", "new_conversation_id",
+}
+ID_LIST_KEYS = {"user_message_uuids", "retracted_message_uuids", "supersedes"}
 INIT_LISTS = {"mcp_servers", "plugins", "skills", "agents", "slash_commands", "terminal_slash_commands"}
 PATH_RE = re.compile(r"(?:/(?:root|home|Users|tmp|private|var|opt)|[A-Za-z]:\\\\)[^\s\"']*")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -32,7 +36,7 @@ def scrub(node, key=None):
     if isinstance(node, list):
         return [scrub(v, key) for v in node]
     if isinstance(node, str):
-        if key in ID_KEYS and node:
+        if (key in ID_KEYS or key in ID_LIST_KEYS) and node:
             return stable_id(node, key)
         node = PATH_RE.sub("<path>", node)
         return EMAIL_RE.sub("<email>", node)
