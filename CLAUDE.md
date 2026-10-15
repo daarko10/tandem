@@ -49,7 +49,9 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 - PRs: clear title, context + approach + testing notes, CI green.
 
 ## Remote-session notes
-- Remote sandboxes may not reach Maven Central or JetBrains repos, so Gradle cannot run there. Say so instead of guessing that code compiles.
+- The cloud environment allows Maven, Gradle and `*.jetbrains.com`, so Gradle runs there. The first build downloads the IntelliJ Platform (over 1 GB) and can take several minutes; run it in the background rather than letting it time out. If a host is refused, stop and name it instead of guessing that code compiles.
+- No IDE runs here, so the IntelliJ MCP server is unavailable. Use `./gradlew test`, `./gradlew verifyPlugin` and compiler output. For UI checks run the sandbox IDE under `xvfb-run` and look at screenshots.
+- `claude` inside the session uses the session's own sign-in, so `scripts/record-fixture.sh` works without an API key.
 - Work on a feature branch, never directly on `main`.
 - Put scratch files outside the repo or in `scratch/` (gitignored).
 
