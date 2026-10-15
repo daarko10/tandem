@@ -21,7 +21,8 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 - `ui/` Jewel tool window. Renders state from `session/`; holds no protocol logic.
 
 ## Commands
-- `./gradlew test` unit and fixture tests (fast, no IDE).
+- `./gradlew test` unit, fixture and headless platform tests (no real `claude`; a fake CLI replays fixtures).
+- `xvfb-run ./gradlew integrationTest` IDE Starter test: installs the built ZIP in a real IDE and checks the rendered tool window. Slow; catches plugin-classloader problems the platform tests cannot.
 - `./gradlew runIde` sandbox IDE with the plugin. Use it to check feel, freezes and focus; agents cannot judge these.
 - `./gradlew verifyPlugin` Plugin Verifier against every supported IDE release.
 - `./gradlew buildPlugin` installable ZIP in `build/distributions/`.
@@ -49,5 +50,5 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 
 ## Headless and cloud sandboxes
 - Gradle needs Maven Central, the Gradle Plugin Portal and `*.jetbrains.com`. The first build downloads the IntelliJ Platform (over 1 GB); run it in the background rather than letting it time out. If a host is refused, stop and name it instead of guessing that code compiles.
-- Without a running IDE there is no IntelliJ MCP server. Use `./gradlew test`, `./gradlew verifyPlugin` and compiler output. For UI checks run the sandbox IDE under `xvfb-run` and look at screenshots.
+- Without a running IDE there is no IntelliJ MCP server. Use `./gradlew test`, `./gradlew verifyPlugin` and compiler output. For UI checks run `xvfb-run ./gradlew integrationTest`, or the sandbox IDE under `xvfb-run` and look at screenshots.
 - `scripts/record-fixture.sh` uses whatever sign-in the local `claude` has; in a hosted Claude Code session that is the session's own.
