@@ -1,18 +1,22 @@
 {
-  "attribution": {
-    "commit": "",
-    "pr": ""
-  },
   "permissions": {
     "allow": [
-      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
-      "Bash(./gradlew test:*)", "Bash(./gradlew check:*)", "Bash(./gradlew compileKotlin:*)",
-      "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(./gradlew test:*)",
+      "Bash(./gradlew check:*)",
+      "Bash(./gradlew compileKotlin:*)",
+      "Bash(./gradlew compileTestKotlin:*)",
+      "Bash(./gradlew buildPlugin:*)",
+      "Bash(./gradlew verifyPlugin:*)",
       "Bash(ktlint:*)"
     ],
     "deny": [
-      "Bash(git push --force:*)", "Bash(rm -rf /:*)",
-      "Read(~/.claude/.credentials*)", "Read(**/.credentials.json)"
+      "Bash(git push --force:*)",
+      "Bash(rm -rf /:*)",
+      "Read(~/.claude/.credentials*)",
+      "Read(**/.credentials.json)"
     ]
   },
   "hooks": {
@@ -20,7 +24,10 @@
       {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
-          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/format-kotlin.sh" }
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/format-kotlin.sh"
+          }
         ]
       }
     ]
