@@ -26,6 +26,10 @@ dependencies {
         intellijIdea(providers.gradleProperty("platformVersion"))
         // Compose + Jewel bundled modules (Jewel foundation/ui, IDE LaF bridge, Compose runtime).
         composeUI()
+        // Jewel Markdown (parsing, IDE-styled rendering, plain-URL links); bundled with the IDE.
+        bundledModule("intellij.platform.jewel.markdown.core")
+        bundledModule("intellij.platform.jewel.markdown.ideLafBridgeStyling")
+        bundledModule("intellij.platform.jewel.markdown.extensions.autolink")
         testFramework(TestFrameworkType.Platform)
     }
 }
@@ -52,6 +56,27 @@ intellijPlatform {
 }
 
 tasks {
+    runIde {
+        // Development-only runs, also usable headless under xvfb-run (see ui/dev/):
+        //   ./gradlew runIde -Ptandem.spike=true -Ptandem.openProject=<dir>       Jewel rendering spike
+        //   ./gradlew runIde -Ptandem.autoPrompt="..." -Ptandem.openProject=<dir> sends one real prompt on startup
+        // The extra flags skip first-run dialogs in the sandbox IDE.
+        val spike = providers.gradleProperty("tandem.spike").orNull == "true"
+        val autoPrompt = providers.gradleProperty("tandem.autoPrompt").orNull
+        if (spike || autoPrompt != null) {
+            jvmArgs(
+                "-Didea.trust.all.projects=true",
+                "-Djb.consents.confirmation.enabled=false",
+                "-Djb.privacy.policy.text=<!--999.999-->",
+                "-Dide.show.tips.on.startup.default.value=false",
+                "-Didea.initially.ask.config=never",
+            )
+        }
+        if (spike) jvmArgs("-Dtandem.spike=true")
+        if (autoPrompt != null) jvmArgs("-Dtandem.autoPrompt=$autoPrompt")
+        providers.gradleProperty("tandem.openProject").orNull?.let { args(it) }
+    }
+
     test {
         // Protocol tests run against recorded CLI transcripts; they never spawn a real `claude`.
         systemProperty("tandem.fixtures", layout.projectDirectory.dir("src/test/resources/fixtures").asFile.path)

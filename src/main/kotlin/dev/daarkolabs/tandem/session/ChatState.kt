@@ -18,6 +18,8 @@ data class ChatState(
     val busy: Boolean = false,
     val pendingPermissions: List<PendingPermission> = emptyList(),
     val ended: Boolean = false,
+    /** Monotonic id source for notices; entry ids must stay unique even after retractions shrink [entries]. */
+    val noticeCount: Int = 0,
 )
 
 sealed interface ChatEntry {

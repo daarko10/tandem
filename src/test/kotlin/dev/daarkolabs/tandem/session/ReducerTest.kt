@@ -121,6 +121,20 @@ class ReducerTest {
     }
 
     @Test
+    fun `entry ids stay unique after a retraction`() {
+        var state = ChatState()
+        state = reduce(state, cli("""{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"text","text":"x"}]}}"""))
+        state = reduce(state, cli("""{"type":"system","subtype":"api_retry","attempt":1,"max_retries":3}"""))
+        state = reduce(
+            state,
+            cli("""{"type":"system","subtype":"model_refusal_fallback","original_model":"a","fallback_model":"b","retracted_message_uuids":["a1"]}"""),
+        )
+        state = reduce(state, cli("""{"type":"system","subtype":"api_retry","attempt":2,"max_retries":3}"""))
+        val ids = state.entries.map { it.id }
+        assertEquals(ids.distinct(), ids)
+    }
+
+    @Test
     fun `overload fallback seen only on the assistant message still warns`() {
         var state = ChatState(requestedModel = "claude-opus-5-5")
         state = reduce(state, cli("""{"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5"}"""))

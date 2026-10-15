@@ -272,4 +272,4 @@ private fun ChatState.finishStreaming(): ChatState =
     copy(entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it })
 
 private fun ChatState.notice(level: NoticeLevel, text: String): ChatState =
-    copy(entries = entries + ChatEntry.Notice("notice-${entries.size}", level, text))
+    copy(entries = entries + ChatEntry.Notice("notice-$noticeCount", level, text), noticeCount = noticeCount + 1)

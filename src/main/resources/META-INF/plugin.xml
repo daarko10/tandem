@@ -12,6 +12,15 @@
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <!-- IDE content modules the Jewel UI uses. Each one must be declared to be visible at runtime. -->
+    <dependencies>
+        <module name="intellij.platform.jewel.foundation"/>
+        <module name="intellij.platform.jewel.ui"/>
+        <module name="intellij.platform.jewel.ideLafBridge"/>
+        <module name="intellij.platform.jewel.markdown.core"/>
+        <module name="intellij.platform.jewel.markdown.ideLafBridgeStyling"/>
+        <module name="intellij.platform.jewel.markdown.extensions.autolink"/>
+    </dependencies>
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="Tandem"
@@ -19,5 +28,7 @@
                     icon="AllIcons.Toolwindows.ToolWindowMessages"
                     factoryClass="dev.daarkolabs.tandem.ui.TandemToolWindowFactory"/>
         <notificationGroup id="Tandem" displayType="BALLOON"/>
+        <!-- Development-only: does nothing unless -Dtandem.spike or -Dtandem.autoPrompt is set. -->
+        <postStartupActivity implementation="dev.daarkolabs.tandem.ui.dev.DevStartupActivity"/>
     </extensions>
 </idea-plugin>
