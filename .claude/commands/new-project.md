@@ -1,0 +1,1 @@
+Scaffold a new project in a subfolder named $ARGUMENTS following the structure and conventions in CLAUDE.md (Node/TS or Python, whichever fits). Include: README with setup, Dockerfile (multi-stage, non-root), .gitignore, a health endpoint, one passing test, and CI workflow. Keep it minimal.

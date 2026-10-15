@@ -1,0 +1,1 @@
+Review the current branch's diff against main for: correctness bugs, security (injection, authz, secrets), performance (N+1, missing indexes), missing tests, and error handling. Report findings ranked by severity with file:line references. Do not edit code.
