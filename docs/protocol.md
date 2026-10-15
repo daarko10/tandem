@@ -3,7 +3,9 @@
 How Tandem talks to the user's `claude` binary (Claude Code 2.1.x) over stdin/stdout NDJSON.
 
 Sources, in order of authority:
-1. The recorded transcript `src/test/resources/fixtures/plain-reply.ndjson` (CLI 2.1.300).
+1. Recorded transcripts in `src/test/resources/fixtures/` (CLI 2.1.300): `plain-reply`, `permission`, `interrupt`,
+   `model-switch`. Re-record with `scripts/record-fixture.sh` (one-shot prompt) or `scripts/record-scenario.sh`
+   (bidirectional scenarios).
 2. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads).
 3. `claude --help` output.
 
@@ -267,6 +269,11 @@ Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_u
 - `allow`: `updatedInput` optional in types; **always echo the (possibly edited) input** for safety on older CLIs (inferred).
 - `deny`: `message` required; `interrupt:true` also aborts the turn.
 - `PermissionUpdate` variants: `addRules|replaceRules|removeRules {rules:[{toolName,ruleContent?}], behavior:"allow"|"deny"|"ask", destination}`, `setMode {mode, destination}`, `addDirectories|removeDirectories {directories, destination}`; destination `userSettings|projectSettings|localSettings|session|cliArg`.
+- Fixture order (`permission`): `assistant` with the `tool_use` block, then `content_block_stop`, then the
+  `can_use_tool` request (its `tool_use_id` equals the block's `id`), then `message_delta`/`message_stop`. After the
+  answer, a `user` line carries the `tool_result` (`is_error:true` with the deny message on deny) plus
+  `tool_result_meta[{id, permission_decision:{decision:"accept"|"reject", source}}]`.
+- Read-only commands (e.g. `echo`) are auto-approved and never reach the host.
 - If the turn is interrupted while a prompt is open, the CLI sends `control_cancel_request` for it: close the dialog, send nothing.
 - Auto-denials without a prompt arrive as `system/permission_denied` (section 5).
 
@@ -275,7 +282,7 @@ Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_u
 | subtype | Request fields | Success `response` |
 |---|---|---|
 | `interrupt` | `cancel_queued?: boolean` | `{still_queued: string[], cancelled?: string[]}` (empty `{}` on CLIs without `interrupt_receipt_v1`) |
-| `set_model` | `model?: string\|null` (`null`/`"default"` = session default) | `{}` |
+| `set_model` | `model?: string\|null` (`null`/`"default"` = session default) | none: the success frame has no `response` field (fixture). The CLI also emits a replayed `user` line (`isReplay:true`) with `<local-command-stdout>Set model to ...</local-command-stdout>` |
 | `set_permission_mode` | `mode: "default"\|"acceptEdits"\|"bypassPermissions"\|"plan"\|"dontAsk"\|"auto"` | `{}` |
 | `set_max_thinking_tokens` | `max_thinking_tokens?: number\|null`, `thinking_display?` | `{}` |
 | `list_models` | — | model catalog (`{models: ModelInfo[]}`, inferred shape) |
@@ -514,6 +521,7 @@ The `session_id` on every line is authoritative; it changes after fork.
 | Topic | Detail |
 |---|---|
 | Version gating | Use `init.capabilities` first, `claude_code_version` second. `pending_permission_requests` on initialize from 2.1.268; `interrupt_receipt_v1` for `still_queued`; `scope` on refusal fallback is new (absent = `session`). Refuse to start below a minimum tested version and say so. |
+| Interrupt | Fixture `interrupt`: the receipt `{still_queued:[]}` arrives, then the partial `assistant`, a synthetic `user` text `[Request interrupted by user]`, the remaining stream frames, and `result{subtype:"error_during_execution", is_error:true, terminal_reason:"aborted_streaming", stop_reason:null}`. Treat that result as "stopped", not as a failure. |
 | Undocumented stdout types | See section 10. The SDK passes them through untouched. |
 | Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init`. Do not assume `init` is first. |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
@@ -545,5 +553,10 @@ Parse them leniently; any of them can change without notice.
 | `message_start.message` | `container, stop_details, input_transformations, diagnostics, context_management` | API-level fields, not in the SDK types |
 | `system/init` | `analytics_disabled, product_feedback_disabled, scratchpad_path, messaging_socket_path, per_turn_effort_active, startup_timing` | not in `SDKSystemMessage` |
 | `result` | `api_error_status, subagent_stats, safety_stops, turn_start_resume_kind, process_*` timings | not in `SDKResultMessage` |
-| `rate_limit_event.rate_limit_info` | `overageDisabledReason, unifiedWindows{five_hour,seven_day}` | beyond the typed fields |
+| `rate_limit_event.rate_limit_info` | `overageDisabledReason, unifiedWindows{five_hour,seven_day}` | beyond the typed fields || top-level `command_lifecycle` | `{command_uuid, state:"queued"\|"started"\|"completed"\|"cancelled"}` | not in `sdk.d.ts`. `command_uuid` is the `uuid` the host sent with the user message |
+| `system/ui_invalidate` | `{event:"ui.render"}` | not in `sdk.d.ts`; before `init` |
+| `system/task_summary` | `{detail: string\|null}` | not in `sdk.d.ts`; short status line while a tool runs, `null` when done |
+| `assistant.wire_tool_inputs` | `{<tool_use id>: input}` | not in `sdk.d.ts` |
+| `user.tool_result_meta` | `[{id, permission_decision:{decision, source}, non_execution_kind?}]` | not in `sdk.d.ts` |
+| initialize `control_response` | `pid, current_permission_mode, session_state, feedback_mode, remote_control_*, user_output_styles_dir` | beyond `SDKControlInitializeResponse` |
 
