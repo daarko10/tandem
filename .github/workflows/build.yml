@@ -65,15 +65,20 @@ jobs:
         with:
           cache-read-only: true
       - name: Verify against every supported IDE release
-        run: ./gradlew verifyPlugin
-      # Surface verifier problems as annotations, which are readable through the GitHub API
-      # (log and artifact downloads are blocked in some sandboxes).
+        shell: bash
+        run: set -o pipefail; ./gradlew verifyPlugin 2>&1 | tee verify.log
+      # Surface the verdict per IDE and each blocking problem as annotations, which are readable through the
+      # GitHub API (log and artifact downloads are blocked in some sandboxes).
       - name: Report verifier problems
         if: ${{ failure() }}
+        shell: bash
         run: |
-          find build/reports/pluginVerifier -type f \( -name '*.txt' -o -name '*.md' \) \
-            | xargs -r grep -hiE 'problem|not found|unresolved|incompatib|deprecated|internal' \
-            | sort -u | head -n 40 \
+          sed -E 's/^[[:space:]]+//' verify.log \
+            | awk '/^Plugin .* against /{print; next}
+                   /^(Compatibility problems|Internal API usages|Non-extendable API usages|Override-only API usages)/{keep=1; print; next}
+                   /^[A-Z][A-Za-z -]*(usages|problems|Eligibility)/{keep=0}
+                   keep && /^#/{print}' \
+            | head -n 40 \
             | while IFS= read -r line; do echo "::error title=Plugin Verifier::${line}"; done
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
