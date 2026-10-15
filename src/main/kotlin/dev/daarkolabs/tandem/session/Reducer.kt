@@ -1,0 +1,275 @@
+package dev.daarkolabs.tandem.session
+
+import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ContentBlock
+import dev.daarkolabs.tandem.protocol.Delta
+import dev.daarkolabs.tandem.protocol.InboundRequest
+import dev.daarkolabs.tandem.protocol.StreamEvent
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+
+/** Inputs to [reduce]: decoded CLI lines plus what the host itself did. */
+sealed interface SessionEvent {
+    data class Cli(val message: CliMessage) : SessionEvent
+
+    data class UserSent(val uuid: String, val text: String) : SessionEvent
+
+    /** The user picked a model (at spawn or via `set_model`); null means the CLI default. */
+    data class ModelRequested(val model: String?) : SessionEvent
+
+    data class PermissionAnswered(val requestId: String) : SessionEvent
+
+    /** The CLI process could not be started or exited. [detail] is shown to the user. */
+    data class Ended(val detail: String, val isError: Boolean) : SessionEvent
+}
+
+/** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
+fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
+    is SessionEvent.Cli -> reduceCli(state, event.message)
+    is SessionEvent.UserSent -> state.copy(entries = state.entries + ChatEntry.User(event.uuid, event.text), busy = true)
+    // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch.
+    is SessionEvent.ModelRequested -> state.copy(requestedModel = event.model, modelWarning = null)
+    is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
+    is SessionEvent.Ended -> state.finishStreaming().copy(busy = false, ended = true, pendingPermissions = emptyList())
+        .notice(if (event.isError) NoticeLevel.ERROR else NoticeLevel.INFO, event.detail)
+}
+
+private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (message) {
+    is CliMessage.SystemInit -> state.copy(
+        sessionId = message.sessionId.ifEmpty { state.sessionId },
+        permissionMode = message.permissionMode ?: state.permissionMode,
+        claudeCodeVersion = message.claudeCodeVersion ?: state.claudeCodeVersion,
+    ).checkModel(message.model)
+    is CliMessage.SystemStatus -> state.copy(permissionMode = message.permissionMode ?: state.permissionMode)
+    is CliMessage.ApiRetry -> state.notice(
+        NoticeLevel.WARNING,
+        buildString {
+            append("API request failed")
+            message.error?.let { append(" ($it)") }
+            append(", retrying")
+            if (message.attempt != null && message.maxRetries != null) append(" ${message.attempt}/${message.maxRetries}")
+            message.retryDelayMs?.let { append(" in ${(it + 999) / 1000}s") }
+            append('.')
+        },
+    )
+    is CliMessage.ModelRefusalFallback -> {
+        val retracted = message.retractedMessageUuids.toSet()
+        val kept = state.entries.filterNot { it is ChatEntry.Assistant && it.uuids.any(retracted::contains) }
+        val text = "${message.originalModel} declined this request; " +
+            if (message.scope == "local") "this answer came from ${message.fallbackModel}." else "the session switched to ${message.fallbackModel}."
+        val next = state.copy(entries = kept).notice(NoticeLevel.WARNING, message.content ?: text)
+        if (message.scope == "local") next else next.checkModel(message.fallbackModel)
+    }
+    is CliMessage.ModelRefusalNoFallback ->
+        state.notice(NoticeLevel.WARNING, message.content ?: "${message.originalModel ?: "The model"} declined this request.")
+    is CliMessage.Assistant -> reduceAssistant(state, message)
+    is CliMessage.User -> reduceUser(state, message)
+    is CliMessage.StreamEvent -> reduceStream(state, message)
+    is CliMessage.Result -> reduceResult(state, message)
+    is CliMessage.ControlRequest -> when (val request = message.request) {
+        is InboundRequest.CanUseTool -> state.copy(
+            pendingPermissions = state.pendingPermissions + PendingPermission(
+                requestId = message.requestId,
+                toolName = request.toolName,
+                input = request.input,
+                toolUseId = request.toolUseId,
+                description = request.description ?: request.title,
+                suggestions = request.permissionSuggestions,
+            ),
+        )
+        is InboundRequest.Other -> state
+    }
+    is CliMessage.ControlCancelRequest -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != message.requestId })
+    is CliMessage.ControlResponse ->
+        if (message.isSuccess) state else state.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
+    is CliMessage.KeepAlive, is CliMessage.Unknown -> state
+}
+
+private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant): ChatState {
+    var next = state
+    if (message.supersedes.isNotEmpty()) {
+        val superseded = message.supersedes.toSet()
+        next = next.copy(entries = next.entries.filterNot { it is ChatEntry.Assistant && it.uuids.any(superseded::contains) })
+    }
+    message.error?.let { return next.notice(NoticeLevel.ERROR, errorText(it, message)) }
+    if (message.parentToolUseId == null) next = next.checkModel(message.model, fromAssistant = true)
+
+    val messageId = message.messageId ?: message.uuid ?: return next
+    val complete = message.content.map(::toBlock)
+    val existing = next.assistant(messageId, message.parentToolUseId)
+    val updated = if (existing == null) {
+        ChatEntry.Assistant(
+            id = entryId(messageId, message.parentToolUseId),
+            messageId = messageId,
+            parentToolUseId = message.parentToolUseId,
+            model = message.model,
+            blocks = complete,
+            completedBlocks = complete.size,
+            streaming = false,
+            uuids = setOfNotNull(message.uuid),
+        )
+    } else {
+        // The Nth complete line for a message replaces the Nth drafted block (docs/protocol.md 6.4).
+        val blocks = existing.blocks.toMutableList()
+        complete.forEachIndexed { offset, block ->
+            val index = existing.completedBlocks + offset
+            if (index < blocks.size) blocks[index] = block else blocks += block
+        }
+        existing.copy(
+            blocks = blocks,
+            completedBlocks = existing.completedBlocks + complete.size,
+            model = message.model ?: existing.model,
+            uuids = existing.uuids + setOfNotNull(message.uuid),
+        )
+    }
+    return next.upsert(updated).let { if (message.aborted) it.finishStreaming() else it }
+}
+
+private fun reduceUser(state: ChatState, message: CliMessage.User): ChatState {
+    if (message.isReplay) return state
+    var next = state
+    for (block in message.content) {
+        next = when (block) {
+            is ContentBlock.ToolResult -> next.copy(
+                entries = next.entries + ChatEntry.ToolResult("result-${block.toolUseId}", block.toolUseId, toolResultText(block), block.isError),
+            )
+            is ContentBlock.Text ->
+                if (block.text.startsWith("[Request interrupted")) next.notice(NoticeLevel.INFO, "Stopped.") else next
+            is ContentBlock.Thinking, is ContentBlock.ToolUse, is ContentBlock.Other -> next
+        }
+    }
+    return next
+}
+
+private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent): ChatState {
+    val parent = message.parentToolUseId
+    return when (val event = message.event) {
+        is StreamEvent.MessageStart -> {
+            if (parent == null) {
+                state.checkModel(event.model, fromAssistant = true)
+            } else {
+                state
+            }.upsertIfAbsent(
+                ChatEntry.Assistant(
+                    id = entryId(event.messageId, parent),
+                    messageId = event.messageId,
+                    parentToolUseId = parent,
+                    model = event.model,
+                    blocks = emptyList(),
+                    completedBlocks = 0,
+                    streaming = true,
+                    uuids = emptySet(),
+                ),
+            )
+        }
+        is StreamEvent.ContentBlockStart -> state.editDraft(message) { blocks ->
+            if (event.index < blocks.size) blocks else blocks + List(event.index - blocks.size) { AssistantBlock.Other("gap") } + toBlock(event.block)
+        }
+        is StreamEvent.ContentBlockDelta -> state.editDraft(message) { blocks ->
+            val draft = blocks.getOrNull(event.index) ?: return@editDraft blocks
+            val updated = when (val delta = event.delta) {
+                is Delta.Text -> (draft as? AssistantBlock.Text)?.copy(text = draft.text + delta.text)
+                is Delta.Thinking -> (draft as? AssistantBlock.Thinking)?.copy(text = draft.text + delta.thinking)
+                is Delta.InputJson -> (draft as? AssistantBlock.ToolUse)?.copy(partialInput = draft.partialInput + delta.partialJson)
+                is Delta.Other -> null
+            } ?: draft
+            blocks.toMutableList().also { it[event.index] = updated }
+        }
+        is StreamEvent.MessageStop -> {
+            val entry = state.draftFor(message) ?: return state
+            state.upsert(entry.copy(streaming = false))
+        }
+        // A late content_block_stop for an already completed block is a no-op (docs/protocol.md 6.4).
+        is StreamEvent.ContentBlockStop, is StreamEvent.MessageDelta, is StreamEvent.Other -> state
+    }
+}
+
+private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState {
+    val next = state.finishStreaming().copy(busy = false, sessionId = result.sessionId ?: state.sessionId, pendingPermissions = emptyList())
+    return when {
+        result.terminalReason == "aborted_streaming" -> next // the interrupt already showed "Stopped."
+        result.isError -> next.notice(
+            NoticeLevel.ERROR,
+            "The turn failed (${result.subtype}): " + (result.result ?: result.errors.joinToString("; ").ifEmpty { "no details" }),
+        )
+        else -> next
+    }
+}
+
+/**
+ * Compares what the CLI reports with what the user picked. Never silently accept another model:
+ * a mismatch sets [ChatState.modelWarning] and adds one notice per distinct mismatch.
+ */
+private fun ChatState.checkModel(reported: String?, fromAssistant: Boolean = false): ChatState {
+    if (reported == null) return this
+    val requested = requestedModel
+    val changed = reported != activeModel
+    val base = copy(activeModel = reported)
+    if (requested == null || modelMatches(requested, reported)) return base.copy(modelWarning = null)
+    val warning = "You picked $requested, but the CLI is using $reported" + if (fromAssistant) " for this reply." else "."
+    return if (changed || modelWarning == null) base.copy(modelWarning = warning).notice(NoticeLevel.WARNING, warning) else base
+}
+
+/** Accepts the CLI's resolution of aliases (`opus` → `claude-opus-5-5`) and context-window suffixes (`[1m]`). */
+internal fun modelMatches(requested: String, reported: String): Boolean {
+    val wanted = requested.substringBefore('[').lowercase()
+    val actual = reported.substringBefore('[').lowercase()
+    if (wanted == "default" || wanted == actual) return true
+    return wanted in setOf("opus", "sonnet", "haiku", "fable") && actual.startsWith("claude-$wanted")
+}
+
+private fun errorText(error: String, message: CliMessage.Assistant): String {
+    val text = message.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+    return when (error) {
+        "authentication_failed" -> "Claude Code is not signed in. Run `claude` in a terminal to sign in, then retry."
+        "model_not_found" -> "The CLI rejected the model${message.model?.let { " $it" } ?: ""}. Pick another model."
+        else -> text.ifEmpty { "The CLI reported an error: $error" }
+    }
+}
+
+private fun toBlock(block: ContentBlock): AssistantBlock = when (block) {
+    is ContentBlock.Text -> AssistantBlock.Text(block.text)
+    is ContentBlock.Thinking -> AssistantBlock.Thinking(block.thinking)
+    is ContentBlock.ToolUse -> AssistantBlock.ToolUse(block.id, block.name, block.input, partialInput = "")
+    is ContentBlock.ToolResult -> AssistantBlock.Other("tool_result")
+    is ContentBlock.Other -> AssistantBlock.Other(block.type)
+}
+
+private fun toolResultText(block: ContentBlock.ToolResult): String = when (val content = block.content) {
+    is JsonPrimitive -> content.content
+    is JsonArray -> content.mapNotNull { (it as? JsonObject)?.get("text") as? JsonPrimitive }.joinToString("\n") { it.content }
+    else -> ""
+}
+
+private fun entryId(messageId: String, parent: String?): String = if (parent == null) messageId else "$parent/$messageId"
+
+private fun ChatState.assistant(messageId: String, parent: String?): ChatEntry.Assistant? {
+    val id = entryId(messageId, parent)
+    return entries.lastOrNull { it.id == id } as? ChatEntry.Assistant
+}
+
+private fun ChatState.upsert(entry: ChatEntry): ChatState {
+    val index = entries.indexOfLast { it.id == entry.id }
+    return copy(entries = if (index < 0) entries + entry else entries.toMutableList().also { it[index] = entry })
+}
+
+private fun ChatState.upsertIfAbsent(entry: ChatEntry): ChatState = if (entries.any { it.id == entry.id }) this else copy(entries = entries + entry)
+
+private fun ChatState.editDraft(message: CliMessage.StreamEvent, edit: (List<AssistantBlock>) -> List<AssistantBlock>): ChatState {
+    val entry = draftFor(message) ?: return this
+    return upsert(entry.copy(blocks = edit(entry.blocks)))
+}
+
+/** The streaming draft a frame belongs to: by `api_message_id` (undocumented), else the open draft of that thread. */
+private fun ChatState.draftFor(message: CliMessage.StreamEvent): ChatEntry.Assistant? {
+    val draft = message.apiMessageId?.let { assistant(it, message.parentToolUseId) }
+        ?: entries.lastOrNull { it is ChatEntry.Assistant && it.streaming && it.parentToolUseId == message.parentToolUseId } as? ChatEntry.Assistant
+    return draft?.takeIf { it.streaming }
+}
+
+private fun ChatState.finishStreaming(): ChatState =
+    copy(entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it })
+
+private fun ChatState.notice(level: NoticeLevel, text: String): ChatState =
+    copy(entries = entries + ChatEntry.Notice("notice-${entries.size}", level, text))

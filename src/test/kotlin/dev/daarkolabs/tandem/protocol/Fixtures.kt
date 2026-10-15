@@ -3,7 +3,7 @@ package dev.daarkolabs.tandem.protocol
 import java.io.File
 
 /** Recorded CLI transcripts from `src/test/resources/fixtures/`. */
-internal object Fixtures {
+object Fixtures {
     private val dir: File = File(System.getProperty("tandem.fixtures") ?: "src/test/resources/fixtures")
 
     fun names(): List<String> = dir.listFiles { f -> f.name.endsWith(".ndjson") }.orEmpty().map { it.nameWithoutExtension }.sorted()
