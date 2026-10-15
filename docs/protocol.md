@@ -116,7 +116,8 @@ One JSON object per line, UTF-8, `\n`-terminated. Blank lines and non-JSON lines
 | `user` | tool results, replays, synthetic user messages |
 | `stream_event` | raw Anthropic SSE event (only with `--include-partial-messages`) |
 | `result` | end of turn |
-| `rate_limit_event` | subscription rate-limit status |
+| `rate_limit_event` | subscription rate-limit status (`SDKRateLimitEvent`) |
+| `conversation_reset` | `/clear` (and plan-mode exit with clear context): `new_conversation_id`, `trigger?`, `user_message_uuid?`. Drop the rendered transcript |
 | `control_request` | CLI asks the host (e.g. `can_use_tool`) |
 | `control_response` | answer to a host request |
 | `control_cancel_request` | CLI withdraws its own pending request |
@@ -386,6 +387,11 @@ There are three different ways the model can change under the user. Surface all 
 Note `modelUsage` legitimately contains helper models (fixture: `claude-haiku-5-5` for internal calls), so only `init.model`/`assistant.message.model` mismatches count as a fallback.
 Also `assistant.error = "model_not_found"` means the CLI rejected the model.
 
+**D. Explicit switches** (`set_model`, `/model`, automatic changes) have no stdout message of their own. The only typed
+signal is the `PreModelSwitch`/`PostModelSwitch` hook input (`from_model`, `to_model`, `requested_model`,
+`source: "command"|"picker"|"sdk"|"auto"|"resume"`), which a host only sees if it registers hooks in `initialize`.
+Tandem relies on comparing `init.model` and `assistant.message.model` against the requested model instead.
+
 ---
 
 ## 6. Assistant, user, and stream events
@@ -403,6 +409,8 @@ Also `assistant.error = "model_not_found"` means the CLI rejected the model.
 - Content block types: `text`, `thinking` (`thinking`, `signature`), `redacted_thinking`, `tool_use` (`id`, `name`, `input`), `server_tool_use`, `web_search_tool_result`, others: keep as unknown blocks.
 - `error?: SDKAssistantMessageError` marks synthetic error messages (auth, rate limit, model_not_found).
 - `parent_tool_use_id` non-null = produced inside a subagent started by that `tool_use`.
+- `supersedes?: uuid[]`: uuids of earlier messages this one replaces (refusal-fallback retry). Evict them on arrival; idempotent with `model_refusal_fallback.retracted_message_uuids`.
+- `aborted?: true`: truncated by an interrupt; `stop_reason` never arrived and the text may end mid-word.
 
 ### 6.2 `user` (tool results)
 
@@ -428,7 +436,7 @@ Also `assistant.error = "model_not_found"` means the CLI rejected the model.
 | `api_message_id` | fixture-only field: the API message id; matches `message_start.message.id` and `assistant.message.id` in real runs (inferred; redacted in the fixture) |
 | `ttft_ms` | on `message_start` |
 | `user_message_uuid(s)` | on the turn's first non-ping event: which client send this turn answers |
-| `thinking_display` | fixture-only field on `message_start` |
+| `thinking_display` | on `message_start` in the fixture; the SDK types it only on `set_max_thinking_tokens` |
 
 ### 6.4 Correlating partial and complete messages
 
@@ -506,7 +514,7 @@ The `session_id` on every line is authoritative; it changes after fork.
 | Topic | Detail |
 |---|---|
 | Version gating | Use `init.capabilities` first, `claude_code_version` second. `pending_permission_requests` on initialize from 2.1.268; `interrupt_receipt_v1` for `still_queued`; `scope` on refusal fallback is new (absent = `session`). Refuse to start below a minimum tested version and say so. |
-| Undocumented stdout types | `active_goal` `{value: {condition,iterations,set_at,tokens_at_start,last_reason?}\|null}`, `autocompact_state` `{value:{enabled,effective_window,threshold,enforced,source}}` (fixture: emitted twice before init, second wins), `rate_limit_event` `{rate_limit_info:{status:"allowed"\|"allowed_warning"\|"rejected", resetsAt, rateLimitType, utilization?, overageStatus?, isUsingOverage?, unifiedWindows?}}`, `system/post_turn_summary` `{summarizes_uuid, status_category, status_detail, needs_action}` (after the turn, before `result`). The SDK passes them through untouched. |
+| Undocumented stdout types | See section 10. The SDK passes them through untouched. |
 | Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init`. Do not assume `init` is first. |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
 | Ordering | complete `assistant` precedes `content_block_stop` (section 6.4). |
@@ -520,3 +528,22 @@ The `session_id` on every line is authoritative; it changes after fork.
 | `--fallback-model` | must differ from `--model` (SDK throws). |
 | Workspace trust | headless mode skips the trust dialog; Tandem should only start in trusted projects (IDE trust). |
 | Settings parse errors | invalid settings files are silently ignored in print mode; `get_settings` reports them. |
+
+---
+
+## 10. Fixture fields and types the SDK does not document
+
+Seen in `plain-reply.ndjson` (CLI 2.1.300) but absent from `sdk.d.ts` 0.3.300, or typed differently there.
+Parse them leniently; any of them can change without notice.
+
+| Where | What | Notes |
+|---|---|---|
+| top-level `autocompact_state` | `{value:{enabled, effective_window, threshold, enforced, source}}` | not in `sdk.d.ts`. Emitted twice before `init` in the fixture; the last one wins |
+| top-level `active_goal` | `{value: {condition, iterations, set_at, tokens_at_start, last_reason?} \| null}` | typed in `sdk.d.ts` but not part of the `SDKMessage` union; arrives before `init` |
+| `system/post_turn_summary` | `summarizes_uuid, status_category, status_detail, needs_action` | not in `sdk.d.ts`. After `message_stop`, before `result` |
+| `stream_event.api_message_id` | API message id on every stream frame | not in `sdk.d.ts`; equals `message_start.message.id` |
+| `message_start.message` | `container, stop_details, input_transformations, diagnostics, context_management` | API-level fields, not in the SDK types |
+| `system/init` | `analytics_disabled, product_feedback_disabled, scratchpad_path, messaging_socket_path, per_turn_effort_active, startup_timing` | not in `SDKSystemMessage` |
+| `result` | `api_error_status, subagent_stats, safety_stops, turn_start_resume_kind, process_*` timings | not in `SDKResultMessage` |
+| `rate_limit_event.rate_limit_info` | `overageDisabledReason, unifiedWindows{five_hour,seven_day}` | beyond the typed fields |
+
