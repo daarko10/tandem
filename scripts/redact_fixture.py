@@ -3,9 +3,11 @@
 
 Usage: redact_fixture.py <in.ndjson> <out.ndjson>
 
-- Replaces ids (session_id, uuid, request_id, message ids, tool_use ids) with stable placeholders.
+- Replaces ids (session_id, uuid, request_id, message ids, tool_use ids, also when used as object keys)
+  with stable placeholders.
 - Replaces absolute paths with <path> and e-mail addresses with <email>.
-- Empties environment-specific lists in system/init (MCP servers, plugins, skills, agents, commands).
+- Empties environment-specific lists in system/init and in the initialize control_response
+  (MCP servers, plugins, skills, agents, commands) and masks account details.
 - Keeps every message type, field name and ordering, which is what the protocol tests care about.
 """
 import json
@@ -17,8 +19,9 @@ ID_KEYS = {
     "api_message_id", "summarizes_uuid", "user_message_uuid", "refused_user_message_uuid", "new_conversation_id",
 }
 ID_LIST_KEYS = {"user_message_uuids", "retracted_message_uuids", "supersedes"}
-INIT_LISTS = {"mcp_servers", "plugins", "skills", "agents", "slash_commands", "terminal_slash_commands"}
+INIT_LISTS = {"mcp_servers", "plugins", "skills", "agents", "slash_commands", "terminal_slash_commands", "commands"}
 PATH_RE = re.compile(r"(?:/(?:root|home|Users|tmp|private|var|opt)|[A-Za-z]:\\\\)[^\s\"']*")
+API_ID_RE = re.compile(r"^(?:toolu|srvtoolu|msg|req)_[A-Za-z0-9]+$")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 ids: dict[str, str] = {}
@@ -32,7 +35,8 @@ def stable_id(value: str, key: str) -> str:
 
 def scrub(node, key=None):
     if isinstance(node, dict):
-        return {k: scrub(v, k) for k, v in node.items()}
+        # API ids can also appear as object keys (e.g. wire_tool_inputs).
+        return {(stable_id(k, "id") if API_ID_RE.match(k) else k): scrub(v, k) for k, v in node.items()}
     if isinstance(node, list):
         return [scrub(v, key) for v in node]
     if isinstance(node, str):
@@ -41,6 +45,11 @@ def scrub(node, key=None):
         node = PATH_RE.sub("<path>", node)
         return EMAIL_RE.sub("<email>", node)
     return node
+
+
+def empty_lists(node: dict) -> None:
+    for k in INIT_LISTS & node.keys():
+        node[k] = []
 
 
 def main(src: str, dst: str) -> None:
@@ -52,8 +61,15 @@ def main(src: str, dst: str) -> None:
                 continue
             msg = json.loads(line)
             if msg.get("type") == "system" and msg.get("subtype") == "init":
-                for k in INIT_LISTS & msg.keys():
-                    msg[k] = []
+                empty_lists(msg)
+            if msg.get("type") == "control_response":
+                payload = msg.get("response", {}).get("response")
+                if isinstance(payload, dict) and "commands" in payload:  # initialize response
+                    empty_lists(payload)
+                    if isinstance(payload.get("account"), dict):
+                        payload["account"] = {k: "<account>" for k in payload["account"]}
+                    if "pid" in payload:
+                        payload["pid"] = 0
             out.append(json.dumps(scrub(msg), ensure_ascii=False, separators=(",", ":")))
     with open(dst, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")

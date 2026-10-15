@@ -17,7 +17,7 @@ mkdir -p "$out_dir"
 
 # Run from an empty directory so the transcript does not mention the repo's files.
 (cd "$work" && claude -p "$prompt" \
-    --output-format stream-json --verbose --include-partial-messages \
+    --output-format stream-json --verbose --include-partial-messages --safe-mode \
     "$@" > raw.ndjson) || echo "claude exited non-zero; keeping the transcript anyway" >&2
 
 python3 -I "$repo/scripts/redact_fixture.py" "$work/raw.ndjson" "$out_dir/$name.ndjson"
