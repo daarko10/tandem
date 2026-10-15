@@ -19,6 +19,11 @@ dependencies {
         exclude(group = "org.jetbrains.kotlinx", module = "kotlinx-coroutines-core")
     }
 
+    // JUnit 5 for platform tests (@TestApplication fixtures); the vintage engine keeps the JUnit 4 tests running.
+    testImplementation(platform("org.junit:junit-bom:5.14.4"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit")
 
@@ -31,6 +36,7 @@ dependencies {
         bundledModule("intellij.platform.jewel.markdown.ideLafBridgeStyling")
         bundledModule("intellij.platform.jewel.markdown.extensions.autolink")
         testFramework(TestFrameworkType.Platform)
+        testFramework(TestFrameworkType.JUnit5)
     }
 }
 
@@ -78,8 +84,11 @@ tasks {
     }
 
     test {
+        useJUnitPlatform()
         // Protocol tests run against recorded CLI transcripts; they never spawn a real `claude`.
         systemProperty("tandem.fixtures", layout.projectDirectory.dir("src/test/resources/fixtures").asFile.path)
+        // Platform tests start TandemChat against a fake CLI that replays a fixture, never a real `claude`.
+        systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/fake-claude.sh").asFile.path)
         // Set by the nightly CLI contract workflow: a directory of freshly recorded live transcripts.
         systemProperty("tandem.contractDir", providers.systemProperty("tandem.contractDir").getOrElse(""))
     }
