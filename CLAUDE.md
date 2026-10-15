@@ -46,6 +46,7 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 - Never log prompt contents, file contents or secrets. Log message types and ids.
 - Coverage target: 90% on `protocol/` and `session/`.
 - Commits: Conventional Commits (`feat:`, `fix:`, `perf:`, `docs:`, `test:`, `refactor:`).
+- Authorship: commits are authored by Dago Kogos <34120174+daarko10@users.noreply.github.com>. Do not add `Co-Authored-By`, `Claude-Session` or any other AI attribution trailer to commits, and no "Generated with Claude Code" line or session link in PR descriptions.
 - PRs: clear title, context + approach + testing notes, CI green.
 
 ## Remote-session notes
