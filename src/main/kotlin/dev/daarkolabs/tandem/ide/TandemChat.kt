@@ -5,6 +5,7 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
+import com.intellij.openapi.util.ShutDownTracker
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ClaudeSession
@@ -15,7 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import java.nio.file.Path
 
@@ -47,7 +48,12 @@ class TandemChat(private val project: Project, private val scope: CoroutineScope
                 }
                 val dir = project.guessProjectDir()?.toNioPath() ?: Path.of(System.getProperty("user.home"))
                 val model = System.getProperty("tandem.model")?.takeIf { it.isNotBlank() }
-                session = ClaudeSession(scope, SessionConfig(binary, dir, model = model)).also { it.start() }
+                val created = ClaudeSession(scope, SessionConfig(binary, dir, model = model))
+                // On IDE exit the JVM can stop before the session's coroutines clean up: kill the CLI synchronously then.
+                val shutdownTask = Runnable(created::killNow)
+                ShutDownTracker.getInstance().registerShutdownTask(shutdownTask)
+                scope.coroutineContext.job.invokeOnCompletion { ShutDownTracker.getInstance().unregisterShutdownTask(shutdownTask) }
+                session = created.also { it.start() }
             }
             thisLogger().info("chat session started")
             val current = session ?: return@launch
