@@ -158,6 +158,17 @@ class ClaudeSession(
         scope.coroutineContext.job.cancelAndJoin()
     }
 
+    /**
+     * Synchronous last resort for JVM shutdown, when coroutines may never get to run [terminate]:
+     * kills the process and its children right away. Safe to call more than once.
+     */
+    fun killNow() {
+        val p = process ?: return
+        val children = p.descendants().toList()
+        p.destroyForcibly()
+        children.forEach { it.destroyForcibly() }
+    }
+
     private val stderrTail = object {
         private val lines = ArrayDeque<String>()
 

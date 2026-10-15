@@ -65,6 +65,21 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `killNow stops the process tree synchronously`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp), fakeCli("sleep 600 & sleep 600"))
+        session.start()
+        val process = withTimeout(5_000) {
+            while ((session.process?.descendants()?.count() ?: 0L) < 2L) kotlinx.coroutines.delay(20)
+            session.process!!
+        }
+        val handles = listOf(process.toHandle()) + process.descendants().toList()
+        session.killNow()
+        withTimeout(5_000) { while (handles.any { it.isAlive }) kotlinx.coroutines.delay(20) }
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
     fun `a missing binary ends the session with a visible error`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("/nonexistent/claude", tmp))
