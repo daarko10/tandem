@@ -12,6 +12,15 @@ kotlin {
     jvmToolchain(21)
 }
 
+// IDE Starter tests: boot a real IDE with the built plugin installed and drive it with the UI Driver.
+// Slow (downloads and starts an IDE), so they run in their own task: xvfb-run ./gradlew integrationTest
+val integrationTest: SourceSet by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output
+    runtimeClasspath += sourceSets.main.get().output
+}
+val integrationTestImplementation: Configuration by configurations.getting
+val integrationTestRuntimeOnly: Configuration by configurations.getting
+
 dependencies {
     // Tree API only (JsonElement). No serialization compiler plugin, so unknown fields never break parsing.
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0") {
@@ -27,6 +36,15 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit")
 
+    integrationTestImplementation(platform("org.junit:junit-bom:5.14.4"))
+    integrationTestImplementation("org.junit.jupiter:junit-jupiter")
+    integrationTestImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
+    integrationTestRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // The test JVM (not the plugin) needs coroutines: the version IDE Starter itself declares.
+    integrationTestImplementation("org.jetbrains.intellij.deps.kotlinx:kotlinx-coroutines-core-jvm:1.10.2-intellij-1")
+    // Only to satisfy the Compose compiler plugin, which applies to every source set; the tests contain no Compose code.
+    "integrationTestCompileOnly"("org.jetbrains.compose.runtime:runtime-desktop:1.12.1")
+
     intellijPlatform {
         intellijIdea(providers.gradleProperty("platformVersion"))
         // Compose + Jewel bundled modules (Jewel foundation/ui, IDE LaF bridge, Compose runtime).
@@ -37,6 +55,7 @@ dependencies {
         bundledModule("intellij.platform.jewel.markdown.extensions.autolink")
         testFramework(TestFrameworkType.Platform)
         testFramework(TestFrameworkType.JUnit5)
+        testFramework(TestFrameworkType.Starter, configurationName = integrationTestImplementation.name)
     }
 }
 
@@ -91,5 +110,25 @@ tasks {
         systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/fake-claude.sh").asFile.path)
         // Set by the nightly CLI contract workflow: a directory of freshly recorded live transcripts.
         systemProperty("tandem.contractDir", providers.systemProperty("tandem.contractDir").getOrElse(""))
+    }
+
+    register<Test>("integrationTest") {
+        description = "Starts a real IDE with the built plugin ZIP installed and drives it (needs a display: xvfb-run)."
+        group = "verification"
+        testClassesDirs = integrationTest.output.classesDirs
+        classpath = integrationTest.runtimeClasspath
+        useJUnitPlatform()
+        val pluginZip = buildPlugin.flatMap { it.archiveFile }
+        inputs.file(pluginZip)
+        val fakeClaude = layout.projectDirectory.file("src/test/resources/fake-claude.sh").asFile.path
+        val ideVersion = providers.gradleProperty("platformVersion")
+        jvmArgumentProviders += CommandLineArgumentProvider {
+            listOf(
+                "-Dtandem.pluginZip=${pluginZip.get().asFile.path}",
+                "-Dtandem.fakeClaude=$fakeClaude",
+                "-Dtandem.ideVersion=${ideVersion.get()}",
+            )
+        }
+        // IDE Starter downloads the IDE under test and keeps its logs and screenshots in out/ide-tests (gitignored).
     }
 }
