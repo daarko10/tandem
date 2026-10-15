@@ -5,7 +5,6 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
-import com.intellij.openapi.util.ShutDownTracker
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ClaudeSession
@@ -50,9 +49,12 @@ class TandemChat(private val project: Project, private val scope: CoroutineScope
                 val model = System.getProperty("tandem.model")?.takeIf { it.isNotBlank() }
                 val created = ClaudeSession(scope, SessionConfig(binary, dir, model = model))
                 // On IDE exit the JVM can stop before the session's coroutines clean up: kill the CLI synchronously then.
-                val shutdownTask = Runnable(created::killNow)
-                ShutDownTracker.getInstance().registerShutdownTask(shutdownTask)
-                scope.coroutineContext.job.invokeOnCompletion { ShutDownTracker.getInstance().unregisterShutdownTask(shutdownTask) }
+                val hook = Thread(created::killNow, "Tandem CLI shutdown")
+                Runtime.getRuntime().addShutdownHook(hook)
+                scope.coroutineContext.job.invokeOnCompletion {
+                    // Throws IllegalStateException once JVM shutdown has begun; the hook then runs anyway.
+                    runCatching { Runtime.getRuntime().removeShutdownHook(hook) }
+                }
                 session = created.also { it.start() }
             }
             thisLogger().info("chat session started")

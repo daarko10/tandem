@@ -159,7 +159,7 @@ class ClaudeSession(
     }
 
     /**
-     * Synchronous last resort for JVM shutdown, when coroutines may never get to run [terminate]:
+     * Synchronous last resort for JVM shutdown (a shutdown hook), when coroutines may never get to run [terminate]:
      * kills the process and its children right away. Safe to call more than once.
      */
     fun killNow() {
