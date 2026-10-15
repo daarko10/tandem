@@ -15,3 +15,6 @@ build/
 *.iml
 out/
 .kotlin/
+
+# IDE Starter test output
+allure-results/
