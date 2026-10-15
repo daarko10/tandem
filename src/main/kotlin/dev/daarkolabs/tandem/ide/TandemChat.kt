@@ -31,6 +31,9 @@ class TandemChat(private val project: Project, private val scope: CoroutineScope
     @Volatile
     private var session: ClaudeSession? = null
 
+    /** Prompts sent before the session exists (it starts on a background thread). Guarded by `this`. */
+    private val queued = ArrayList<String>()
+
     /** Safe to call from the EDT: binary lookup and process start happen on a background thread. */
     fun start() {
         if (session != null) return
@@ -56,15 +59,24 @@ class TandemChat(private val project: Project, private val scope: CoroutineScope
                     runCatching { Runtime.getRuntime().removeShutdownHook(hook) }
                 }
                 session = created.also { it.start() }
+                queued.forEach(created::sendUserMessage)
+                queued.clear()
             }
             thisLogger().info("chat session started")
             val current = session ?: return@launch
-            System.getProperty("tandem.autoPrompt")?.takeIf { it.isNotBlank() }?.let(current::sendUserMessage)
+            System.getProperty("tandem.autoPrompt")?.takeIf { it.isNotBlank() }?.let(::send)
             current.state.collect { _state.value = it }
         }
     }
 
+    /** Never drops a prompt: before the session is up, it is queued and sent once the CLI starts. */
     fun send(text: String) {
+        synchronized(this) {
+            if (session == null) {
+                queued += text
+                return
+            }
+        }
         session?.sendUserMessage(text)
     }
 
