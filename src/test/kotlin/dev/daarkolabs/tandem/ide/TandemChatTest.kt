@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
 /**
- * [TandemChat] inside a real (headless) project, against `src/test/resources/fake-claude.sh`,
+ * [TandemChat] inside a real (headless) project, against `src/test/resources/fake-claude.py`,
  * which the test task passes as `tandem.claudePath`.
  */
 @TestApplication
@@ -28,7 +28,7 @@ class TandemChatTest {
     /** Live processes running the fake CLI, children of this test JVM. */
     private fun fakeCliProcesses(): List<ProcessHandle> =
         ProcessHandle.current().descendants().filter { handle ->
-            handle.isAlive && handle.info().arguments().orElse(emptyArray()).any { it.endsWith("fake-claude.sh") }
+            handle.isAlive && handle.info().arguments().orElse(emptyArray()).any { it.endsWith("fake-claude.py") }
         }.toList()
 
     @Test
@@ -56,8 +56,7 @@ class TandemChatTest {
         val started = openProjectAsync(dir).useProjectAsync { project ->
             val chat = TandemChat.get(project)
             chat.start()
-            chat.state.first { s -> s.entries.isNotEmpty() || s.claudeCodeVersion != null || s.sessionId != null }
-            // The fake CLI is running now; remember it before the project closes.
+            // Wait until the fake CLI is running; remember it before the project closes.
             var mine = emptyList<ProcessHandle>()
             while (mine.isEmpty()) {
                 mine = fakeCliProcesses().filter { it.pid() !in before }

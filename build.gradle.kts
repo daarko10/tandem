@@ -39,6 +39,8 @@ dependencies {
     integrationTestImplementation(platform("org.junit:junit-bom:5.14.4"))
     integrationTestImplementation("org.junit.jupiter:junit-jupiter")
     integrationTestImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
+    // Reads the frames the fake CLI logged; same version as the plugin uses.
+    integrationTestImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     integrationTestRuntimeOnly("org.junit.platform:junit-platform-launcher")
     // The test JVM (not the plugin) needs coroutines: the version IDE Starter itself declares.
     integrationTestImplementation("org.jetbrains.intellij.deps.kotlinx:kotlinx-coroutines-core-jvm:1.10.2-intellij-1")
@@ -107,7 +109,7 @@ tasks {
         // Protocol tests run against recorded CLI transcripts; they never spawn a real `claude`.
         systemProperty("tandem.fixtures", layout.projectDirectory.dir("src/test/resources/fixtures").asFile.path)
         // Platform tests start TandemChat against a fake CLI that replays a fixture, never a real `claude`.
-        systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/fake-claude.sh").asFile.path)
+        systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path)
         // Set by the nightly CLI contract workflow: a directory of freshly recorded live transcripts.
         systemProperty("tandem.contractDir", providers.systemProperty("tandem.contractDir").getOrElse(""))
     }
@@ -120,7 +122,7 @@ tasks {
         useJUnitPlatform()
         val pluginZip = buildPlugin.flatMap { it.archiveFile }
         inputs.file(pluginZip)
-        val fakeClaude = layout.projectDirectory.file("src/test/resources/fake-claude.sh").asFile.path
+        val fakeClaude = layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path
         val ideVersion = providers.gradleProperty("platformVersion")
         jvmArgumentProviders += CommandLineArgumentProvider {
             listOf(
