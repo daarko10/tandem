@@ -39,6 +39,23 @@ class TranscriptReaderTest {
     private fun ChatState.assistantTexts(): List<String> =
         entries.filterIsInstance<ChatEntry.Assistant>().flatMap { it.blocks }.filterIsInstance<AssistantBlock.Text>().map { it.text }
 
+    /** The entries as short strings, so one assertion can state a whole history. */
+    private fun ChatState.shape(): List<String> = entries.map { entry ->
+        when (entry) {
+            is ChatEntry.User -> "user: ${entry.text}"
+            is ChatEntry.Assistant -> "assistant: " + entry.blocks.joinToString { block ->
+                when (block) {
+                    is AssistantBlock.Text -> block.text
+                    is AssistantBlock.ToolUse -> "tool ${block.name}"
+                    is AssistantBlock.Thinking -> "thinking"
+                    is AssistantBlock.Other -> block.type
+                }
+            }
+            is ChatEntry.ToolResult -> "result: ${entry.text}" + if (entry.isError) " (error)" else ""
+            is ChatEntry.Notice -> "${entry.level}: ${entry.text}"
+        }
+    }
+
     private fun Path.writeLines(vararg lines: String) = writeText(lines.joinToString("\n", postfix = "\n"))
 
     private fun emptyMeta(id: String, cwd: String? = null, lineCount: Int = 0) =
@@ -100,7 +117,7 @@ class TranscriptReaderTest {
         val empty = TranscriptReader.read(f)
         assertEquals(emptyMeta(id), empty.meta)
         assertEquals(id, empty.meta.title)
-        assertEquals(ChatState(), empty.state)
+        assertEquals(ChatState(sessionId = id), empty.state)
         assertEquals(empty.meta, TranscriptReader.meta(f))
 
         // Leading blank lines and surrounding spaces go, and only the first line is kept, cut to 80 characters.
@@ -197,6 +214,86 @@ class TranscriptReaderTest {
     }
 
     @Test
+    fun `an interrupt marker loads as the Stopped notice and is never a prompt`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("12121212-1212-4121-8121-121212121212.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"Write a long story"}}""",
+            """{"type":"assistant","uuid":"a1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"Once upon"}]}}""",
+            """{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}""",
+            """{"type":"user","uuid":"u3","message":{"role":"user","content":"List the files instead"}}""",
+            """{"type":"assistant","uuid":"a3","message":{"id":"msg_2","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}""",
+            // A tool result and the marker on one line are delivered once, so the result is not shown twice.
+            """{"type":"user","uuid":"u4","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"Interrupted.","is_error":true},{"type":"text","text":"[Request interrupted by user for tool use]"}]}}""",
+        )
+        assertEquals(
+            listOf(
+                "user: Write a long story",
+                "assistant: Once upon",
+                "INFO: Stopped.",
+                "user: List the files instead",
+                "assistant: tool Bash",
+                "result: Interrupted. (error)",
+                "INFO: Stopped.",
+            ),
+            TranscriptReader.read(f).state.shape(),
+        )
+
+        // The marker never stands in for the title either.
+        f.writeLines(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"[Request interrupted by user]"}}""",
+            """{"type":"user","uuid":"u2","message":{"role":"user","content":"The real first prompt"}}""",
+        )
+        assertEquals("The real first prompt", TranscriptReader.meta(f).firstPrompt)
+    }
+
+    @Test
+    fun `a compact summary is skipped entirely`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("13131313-1313-4131-8131-131313131313.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"c1","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"permissionMode":"plan","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}""",
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"Now run the tests"}}""",
+        )
+        val loaded = TranscriptReader.read(f)
+        assertEquals(listOf("user: Now run the tests"), loaded.state.shape())
+        assertEquals("Now run the tests", loaded.meta.firstPrompt)
+        assertNull(loaded.meta.lastPermissionMode)
+    }
+
+    @Test
+    fun `a slash command loads as the command and its local output is skipped`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("14141414-1414-4141-8141-141414141414.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"m1","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: generated by local commands.</local-command-caveat>"}}""",
+            """{"type":"user","uuid":"c1","message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>opus</command-args>"}}""",
+            """{"type":"user","uuid":"o1","message":{"role":"user","content":"<local-command-stdout>Set model to opus</local-command-stdout>"}}""",
+            """{"type":"user","uuid":"c2","message":{"role":"user","content":[{"type":"text","text":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"}]}}""",
+            """{"type":"user","uuid":"o2","message":{"role":"user","content":"<local-command-stdout></local-command-stdout>"}}""",
+        )
+        val loaded = TranscriptReader.read(f)
+        assertEquals(listOf("user: /model opus", "user: /clear"), loaded.state.shape())
+        assertEquals("/model opus", loaded.meta.firstPrompt)
+        assertEquals("/model opus", loaded.meta.title)
+    }
+
+    @Test
+    fun `a synthetic assistant line changes neither the last model nor the last effort`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("15151515-1515-4151-8151-151515151515.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"hi"}}""",
+            """{"type":"assistant","uuid":"a1","effort":"high","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"hello"}]}}""",
+            """{"type":"user","uuid":"u2","message":{"role":"user","content":"again"}}""",
+            // Written by the CLI itself, e.g. for an API error: a model that is not one, and no effort.
+            """{"type":"assistant","uuid":"a2","isApiErrorMessage":true,"message":{"id":"msg_2","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: 500"}]}}""",
+        )
+        val loaded = TranscriptReader.read(f)
+        assertEquals("claude-sonnet-5-5", loaded.meta.lastModel)
+        assertEquals("high", loaded.meta.lastEffort)
+        assertEquals("high", loaded.state.effort)
+        // Still part of the history, as it is live.
+        assertEquals(listOf("hello", "API Error: 500"), loaded.state.assistantTexts())
+    }
+
+    @Test
     fun `a loaded history followed by a live turn keeps ids unique and toggles busy`() = runBlocking<Unit> {
         var state = TranscriptReader.read(Fixtures.transcript("history-reply")).state
         assertEquals(listOf("Reply with the single word: pong"), state.userTexts())
@@ -228,6 +325,8 @@ class TranscriptReaderTest {
             reply.meta,
         )
         assertEquals("Pong", reply.meta.title)
+        // A resumed session knows its id before init arrives: the transcript's file name.
+        assertEquals("history-reply", reply.state.sessionId)
         assertEquals(reply.meta, TranscriptReader.meta(Fixtures.transcript("history-reply")))
         // A reopened session shows the effort and permission mode its transcript last recorded.
         assertEquals("high", reply.state.effort)

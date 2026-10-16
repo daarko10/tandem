@@ -28,6 +28,13 @@ private val LOG = logger<TranscriptReader>()
 /** A first prompt that stands in for the title is cut to this many characters. */
 private const val PROMPT_TITLE_LENGTH: Int = 80
 
+/** How the CLI's interrupt marker starts. The reducer shows a user line that starts with it as "Stopped.". */
+private const val INTERRUPT_MARKER: String = "[Request interrupted"
+
+/** A slash command as the CLI records it: `<command-name>/model</command-name>`, then `<command-args>opus</command-args>`. */
+private val COMMAND_NAME: Regex = Regex("<command-name>(.*?)</command-name>", RegexOption.DOT_MATCHES_ALL)
+private val COMMAND_ARGS: Regex = Regex("<command-args>(.*?)</command-args>", RegexOption.DOT_MATCHES_ALL)
+
 /** What a transcript says about its session, short of the history itself. */
 data class TranscriptMeta(
     /** The transcript's file name without `.jsonl`. */
@@ -36,9 +43,9 @@ data class TranscriptMeta(
     val customTitle: String?,
     /** The last `ai-title` or `summary` line's text, whichever comes last. */
     val generatedTitle: String?,
-    /** The first prompt's first line, trimmed and cut to 80 characters. */
+    /** The first thing the user typed (a slash command as `/name args`): its first line, trimmed and cut to 80 characters. */
     val firstPrompt: String?,
-    /** `message.model` of the last assistant line. */
+    /** `message.model` of the last assistant line, except the CLI's own lines whose model starts with `<` (`<synthetic>`). */
     val lastModel: String?,
     /** `effort` of the last assistant line (the recorded `system/init` has no effort). */
     val lastEffort: String?,
@@ -54,15 +61,17 @@ data class TranscriptMeta(
         get() = customTitle ?: generatedTitle ?: firstPrompt ?: sessionId
 }
 
-/** A transcript loaded as chat history. Its [state] is settled: no turn is in progress. */
+/** A transcript loaded as chat history. Its [state] is settled (no turn is in progress) and has the session id from the file name. */
 data class LoadedTranscript(val state: ChatState, val meta: TranscriptMeta)
 
 /**
  * Reads the CLI's own transcript of a session, `<session id>.jsonl`, through [Ndjson.decode] and [reduce].
  *
- * Prompts (`user` text), tool results (`user` `tool_result` blocks) and `assistant` lines make the history; `custom-title`,
- * `ai-title` and `summary` lines make the title. `isMeta` and `isSidechain` lines, every other type, and lines that are not a
- * JSON object (such as a last line the CLI is still writing) are skipped. Bad input never throws.
+ * Prompts (`user` text), tool results (`user` `tool_result` blocks) and `assistant` lines make the history, shown the way the
+ * live stream shows them: an interrupt marker becomes the reducer's "Stopped." notice, a slash command its name and arguments.
+ * `custom-title`, `ai-title` and `summary` lines make the title. `isMeta`, `isSidechain` and `isCompactSummary` lines, a
+ * command's local output, every other type, and lines that are not a JSON object (such as a last line the CLI is still
+ * writing) are skipped. Bad input never throws.
  */
 object TranscriptReader {
     /**
@@ -98,7 +107,11 @@ object TranscriptReader {
         val meta = scan.meta()
         val state = scan.state.settled()
         return LoadedTranscript(
-            state.copy(permissionMode = meta.lastPermissionMode ?: state.permissionMode, effort = meta.lastEffort ?: state.effort),
+            state.copy(
+                sessionId = meta.sessionId,
+                permissionMode = meta.lastPermissionMode ?: state.permissionMode,
+                effort = meta.lastEffort ?: state.effort,
+            ),
             meta,
         )
     }
@@ -142,7 +155,8 @@ private class Scan(val sessionId: String, private val withHistory: Boolean) {
         val raw = message.raw ?: return // not a JSON object, e.g. a line the CLI is still writing
         if (cwd == null) cwd = raw.string("cwd")?.takeIf { it.isNotEmpty() }
         when (raw.string("type")) {
-            "user" -> if (!raw.isSet("isMeta") && !raw.isSet("isSidechain")) userLine(message, raw)
+            // isMeta and isCompactSummary lines are the CLI's own context, isSidechain lines a subagent's: none is the user's.
+            "user" -> if (!raw.isSet("isMeta") && !raw.isSet("isSidechain") && !raw.isSet("isCompactSummary")) userLine(message, raw)
             "assistant" -> if (!raw.isSet("isSidechain")) assistantLine(message, raw)
             "custom-title" -> raw.titleText("customTitle")?.let { customTitle = it }
             "ai-title" -> raw.titleText("aiTitle")?.let { generatedTitle = it }
@@ -153,16 +167,20 @@ private class Scan(val sessionId: String, private val withHistory: Boolean) {
     private fun userLine(message: CliMessage, raw: JsonObject) {
         PermissionMode.fromWire(raw.string("permissionMode"))?.let { lastPermissionMode = it }
         val user = message as? CliMessage.User ?: return
-        // The API puts a user message's tool_result blocks first and any text after them; keep that order.
-        if (user.content.any { it is ContentBlock.ToolResult }) emit(SessionEvent.Cli(user))
         val text = user.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
-        if (text.isBlank()) return
-        if (firstPrompt == null) firstPrompt = promptTitle(text)
-        emit(SessionEvent.UserSent(user.uuid ?: "line-$lineCount", text))
+        // Tool results and an interrupt marker go through the reducer, as they do live; once per line, since it handles both.
+        // The API puts a user message's tool_result blocks first and any text after them, so a prompt comes after its results.
+        val interrupted = text.startsWith(INTERRUPT_MARKER)
+        if (interrupted || user.content.any { it is ContentBlock.ToolResult }) emit(SessionEvent.Cli(user))
+        if (interrupted) return
+        val prompt = promptOf(text) ?: return
+        if (firstPrompt == null) firstPrompt = promptTitle(prompt)
+        emit(SessionEvent.UserSent(user.uuid ?: "line-$lineCount", prompt))
     }
 
     private fun assistantLine(message: CliMessage, raw: JsonObject) {
-        (message as? CliMessage.Assistant)?.model?.let { lastModel = it }
+        // A line the CLI wrote itself, such as an API error, names a model like "<synthetic>": not the session's model.
+        (message as? CliMessage.Assistant)?.model?.takeUnless { it.startsWith("<") }?.let { lastModel = it }
         raw.string("effort")?.let { lastEffort = it }
         emit(SessionEvent.Cli(message))
     }
@@ -176,6 +194,20 @@ private fun JsonObject.isSet(flag: String): Boolean = boolean(flag) == true
 
 /** The text of a title line; a blank one does not count. */
 private fun JsonObject.titleText(key: String): String? = string(key)?.takeIf { it.isNotBlank() }
+
+/**
+ * What the user typed, from a user line's [text]: a slash command as its name and arguments (`/model opus`), null for blank
+ * text or for a command's local output (`<local-command-stdout>...</local-command-stdout>`), else the text itself.
+ */
+private fun promptOf(text: String): String? {
+    COMMAND_NAME.find(text)?.let { name ->
+        val args = COMMAND_ARGS.find(text)?.groupValues?.get(1)?.trim().orEmpty()
+        return listOf(name.groupValues[1].trim(), args).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { null }
+    }
+    val trimmed = text.trim()
+    val localOutput = trimmed.startsWith("<local-command-stdout>") && trimmed.endsWith("</local-command-stdout>")
+    return if (trimmed.isEmpty() || localOutput) null else text
+}
 
 /** The first line of [text], trimmed and cut to [PROMPT_TITLE_LENGTH] characters, never between the halves of a surrogate pair. */
 private fun promptTitle(text: String): String {
