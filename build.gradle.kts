@@ -117,6 +117,8 @@ tasks {
     register<Test>("integrationTest") {
         description = "Starts a real IDE with the built plugin ZIP installed and drives it (needs a display: xvfb-run)."
         group = "verification"
+        // Each IDE test is slow and runs once in CI: list every result in the log.
+        testLogging { events("passed", "skipped", "failed") }
         testClassesDirs = integrationTest.output.classesDirs
         classpath = integrationTest.runtimeClasspath
         useJUnitPlatform()
