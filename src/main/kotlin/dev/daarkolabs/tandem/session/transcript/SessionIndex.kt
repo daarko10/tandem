@@ -83,8 +83,11 @@ data class SessionSummary(
     val lastModified: Long,
     /** [TranscriptMeta.firstPrompt]. */
     val firstPrompt: String?,
-    /** The transcript. */
-    val file: Path,
+    /**
+     * The transcript. [SessionIndex.list] always has one; it is null for an open session the CLI has not written a transcript for
+     * yet, which the session manager lists before its first prompt.
+     */
+    val file: Path?,
 )
 
 /**
@@ -142,6 +145,23 @@ class SessionIndex(
     /** Forgets session [id], so that the next [list] reads its transcript again. */
     fun invalidate(id: String) {
         cache.values.removeIf { it.summary.id == id }
+    }
+
+    /**
+     * Session [id]'s transcript in the folders, or null while there is none: the CLI writes it with the session's first prompt,
+     * not when it starts. Only looks whether `<id>.jsonl` exists, so it reads nothing and needs no cache; it still touches the
+     * file system, so call it off the EDT. An [id] that is not a session id is never looked up, and a failure of the file system
+     * counts as no transcript (and goes to the log).
+     */
+    fun transcript(id: String): Path? {
+        val name = id + TRANSCRIPT_SUFFIX
+        if (!TRANSCRIPT_NAME.matches(name)) return null
+        return tryFileSystem(
+            onFailure = { e ->
+                LOG.warn("transcript $id not looked up (${e.javaClass.simpleName})")
+                null
+            },
+        ) { folders().map { it.resolve(name) }.firstOrNull { Files.isRegularFile(it) } }
     }
 
     /**

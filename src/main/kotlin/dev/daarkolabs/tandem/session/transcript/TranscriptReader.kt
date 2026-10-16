@@ -274,7 +274,7 @@ private fun commandOf(text: String): String? {
 }
 
 /** The first line of [text], trimmed and cut to [PROMPT_TITLE_LENGTH] characters, never between the halves of a surrogate pair. */
-private fun promptTitle(text: String): String {
+internal fun promptTitle(text: String): String {
     val line = text.trim().lineSequence().first().trim()
     if (line.length <= PROMPT_TITLE_LENGTH) return line
     val end = if (line[PROMPT_TITLE_LENGTH - 1].isHighSurrogate()) PROMPT_TITLE_LENGTH - 1 else PROMPT_TITLE_LENGTH

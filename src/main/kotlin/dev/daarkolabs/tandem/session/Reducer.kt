@@ -33,6 +33,9 @@ sealed interface SessionEvent {
 
     data class PermissionAnswered(val requestId: String) : SessionEvent
 
+    /** Something Tandem itself must tell the user, such as a pick it could not pass on to the CLI. Shown as a notice of [level]. */
+    data class HostNotice(val level: NoticeLevel, val text: String) : SessionEvent
+
     /** The CLI process could not be started or exited. [detail] is shown to the user. */
     data class Ended(val detail: String, val isError: Boolean) : SessionEvent
 }
@@ -46,6 +49,7 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     // Shown at once; what the CLI reports next (system/status, system/init) has the last word.
     is SessionEvent.PermissionModeRequested -> state.copy(permissionMode = event.mode)
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
+    is SessionEvent.HostNotice -> state.notice(event.level, event.text)
     is SessionEvent.Ended -> state.finishStreaming().copy(busy = false, ended = true, pendingPermissions = emptyList())
         .notice(if (event.isError) NoticeLevel.ERROR else NoticeLevel.INFO, event.detail)
 }

@@ -10,6 +10,7 @@ import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ClaudeSession
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionConfig
+import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,7 +45,7 @@ class TandemChat(private val project: Project, private val scope: CoroutineScope
                 val binary = ClaudeBinary.find()
                 if (binary == null) {
                     _state.value = ChatState(
-                        entries = listOf(ChatEntry.Notice("no-cli", NoticeLevel.ERROR, NO_CLI_TEXT)),
+                        entries = listOf(ChatEntry.Notice("no-cli", NoticeLevel.ERROR, SessionManager.NO_CLI_TEXT)),
                         ended = true,
                     )
                     return@launch
@@ -97,9 +98,5 @@ class TandemChat(private val project: Project, private val scope: CoroutineScope
 
     companion object {
         fun get(project: Project): TandemChat = project.service()
-
-        private const val NO_CLI_TEXT =
-            "Claude Code was not found. Install it from https://code.claude.com, sign in once with `claude` in a terminal, " +
-                "then reopen this tool window."
     }
 }

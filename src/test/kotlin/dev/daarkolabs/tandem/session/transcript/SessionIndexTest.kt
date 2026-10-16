@@ -36,6 +36,7 @@ import kotlin.io.path.name
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -176,6 +177,21 @@ class SessionIndexTest {
     fun `a missing folder is an empty list`(@TempDir dir: Path) {
         assertEquals(emptyList(), SessionIndex({ listOf(dir.resolve("missing")) }, "/p").list())
         assertEquals(emptyList(), SessionIndex({ emptyList() }, "/p").list())
+    }
+
+    @Test
+    fun `transcript finds a session's file in whichever folder holds it`(@TempDir root: Path) {
+        val one = root.resolve("one").createDirectories()
+        val two = root.resolve("two").createDirectories()
+        val file = write(two, "$first.jsonl", mtime = 1_000)
+        two.resolve("$second.jsonl").createDirectory() // a directory with a transcript's name is no transcript
+        val index = SessionIndex({ listOf(one, root.resolve("missing"), two) }, "/p")
+        assertEquals(file, index.transcript(first))
+        assertNull(index.transcript(second))
+        assertNull(index.transcript(third)) // not written yet: the CLI writes it with the first prompt
+        // Only a session id is looked up, so an id can never name a file outside the folders.
+        assertNull(index.transcript("../two/$first"))
+        assertNull(SessionIndex({ throw InvalidPathException("bad", "a config path that cannot be parsed") }, "/p").transcript(first))
     }
 
     @Test
