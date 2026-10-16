@@ -9,6 +9,7 @@ import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -148,8 +149,11 @@ class ClaudeSession(
         process = p
         LOG.info("claude started, pid=${p.pid()}")
         coroutineScope {
-            // Cancellation of the session cannot interrupt a blocking readLine; ending the process does.
-            launch { try { awaitCancellation() } finally { withContext(NonCancellable) { terminate(p) } } }
+            // Cancellation of the session cannot interrupt a blocking readLine; ending the process does. Undispatched, so that it
+            // runs even when the session was cancelled while the process started: a coroutine cancelled before it starts never runs.
+            launch(start = CoroutineStart.UNDISPATCHED) {
+                try { awaitCancellation() } finally { withContext(NonCancellable) { terminate(p) } }
+            }
             val writer = launch { writeLoop(p) }
             val stderr = launch { runInterruptible { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } } }
             readLoop(p)

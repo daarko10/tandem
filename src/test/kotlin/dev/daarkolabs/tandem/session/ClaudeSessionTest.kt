@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -74,6 +75,27 @@ class ClaudeSessionTest {
 
         withTimeout(10_000) { while (handles.any { it.isAlive }) kotlinx.coroutines.delay(20) }
         assertFalse(handles.any { it.isAlive })
+    }
+
+    @Test
+    fun `a process that starts while the scope is being cancelled is still stopped`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val started = CompletableDeferred<Process>()
+        // Starting a process cannot be interrupted, so a cancellation can arrive while it starts: here, from inside the launch.
+        val launcher = ProcessLauncher { _, dir ->
+            scope.cancel()
+            ProcessBuilder("sh", "-c", "cat > /dev/null").directory(dir.toFile()).start().also { started.complete(it) }
+        }
+        ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher).start()
+        val process = withTimeout(5_000) { started.await() }
+        try {
+            scope.coroutineContext.job.join()
+            val deadline = System.nanoTime() + 10_000_000_000L
+            while (process.isAlive && System.nanoTime() < deadline) delay(20)
+            assertFalse(process.isAlive, "the process outlived its cancelled session")
+        } finally {
+            process.destroyForcibly()
+        }
     }
 
     @Test
