@@ -71,3 +71,14 @@ data class PendingPermission(
     val description: String?,
     val suggestions: List<JsonObject>,
 )
+
+/**
+ * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming.
+ * A loaded history starts from it, and so does a stopped session that is spawned again.
+ */
+internal fun ChatState.settled(): ChatState = copy(
+    entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it },
+    busy = false,
+    pendingPermissions = emptyList(),
+    ended = false,
+)
