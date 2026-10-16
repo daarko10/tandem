@@ -276,7 +276,7 @@ private fun ChatState.assistant(messageId: String, parent: String?): ChatEntry.A
 private fun ChatState.upsert(entry: ChatEntry): ChatState {
     val position = positionOf(entry.id)
     // A replacement keeps the id at its position, so the entry index stays as it is.
-    return if (position < 0) append(entry) else copy(entries = entryList().set(position, entry))
+    return if (position < 0) append(entry) else copy(entries = entryList().mutate { list -> list[position] = entry })
 }
 
 private fun ChatState.upsertIfAbsent(entry: ChatEntry): ChatState = if (positionOf(entry.id) < 0) append(entry) else this
@@ -296,19 +296,26 @@ private fun ChatState.indexInStep(): Boolean = entries.isEmpty() || entryIndex[e
 
 /** This state with [entry] appended and indexed; an index out of step is rebuilt first. */
 private fun ChatState.append(entry: ChatEntry): ChatState {
+    val position = entries.size
     val index = if (indexInStep()) entryIndex.toPersistentHashMap() else positionsOf(entries)
-    return copy(entries = entryList().add(entry), entryIndex = index.put(entry.id, entries.size))
+    return copy(
+        entries = entryList().mutate { list -> list.add(entry) },
+        entryIndex = index.mutate { positions -> positions[entry.id] = position },
+    )
 }
 
 /** This state without the assistant entries that carry one of [uuids]. The entries after a removed one move up, so the index is rebuilt. */
 private fun ChatState.withoutAssistants(uuids: Set<String>): ChatState {
-    val kept = entryList().removeAll { it is ChatEntry.Assistant && it.uuids.any(uuids::contains) }
+    val kept = entryList().mutate { list -> list.removeAll { it is ChatEntry.Assistant && it.uuids.any(uuids::contains) } }
     return if (kept.size == entries.size) this else copy(entries = kept, entryIndex = positionsOf(kept))
 }
 
 /**
  * [ChatState.entries] as the [PersistentList] that [reduce] keeps there, so that a change shares the rest of a long history
  * instead of copying it. A list built by hand is converted once; [toPersistentList] returns a persistent list as it is.
+ *
+ * Every change goes through the collections' builders ([mutate]): the persistent `add`, `set`, `removeAll` and `put` are
+ * deprecated in the version that IDE 2026.2 bundles, and the names replacing them do not exist in 2026.1.
  */
 private fun ChatState.entryList(): PersistentList<ChatEntry> = entries.toPersistentList()
 
