@@ -74,7 +74,7 @@ data class PendingPermission(
 
 /**
  * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming.
- * A loaded history starts from it, and so does a stopped session that is spawned again.
+ * A transcript loaded by `TranscriptReader` comes back settled.
  */
 internal fun ChatState.settled(): ChatState = copy(
     entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it },
