@@ -3,8 +3,11 @@ package dev.daarkolabs.tandem.session
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
+import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
+import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
@@ -12,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -23,8 +27,12 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.nio.file.AccessDeniedException
 import java.nio.file.Path
+import java.util.Collections
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.readText
@@ -52,6 +60,9 @@ class SessionManagerTest {
     /** A session with a recorded transcript (`history-reply`, whose own title is "Pong"). */
     private val seeded = "44444444-4444-4444-8444-444444444444"
 
+    /** Another one, for tests that need two. */
+    private val other = "55555555-5555-4555-8555-555555555555"
+
     private val log: Path get() = dir.resolve("fake-cli.log")
     private val folder: Path get() = dir.resolve("transcripts")
 
@@ -75,7 +86,9 @@ class SessionManagerTest {
         fixtures: String = "plain-reply",
         delayMs: Int? = null,
         binary: String? = fakeClaude,
+        lookup: () -> String? = { binary },
         clock: () -> Long = System::currentTimeMillis,
+        read: suspend (Path) -> LoadedTranscript = TranscriptReader::read,
     ): SessionManager {
         val fake = buildMap {
             put("TANDEM_FAKE_LOG", log.toString())
@@ -84,10 +97,10 @@ class SessionManagerTest {
         }
         val launcher = DefaultProcessLauncher { System.getenv() + fake }
         val index = SessionIndex({ listOf(folder) }, "/project")
-        return SessionManager(scope, index, launcher, { binary }, dir, maxLive = { 4 }, clock = clock)
+        return SessionManager(scope, index, launcher, lookup, dir, maxLive = { 4 }, clock = clock, readTranscript = read)
     }
 
-    private fun test(block: suspend () -> Unit): Unit = runBlocking { withTimeout(30_000) { block() } }
+    private fun test(block: suspend CoroutineScope.() -> Unit): Unit = runBlocking { withTimeout(30_000, block) }
 
     /** Writes the `history-reply` transcript as session [id]'s, through [edit]. */
     private fun seed(id: String, edit: (String) -> String = { it }) {
@@ -172,11 +185,25 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `a transcript that cannot be read opens with a warning in place of the history`() = test {
+        seed(seeded)
+        // Run as root, a test cannot make a file unreadable, so the reader fails in its place.
+        val manager = manager(read = { throw AccessDeniedException(it.toString()) })
+        val handle = manager.open(seeded, spawn = false)
+        val notice = handle.state.value.entries.single() as ChatEntry.Notice
+        assertEquals(NoticeLevel.WARNING, notice.level)
+        assertEquals("The session's history could not be read: AccessDeniedException", notice.text)
+    }
+
+    @Test
     fun `two quick prompts to a stopped session start one process`() = test {
         seed(seeded)
         val manager = manager()
         val handle = manager.open(seeded, spawn = false)
         assertEquals(SessionStatus.STOPPED, handle.status.value)
+        assertSame(handle, manager.open(seeded))
+        delay(300) // time for a wrong start to show in the log
+        assertEquals(emptyList(), spawns(), "an open session starts with its next prompt, not when it is opened again")
 
         manager.send(seeded, "Reply with the single word: pong")
         manager.send(seeded, "And once more")
@@ -209,11 +236,8 @@ class SessionManagerTest {
         seed(seeded)
         // The fake waits this long before each permission request, so that the running turn can be seen.
         val manager = manager(fixtures = "permission", delayMs = 1_000)
-        val handle = manager.open(seeded, spawn = false)
-        assertEquals(SessionStatus.STOPPED, handle.status.value)
-
-        manager.open(seeded)
-        handle.status.await(SessionStatus.IDLE) // the process is up and waits for a prompt
+        val handle = manager.open(seeded)
+        handle.status.await(SessionStatus.IDLE) // a process is attached, and the fake waits for a prompt
         manager.send(seeded, "Create the fixture file")
         handle.status.await(SessionStatus.RUNNING)
         handle.status.await(SessionStatus.WAITING)
@@ -279,10 +303,7 @@ class SessionManagerTest {
     fun `a recorded permission mode Tandem does not offer starts as default with a notice`() = test {
         seed(seeded) { it.replace("\"permissionMode\":\"default\"", "\"permissionMode\":\"bypassPermissions\"") }
         val manager = manager()
-        val handle = manager.open(seeded, spawn = false)
-        assertEquals(PermissionMode.BYPASS_PERMISSIONS, handle.state.value.permissionMode)
-
-        manager.open(seeded)
+        val handle = manager.open(seeded)
         awaitLog { spawns().isNotEmpty() }
         assertEquals("default", spawns().single().valueOf("--permission-mode"))
         val state = handle.state.value
@@ -295,17 +316,22 @@ class SessionManagerTest {
     @Test
     fun `close stops the process and drops the session`() = test {
         seed(seeded)
+        seed(other)
         val manager = manager()
         val created = manager.create(NewSessionOptions())
         awaitLog { spawns().size == 1 }
         val opened = manager.open(seeded, spawn = false)
+        val last = manager.open(other, spawn = false)
         manager.select(created.id)
 
         manager.close(created.id)
         assertEquals(emptyList(), ownFakeProcesses(), "close returns once the process is gone")
-        assertEquals(listOf(opened), manager.sessions.value)
+        assertEquals(listOf(opened, last), manager.sessions.value)
         assertEquals(seeded, manager.selected.value, "the closed session was selected, so the next one is")
 
+        manager.select(other)
+        manager.close(other)
+        assertEquals(seeded, manager.selected.value, "the last one was selected, so the one before it is")
         manager.close(seeded)
         assertEquals(emptyList(), manager.sessions.value)
         assertNull(manager.selected.value)
@@ -313,15 +339,20 @@ class SessionManagerTest {
 
     @Test
     fun `a missing binary shows the install notice`() = test {
-        val manager = manager(binary = null)
+        // The first lookup waits until the prompt below is queued, so that the prompt is sent while the session starts.
+        val queued = CountDownLatch(1)
+        val manager = manager(lookup = { queued.await(10, TimeUnit.SECONDS); null })
         val handle = manager.create(NewSessionOptions())
-        val state = handle.state.first { it.entries.isNotEmpty() }
-        val notice = state.entries.last() as ChatEntry.Notice
+        manager.send(handle.id, "Reply with the single word: pong")
+        queued.countDown()
+        manager.stop(handle.id) // comes after both starts, so both have run
+        // One notice: the first start dropped the prompt, which leaves the prompt's own start nothing to do.
+        val notice = handle.state.value.entries.single() as ChatEntry.Notice
         assertEquals(NoticeLevel.ERROR, notice.level)
         assertTrue("not found" in notice.text, notice.text)
         assertEquals(SessionStatus.STOPPED, handle.status.value)
 
-        // The next prompt looks for the binary again, and says so again; the prompt is not shown as sent.
+        // A later prompt looks for the binary again, and says so again; no prompt is shown as sent.
         manager.send(handle.id, "Reply with the single word: pong")
         handle.state.first { s -> s.entries.count { it is ChatEntry.Notice } == 2 }
         assertEquals(emptyList(), handle.state.value.prompts())
@@ -364,6 +395,45 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `stopping a running background session raises no attention`() = test {
+        val manager = manager(fixtures = "interrupt,plain-reply")
+        val background = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 } // this process replays the interrupt fixture
+        val foreground = manager.create(NewSessionOptions())
+        manager.select(foreground.id)
+        manager.send(background.id, "Count to a hundred")
+        background.status.await(SessionStatus.RUNNING) // the fixture streams, then waits for an interrupt
+
+        val seen = Collections.synchronizedList(ArrayList<SessionStatus>())
+        val recording = launch(start = CoroutineStart.UNDISPATCHED) { background.status.collect { seen.add(it) } }
+        manager.stop(background.id)
+        background.status.await(SessionStatus.STOPPED)
+        delay(300) // time for a wrong badge to show
+        recording.cancel()
+        assertEquals(listOf(SessionStatus.RUNNING, SessionStatus.STOPPED), seen.toList(), "never idle on the way to stopped")
+        assertFalse(background.attention.value)
+    }
+
+    @Test
+    fun `a session opened again while it closes starts once its old process is gone`() = test {
+        seed(seeded)
+        // While the fake waits before its permission request it reads no input, so closing it takes about 2 s.
+        val manager = manager(fixtures = "permission", delayMs = 5_000)
+        manager.open(seeded)
+        manager.send(seeded, "Create the fixture file")
+        awaitLog { prompts().isNotEmpty() }
+        val old = ownFakeProcesses().single()
+
+        val closing = launch(start = CoroutineStart.UNDISPATCHED) { manager.close(seeded) }
+        val reopened = manager.open(seeded)
+        assertFalse(old.isAlive, "two processes on one transcript")
+        closing.join()
+        assertEquals(listOf(reopened), manager.sessions.value)
+        awaitLog { spawns().size == 2 }
+        assertEquals(1, ownFakeProcesses().size)
+    }
+
+    @Test
     fun `summaries list a session without a transcript first and titles come from the index, else the first prompt`() = test {
         seed(seeded)
         val manager = manager(clock = { 7_000L })
@@ -386,7 +456,6 @@ class SessionManagerTest {
         seed(seeded)
         val manager = manager()
         assertEquals("Pong", manager.summaries.first { it.isNotEmpty() }.single().title) // the first listing
-        val other = "55555555-5555-4555-8555-555555555555"
         seed(other)
         // From the folder's change, well before the 30 s poll that stands in where the folders cannot be watched.
         val listed = withTimeout(10_000) { manager.summaries.first { summaries -> summaries.any { it.id == other } } }

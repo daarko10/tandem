@@ -167,8 +167,9 @@ class ReducerTest {
     @Test
     fun `a notice from the host is shown and changes nothing else`() {
         val before = reduce(ChatState(), SessionEvent.UserSent("u1", "hi"))
-        val after = reduce(before, SessionEvent.HostNotice(NoticeLevel.INFO, "Permission mode auto is not supported yet; using default."))
-        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.INFO, "Permission mode auto is not supported yet; using default."), after.entries.last())
+        val text = "Permission mode auto is not supported yet; using default."
+        val after = reduce(before, SessionEvent.HostNotice(NoticeLevel.INFO, text))
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.INFO, text), after.entries.last())
         assertEquals(before.copy(entries = after.entries, noticeCount = 1, entryIndex = after.entryIndex), after)
         assertEquals(after.positions(), after.entryIndex)
     }

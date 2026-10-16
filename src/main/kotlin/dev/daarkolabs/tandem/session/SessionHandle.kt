@@ -15,7 +15,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -62,23 +61,40 @@ class SessionHandle internal constructor(
     internal val spawnLock: Mutex = Mutex()
 
     /**
-     * Guards [session], [mirror], [queued] and [closed], and makes each change of [mutableState] one step with them: a pick or a
-     * prompt is either in the state a process starts from, or goes to that process. Only held for steps that never wait.
+     * Guards [session], [mirror], [queued] and [closed], and makes each change of the chat ([publishLocked]) one step with them: a
+     * pick or a prompt is either in the state a process starts from, or goes to that process. Only held for steps that never wait.
      */
     private val lock = Any()
 
     /** The process's session, from [attach] until it is let go ([releaseLocked]). */
     private var session: ClaudeSession? = null
 
-    /** Copies [session]'s state into [mutableState]. */
+    /** Copies [session]'s state into the chat. */
     private var mirror: Job? = null
 
     /** Prompts sent while no process runs, in order: the next process gets them. */
     private val queued = ArrayList<String>()
     private var closed = false
 
+    /** A chat and whether a process is attached to it ([session] is set), which together make the [SessionStatus]. */
+    private data class Snapshot(val chat: ChatState, val attached: Boolean) {
+        val status: SessionStatus
+            get() = when {
+                !attached || chat.ended -> SessionStatus.STOPPED
+                chat.pendingPermissions.isNotEmpty() -> SessionStatus.WAITING
+                chat.busy -> SessionStatus.RUNNING
+                else -> SessionStatus.IDLE
+            }
+    }
+
+    /**
+     * The chat and the process as one value, written once per change, so that [status] never sees one changed without the
+     * other: a stopped session's settled chat with its process still attached would read as IDLE between RUNNING and STOPPED.
+     */
+    private val snapshot = MutableStateFlow(Snapshot(initialState, attached = false))
+
+    /** [Snapshot.chat], written in the same step as [snapshot], so that [state] follows it without a coroutine in between. */
     private val mutableState = MutableStateFlow(initialState)
-    private val attached = MutableStateFlow(false)
     private val mutableAttention = MutableStateFlow(false)
 
     /** The chat: the running process's state, else what the last process left (settled once it was stopped), else the loaded history. */
@@ -86,8 +102,7 @@ class SessionHandle internal constructor(
 
     /** STOPPED without a process or once it ended; else WAITING with a permission pending, RUNNING during a turn, IDLE otherwise. */
     val status: StateFlow<SessionStatus> =
-        combine(mutableState, attached) { chat, running -> statusOf(chat, running) }
-            .stateIn(scope, SharingStarted.Eagerly, statusOf(initialState, attached = false))
+        snapshot.map { it.status }.stateIn(scope, SharingStarted.Eagerly, snapshot.value.status)
 
     /** The index's title for this session, else its first prompt (the first line, cut to 80 characters), else the [id]. */
     val title: StateFlow<String> =
@@ -129,6 +144,9 @@ class SessionHandle internal constructor(
         }
     }
 
+    /** Whether prompts wait for a process. */
+    internal fun hasQueued(): Boolean = synchronized(lock) { queued.isNotEmpty() }
+
     /** Hands the queued prompts to the running process, if one runs: then true. */
     internal fun deliverQueued(): Boolean = synchronized(lock) {
         val live = liveLocked() ?: return false
@@ -147,10 +165,9 @@ class SessionHandle internal constructor(
             session?.let { releaseLocked(it) }
             val created = create(mutableState.value)
             session = created
-            mutableState.value = created.state.value
-            attached.value = true
+            publishLocked(created.state.value, attached = true)
             mirror = scope.launch {
-                created.state.collect { chat -> synchronized(lock) { if (session === created) mutableState.value = chat } }
+                created.state.collect { chat -> synchronized(lock) { if (session === created) publishLocked(chat, attached = true) } }
             }
             val running = created.start()
             flushLocked(created)
@@ -174,7 +191,7 @@ class SessionHandle internal constructor(
                 live(running)
             } else {
                 session?.let { releaseLocked(it) } // one that ended: its state must not overwrite the pick
-                mutableState.update { reduce(it, stopped) }
+                publishLocked(reduce(mutableState.value, stopped), attached = false)
             }
         }
     }
@@ -187,7 +204,7 @@ class SessionHandle internal constructor(
         session?.let { releaseLocked(it) }
         val dropped = queued.size
         queued.clear()
-        mutableState.update { reduce(it, SessionEvent.Ended(detail, isError = true)) }
+        publishLocked(reduce(mutableState.value, SessionEvent.Ended(detail, isError = true)), attached = false)
         dropped
     }
 
@@ -236,8 +253,13 @@ class SessionHandle internal constructor(
         mirror?.cancel()
         mirror = null
         val last = ended.state.value
-        mutableState.value = if (settle) last.settled() else last
-        attached.value = false
+        publishLocked(if (settle) last.settled() else last, attached = false)
+    }
+
+    /** The chat, and whether a process is [attached], as one step: see [snapshot]. */
+    private fun publishLocked(chat: ChatState, attached: Boolean) {
+        snapshot.value = Snapshot(chat, attached)
+        mutableState.value = chat
     }
 }
 
@@ -249,10 +271,3 @@ private fun ChatState.firstUser(): ChatEntry.User? = entries.firstNotNullOfOrNul
 private fun ChatEntry.User.asTitle(): String? = promptTitle(text).ifEmpty { null }
 
 private fun List<SessionSummary>.titleOf(id: SessionId): String? = firstOrNull { it.id == id }?.title
-
-private fun statusOf(chat: ChatState, attached: Boolean): SessionStatus = when {
-    !attached || chat.ended -> SessionStatus.STOPPED
-    chat.pendingPermissions.isNotEmpty() -> SessionStatus.WAITING
-    chat.busy -> SessionStatus.RUNNING
-    else -> SessionStatus.IDLE
-}

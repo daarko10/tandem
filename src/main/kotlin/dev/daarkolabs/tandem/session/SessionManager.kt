@@ -2,14 +2,17 @@ package dev.daarkolabs.tandem.session
 
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,12 +57,13 @@ data class NewSessionOptions(val model: String? = null, val effort: String? = nu
  * Processes: a session starts or stops one process at a time (its spawn lock). [send] to a stopped session starts one and
  * queues the prompt until it is attached, so prompts sent in quick succession start a single process and keep their order. A
  * process that cannot start, or that ends, leaves its error notice in the chat and the session STOPPED; the next prompt tries
- * again. Without a [binary] the chat shows the install notice instead.
+ * again. Without a [binary] the chat shows the install notice instead. A session never has two processes, not even one that is
+ * closing and opened again: [open] waits until the old one has ended.
  *
  * The list follows [SessionIndex.changes]; where the folders cannot be watched, it is read again every 30 s. [maxLive], the
  * most sessions to keep live at once, is not enforced yet.
  */
-class SessionManager(
+class SessionManager internal constructor(
     private val scope: CoroutineScope,
     private val index: SessionIndex,
     private val launcher: ProcessLauncher,
@@ -67,8 +71,21 @@ class SessionManager(
     private val binary: () -> String?,
     private val workingDirectory: Path,
     private val maxLive: () -> Int,
-    private val clock: () -> Long = System::currentTimeMillis,
+    private val clock: () -> Long,
+    /** Reads a session's history; tests pass one that fails, since a test run as root cannot make a file unreadable. */
+    private val readTranscript: suspend (Path) -> LoadedTranscript,
 ) {
+    /** Reads histories with [TranscriptReader]. */
+    constructor(
+        scope: CoroutineScope,
+        index: SessionIndex,
+        launcher: ProcessLauncher,
+        binary: () -> String?,
+        workingDirectory: Path,
+        maxLive: () -> Int,
+        clock: () -> Long = System::currentTimeMillis,
+    ) : this(scope, index, launcher, binary, workingDirectory, maxLive, clock, TranscriptReader::read)
+
     /** Guards changes of [sessions] and [selected] together, and a session's attention against a change of the selection. */
     private val lock = Any()
     private val mutableSessions = MutableStateFlow<List<SessionHandle>>(emptyList())
@@ -79,6 +96,9 @@ class SessionManager(
 
     /** One listing at a time, so that an older one never replaces a newer one. */
     private val refreshLock = Mutex()
+
+    /** Sessions being closed, until their process has ended: [open] waits for them. Guarded by [lock]. */
+    private val closing = HashMap<SessionId, CompletableJob>()
 
     /** The open sessions, in the order they were opened. */
     val sessions: StateFlow<List<SessionHandle>> = mutableSessions.asStateFlow()
@@ -111,19 +131,31 @@ class SessionManager(
     /** Starts a new session with [options] (`--session-id` with a new UUID) and returns its handle at once. It is not selected. */
     fun create(options: NewSessionOptions): SessionHandle {
         val initial = ChatState(requestedModel = options.model, permissionMode = options.permissionMode, effort = options.effort)
-        val handle = register(UUID.randomUUID().toString(), initial)
-        startInBackground(handle)
+        val (handle, _) = synchronized(lock) { registerLocked(UUID.randomUUID().toString(), initial) }
+        startInBackground(handle, forPrompts = false)
         return handle
     }
 
     /**
-     * Session [id]'s handle: the open one, or a new one with the history from the session's transcript (empty if there is none
-     * yet, or if it cannot be read). With [spawn], a process starts unless one runs. The selection does not change.
+     * Session [id]'s handle. One that is open is returned as it is: a stopped session starts again with its next prompt ([send]).
+     * Otherwise a new handle gets the history from the session's transcript (none if there is no transcript yet, and a warning
+     * in the chat if it cannot be read) and, with [spawn], a process. A session that is closing is opened again only once its
+     * process has ended. The selection does not change.
      */
     suspend fun open(id: SessionId, spawn: Boolean = true): SessionHandle {
-        val handle = handle(id) ?: register(id, history(id))
-        if (spawn) start(handle)
-        return handle
+        while (true) {
+            val pendingClose = synchronized(lock) { closing[id] }
+            if (pendingClose != null) {
+                pendingClose.join()
+                continue
+            }
+            handle(id)?.let { return it }
+            val history = history(id)
+            // Meanwhile a close may have started, or another open may have added the session.
+            val (handle, isNew) = synchronized(lock) { if (closing[id] == null) registerLocked(id, history) else null } ?: continue
+            if (isNew && spawn) start(handle, forPrompts = false)
+            return handle
+        }
     }
 
     /** Selects session [id], or none; the selected session's [SessionHandle.attention] clears. An [id] that is not open is ignored. */
@@ -135,7 +167,7 @@ class SessionManager(
     fun send(id: SessionId, text: String) {
         val handle = handle(id) ?: return
         handle.lastUsed = clock()
-        if (handle.sendOrQueue(text)) startInBackground(handle)
+        if (handle.sendOrQueue(text)) startInBackground(handle, forPrompts = true)
     }
 
     /** Interrupts the turn in progress, if a process runs. */
@@ -173,20 +205,22 @@ class SessionManager(
     }
 
     /**
-     * Stops the session and drops it from [sessions]; if it was selected, the session after it is (in [sessions] order, else
-     * the one before), or none. Its transcript stays.
+     * Stops the session and drops it from [sessions]; its transcript stays. If it was selected, a neighbour is: the next row in
+     * [sessions], else the previous one, else none. Returns once the process has ended, as does a second close meanwhile.
      */
     suspend fun close(id: SessionId) {
-        val handle = synchronized(lock) {
-            val open = mutableSessions.value
-            val position = open.indexOfFirst { it.id == id }
-            if (position < 0) return
-            val rest = open.filterIndexed { i, _ -> i != position }
-            mutableSessions.value = rest
-            if (mutableSelected.value == id) selectLocked((rest.getOrNull(position) ?: rest.lastOrNull())?.id)
-            open[position]
+        val removed = synchronized(lock) { removeLocked(id) }
+        if (removed == null) {
+            synchronized(lock) { closing[id] }?.join() // closing already
+            return
         }
-        handle.close()
+        val (handle, done) = removed
+        try {
+            handle.close()
+        } finally {
+            synchronized(lock) { closing.remove(id) }
+            done.complete()
+        }
         LOG.info("session $id closed")
     }
 
@@ -207,12 +241,29 @@ class SessionManager(
         return if (unlisted.isEmpty()) listed else unlisted + listed
     }
 
-    /** The open handle for [id], or a new one with [state], added to [sessions]. */
-    private fun register(id: SessionId, state: ChatState): SessionHandle = synchronized(lock) {
-        handle(id) ?: SessionHandle(id, scope, state, listing, clock()).also { handle ->
-            mutableSessions.value += handle
-            watch(handle)
-        }
+    /** The open handle for [id] and false, or a new one with [state], added to [sessions], and true. */
+    private fun registerLocked(id: SessionId, state: ChatState): Pair<SessionHandle, Boolean> {
+        handle(id)?.let { return it to false }
+        val handle = SessionHandle(id, scope, state, listing, clock())
+        mutableSessions.value += handle
+        watch(handle)
+        return handle to true
+    }
+
+    /**
+     * Takes session [id] out of [sessions], selects a neighbour if it was selected, and marks it closing until its process has
+     * ended: the handle and the job to complete then. Null if [id] is not open.
+     */
+    private fun removeLocked(id: SessionId): Pair<SessionHandle, CompletableJob>? {
+        val open = mutableSessions.value
+        val position = open.indexOfFirst { it.id == id }
+        if (position < 0) return null
+        val rest = open.filterIndexed { i, _ -> i != position }
+        mutableSessions.value = rest
+        if (mutableSelected.value == id) selectLocked((rest.getOrNull(position) ?: rest.lastOrNull())?.id)
+        val done = Job()
+        closing[id] = done
+        return open[position] to done
     }
 
     private fun selectLocked(id: SessionId?) {
@@ -242,14 +293,18 @@ class SessionManager(
         }
     }
 
-    /** The history in session [id]'s transcript: empty while there is none, or when it cannot be read (the log says why). */
+    /**
+     * The history in session [id]'s transcript: empty while there is none, and only a warning saying why when it cannot be
+     * read, so that an empty chat is never a mystery.
+     */
     private suspend fun history(id: SessionId): ChatState {
         val file = withContext(Dispatchers.IO) { index.transcript(id) } ?: return ChatState()
         return try {
-            TranscriptReader.read(file).state
+            readTranscript(file).state
         } catch (e: IOException) {
-            LOG.warn("session $id: transcript not read (${e.javaClass.simpleName})")
-            ChatState()
+            val reason = e.javaClass.simpleName
+            LOG.warn("session $id: transcript not read ($reason)")
+            reduce(ChatState(), SessionEvent.HostNotice(NoticeLevel.WARNING, "The session's history could not be read: $reason"))
         }
     }
 
@@ -257,17 +312,20 @@ class SessionManager(
      * [start] in the session's scope, undispatched: it takes its place in line for the spawn lock before this returns, so that
      * what is asked later ([stop], another prompt) comes after it.
      */
-    private fun startInBackground(handle: SessionHandle) {
-        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) { start(handle) }
+    private fun startInBackground(handle: SessionHandle, forPrompts: Boolean) {
+        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) { start(handle, forPrompts) }
     }
 
     /**
-     * Starts a process for the session unless one runs, and hands it the queued prompts. Holds the session's spawn lock
-     * throughout, so that a session never gets two. Without a binary the chat shows the install notice instead.
+     * Starts a process for the session unless one runs, and hands it the queued prompts. A start [forPrompts] (one that [send]
+     * asked for) that finds none left does nothing: an earlier start sent them, or dropped them for want of a binary. Holds the
+     * session's spawn lock throughout, so that a session never gets two processes. Without a binary the chat shows the install
+     * notice instead.
      */
-    private suspend fun start(handle: SessionHandle) {
+    private suspend fun start(handle: SessionHandle, forPrompts: Boolean) {
         handle.spawnLock.withLock {
             if (handle.isClosed || handle.deliverQueued()) return
+            if (forPrompts && !handle.hasQueued()) return
             val (path, hasTranscript) = withContext(Dispatchers.IO) {
                 val path = binary()
                 path to (path != null && index.transcript(handle.id) != null)
