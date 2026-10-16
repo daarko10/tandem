@@ -1,6 +1,8 @@
 package dev.daarkolabs.tandem.protocol
 
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import org.junit.Test
 import kotlin.io.path.readLines
 import kotlin.test.assertEquals
@@ -106,11 +108,20 @@ class FixtureDecodeTest {
     fun `permission mode fixture shows how the CLI acknowledges set_permission_mode`() {
         val messages = Fixtures.decode("permission-mode")
 
-        assertEquals(3, messages.filterIsInstance<CliMessage.ControlResponse>().count { it.isSuccess }) // initialize + two acks
+        val responses = messages.filterIsInstance<CliMessage.ControlResponse>()
+        assertEquals(3, responses.count { it.isSuccess }) // initialize + two acks
         assertEquals(
             listOf(PermissionMode.DEFAULT, PermissionMode.PLAN, PermissionMode.ACCEPT_EDITS),
             messages.filterIsInstance<CliMessage.SystemInit>().map { it.permissionMode },
         )
+
+        // Each ack echoes the mode, and a system/status line with that mode comes right after it.
+        val acks = responses.drop(1)
+        assertEquals(listOf("plan", "acceptEdits").map { mode -> buildJsonObject { put("mode", mode) } }, acks.map { it.payload })
+        for ((ack, mode) in acks.zip(listOf(PermissionMode.PLAN, PermissionMode.ACCEPT_EDITS))) {
+            val status = assertIs<CliMessage.SystemStatus>(messages[messages.indexOf(ack) + 1])
+            assertEquals(mode, status.permissionMode)
+        }
     }
 
     @Test

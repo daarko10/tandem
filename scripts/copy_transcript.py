@@ -9,9 +9,9 @@ copied to <out-dir>/<name>-origin.jsonl. Transcripts are read from
 ${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<key>/<session id>.jsonl, where <key> is computed from <work-dir> (the
 directory `claude` ran in) as the plugin's TranscriptFolder.key does.
 
-Each file must exist, be at most 2 MB, and every line with a sessionId field must name the expected session;
-otherwise nothing is copied and the exit code is non-zero. The copies are raw: redact them with redact_fixture.py,
-never commit them as they are.
+Each file must be a regular file (not a symlink) of at most 2 MB holding one JSON object per line (blank lines aside),
+with at least one sessionId field and every sessionId naming the expected session; otherwise nothing is copied and the
+exit code is non-zero. The copies are raw: redact them with redact_fixture.py, never commit them as they are.
 """
 import json
 import os
@@ -52,20 +52,31 @@ def session_ids(stream: str) -> list[str]:
 
 
 def check(path: str, session_id: str) -> None:
-    """Fails unless `path` is a transcript of at most MAX_BYTES whose sessionId fields all name `session_id`."""
+    """Fails unless `path` is the transcript of `session_id` as the module docstring describes it."""
+    if os.path.islink(path):
+        fail(f"{path} is a symlink")
     if not os.path.isfile(path):
         fail(f"no transcript at {path}")
     size = os.path.getsize(path)
     if size > MAX_BYTES:
         fail(f"{path} has {size} bytes, more than {MAX_BYTES}")
+    matches = 0
     with open(path, encoding="utf-8") as f:
         for number, line in enumerate(f, 1):
+            if not line.strip():
+                continue
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
-                continue
-            if isinstance(msg, dict) and "sessionId" in msg and msg["sessionId"] != session_id:
-                fail(f"{path} line {number} belongs to another session")
+                fail(f"{path} line {number} is not JSON")
+            if not isinstance(msg, dict):
+                fail(f"{path} line {number} is not a JSON object")
+            if "sessionId" in msg:
+                if msg["sessionId"] != session_id:
+                    fail(f"{path} line {number} belongs to another session")
+                matches += 1
+    if not matches:
+        fail(f"{path} has no line with the session id {session_id}")
 
 
 def main(work_dir: str, stream: str, out_dir: str, name: str) -> None:

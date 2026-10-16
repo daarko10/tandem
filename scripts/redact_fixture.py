@@ -5,7 +5,8 @@ Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
 
 - Replaces ids (session_id, uuid, request_id, message ids, tool_use ids, also when used as object keys)
   with stable placeholders.
-- Replaces absolute paths with <path>, e-mail addresses with <email> and git branch names with <branch>.
+- Replaces absolute paths with <path>, e-mail addresses with <email>, git branch names with <branch> and the
+  entrypoint (how the recording was started) with <entrypoint>.
 - Empties environment-specific lists in system/init and in the initialize control_response
   (MCP servers, plugins, skills, agents, commands) and masks account details.
 - Keeps every message type, field name and ordering, which is what the protocol tests care about.
@@ -16,6 +17,7 @@ Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
   listings, an environment snapshot) and its `rendered` copy describe the recording machine, not the protocol.
   Every other field of the line stays.
 - Leaves values that already are placeholders (<name-N>) alone, so a second run over a redacted file changes nothing.
+- Safety net: a UUID or API id that no rule above caught becomes <leaked-N>, with a warning naming its key path.
 """
 import json
 import re
@@ -36,8 +38,10 @@ PATH_RE = re.compile(r"(?:/(?:root|home|Users|tmp|private|var|opt)|[A-Za-z]:\\\\
 API_ID_RE = re.compile(r"^(?:toolu|srvtoolu|msg|req)_[A-Za-z0-9]+$")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PLACEHOLDER_RE = re.compile(r"<[A-Za-z_]\w*-\d+>")
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 ids: dict[str, str] = {}
+leaked: dict[str, str] = {}
 
 
 def stable_id(value: str, key: str) -> str:
@@ -59,9 +63,31 @@ def scrub(node, key=None):
             return stable_id(node, key)
         if key == "gitBranch" and node:
             return "<branch>"
+        if key == "entrypoint":
+            return "<entrypoint>"
         node = PATH_RE.sub("<path>", node)
         return EMAIL_RE.sub("<email>", node)
     return node
+
+
+def leaked_id(value: str) -> str:
+    if value not in leaked:  # its own name, so it can never collide with a <key-N> placeholder
+        leaked[value] = f"<leaked-{len(leaked) + 1}>"
+    return leaked[value]
+
+
+def catch_leaks(node, path: str, where: str):
+    """Replaces any UUID or API id still in a string value, warning once per value with its key path."""
+    if isinstance(node, dict):
+        return {k: catch_leaks(v, f"{path}.{k}" if path else k, where) for k, v in node.items()}
+    if isinstance(node, list):
+        return [catch_leaks(v, f"{path}[{i}]", where) for i, v in enumerate(node)]
+    if not isinstance(node, str) or PLACEHOLDER_RE.fullmatch(node):
+        return node
+    clean = leaked_id(node) if API_ID_RE.fullmatch(node) else UUID_RE.sub(lambda m: leaked_id(m.group()), node)
+    if clean != node:
+        print(f"{where}: unredacted id at {path}, replaced", file=sys.stderr)
+    return clean
 
 
 def empty_lists(node: dict) -> None:
@@ -103,7 +129,8 @@ def redact(src: str, dst: str) -> None:
                         payload["account"] = {k: "<account>" for k in payload["account"]}
                     if "pid" in payload:
                         payload["pid"] = 0
-            out.append(json.dumps(scrub(msg), ensure_ascii=False, separators=(",", ":")))
+            clean = catch_leaks(scrub(msg), "", f"{src} line {number}")
+            out.append(json.dumps(clean, ensure_ascii=False, separators=(",", ":")))
     with open(dst, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
 

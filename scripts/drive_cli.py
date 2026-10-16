@@ -29,7 +29,8 @@ INITIALIZE = {"subtype": "initialize", "hooks": None}
 
 # Variables that tie a process to a parent Claude Code session or hosted environment; the plugin drops the same ones
 # (cliEnvironment). A `claude` that inherits them, e.g. inside a hosted session, writes its transcript under the
-# parent's session id. Everything else passes through, sign-in included.
+# parent's session id. Everything else passes through, sign-in included, and CLAUDE_CODE_ENTRYPOINT gets Tandem's own
+# value as in cliEnvironment, so a recording shows what Tandem gets.
 PARENT_SESSION_VARIABLES = {
     "CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ATTENDED",
     "CLAUDE_CODE_CONTAINER_ID", "CLAUDE_CODE_WORKER_EPOCH", "CLAUDE_SESSION_INGRESS_TOKEN_FILE",
@@ -38,8 +39,10 @@ PARENT_SESSION_PREFIXES = ("CLAUDE_CODE_REMOTE", "CLAUDE_CODE_MESSAGING_", "CLAU
 
 
 def child_environment() -> dict[str, str]:
-    return {name: value for name, value in os.environ.items()
-            if name not in PARENT_SESSION_VARIABLES and not name.startswith(PARENT_SESSION_PREFIXES)}
+    env = {name: value for name, value in os.environ.items()
+           if name not in PARENT_SESSION_VARIABLES and not name.startswith(PARENT_SESSION_PREFIXES)}
+    env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-tandem"
+    return env
 
 
 class Cli:

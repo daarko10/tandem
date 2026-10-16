@@ -18,7 +18,7 @@ mkdir -p "$out_dir/transcripts"
 
 # Variables that tie a process to a parent Claude Code session or hosted environment; the plugin (cliEnvironment)
 # and drive_cli.py drop the same ones. A `claude` that inherits them writes its transcript under the parent's
-# session id. Everything else passes through, sign-in included.
+# session id. Everything else passes through, sign-in included, and CLAUDE_CODE_ENTRYPOINT gets Tandem's own value.
 parent_session_variable() {
   case "$1" in
     CLAUDECODE | CLAUDE_PID | CLAUDE_CODE_SESSION_ID | CLAUDE_CODE_CHILD_SESSION | CLAUDE_CODE_SESSION_ATTENDED | \
@@ -34,8 +34,9 @@ parent_session_variable() {
   for variable in $(compgen -e); do
     if parent_session_variable "$variable"; then unset "$variable"; fi
   done
+  export CLAUDE_CODE_ENTRYPOINT=sdk-tandem
   claude -p "$prompt" --output-format stream-json --verbose --include-partial-messages --safe-mode "$@" > raw.ndjson
-) || echo "claude exited non-zero; keeping the transcript anyway" >&2
+) || echo "claude exited non-zero; a run without a system/init line produces no fixture" >&2
 
 # The CLI wrote its own transcript under the folder of the directory it ran in.
 python3 -I "$repo/scripts/copy_transcript.py" "$work" "$work/raw.ndjson" "$work/transcripts" "$name"
