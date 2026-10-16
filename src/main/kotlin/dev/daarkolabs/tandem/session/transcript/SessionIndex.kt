@@ -11,11 +11,14 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
+import java.io.UncheckedIOException
 import java.nio.file.ClosedWatchServiceException
 import java.nio.file.FileSystems
 import java.nio.file.Files
+import java.nio.file.InvalidPathException
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
+import java.nio.file.ProviderMismatchException
 import java.nio.file.StandardWatchEventKinds.ENTRY_CREATE
 import java.nio.file.StandardWatchEventKinds.ENTRY_DELETE
 import java.nio.file.StandardWatchEventKinds.ENTRY_MODIFY
@@ -42,6 +45,34 @@ private const val FOLDER_POLL_MILLIS: Long = 2_000
 
 private val NEWEST_FIRST: Comparator<SessionSummary> = compareByDescending<SessionSummary> { it.lastModified }.thenBy { it.id }
 
+/**
+ * Runs [block], which calls the file system, and gives [onFailure]'s result if the JDK reports a failure: an I/O error, a refused
+ * access, or a path it cannot parse (the folder lookup builds paths from the config directory). Nothing else is caught, so that a
+ * bug, or a cancellation, is never swallowed.
+ */
+private inline fun <T> tryFileSystem(onFailure: (Exception) -> T, block: () -> T): T =
+    try {
+        block()
+    } catch (e: IOException) {
+        onFailure(e)
+    } catch (e: UncheckedIOException) {
+        onFailure(e)
+    } catch (e: SecurityException) {
+        onFailure(e)
+    } catch (e: InvalidPathException) {
+        onFailure(e)
+    }
+
+/** [tryFileSystem], and what a watch service reports: a file system that cannot be watched, or a folder from another provider. */
+private inline fun <T> tryWatching(onFailure: (Exception) -> T, block: () -> T): T =
+    try {
+        tryFileSystem(onFailure, block)
+    } catch (e: UnsupportedOperationException) {
+        onFailure(e)
+    } catch (e: ProviderMismatchException) {
+        onFailure(e)
+    }
+
 /** One session in a project's transcript folder, as the session list shows it. */
 data class SessionSummary(
     /** The transcript's file name without `.jsonl`. */
@@ -61,8 +92,9 @@ data class SessionSummary(
  * Other files in them, such as a subagent's `agent-*.jsonl`, are no sessions and are skipped.
  *
  * A transcript's [TranscriptMeta] takes two passes over the whole file, so a file is read again only when its size or modification
- * time changed, or after [invalidate]. A transcript that cannot be read is left out of the listing. [list] and [invalidate] never
- * throw and may be called from several threads; [list] blocks on file I/O, so call it off the EDT.
+ * time changed, or after [invalidate]. When the file system fails on a folder or a transcript (an I/O error, a refused access), that
+ * one is left out of the listing and a warning goes to the log; [list] does not throw for it. [list] and [invalidate] may be called
+ * from several threads; [list] blocks on file I/O, so call it off the EDT.
  */
 class SessionIndex(
     private val folders: () -> List<Path>,
@@ -74,21 +106,25 @@ class SessionIndex(
 
     private val cache = ConcurrentHashMap<Path, Entry>()
 
+    /** Whether other projects' sessions can be in the folders: the key is cut at the CLI's limit, see [TranscriptFolder.candidates]. */
+    private val sharesFolders: Boolean = TranscriptFolder.key(projectPath).length >= TranscriptFolder.MAX_KEY_LENGTH
+
     /**
      * Every session in the folders, newest first, ties by id. A folder that does not exist has none: a project's first session
      * creates it.
      *
-     * With more than one folder (a project path longer than the CLI's folder key, see [TranscriptFolder.candidates]) the folders
-     * may hold other projects' sessions too, so those whose transcript names another working directory than [projectPath] are
-     * dropped. With one folder nothing is dropped.
+     * A project path whose folder key reaches the CLI's limit ([TranscriptFolder.MAX_KEY_LENGTH] characters) shares its folders with
+     * every other project whose key starts the same (see [TranscriptFolder.candidates]), even when only one such folder exists. There
+     * a session is dropped if its transcript names another working directory than [projectPath]; one that names none stays. With a
+     * shorter key the folder is the project's own and nothing is dropped.
      */
     fun list(): List<SessionSummary> {
-        val candidates: List<Path> = try {
-            folders()
-        } catch (e: Exception) {
-            LOG.warn("transcript folders not known (${e.javaClass.simpleName})")
-            emptyList()
-        }
+        val candidates: List<Path> = tryFileSystem(
+            onFailure = { e ->
+                LOG.warn("transcript folders not known (${e.javaClass.simpleName})")
+                emptyList()
+            },
+        ) { folders() }
         val seen = HashSet<Path>()
         val found = ArrayList<Entry>()
         for (folder in candidates) {
@@ -99,7 +135,7 @@ class SessionIndex(
             }
         }
         cache.keys.retainAll(seen) // transcripts that are gone
-        val own = if (candidates.size > 1) found.filter { it.cwd == null || it.cwd == projectPath } else found
+        val own = if (sharesFolders) found.filter { it.cwd == null || it.cwd == projectPath } else found
         return own.map { it.summary }.sortedWith(NEWEST_FIRST)
     }
 
@@ -111,92 +147,105 @@ class SessionIndex(
     /**
      * A signal whenever something happens in the folders: a transcript is created, written to or deleted. Call [list] after one.
      *
-     * Every folder that exists is watched with a [WatchService]; the others are looked for every 2 s, since a project's first
-     * session creates its folder, and signalled once found because they may hold transcripts already. A burst of events is one
-     * signal, sent when the folders have been quiet for 500 ms. What is there when the watching starts is not signalled: [list] it.
+     * The first signal comes as soon as the watching has started, whatever the folders hold, so a caller that lists first and
+     * subscribes after misses nothing created in between. From then on every folder that exists is watched with a [WatchService];
+     * the others are looked for every 2 s, since a project's first session creates its folder, and signalled once found because they
+     * may hold transcripts already. A burst of events is one signal, sent when the folders have been quiet for 500 ms.
      *
      * Collecting runs on [Dispatchers.IO] and holds the watch service until it is cancelled. Where the file system cannot be
-     * watched the flow logs that and ends without a signal, and sessions then show up on the next [list] only. It never throws.
+     * watched, or fails, the flow logs that and ends without a signal, and sessions then show up on the next [list] only.
      */
     @OptIn(FlowPreview::class)
     fun changes(): Flow<Unit> = watchFolders(folders).debounce(CHANGE_DEBOUNCE_MILLIS)
 
     /** The folder's transcripts; none for a folder that is missing or cannot be listed. */
     private fun transcriptsIn(folder: Path): List<Path> =
-        try {
-            Files.newDirectoryStream(folder).use { entries -> entries.filter { TRANSCRIPT_NAME.matches(it.name) } }
-        } catch (_: NoSuchFileException) {
-            emptyList()
-        } catch (e: Exception) {
-            LOG.warn("transcript folder not listed (${e.javaClass.simpleName})")
-            emptyList()
+        tryFileSystem(
+            onFailure = { e ->
+                LOG.warn("transcript folder not listed (${e.javaClass.simpleName})")
+                emptyList()
+            },
+        ) {
+            try {
+                Files.list(folder).use { entries -> entries.filter { TRANSCRIPT_NAME.matches(it.name) }.toList() }
+            } catch (_: NoSuchFileException) {
+                emptyList() // no session was ever started in this project
+            }
         }
 
     /** What is known about [file]: from the cache if it has not changed, else read afresh. Null if it is no longer a readable file. */
     private fun entryOf(file: Path): Entry? =
-        try {
-            val attributes = Files.readAttributes(file, BasicFileAttributes::class.java)
-            val size = attributes.size()
-            val modified = attributes.lastModifiedTime()
-            val cached = cache[file]
-            when {
-                !attributes.isRegularFile -> null
-                cached != null && cached.size == size && cached.modified == modified -> cached
-                else -> {
-                    // Size and time are taken before the read: if the CLI appends meanwhile, the next listing sees a change.
-                    val transcript = meta(file)
-                    val summary = SessionSummary(
-                        file.name.removeSuffix(TRANSCRIPT_SUFFIX), transcript.title, modified.toMillis(), transcript.firstPrompt, file,
-                    )
-                    Entry(size, modified, transcript.cwd, summary).also { cache[file] = it }
+        tryFileSystem(
+            onFailure = { e ->
+                LOG.warn("transcript ${file.name} not listed (${e.javaClass.simpleName})")
+                null
+            },
+        ) {
+            try {
+                val attributes = Files.readAttributes(file, BasicFileAttributes::class.java)
+                val size = attributes.size()
+                val modified = attributes.lastModifiedTime()
+                val cached = cache[file]
+                when {
+                    !attributes.isRegularFile -> null
+                    cached != null && cached.size == size && cached.modified == modified -> cached
+                    else -> {
+                        // Size and time are taken before the read: if the CLI appends meanwhile, the next listing sees a change.
+                        val transcript = meta(file)
+                        val summary = SessionSummary(
+                            file.name.removeSuffix(TRANSCRIPT_SUFFIX), transcript.title, modified.toMillis(), transcript.firstPrompt, file,
+                        )
+                        Entry(size, modified, transcript.cwd, summary).also { cache[file] = it }
+                    }
                 }
+            } catch (_: NoSuchFileException) {
+                null // deleted since the folder was listed
             }
-        } catch (_: NoSuchFileException) {
-            null // deleted since the folder was listed
-        } catch (e: Exception) {
-            LOG.warn("transcript ${file.name} not listed (${e.javaClass.simpleName})")
-            null
         }
 }
 
 /**
- * One signal per batch of events in the [folders], watched with the service that [newWatchService] creates; the flow behind
- * [SessionIndex.changes], without its debounce. A folder that does not exist, or that was deleted, is looked for every
- * [pollMillis] and signalled when it is found again. Internal so tests can pass a watch service that fails, and a shorter poll.
+ * One signal once the watching has started, then one per batch of events in the [folders], watched with the service that
+ * [newWatchService] creates; the flow behind [SessionIndex.changes], without its debounce. A folder that does not exist, or that was
+ * deleted, is looked for every [pollMillis] and signalled when it is found. Internal so tests can pass a watch service that fails,
+ * and a shorter poll.
  */
 internal fun watchFolders(
     folders: () -> List<Path>,
     newWatchService: () -> WatchService = { FileSystems.getDefault().newWatchService() },
     pollMillis: Long = FOLDER_POLL_MILLIS,
 ): Flow<Unit> = callbackFlow<Unit> {
-    val service = try {
-        newWatchService()
-    } catch (e: Exception) { // UnsupportedOperationException or IOException: this file system cannot be watched
+    val service = tryWatching(onFailure = { e ->
         logGivingUp(e)
+        null
+    }) { newWatchService() }
+    if (service == null) {
         close()
         return@callbackFlow
     }
     launch {
         try {
-            val watch = FolderWatch(service, folders)
-            watch.registerNew()
-            val pollNanos = TimeUnit.MILLISECONDS.toNanos(pollMillis)
-            var nextCheck = System.nanoTime() + pollNanos
-            // Waits for events until it is time to look for folders again, so that a busy folder cannot keep the others waiting.
-            while (isActive) {
-                val wait = nextCheck - System.nanoTime()
-                if (wait > 0) {
-                    if (watch.awaitEvents(wait)) trySend(Unit)
-                } else {
-                    nextCheck = System.nanoTime() + pollNanos
-                    if (watch.registerNew()) trySend(Unit)
+            tryWatching(onFailure = ::logGivingUp) {
+                val watch = FolderWatch(service, folders)
+                watch.registerNew()
+                trySend(Unit) // Watched from here on: this makes a caller that listed earlier look again.
+                val pollNanos = TimeUnit.MILLISECONDS.toNanos(pollMillis)
+                var nextCheck = System.nanoTime() + pollNanos
+                // Waits for events until it is time to look for folders again, so that a busy folder cannot keep the others waiting.
+                while (isActive) {
+                    val wait = nextCheck - System.nanoTime()
+                    if (wait > 0) {
+                        if (watch.awaitEvents(wait)) trySend(Unit)
+                    } else {
+                        nextCheck = System.nanoTime() + pollNanos
+                        if (watch.registerNew()) trySend(Unit)
+                    }
                 }
             }
         } catch (_: ClosedWatchServiceException) {
             // awaitClose closed the service under a blocked poll: the collector is gone.
-        } catch (e: Exception) {
-            if (e is InterruptedException) Thread.currentThread().interrupt()
-            logGivingUp(e)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
         } finally {
             close()
         }

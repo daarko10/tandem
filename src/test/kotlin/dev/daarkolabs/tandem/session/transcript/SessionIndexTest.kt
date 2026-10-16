@@ -1,16 +1,14 @@
 package dev.daarkolabs.tandem.session.transcript
 
 import dev.daarkolabs.tandem.protocol.Fixtures
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -21,11 +19,14 @@ import java.io.IOException
 import java.nio.file.ClosedWatchServiceException
 import java.nio.file.FileSystems
 import java.nio.file.Files
+import java.nio.file.InvalidPathException
 import java.nio.file.Path
+import java.nio.file.WatchKey
 import java.nio.file.WatchService
 import java.nio.file.attribute.FileTime
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.appendText
 import kotlin.io.path.createDirectories
@@ -35,12 +36,16 @@ import kotlin.io.path.name
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class SessionIndexTest {
     private val first = "11111111-1111-4111-8111-111111111111"
     private val second = "22222222-2222-4222-8222-222222222222"
     private val third = "33333333-3333-4333-8333-333333333333"
+
+    // 250 characters: its folder key is cut at the CLI's limit of 200, so other projects' keys can start the same.
+    private val longProject = "/" + "a".repeat(250)
 
     private fun write(dir: Path, name: String, mtime: Long, text: String = "{}\n"): Path =
         dir.resolve(name).also {
@@ -196,9 +201,18 @@ class SessionIndexTest {
             meta = { if (it.name.startsWith("1")) throw IOException("unreadable") else stubMeta(it) },
         )
         assertEquals(listOf(second), failing.list().map { it.id })
-        // Something that is not a folder, and a folder lookup that fails.
+        // Something that is not a folder, and a folder lookup that fails (here on a config directory that is no valid path).
         assertEquals(emptyList(), SessionIndex({ listOf(dir.resolve("$first.jsonl")) }, "/p").list())
-        assertEquals(emptyList(), SessionIndex({ throw IllegalStateException("no config dir") }, "/p").list())
+        assertEquals(emptyList(), SessionIndex({ throw InvalidPathException("", "no config dir") }, "/p").list())
+    }
+
+    @Test
+    fun `only the file system's failures are absorbed, a cancellation or a bug passes through`(@TempDir dir: Path) {
+        write(dir, "$first.jsonl", mtime = 1_000)
+        for (failure in listOf(CancellationException("cancelled"), IllegalStateException("bug"))) {
+            val index = SessionIndex({ listOf(dir) }, "/p", meta = { throw failure })
+            assertSame(failure, assertFailsWith<RuntimeException> { index.list() })
+        }
     }
 
     @Test
@@ -208,12 +222,40 @@ class SessionIndexTest {
         write(a, "$first.jsonl", mtime = 3_000)
         write(b, "$second.jsonl", mtime = 2_000)
         write(b, "$third.jsonl", mtime = 1_000)
-        val cwds = mapOf(first to "/p", second to "/other", third to null)
+        val cwds = mapOf(first to longProject, second to "/other", third to null)
         val meta = { file: Path -> stubMeta(file, cwds.getValue(file.name.removeSuffix(".jsonl"))) }
-        // Of two folders, the session of another project goes; one whose cwd is unknown stays.
-        assertEquals(listOf(first, third), SessionIndex({ listOf(a, b) }, "/p", meta).list().map { it.id })
-        // A single folder is the project's own, whatever the sessions say.
-        assertEquals(listOf(second, third), SessionIndex({ listOf(b) }, "/p", meta).list().map { it.id })
+        // The session of another project goes; one whose cwd is unknown stays.
+        assertEquals(listOf(first, third), SessionIndex({ listOf(a, b) }, longProject, meta).list().map { it.id })
+    }
+
+    @Test
+    fun `with a long project path, the only folder of a sibling project does not make its sessions ours`(@TempDir root: Path) {
+        // This project has no folder yet. The one directory that shares its key prefix is another project's.
+        val sibling = root.resolve("sibling").createDirectories()
+        write(sibling, "$first.jsonl", mtime = 1_000)
+        val index = SessionIndex({ listOf(sibling) }, longProject, meta = { stubMeta(it, cwd = "/other") })
+        assertEquals(emptyList(), index.list())
+    }
+
+    @Test
+    fun `with a shorter key nothing is dropped, however many folders there are`(@TempDir root: Path) {
+        val a = root.resolve("a").createDirectories()
+        val b = root.resolve("b").createDirectories()
+        write(a, "$first.jsonl", mtime = 2_000)
+        write(b, "$second.jsonl", mtime = 1_000)
+        // The sessions name another working directory, but a short key names the project's own folder.
+        val foreign = { file: Path -> stubMeta(file, cwd = "/other") }
+        assertEquals(listOf(first, second), SessionIndex({ listOf(a, b) }, "/p", foreign).list().map { it.id })
+        assertEquals(listOf(second), SessionIndex({ listOf(b) }, "/p", foreign).list().map { it.id })
+    }
+
+    @Test
+    fun `the cwd filter starts where the CLI cuts the key`(@TempDir dir: Path) {
+        write(dir, "$first.jsonl", mtime = 1_000)
+        val foreign = { file: Path -> stubMeta(file, cwd = "/other") }
+        // "/" and 198 letters make a key of 199 characters, which the CLI keeps whole. One letter more reaches the limit.
+        assertEquals(listOf(first), SessionIndex({ listOf(dir) }, "/" + "a".repeat(198), foreign).list().map { it.id })
+        assertEquals(emptyList(), SessionIndex({ listOf(dir) }, "/" + "a".repeat(199), foreign).list())
     }
 
     @Test
@@ -233,20 +275,30 @@ class SessionIndexTest {
     }
 
     @Test
-    fun `changes emits after a file is written`(@TempDir dir: Path) = runBlocking<Unit> {
-        val changed = async { SessionIndex({ listOf(dir) }, "/p").changes().first() }
+    fun `changes signals once as soon as the watching has started`(@TempDir dir: Path) = runBlocking<Unit> {
+        val signals = Channel<Unit>(Channel.UNLIMITED)
+        val collecting = launch { SessionIndex({ listOf(dir) }, "/p").changes().collect { signals.send(it) } }
         try {
-            withTimeout(15_000) {
-                // The watch is registered a moment after collection starts, and a write before that goes unseen: keep writing
-                // until one is noticed. The writes are further apart than the 500 ms debounce, so each can be reported.
-                while (!changed.isCompleted) {
-                    newTranscript(dir)
-                    delay(700)
-                }
-                changed.await()
-            }
+            withTimeout(15_000) { signals.receive() }
+            delay(1_500)
+            assertTrue(signals.tryReceive().isFailure, "a second signal although nothing was written")
         } finally {
-            changed.cancelAndJoin()
+            collecting.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun `changes emits after a file is written`(@TempDir dir: Path) = runBlocking<Unit> {
+        val signals = Channel<Unit>(Channel.UNLIMITED)
+        val collecting = launch { SessionIndex({ listOf(dir) }, "/p").changes().collect { signals.send(it) } }
+        try {
+            // The first signal says that the watching has started, so a file written from now on is reported. (A polling watch
+            // service, as on macOS, takes up to 10 s to notice it.)
+            withTimeout(15_000) { signals.receive() }
+            newTranscript(dir)
+            withTimeout(15_000) { signals.receive() }
+        } finally {
+            collecting.cancelAndJoin()
         }
     }
 
@@ -255,23 +307,14 @@ class SessionIndexTest {
         val signals = Channel<Unit>(Channel.UNLIMITED)
         val collecting = launch { SessionIndex({ listOf(dir) }, "/p").changes().collect { signals.send(it) } }
         try {
-            withTimeout(15_000) {
-                // Write until the first signal shows that the watch is live.
-                val writing = launch {
-                    while (isActive) {
-                        newTranscript(dir)
-                        delay(700)
-                    }
-                }
-                signals.receive()
-                writing.cancelAndJoin()
-            }
+            withTimeout(15_000) { signals.receive() } // the watching has started
             repeat(10) { newTranscript(dir) }
+            withTimeout(15_000) { signals.receive() } // the burst is reported
             delay(1_500)
-            var count = 0
-            while (signals.tryReceive().isSuccess) count++
-            // Ten writes with no pause between them are one signal; two allow for a pause of the test machine in the middle.
-            assertTrue(count in 1..2, "$count signals for one burst of writes")
+            var more = 0
+            while (signals.tryReceive().isSuccess) more++
+            // Not once more for each write. One more allows for the test machine pausing in the middle of the burst.
+            assertTrue(more <= 1, "$more signals after the first, for one burst of writes")
         } finally {
             collecting.cancelAndJoin()
         }
@@ -280,48 +323,48 @@ class SessionIndexTest {
     @Test
     fun `a folder that does not exist yet is watched once it appears`(@TempDir root: Path) = runBlocking<Unit> {
         val folder = root.resolve("projects").resolve("-p")
-        val checks = AtomicInteger()
-        val signal = async { watchFolders({ checks.incrementAndGet(); listOf(folder) }, pollMillis = 100).first() }
+        val signals = Channel<Unit>(Channel.UNLIMITED)
+        val collecting = launch { watchFolders({ listOf(folder) }, pollMillis = 100).collect { signals.send(it) } }
         try {
             withTimeout(15_000) {
-                // A second check means that the first one found the folder missing, and the watcher is polling for it.
-                while (checks.get() < 2) delay(20)
+                signals.receive() // the watching has started, with the folder missing
                 folder.createDirectories()
                 // Written before the watcher can register the folder, so no event will tell of it: finding the folder must.
                 newTranscript(folder)
-                signal.await()
+                signals.receive()
             }
         } finally {
-            signal.cancelAndJoin()
+            collecting.cancelAndJoin()
         }
     }
 
     @Test
-    fun `a folder that is deleted and created again is watched again`(@TempDir root: Path) = runBlocking<Unit> {
-        val folder = root.resolve("-p").createDirectories()
-        newTranscript(folder)
-        val checks = AtomicInteger()
-        val signals = Channel<Unit>(Channel.UNLIMITED)
-        val collecting = launch {
-            watchFolders({ checks.incrementAndGet(); listOf(folder) }, pollMillis = 100).collect { signals.send(it) }
-        }
-        suspend fun awaitChecks(count: Int) {
-            val until = checks.get() + count
-            while (checks.get() < until) delay(20)
-        }
-        try {
-            withTimeout(15_000) {
-                awaitChecks(2) // the folder is registered
-                folder.toFile().deleteRecursively()
-                signals.receive() // the deletion is reported
-                awaitChecks(3) // and the watcher has dropped the dead watch
-                while (signals.tryReceive().isSuccess) continue
-                folder.createDirectories()
-                newTranscript(folder)
-                signals.receive() // the folder is watched again
+    fun `a folder that is deleted and created again is watched again`(@TempDir root: Path) {
+        // A polling watch service (macOS) cancels the key of a vanished folder without any event, so there is nothing to wait for.
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"), "needs a watch service that reports deletions")
+        runBlocking<Unit> {
+            val folder = root.resolve("-p").createDirectories()
+            newTranscript(folder)
+            val checks = AtomicInteger()
+            val signals = Channel<Unit>(Channel.UNLIMITED)
+            val collecting = launch {
+                watchFolders({ checks.incrementAndGet(); listOf(folder) }, pollMillis = 100).collect { signals.send(it) }
             }
-        } finally {
-            collecting.cancelAndJoin()
+            try {
+                withTimeout(15_000) {
+                    signals.receive() // the folder is registered
+                    folder.toFile().deleteRecursively()
+                    signals.receive() // the deletion is reported
+                    val seen = checks.get()
+                    while (checks.get() < seen + 3) delay(20) // and the watcher has dropped the dead watch
+                    while (signals.tryReceive().isSuccess) continue
+                    folder.createDirectories()
+                    newTranscript(folder)
+                    signals.receive() // the folder is watched again
+                }
+            } finally {
+                collecting.cancelAndJoin()
+            }
         }
     }
 
@@ -333,22 +376,34 @@ class SessionIndexTest {
     }
 
     @Test
-    fun `a folder that cannot be watched, or cannot be looked up, ends the flow without a signal`(@TempDir tmp: Path) = runBlocking<Unit> {
-        // The paths of a zip file system refuse to register with a watch service.
-        FileSystems.newFileSystem(tmp.resolve("empty.zip"), mapOf("create" to "true")).use { zip ->
-            assertEquals(emptyList(), withTimeout(15_000) { watchFolders({ listOf(zip.getPath("/")) }).toList() })
-        }
-        assertEquals(emptyList(), withTimeout(15_000) { watchFolders({ throw IllegalStateException("no config dir") }).toList() })
+    fun `a folder that cannot be registered, or looked up, ends the flow without a signal`(@TempDir dir: Path) = runBlocking<Unit> {
+        // A folder of this file system cannot be registered with a watch service that no provider made: ProviderMismatchException.
+        assertEquals(emptyList(), withTimeout(15_000) { watchFolders({ listOf(dir) }, { ForeignWatchService() }).toList() })
+        assertEquals(emptyList(), withTimeout(15_000) { watchFolders({ throw InvalidPathException("", "no config dir") }).toList() })
     }
 
     @Test
     fun `the watch service is closed as soon as the collector stops`(@TempDir dir: Path) = runBlocking<Unit> {
         val created = CompletableDeferred<WatchService>()
         val newService = { FileSystems.getDefault().newWatchService().also { created.complete(it) } }
-        val collecting = launch { watchFolders({ listOf(dir) }, newService, pollMillis = 60_000).collect {} }
+        val signals = Channel<Unit>(Channel.UNLIMITED)
+        val collecting = launch { watchFolders({ listOf(dir) }, newService, pollMillis = 60_000).collect { signals.send(it) } }
         val service = withTimeout(15_000) { created.await() }
-        // The watcher waits in a poll that would last a minute: only closing the service can end it within the timeout.
+        // The signal follows the first look at the folders. The watcher then waits in a poll that would last a minute, so only
+        // closing the service can end it within the timeout below.
+        withTimeout(15_000) { signals.receive() }
         withTimeout(10_000) { collecting.cancelAndJoin() }
         assertFailsWith<ClosedWatchServiceException> { service.poll() }
     }
+}
+
+/** A watch service that no file system provider made: a folder cannot be registered with it. */
+private class ForeignWatchService : WatchService {
+    override fun close() = Unit
+
+    override fun poll(): WatchKey? = null
+
+    override fun poll(timeout: Long, unit: TimeUnit): WatchKey? = null
+
+    override fun take(): WatchKey = throw ClosedWatchServiceException()
 }
