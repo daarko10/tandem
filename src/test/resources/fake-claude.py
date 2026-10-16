@@ -8,7 +8,9 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
   TANDEM_FAKE_LOG         optional file. The first line this process writes to it is
                             {"type":"__spawn__","argv":[...],"env":{...}}
                           how it was started: its arguments, and only the CLAUDE* variables and NODE_OPTIONS of its
-                          environment, never the whole environment. Every frame the host writes follows, one per line
+                          environment, never the whole environment. The value of a variable whose name contains TOKEN,
+                          KEY, SECRET, PASSWORD, CREDENTIAL or AUTH (in any case) is logged as <redacted>.
+                          Every frame the host writes follows, one per line
   TANDEM_FAKE_SESSION_ID  the session id to use, whatever the arguments say
   TANDEM_FAKE_DELAY_MS    sleep this long before emitting each control_request
 
@@ -37,6 +39,7 @@ log_path = os.environ.get("TANDEM_FAKE_LOG")
 delay_ms = int(os.environ.get("TANDEM_FAKE_DELAY_MS") or 0)
 SPAWN_PREFIX = '{"type":"__spawn__"'
 SESSION_PLACEHOLDER = re.compile(r"<session_id-\d+>")
+SECRET_NAME_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH")
 
 
 def option(name):
@@ -52,6 +55,11 @@ def session_id():
     return option("--session-id") or option("--resume") or str(uuid.uuid4())
 
 
+def loggable(name, value):
+    """The value to write to the log: the value of a secret never is."""
+    return "<redacted>" if any(part in name.upper() for part in SECRET_NAME_PARTS) else value
+
+
 def record_spawn():
     """Appends this process's `__spawn__` line to the log; returns how many such lines were there before it."""
     if not log_path:
@@ -59,7 +67,7 @@ def record_spawn():
     spawn = {
         "type": "__spawn__",
         "argv": args,
-        "env": {name: value for name, value in os.environ.items() if name.startswith("CLAUDE") or name == "NODE_OPTIONS"},
+        "env": {name: loggable(name, value) for name, value in os.environ.items() if name.startswith("CLAUDE") or name == "NODE_OPTIONS"},
     }
     with open(log_path, "a+", encoding="utf-8") as log:
         fcntl.flock(log, fcntl.LOCK_EX)  # processes that start together must not count the same lines

@@ -190,6 +190,7 @@ class ClaudeSessionTest {
             System.getenv() + mapOf(
                 "CLAUDE_CODE_SESSION_ID" to "bogus", "NODE_OPTIONS" to "--inspect",
                 "CLAUDE_CONFIG_DIR" to "/cfg", "TANDEM_FAKE_LOG" to log.path,
+                "CLAUDE_CODE_OAUTH_TOKEN" to "secret-value-for-test",
             )
         }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -206,6 +207,9 @@ class ClaudeSessionTest {
         assertFalse("NODE_OPTIONS" in env)
         assertEquals("/cfg", env["CLAUDE_CONFIG_DIR"]!!.jsonPrimitive.content)
         assertEquals("sdk-tandem", env["CLAUDE_CODE_ENTRYPOINT"]!!.jsonPrimitive.content)
+        // The fake lists the name of a secret that reaches it, never its value.
+        assertEquals("<redacted>", env["CLAUDE_CODE_OAUTH_TOKEN"]!!.jsonPrimitive.content)
+        assertFalse("secret-value-for-test" in log.readText())
         val argv = spawn["argv"]!!.jsonArray.map { it.jsonPrimitive.content }
         assertEquals(newSessionId, argv[argv.indexOf("--session-id") + 1])
         scope.coroutineContext.job.cancelAndJoin()
