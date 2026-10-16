@@ -317,14 +317,17 @@ class TranscriptReaderTest {
             """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}""",
             """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"one"}]}}""",
             """{"type":"user","uuid":"u2","parentUuid":"a1","permissionMode":"plan","message":{"role":"user","content":"abandoned"}}""",
-            """{"type":"assistant","uuid":"a2","parentUuid":"u2","effort":"low","message":{"id":"msg_2","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"text","text":"abandoned reply"}]}}""",
-            // Rewound to a1 in the terminal: the next prompt continues from there, and u2 and a2 stay in the file.
+            """{"type":"assistant","uuid":"a2","parentUuid":"u2","effort":"low","message":{"id":"msg_2","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"ls"}}]}}""",
+            """{"type":"user","uuid":"r9","parentUuid":"a2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":"abandoned result"}]}}""",
+            // Rewound to a1 in the terminal: the next prompt continues from there, and u2, a2 and r9 stay in the file.
             """{"type":"user","uuid":"u3","parentUuid":"a1","message":{"role":"user","content":"second"}}""",
+            // A side branch with a message id of its own stays out, although its parent is kept.
+            """{"type":"assistant","uuid":"a3x","parentUuid":"u3","message":{"id":"msg_3x","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"cut short"}]}}""",
             """{"type":"assistant","uuid":"a3","parentUuid":"u3","message":{"id":"msg_3","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"two"}]}}""",
         )
         val loaded = TranscriptReader.read(f)
         assertEquals(listOf("user: first", "assistant: one", "user: second", "assistant: two"), loaded.state.shape())
-        assertEquals(6, loaded.meta.lineCount)
+        assertEquals(8, loaded.meta.lineCount)
         // Nothing of the abandoned turn counts, not even its permission mode or effort.
         assertNull(loaded.meta.lastPermissionMode)
         assertNull(loaded.meta.lastEffort)
@@ -355,6 +358,51 @@ class TranscriptReaderTest {
     }
 
     @Test
+    fun `parallel tool calls off the chain stay in the history`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("21212121-2121-4212-8212-212121212121.jsonl")
+        // Two tool calls in one message: each block has its own line, and the results branch off the blocks they answer.
+        f.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"Read both files"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"m1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.txt"}}]}}""",
+            """{"type":"assistant","uuid":"a2","parentUuid":"a1","message":{"id":"m1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"b.txt"}}]}}""",
+            """{"type":"user","uuid":"r2","parentUuid":"a2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"bee"}]}}""",
+            """{"type":"user","uuid":"r1","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ay"}]}}""",
+            """{"type":"assistant","uuid":"a3","parentUuid":"r1","message":{"id":"m2","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"Both read."}]}}""",
+        )
+        assertEquals(
+            listOf("user: Read both files", "assistant: tool Read, tool Read", "result: bee", "result: ay", "assistant: Both read."),
+            TranscriptReader.read(f).state.shape(),
+        )
+    }
+
+    @Test
+    fun `the chain runs through attachment and system lines`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("23232323-2323-4232-8232-232323232323.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}""",
+            """{"type":"attachment","uuid":"x1","parentUuid":"u1","attachment":{"type":"date"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"x1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"one"}]}}""",
+            """{"type":"system","subtype":"informational","uuid":"y1","parentUuid":"a1","content":"Noted"}""",
+            """{"type":"user","uuid":"u2","parentUuid":"y1","message":{"role":"user","content":"second"}}""",
+            """{"type":"assistant","uuid":"a2","parentUuid":"u2","message":{"id":"msg_2","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"two"}]}}""",
+        )
+        assertEquals(listOf("user: first", "assistant: one", "user: second", "assistant: two"), TranscriptReader.read(f).state.shape())
+    }
+
+    @Test
+    fun `a conversational line without a uuid stays in the history`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("24242424-2424-4242-8242-242424242424.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}""",
+            """{"type":"user","message":{"role":"user","content":"no uuid"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"one"}]}}""",
+        )
+        // No chain can reach it, so the walk keeps it rather than drop it; its entry id falls back to the line number.
+        val entries = TranscriptReader.read(f).state.entries
+        assertEquals(listOf("u1", "line-2", "msg_1"), entries.map { it.id })
+    }
+
+    @Test
     fun `a prompt that quotes a CLI tag further on stays a prompt`(@TempDir dir: Path) = runBlocking<Unit> {
         val f = dir.resolve("18181818-1818-4181-8181-181818181818.jsonl")
         val prompt = "Explain <command-name>/model</command-name> and <bash-stdout> in transcripts"
@@ -365,13 +413,14 @@ class TranscriptReaderTest {
     }
 
     @Test
-    fun `a shell escape loads as its command and what it printed is skipped`(@TempDir dir: Path) = runBlocking<Unit> {
+    fun `a shell escape loads as its command, and output and notifications are skipped`(@TempDir dir: Path) = runBlocking<Unit> {
         val f = dir.resolve("19191919-1919-4191-8191-191919191919.jsonl")
         f.writeLines(
             """{"type":"user","uuid":"b1","parentUuid":null,"message":{"role":"user","content":"<bash-input>ls -la</bash-input>"}}""",
             """{"type":"user","uuid":"b2","parentUuid":"b1","message":{"role":"user","content":"<bash-stdout>notes.txt</bash-stdout><bash-stderr></bash-stderr>"}}""",
             """{"type":"user","uuid":"b3","parentUuid":"b2","message":{"role":"user","content":"<bash-stderr>Command failed: cat nothing.txt</bash-stderr>"}}""",
             """{"type":"user","uuid":"c1","parentUuid":"b3","message":{"role":"user","content":"<local-command-stderr>Unknown command: /nope</local-command-stderr>"}}""",
+            """{"type":"user","uuid":"n1","parentUuid":"c1","message":{"role":"user","content":"<task-notification>\n<task-id>bg-1</task-id>\n<status>completed</status>\n</task-notification>"}}""",
         )
         val loaded = TranscriptReader.read(f)
         assertEquals(listOf("user: !ls -la"), loaded.state.shape())

@@ -6,7 +6,6 @@ import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ContentBlock
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
-import dev.daarkolabs.tandem.protocol.boolean
 import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.SessionEvent
@@ -16,7 +15,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import java.io.BufferedReader
 import java.io.IOException
@@ -38,8 +36,9 @@ private const val COMMAND_NAME_TAG: String = "<command-name>"
 private const val COMMAND_MESSAGE_TAG: String = "<command-message>"
 private const val BASH_INPUT_TAG: String = "<bash-input>"
 
-/** What a slash command or a shell escape printed: never something the user typed. */
-private val OUTPUT_TAGS: List<String> = listOf("<local-command-stdout>", "<local-command-stderr>", "<bash-stdout>", "<bash-stderr>")
+/** Text the CLI or its harness writes in the user's place: command and shell output, background-task notifications. */
+private val GENERATED_TAGS: List<String> =
+    listOf("<local-command-stdout>", "<local-command-stderr>", "<bash-stdout>", "<bash-stderr>", "<task-notification>")
 
 private val COMMAND_NAME: Regex = Regex("<command-name>([^<]*)</command-name>")
 private val COMMAND_ARGS: Regex = Regex("<command-args>(.*?)</command-args>", RegexOption.DOT_MATCHES_ALL)
@@ -77,16 +76,15 @@ data class LoadedTranscript(val state: ChatState, val meta: TranscriptMeta)
 /**
  * Reads the CLI's own transcript of a session, `<session id>.jsonl`, through [Ndjson.decode] and [reduce].
  *
- * A transcript is only ever appended to, so it keeps the turns a rewind abandoned. The current history is the `parentUuid`
- * chain that ends at the last user or assistant line; when that chain starts at a compaction, the lines before the
- * compaction add their own chain, found the same way. So the file is read twice: the first pass finds the chains, the
- * second reads the lines on them as the live stream would have shown them.
+ * A transcript is only ever appended to, so it keeps the turns a rewind abandoned. The file is read twice: the first pass
+ * ([TranscriptChain]) finds the current history, the `parentUuid` chain through the transcript with the lines parallel tool
+ * calls branch off it; the second reads the lines on it as the live stream would have shown them.
  *
  * Prompts (`user` text), tool results (`user` `tool_result` blocks) and `assistant` lines make the history: an interrupt
  * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`. `custom-title`,
  * `ai-title` and `summary` lines make the title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the
- * output of commands and shell escapes, every other type, and lines that are not a JSON object (such as a last line the CLI
- * is still writing) are skipped. Bad input never throws.
+ * output of commands and shell escapes, background-task notifications, every other type, and lines that are not a JSON object
+ * (such as a last line the CLI is still writing) are skipped. Bad input never throws.
  */
 object TranscriptReader {
     /**
@@ -147,11 +145,16 @@ private fun readTwice(
     withHistory: Boolean,
     beforeLine: () -> Unit,
 ): Pair<ChatState, TranscriptMeta> {
-    val chains = Chains(sessionId)
-    if (!open().use { chains.consume(it, beforeLine) }) return ChatState() to emptyMeta(sessionId, chains.lineCount)
-    val scan = Scan(sessionId, withHistory, chains.abandoned(), limit = chains.lineCount)
+    val chain = TranscriptChain()
+    open().use { it.feed(Int.MAX_VALUE, beforeLine, chain::add) }?.let { e ->
+        LOG.debug { "transcript $sessionId: first pass stopped after ${chain.lineCount} lines (${e.javaClass.simpleName})" }
+        return ChatState() to emptyMeta(sessionId, chain.lineCount)
+    }
+    val scan = Scan(sessionId, withHistory, chain.abandoned())
     try {
-        open().use { scan.consume(it, beforeLine) }
+        open().use { it.feed(chain.lineCount, beforeLine, scan::accept) }?.let { e ->
+            LOG.debug { "transcript $sessionId: second pass stopped after ${scan.lineCount} lines (${e.javaClass.simpleName})" }
+        }
     } catch (e: IOException) {
         LOG.debug { "transcript $sessionId not reopened (${e.javaClass.simpleName})" }
     }
@@ -159,80 +162,26 @@ private fun readTwice(
 }
 
 /**
- * The first pass: for each line, only what places it in the conversation. A line is conversational when it is a `user` or
- * `assistant` line that is neither sidechain nor meta; [abandoned] names the conversational lines off the current history.
+ * Hands [onLine] the lines of this reader, at most [limit] of them, running [beforeLine] before each. Returns the
+ * [IOException] that ended the reading early, or null.
  */
-private class Chains(private val sessionId: String) {
-    private val uuids = ArrayList<String?>()
-    private val parents = ArrayList<String?>()
-    private val conversational = BitSet()
-    private val compactionRoots = BitSet()
-
-    val lineCount: Int
-        get() = uuids.size
-
-    /** Takes every line of [reader], running [beforeLine] before each. False when an [IOException] cut it short. */
-    fun consume(reader: BufferedReader, beforeLine: () -> Unit): Boolean = try {
-        while (true) {
+private fun BufferedReader.feed(limit: Int, beforeLine: () -> Unit, onLine: (String) -> Unit): IOException? {
+    try {
+        repeat(limit) {
             beforeLine()
-            accept(reader.readLine() ?: break)
+            onLine(readLine() ?: return null)
         }
-        true
     } catch (e: IOException) {
-        LOG.debug { "transcript $sessionId: first pass stopped after $lineCount lines (${e.javaClass.simpleName})" }
-        false
+        return e
     }
-
-    private fun accept(line: String) {
-        val index = lineCount
-        val raw = parseObject(line)
-        uuids += raw?.string("uuid")
-        parents += raw?.string("parentUuid")
-        if (raw == null) return
-        val type = raw.string("type")
-        if ((type == "user" || type == "assistant") && !raw.isSet("isSidechain") && !raw.isSet("isMeta")) conversational.set(index)
-        val compaction = type == "user" && raw.isSet("isCompactSummary") || type == "system" && raw.string("subtype") == "compact_boundary"
-        if (compaction) compactionRoots.set(index)
-    }
-
-    /**
-     * Walks `parentUuid` from the last conversational line to the root of its chain. When that root is a compaction (a compact
-     * summary or a `compact_boundary` line), the last conversational line before it starts the next walk. Conversational
-     * lines that no walk reaches are abandoned, except those without a uuid.
-     */
-    fun abandoned(): BitSet {
-        val byUuid = HashMap<String, Int>()
-        uuids.forEachIndexed { index, uuid -> if (uuid != null) byUuid[uuid] = index }
-        val onChain = BitSet()
-        var below = lineCount
-        while (true) {
-            val leaf = conversational.previousSetBit(below - 1)
-            if (leaf < 0) break
-            var line = leaf
-            while (true) {
-                onChain.set(line)
-                val parent = parents[line]?.let(byUuid::get)
-                if (parent == null || onChain[parent]) break // the root, or a loop in a broken file
-                line = parent
-            }
-            if (!compactionRoots[line]) break
-            below = minOf(line, leaf) // lower on every walk, so even a broken file ends the loop
-        }
-        val abandoned = BitSet()
-        var line = conversational.nextSetBit(0)
-        while (line >= 0) {
-            if (uuids[line] != null && !onChain[line]) abandoned.set(line)
-            line = conversational.nextSetBit(line + 1)
-        }
-        return abandoned
-    }
+    return null
 }
 
 /**
- * The second pass, over the first [limit] lines: collects the [TranscriptMeta] and, [withHistory], reduces the history into
- * [state]. [abandoned] lines are counted and otherwise left out.
+ * The second pass: collects the [TranscriptMeta] and, [withHistory], reduces the history into [state], one [accept]ed line at a
+ * time. [abandoned] lines are counted and otherwise left out.
  */
-private class Scan(val sessionId: String, private val withHistory: Boolean, private val abandoned: BitSet, private val limit: Int) {
+private class Scan(private val sessionId: String, private val withHistory: Boolean, private val abandoned: BitSet) {
     var state: ChatState = ChatState()
         private set
 
@@ -243,25 +192,13 @@ private class Scan(val sessionId: String, private val withHistory: Boolean, priv
     private var lastEffort: String? = null
     private var lastPermissionMode: PermissionMode? = null
     private var cwd: String? = null
-    private var lineCount: Int = 0
-
-    /** Takes the lines of [reader], running [beforeLine] before each. An [IOException] ends it with the lines taken so far. */
-    fun consume(reader: BufferedReader, beforeLine: () -> Unit) {
-        try {
-            while (lineCount < limit) {
-                beforeLine()
-                val line = reader.readLine() ?: break
-                accept(line)
-            }
-        } catch (e: IOException) {
-            LOG.debug { "transcript $sessionId: second pass stopped after $lineCount lines (${e.javaClass.simpleName})" }
-        }
-    }
+    var lineCount: Int = 0
+        private set
 
     fun meta(): TranscriptMeta =
         TranscriptMeta(sessionId, customTitle, generatedTitle, firstPrompt, lastModel, lastEffort, lastPermissionMode, cwd, lineCount)
 
-    private fun accept(line: String) {
+    fun accept(line: String) {
         val index = lineCount++
         if (abandoned[index]) return
         val message = Ndjson.decode(line)
@@ -304,15 +241,6 @@ private class Scan(val sessionId: String, private val withHistory: Boolean, priv
     }
 }
 
-/** [line] as a JSON object, or null when it is not one (such as a line the CLI is still writing). */
-private fun parseObject(line: String): JsonObject? = try {
-    Json.parseToJsonElement(line) as? JsonObject
-} catch (_: IllegalArgumentException) { // SerializationException: not JSON
-    null
-}
-
-private fun JsonObject.isSet(flag: String): Boolean = boolean(flag) == true
-
 /** The text of a title line; a blank one does not count. */
 private fun JsonObject.titleText(key: String): String? = string(key)?.takeIf { it.isNotBlank() }
 
@@ -322,13 +250,13 @@ private class Typed(val text: String, val isPrompt: Boolean)
 /**
  * What the user typed, from a user line's [text], told apart the way the CLI tells its own lines apart: by how the text starts.
  * A slash command (`<command-name>` or `<command-message>` first) shows as `/name args` but is not a prompt for the title; a
- * shell escape (`<bash-input>`) shows as `!command`. Their output and blank text give null. Any other text is a prompt as it
- * stands, even one that quotes such a tag further on.
+ * shell escape (`<bash-input>`) shows as `!command`. Their output, background-task notifications and blank text give null.
+ * Any other text is a prompt as it stands, even one that quotes such a tag further on.
  */
 private fun typedText(text: String): Typed? {
     val start = text.trim()
     return when {
-        start.isEmpty() || OUTPUT_TAGS.any { start.startsWith(it) } -> null
+        start.isEmpty() || GENERATED_TAGS.any { start.startsWith(it) } -> null
         start.startsWith(COMMAND_NAME_TAG) || start.startsWith(COMMAND_MESSAGE_TAG) ->
             commandOf(start)?.let { Typed(it, isPrompt = false) }
         start.startsWith(BASH_INPUT_TAG) ->
