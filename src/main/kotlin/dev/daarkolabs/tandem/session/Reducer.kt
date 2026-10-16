@@ -4,7 +4,17 @@ import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ContentBlock
 import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.InboundRequest
+import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
+import dev.daarkolabs.tandem.protocol.array
+import dev.daarkolabs.tandem.protocol.asObject
+import dev.daarkolabs.tandem.protocol.string
+import kotlinx.collections.immutable.PersistentList
+import kotlinx.collections.immutable.PersistentMap
+import kotlinx.collections.immutable.mutate
+import kotlinx.collections.immutable.persistentHashMapOf
+import kotlinx.collections.immutable.toPersistentHashMap
+import kotlinx.collections.immutable.toPersistentList
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -18,6 +28,9 @@ sealed interface SessionEvent {
     /** The user picked a model (at spawn or via `set_model`); null means the CLI default. */
     data class ModelRequested(val model: String?) : SessionEvent
 
+    /** The user picked a permission mode (via `set_permission_mode`). `system/status` or the next `system/init` confirms it. */
+    data class PermissionModeRequested(val mode: PermissionMode) : SessionEvent
+
     data class PermissionAnswered(val requestId: String) : SessionEvent
 
     /** The CLI process could not be started or exited. [detail] is shown to the user. */
@@ -27,9 +40,11 @@ sealed interface SessionEvent {
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
 fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.Cli -> reduceCli(state, event.message)
-    is SessionEvent.UserSent -> state.copy(entries = state.entries + ChatEntry.User(event.uuid, event.text), busy = true)
+    is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text)).copy(busy = true)
     // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch.
     is SessionEvent.ModelRequested -> state.copy(requestedModel = event.model, modelWarning = null)
+    // Shown at once; what the CLI reports next (system/status, system/init) has the last word.
+    is SessionEvent.PermissionModeRequested -> state.copy(permissionMode = event.mode)
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
     is SessionEvent.Ended -> state.finishStreaming().copy(busy = false, ended = true, pendingPermissions = emptyList())
         .notice(if (event.isError) NoticeLevel.ERROR else NoticeLevel.INFO, event.detail)
@@ -54,11 +69,9 @@ private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (
         },
     )
     is CliMessage.ModelRefusalFallback -> {
-        val retracted = message.retractedMessageUuids.toSet()
-        val kept = state.entries.filterNot { it is ChatEntry.Assistant && it.uuids.any(retracted::contains) }
         val text = "${message.originalModel} declined this request; " +
             if (message.scope == "local") "this answer came from ${message.fallbackModel}." else "the session switched to ${message.fallbackModel}."
-        val next = state.copy(entries = kept).notice(NoticeLevel.WARNING, message.content ?: text)
+        val next = state.withoutAssistants(message.retractedMessageUuids.toSet()).notice(NoticeLevel.WARNING, message.content ?: text)
         if (message.scope == "local") next else next.checkModel(message.fallbackModel)
     }
     is CliMessage.ModelRefusalNoFallback ->
@@ -82,16 +95,17 @@ private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (
     }
     is CliMessage.ControlCancelRequest -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != message.requestId })
     is CliMessage.ControlResponse ->
-        if (message.isSuccess) state else state.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
+        if (message.isSuccess) {
+            state.withModels(message.payload)
+        } else {
+            state.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
+        }
     is CliMessage.KeepAlive, is CliMessage.Unknown -> state
 }
 
 private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant): ChatState {
     var next = state
-    if (message.supersedes.isNotEmpty()) {
-        val superseded = message.supersedes.toSet()
-        next = next.copy(entries = next.entries.filterNot { it is ChatEntry.Assistant && it.uuids.any(superseded::contains) })
-    }
+    if (message.supersedes.isNotEmpty()) next = next.withoutAssistants(message.supersedes.toSet())
     message.error?.let { return next.notice(NoticeLevel.ERROR, errorText(it, message)) }
     if (message.parentToolUseId == null) next = next.checkModel(message.model, fromAssistant = true)
 
@@ -131,9 +145,8 @@ private fun reduceUser(state: ChatState, message: CliMessage.User): ChatState {
     var next = state
     for (block in message.content) {
         next = when (block) {
-            is ContentBlock.ToolResult -> next.copy(
-                entries = next.entries + ChatEntry.ToolResult("result-${block.toolUseId}", block.toolUseId, toolResultText(block), block.isError),
-            )
+            is ContentBlock.ToolResult ->
+                next.append(ChatEntry.ToolResult("result-${block.toolUseId}", block.toolUseId, toolResultText(block), block.isError))
             is ContentBlock.Text ->
                 if (block.text.startsWith("[Request interrupted")) next.notice(NoticeLevel.INFO, "Stopped.") else next
             is ContentBlock.Thinking, is ContentBlock.ToolUse, is ContentBlock.Other -> next
@@ -200,9 +213,10 @@ private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState
 /**
  * Compares what the CLI reports with what the user picked. Never silently accept another model:
  * a mismatch sets [ChatState.modelWarning] and adds one notice per distinct mismatch.
+ * A name in angle brackets, such as `<synthetic>` on a line the CLI writes itself for an API error, is not a model and changes nothing.
  */
 private fun ChatState.checkModel(reported: String?, fromAssistant: Boolean = false): ChatState {
-    if (reported == null) return this
+    if (reported == null || reported.startsWith("<")) return this
     val requested = requestedModel
     val changed = reported != activeModel
     val base = copy(activeModel = reported)
@@ -244,17 +258,63 @@ private fun toolResultText(block: ContentBlock.ToolResult): String = when (val c
 
 private fun entryId(messageId: String, parent: String?): String = if (parent == null) messageId else "$parent/$messageId"
 
-private fun ChatState.assistant(messageId: String, parent: String?): ChatEntry.Assistant? {
-    val id = entryId(messageId, parent)
-    return entries.lastOrNull { it.id == id } as? ChatEntry.Assistant
+/** The `models` a response's [payload] lists, as the `initialize` response does, replace [ChatState.models]; other payloads keep them. */
+private fun ChatState.withModels(payload: JsonObject?): ChatState {
+    val models = payload?.array("models") ?: return this
+    return copy(models = models.mapNotNull { it.asObject()?.modelOption() })
 }
+
+/** One entry of a `models` list; null without a string `value`. */
+private fun JsonObject.modelOption(): ModelOption? {
+    val value = string("value") ?: return null
+    return ModelOption(value, string("displayName") ?: value, string("description"))
+}
+
+private fun ChatState.assistant(messageId: String, parent: String?): ChatEntry.Assistant? =
+    entries.getOrNull(positionOf(entryId(messageId, parent))) as? ChatEntry.Assistant
 
 private fun ChatState.upsert(entry: ChatEntry): ChatState {
-    val index = entries.indexOfLast { it.id == entry.id }
-    return copy(entries = if (index < 0) entries + entry else entries.toMutableList().also { it[index] = entry })
+    val position = positionOf(entry.id)
+    // A replacement keeps the id at its position, so the entry index stays as it is.
+    return if (position < 0) append(entry) else copy(entries = entryList().set(position, entry))
 }
 
-private fun ChatState.upsertIfAbsent(entry: ChatEntry): ChatState = if (entries.any { it.id == entry.id }) this else copy(entries = entries + entry)
+private fun ChatState.upsertIfAbsent(entry: ChatEntry): ChatState = if (positionOf(entry.id) < 0) append(entry) else this
+
+/**
+ * The last position of the entry with [id] in [ChatState.entries], or -1. Takes it from [ChatState.entryIndex] and checks it;
+ * only a state whose index is empty or out of step (built by hand, or changed outside [reduce]) is scanned.
+ */
+private fun ChatState.positionOf(id: String): Int {
+    val position = entryIndex[id]
+    if (position != null && entries.getOrNull(position)?.id == id) return position
+    return if (position == null && indexInStep()) -1 else entries.indexOfLast { it.id == id }
+}
+
+/** Whether [ChatState.entryIndex] answers for [ChatState.entries]: [reduce] indexes every entry it appends, so the last one too. */
+private fun ChatState.indexInStep(): Boolean = entries.isEmpty() || entryIndex[entries.last().id] == entries.lastIndex
+
+/** This state with [entry] appended and indexed; an index out of step is rebuilt first. */
+private fun ChatState.append(entry: ChatEntry): ChatState {
+    val index = if (indexInStep()) entryIndex.toPersistentHashMap() else positionsOf(entries)
+    return copy(entries = entryList().add(entry), entryIndex = index.put(entry.id, entries.size))
+}
+
+/** This state without the assistant entries that carry one of [uuids]. The entries after a removed one move up, so the index is rebuilt. */
+private fun ChatState.withoutAssistants(uuids: Set<String>): ChatState {
+    val kept = entryList().removeAll { it is ChatEntry.Assistant && it.uuids.any(uuids::contains) }
+    return if (kept.size == entries.size) this else copy(entries = kept, entryIndex = positionsOf(kept))
+}
+
+/**
+ * [ChatState.entries] as the [PersistentList] that [reduce] keeps there, so that a change shares the rest of a long history
+ * instead of copying it. A list built by hand is converted once; [toPersistentList] returns a persistent list as it is.
+ */
+private fun ChatState.entryList(): PersistentList<ChatEntry> = entries.toPersistentList()
+
+/** The last position of each id in [entries], indexed afresh. */
+private fun positionsOf(entries: List<ChatEntry>): PersistentMap<String, Int> =
+    persistentHashMapOf<String, Int>().mutate { index -> entries.forEachIndexed { position, entry -> index[entry.id] = position } }
 
 private fun ChatState.editDraft(message: CliMessage.StreamEvent, edit: (List<AssistantBlock>) -> List<AssistantBlock>): ChatState {
     val entry = draftFor(message) ?: return this
@@ -268,8 +328,15 @@ private fun ChatState.draftFor(message: CliMessage.StreamEvent): ChatEntry.Assis
     return draft?.takeIf { it.streaming }
 }
 
-private fun ChatState.finishStreaming(): ChatState =
-    copy(entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it })
+// The same ids at the same positions: the entry index stays as it is.
+private fun ChatState.finishStreaming(): ChatState = copy(
+    entries = entryList().mutate { list ->
+        for (position in list.indices) {
+            val entry = list[position]
+            if (entry is ChatEntry.Assistant && entry.streaming) list[position] = entry.copy(streaming = false)
+        }
+    },
+)
 
 private fun ChatState.notice(level: NoticeLevel, text: String): ChatState =
-    copy(entries = entries + ChatEntry.Notice("notice-$noticeCount", level, text), noticeCount = noticeCount + 1)
+    append(ChatEntry.Notice("notice-$noticeCount", level, text)).copy(noticeCount = noticeCount + 1)

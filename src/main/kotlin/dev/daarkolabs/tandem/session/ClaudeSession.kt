@@ -176,7 +176,11 @@ class ClaudeSession(
         send(HostMessages.setModel(newRequestId(), model))
     }
 
-    fun setPermissionMode(mode: PermissionMode): Unit = send(HostMessages.setPermissionMode(newRequestId(), mode))
+    /** Asks for another permission mode. It shows at once; `system/status` or the next `system/init` confirms it. */
+    fun setPermissionMode(mode: PermissionMode) {
+        dispatch(SessionEvent.PermissionModeRequested(mode))
+        send(HostMessages.setPermissionMode(newRequestId(), mode))
+    }
 
     /** Asks the CLI to give the session a custom title (`rename_session`). */
     fun rename(title: String): Unit = send(HostMessages.renameSession(newRequestId(), title))

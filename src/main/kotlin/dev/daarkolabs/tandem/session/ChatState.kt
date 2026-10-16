@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonObject
 
 /** Everything the chat UI renders for one session. Produced only by [reduce]. */
 data class ChatState(
+    /** The history, oldest first. [reduce] keeps it in a persistent list, so that an event never copies a long history. */
     val entries: List<ChatEntry> = emptyList(),
     val sessionId: String? = null,
     /** What the user picked; null means the CLI's default. */
@@ -13,6 +14,8 @@ data class ChatState(
     val activeModel: String? = null,
     /** Shown prominently while set: the CLI is not running the model the user picked. */
     val modelWarning: String? = null,
+    /** The models the CLI offers, in its order, from the `models` of its `initialize` response; empty until it answers. */
+    val models: List<ModelOption> = emptyList(),
     val permissionMode: PermissionMode? = null,
     /** What Tandem passed with `--effort`, or what a loaded transcript recorded: the recorded `system/init` carries no effort. */
     val effort: String? = null,
@@ -22,7 +25,18 @@ data class ChatState(
     val ended: Boolean = false,
     /** Monotonic id source for notices; entry ids must stay unique even after retractions shrink [entries]. */
     val noticeCount: Int = 0,
+    /**
+     * A cache of each entry's position in [entries] by id (the last position, should an id repeat), so that [reduce] finds an
+     * entry without scanning a long history. [reduce] keeps it in a persistent map and in step with [entries]: an append adds
+     * the new position, a replacement keeps the id at its position, and a removal rebuilds it. A state built by hand may leave
+     * it empty: [reduce] checks every position it reads, scans [entries] while the index is empty or out of step, and
+     * re-indexes them on its first append.
+     */
+    val entryIndex: Map<String, Int> = emptyMap(),
 )
+
+/** A model the CLI offers: [value] is what `--model` and `set_model` take, [displayName] and [description] are for people. */
+data class ModelOption(val value: String, val displayName: String, val description: String?)
 
 sealed interface ChatEntry {
     val id: String

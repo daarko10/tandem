@@ -162,6 +162,15 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `a permission mode change shows before the CLI confirms it`() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("true"))
+        session.setPermissionMode(PermissionMode.PLAN)
+        assertEquals(PermissionMode.PLAN, session.state.value.permissionMode)
+        scope.cancel()
+    }
+
+    @Test
     fun `rename asks the CLI to rename the session`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

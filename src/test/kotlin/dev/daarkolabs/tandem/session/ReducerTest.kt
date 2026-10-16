@@ -3,7 +3,9 @@ package dev.daarkolabs.tandem.session
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
+import dev.daarkolabs.tandem.protocol.PermissionMode
 import org.junit.Test
+import kotlin.system.measureTimeMillis
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -16,10 +18,17 @@ class ReducerTest {
 
     private fun cli(json: String): SessionEvent = SessionEvent.Cli(Ndjson.decode(json))
 
+    /** A complete `assistant` line with one text block; [fields] go in ahead of `message`, such as `"supersedes":["a1"],`. */
+    private fun reply(uuid: String, messageId: String, text: String, fields: String = ""): SessionEvent =
+        cli("""{"type":"assistant","uuid":"$uuid",$fields"message":{"id":"$messageId","content":[{"type":"text","text":"$text"}]}}""")
+
     private fun ChatState.assistants(): List<ChatEntry.Assistant> = entries.filterIsInstance<ChatEntry.Assistant>()
 
     private fun ChatState.text(): String =
         assistants().flatMap { it.blocks }.filterIsInstance<AssistantBlock.Text>().joinToString("") { it.text }
+
+    /** What [ChatState.entryIndex] has to hold: the last position of each id in [ChatState.entries]. */
+    private fun ChatState.positions(): Map<String, Int> = entries.withIndex().associate { (position, entry) -> entry.id to position }
 
     @Test
     fun `plain reply streams a draft, the complete message replaces it, and there is never a second bubble`() {
@@ -153,5 +162,160 @@ class ReducerTest {
         assertEquals(NoticeLevel.ERROR, (state.entries.last() as ChatEntry.Notice).level)
         state = reduce(state, SessionEvent.Ended("Claude Code exited with code 1.", isError = true))
         assertTrue(state.ended)
+    }
+
+    @Test
+    fun `a synthetic model on a line the CLI wrote itself is neither the active model nor a mismatch`() {
+        var state = ChatState(requestedModel = "opus")
+        state = reduce(state, cli("""{"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5"}"""))
+        // The CLI writes an API error as an assistant line of its own, naming a model like "<synthetic>".
+        state = reduce(
+            state,
+            cli(
+                """{"type":"assistant","uuid":"a1","isApiErrorMessage":true,""" +
+                    """"message":{"id":"m1","model":"<synthetic>","content":[{"type":"text","text":"API Error: 500"}]}}""",
+            ),
+        )
+        assertEquals("claude-opus-5-5", state.activeModel)
+        assertNull(state.modelWarning)
+        assertTrue(state.entries.none { it is ChatEntry.Notice })
+        assertEquals("API Error: 500", state.text())
+    }
+
+    @Test
+    fun `reduces 32,000 events in linear time`() {
+        // A long session: 16,000 turns of a prompt and a one-block reply, decoded up front so that only reduce is timed, cold.
+        val events = (1..16_000).flatMap { i ->
+            listOf(
+                SessionEvent.UserSent("u$i", "prompt $i"),
+                cli(
+                    """{"type":"assistant","uuid":"a$i",""" +
+                        """"message":{"id":"m$i","model":"claude-sonnet-5-5","content":[{"type":"text","text":"reply $i"}]}}""",
+                ),
+            )
+        }
+        val final: ChatState
+        val millis = measureTimeMillis { final = events.fold(ChatState()) { state, event -> reduce(state, event) } }
+        assertEquals(32_000, final.entries.size)
+        assertEquals(listOf("u16000", "m16000"), final.entries.takeLast(2).map { it.id })
+        assertTrue(millis < 2_000, "reducing took $millis ms")
+    }
+
+    @Test
+    fun `a state built without the reducer still finds its entries`() {
+        // Tests and the missing-CLI screen build states by hand, with no entry index.
+        val reply = ChatEntry.Assistant(
+            id = "m1",
+            messageId = "m1",
+            parentToolUseId = null,
+            model = "claude-sonnet-5-5",
+            blocks = listOf(AssistantBlock.Text("one")),
+            completedBlocks = 1,
+            streaming = false,
+            uuids = setOf("a1"),
+        )
+        var state = ChatState(entries = listOf(ChatEntry.User("u1", "hi"), reply))
+        state = reduce(state, reply("a2", "m1", " two"))
+        state = reduce(state, SessionEvent.UserSent("u2", "and?"))
+        state = reduce(state, reply("a3", "m1", " three"))
+        assertEquals(listOf("u1", "m1", "u2"), state.entries.map { it.id })
+        assertEquals("one two three", state.text())
+    }
+
+    @Test
+    fun `entries changed outside the reducer are found where they are now`() {
+        var state = reduce(ChatState(), reply("a1", "m1", "one"))
+        state = reduce(state, reply("a2", "m2", "two"))
+        // The entries change, the index does not: it still has m2 at position 1.
+        state = state.copy(entries = state.entries.drop(1))
+        state = reduce(state, reply("a3", "m2", " more"))
+        assertEquals(listOf("m2"), state.entries.map { it.id })
+        assertEquals("two more", state.text())
+    }
+
+    @Test
+    fun `a requested permission mode shows at once and the CLI confirms it`() {
+        var state = reduce(ChatState(), SessionEvent.PermissionModeRequested(PermissionMode.PLAN))
+        assertEquals(PermissionMode.PLAN, state.permissionMode)
+        for (m in Fixtures.decode("permission-mode")) state = reduce(state, SessionEvent.Cli(m))
+        assertEquals(PermissionMode.ACCEPT_EDITS, state.permissionMode)
+    }
+
+    @Test
+    fun `the initialize response fills the model list`() {
+        val state = Fixtures.decode("permission").fold(ChatState()) { s, m -> reduce(s, SessionEvent.Cli(m)) }
+        assertEquals("default", state.models.first().value)
+        assertTrue(state.models.size > 1)
+    }
+
+    @Test
+    fun `model entries without a value are skipped and a missing display name falls back to the value`() {
+        val state = reduce(
+            ChatState(),
+            cli(
+                """{"type":"control_response","response":{"subtype":"success","request_id":"r1","response":{"models":[""" +
+                    """{"value":"opus","displayName":"Opus","description":"Most capable"},{"value":"haiku"},""" +
+                    """{"displayName":"No value"},"sonnet"]}}}""",
+            ),
+        )
+        assertEquals(listOf(ModelOption("opus", "Opus", "Most capable"), ModelOption("haiku", "haiku", null)), state.models)
+    }
+
+    @Test
+    fun `responses without a model list leave it as it is`() {
+        val models = listOf(ModelOption("default", "Default", null))
+        val acknowledged = reduce(
+            ChatState(models = models),
+            cli("""{"type":"control_response","response":{"subtype":"success","request_id":"r2","response":{"mode":"plan"}}}"""),
+        )
+        assertEquals(models, acknowledged.models)
+        val rejected = reduce(
+            acknowledged,
+            cli("""{"type":"control_response","response":{"subtype":"error","request_id":"r3","error":"Unknown model"}}"""),
+        )
+        assertEquals(models, rejected.models)
+        assertEquals("The CLI rejected a request: Unknown model", (rejected.entries.single() as ChatEntry.Notice).text)
+    }
+
+    @Test
+    fun `the entry index stays in step through every fixture`() {
+        for (fixture in Fixtures.names()) {
+            for (state in replay(fixture)) assertEquals(state.positions(), state.entryIndex, fixture)
+        }
+    }
+
+    @Test
+    fun `the entry index stays in step when replies are retracted or superseded`() {
+        var state = reduce(ChatState(), reply("a1", "m1", "refused"))
+        state = reduce(state, SessionEvent.UserSent("u1", "next"))
+        state = reduce(state, reply("a2", "m2", "first try"))
+        state = reduce(
+            state,
+            cli(
+                """{"type":"system","subtype":"model_refusal_fallback","original_model":"a","fallback_model":"b",""" +
+                    """"retracted_message_uuids":["a1"]}""",
+            ),
+        )
+        assertEquals(listOf("u1", "m2", "notice-0"), state.entries.map { it.id })
+        assertEquals(state.positions(), state.entryIndex)
+        state = reduce(state, reply("a3", "m3", "second try", fields = """"supersedes":["a2"],"""))
+        assertEquals(listOf("u1", "notice-0", "m3"), state.entries.map { it.id })
+        assertEquals(state.positions(), state.entryIndex)
+        // A later line of a reply that moved up still lands in its own entry.
+        state = reduce(state, reply("a4", "m3", ", done"))
+        assertEquals(listOf("u1", "notice-0", "m3"), state.entries.map { it.id })
+        assertEquals("second try, done", state.text())
+    }
+
+    @Test
+    fun `the entry index is rebuilt after a removal that appends nothing`() {
+        var state = reduce(ChatState(), reply("a1", "m1", "one"))
+        state = reduce(state, SessionEvent.UserSent("u1", "next"))
+        state = reduce(state, reply("a2", "m2", "two"))
+        // This line supersedes m1 and adds a block to m2, which moves up a place.
+        state = reduce(state, reply("a3", "m2", " more", fields = """"supersedes":["a1"],"""))
+        assertEquals(listOf("u1", "m2"), state.entries.map { it.id })
+        assertEquals("two more", state.text())
+        assertEquals(state.positions(), state.entryIndex)
     }
 }
