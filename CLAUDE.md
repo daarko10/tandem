@@ -22,7 +22,7 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 
 ## Commands
 - `./gradlew test` unit, fixture and headless platform tests (no real `claude`; a fake CLI replays fixtures).
-- `xvfb-run ./gradlew integrationTest` IDE Starter test: installs the built ZIP in a real IDE and checks the rendered tool window. Slow; catches plugin-classloader problems the platform tests cannot.
+- `xvfb-run ./gradlew integrationTest` IDE Starter + UI Driver tests: install the built ZIP in a real IDE, type prompts, answer permission prompts and press Stop against a fake CLI (`src/test/resources/fake-claude.py`). Slow; catch plugin-classloader and UI problems the platform tests cannot.
 - `./gradlew runIde` sandbox IDE with the plugin. Use it to check feel, freezes and focus; agents cannot judge these.
 - `./gradlew verifyPlugin` Plugin Verifier against every supported IDE release.
 - `./gradlew buildPlugin` installable ZIP in `build/distributions/`.
