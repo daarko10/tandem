@@ -1,8 +1,11 @@
 package dev.daarkolabs.tandem.protocol
 
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
+import kotlin.io.path.readLines
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -97,6 +100,42 @@ class FixtureDecodeTest {
         val setModelAck = messages.filterIsInstance<CliMessage.ControlResponse>().last()
         assertTrue(setModelAck.isSuccess)
         assertNull(setModelAck.payload, "set_model succeeds without a payload")
+    }
+
+    @Test
+    fun `permission mode fixture shows how the CLI acknowledges set_permission_mode`() {
+        val messages = Fixtures.decode("permission-mode")
+
+        assertEquals(3, messages.filterIsInstance<CliMessage.ControlResponse>().count { it.isSuccess }) // initialize + two acks
+        assertEquals(
+            listOf(PermissionMode.DEFAULT, PermissionMode.PLAN, PermissionMode.ACCEPT_EDITS),
+            messages.filterIsInstance<CliMessage.SystemInit>().map { it.permissionMode },
+        )
+    }
+
+    @Test
+    fun `fork fixture resumes under a new session id`() {
+        val ids = Fixtures.decode("fork").filterIsInstance<CliMessage.SystemInit>().map { it.sessionId }
+
+        assertEquals(2, ids.size)
+        assertNotEquals(ids[0], ids[1])
+    }
+
+    @Test
+    fun `transcript fixtures decode line by line without throwing`() {
+        for (name in listOf("history-reply", "history-permission", "fork", "fork-origin")) {
+            val lines = Fixtures.transcript(name).readLines().filter { it.isNotBlank() }
+            assertTrue(lines.isNotEmpty(), "$name: empty transcript")
+            lines.forEach(Ndjson::decode)
+        }
+    }
+
+    @Test
+    fun `the original session's transcript keeps the title the host's rename_session gave it`() {
+        val titles = Fixtures.transcript("fork-origin").readLines().filter { it.isNotBlank() }.map(Ndjson::decode)
+            .filterIsInstance<CliMessage.Unknown>().filter { it.type == "custom-title" }
+            .map { it.raw?.get("customTitle")?.jsonPrimitive?.content }
+        assertEquals(listOf("Renamed by host"), titles)
     }
 
     @Test
