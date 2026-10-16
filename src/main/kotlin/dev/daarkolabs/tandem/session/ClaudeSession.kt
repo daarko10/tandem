@@ -35,15 +35,27 @@ import java.util.concurrent.atomic.AtomicLong
 
 private val LOG = logger<ClaudeSession>()
 
-/** How to start the CLI for one chat. */
+/** How to start the CLI for one chat. Exactly one of [sessionId] and [resumeSessionId] is set. */
 data class SessionConfig(
     val binary: String,
     val workingDirectory: Path,
+    /** A new session: passed as `--session-id`, so its id is known before the CLI reports it. */
+    val sessionId: String? = null,
+    /** An existing session: passed as `--resume`. */
+    val resumeSessionId: String? = null,
     /** Null lets the CLI pick its default. */
     val model: String? = null,
+    val effort: String? = null,
     val permissionMode: PermissionMode? = null,
-    val resumeSessionId: String? = null,
+    /** With [resumeSessionId]: continue as a new session (`--fork-session`), leaving the original untouched. */
+    val forkSession: Boolean = false,
 ) {
+    init {
+        require((sessionId == null) != (resumeSessionId == null)) {
+            "Pass sessionId for a new session or resumeSessionId for an existing one, not both or neither."
+        }
+    }
+
     /** argv per docs/protocol.md 1.1. Built-in edit tools stay disabled: edits go through the IDE (hard rule 4). */
     fun argv(): List<String> = buildList {
         add(binary)
@@ -51,9 +63,14 @@ data class SessionConfig(
         add("--include-partial-messages")
         add("--permission-prompt-tool=stdio")
         model?.let { addAll(listOf("--model", it)) }
+        effort?.let { addAll(listOf("--effort", it)) }
         permissionMode?.let { addAll(listOf("--permission-mode", it.wire)) }
         addAll(listOf("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"))
-        resumeSessionId?.let { addAll(listOf("--resume", it)) }
+        sessionId?.let { addAll(listOf("--session-id", it)) }
+        resumeSessionId?.let {
+            addAll(listOf("--resume", it))
+            if (forkSession) add("--fork-session")
+        }
     }
 }
 
@@ -62,12 +79,22 @@ fun interface ProcessLauncher {
     fun launch(argv: List<String>, workingDirectory: Path): Process
 
     companion object {
-        val Default: ProcessLauncher = ProcessLauncher { argv, dir ->
-            ProcessBuilder(argv).directory(dir.toFile()).apply {
-                environment().remove("NODE_OPTIONS")
-                environment()["CLAUDE_CODE_ENTRYPOINT"] = "sdk-tandem"
-            }.start()
+        val Default: ProcessLauncher = DefaultProcessLauncher()
+    }
+}
+
+/**
+ * Starts the real CLI. The child gets [cliEnvironment] of [parentEnvironment] and nothing else, so variables that identify
+ * the session or hosted environment Tandem itself runs in never reach a chat's CLI.
+ */
+class DefaultProcessLauncher(private val parentEnvironment: () -> Map<String, String> = System::getenv) : ProcessLauncher {
+    override fun launch(argv: List<String>, workingDirectory: Path): Process {
+        val builder = ProcessBuilder(argv).directory(workingDirectory.toFile())
+        builder.environment().run {
+            clear()
+            putAll(cliEnvironment(parentEnvironment()))
         }
+        return builder.start()
     }
 }
 
@@ -77,14 +104,23 @@ fun interface ProcessLauncher {
  * stops the process and its children: nothing outlives the session.
  *
  * All methods are safe to call from any thread, including the EDT: they only enqueue work.
+ *
+ * [initialState] is the chat so far when a transcript is resumed; the picks in [config] win over what it recorded.
  */
 class ClaudeSession(
     parentScope: CoroutineScope,
     private val config: SessionConfig,
-    private val launcher: ProcessLauncher = ProcessLauncher.Default,
+    private val launcher: ProcessLauncher = DefaultProcessLauncher(),
+    initialState: ChatState = ChatState(),
 ) {
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext.job) + CoroutineName("ClaudeSession"))
-    private val _state = MutableStateFlow(ChatState(requestedModel = config.model, permissionMode = config.permissionMode))
+    private val _state = MutableStateFlow(
+        initialState.copy(
+            requestedModel = config.model ?: initialState.requestedModel,
+            permissionMode = config.permissionMode ?: initialState.permissionMode,
+            effort = config.effort ?: initialState.effort,
+        ),
+    )
     private val outbox = Channel<JsonObject>(Channel.UNLIMITED)
     private val nextId = AtomicLong()
 
@@ -141,6 +177,9 @@ class ClaudeSession(
     }
 
     fun setPermissionMode(mode: PermissionMode): Unit = send(HostMessages.setPermissionMode(newRequestId(), mode))
+
+    /** Asks the CLI to give the session a custom title (`rename_session`). */
+    fun rename(title: String): Unit = send(HostMessages.renameSession(newRequestId(), title))
 
     fun allow(permission: PendingPermission, always: Boolean = false) {
         val updates = if (always) permission.suggestions.map(::forSession) else emptyList()

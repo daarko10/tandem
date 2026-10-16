@@ -14,6 +14,8 @@ data class ChatState(
     /** Shown prominently while set: the CLI is not running the model the user picked. */
     val modelWarning: String? = null,
     val permissionMode: PermissionMode? = null,
+    /** What Tandem passed with `--effort`, or what a loaded transcript recorded: the recorded `system/init` carries no effort. */
+    val effort: String? = null,
     val claudeCodeVersion: String? = null,
     val busy: Boolean = false,
     val pendingPermissions: List<PendingPermission> = emptyList(),

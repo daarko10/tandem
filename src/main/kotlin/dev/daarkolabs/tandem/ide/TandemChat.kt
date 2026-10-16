@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import java.nio.file.Path
+import java.util.UUID
 
 /**
  * The project's chat. Starts one [ClaudeSession] on first use; the session lives in this service's scope,
@@ -50,7 +51,7 @@ class TandemChat(private val project: Project, private val scope: CoroutineScope
                 }
                 val dir = project.guessProjectDir()?.toNioPath() ?: Path.of(System.getProperty("user.home"))
                 val model = System.getProperty("tandem.model")?.takeIf { it.isNotBlank() }
-                val created = ClaudeSession(scope, SessionConfig(binary, dir, model = model))
+                val created = ClaudeSession(scope, SessionConfig(binary, dir, sessionId = UUID.randomUUID().toString(), model = model))
                 // On IDE exit the JVM can stop before the session's coroutines clean up: kill the CLI synchronously then.
                 val hook = Thread(created::killNow, "Tandem CLI shutdown")
                 Runtime.getRuntime().addShutdownHook(hook)
