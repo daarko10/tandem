@@ -1,18 +1,22 @@
 package dev.daarkolabs.tandem
 
 import com.intellij.driver.client.Driver
+import com.intellij.driver.client.Remote
 import com.intellij.driver.client.service
+import com.intellij.driver.model.OnDispatcher
 import com.intellij.driver.sdk.ActionManager
 import com.intellij.driver.sdk.closeAndDisableAllBalloonNotifications
 import com.intellij.driver.sdk.getOpenProjects
 import com.intellij.driver.sdk.invokeAction
 import com.intellij.driver.sdk.isPluginLoaded
 import com.intellij.driver.sdk.openToolWindow
+import com.intellij.driver.sdk.singleProject
 import com.intellij.driver.sdk.ui.components.UiComponent
 import com.intellij.driver.sdk.ui.ui
 import com.intellij.driver.sdk.waitFor
 import com.intellij.driver.sdk.waitForIndicators
 import com.intellij.ide.starter.driver.engine.runIdeWithDriver
+import com.intellij.ide.starter.ide.IDETestContext
 import com.intellij.ide.starter.ide.IdeProductProvider
 import com.intellij.ide.starter.models.TestCase
 import com.intellij.ide.starter.plugins.PluginConfigurator
@@ -47,7 +51,8 @@ import kotlin.time.Duration.Companion.seconds
  * the way a person does: create sessions, type a prompt, press Send, answer permission prompts, press Stop, pick a
  * permission mode and a model below the prompt, switch, rename and delete sessions in the sidebar, with the mouse and
  * the keyboard (the IDE's own context menu key included).
- * The tool window keeps the width the IDE gives it, too narrow to dock the sidebar, so the sidebar opens over the chat.
+ * The tool window keeps the width the IDE gives it, too narrow to dock the sidebar, so the sidebar opens over the chat; one test
+ * widens it to dock the sidebar.
  * The `claude` it talks to is `src/test/resources/fake-claude.py`, which replays a recorded fixture in step with what
  * the UI sends and logs every frame it receives, so each test checks both the rendered UI and the protocol traffic.
  *
@@ -234,6 +239,19 @@ class ToolWindowIdeTest {
             ui.keyboard { escape() }
             waitFor("Escape closes the sidebar", 30.seconds) { !row("Alpha").present() }
 
+            // The dimmed chat under the sidebar is out of the Tab order: Shift+Tab from "New session" goes to the header's "+",
+            // and Tab from there back to "New session".
+            openSidebar()
+            waitFor("filter focused for Shift+Tab", 30.seconds) { focusedEditable("").present() }
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("New session focused", 30.seconds) { focusedButton("New session").present() }
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("Shift+Tab passes the chat by, to the header's +", 30.seconds) { focusedIconButton("New session").present() }
+            ui.keyboard { tab() }
+            waitFor("Tab passes the chat by, back to New session", 30.seconds) { focusedButton("New session").present() }
+            ui.keyboard { escape() }
+            waitFor("Escape closes the sidebar once more", 30.seconds) { !row("Alpha").present() }
+
             // Two rows left by the filter, newest first. Down and Up move between them, End and Home go to the last and the
             // first. The IDE's context menu key opens the focused row's menu: Close only for the open session. Delete asks and
             // Escape takes it back. Down and Enter show the second row's session, with the focus in its prompt box. The seeded
@@ -292,6 +310,97 @@ class ToolWindowIdeTest {
         assertFalse(configDir.walk().any { it.fileName.toString() == "$seeded.jsonl" }, "the seeded transcript is deleted")
     }
 
+    @Test
+    fun `a wide tool window docks the sidebar, which stays collapsed in the next IDE run`() {
+        val configDir = Files.createTempDirectory("tandem-config")
+        val project = newProject()
+        val seeded = "44444444-4444-4444-8444-444444444444"
+        val transcript = Path.of(fakeClaude).resolveSibling("fixtures/transcripts/history-reply.jsonl").readText() +
+            """{"type":"custom-title","customTitle":"Seeded","sessionId":"$seeded"}""" + "\n"
+        configDir.resolve("projects").resolve(TranscriptFolder.key(project.toRealPath().toString())).createDirectories()
+            .resolve("$seeded.jsonl").writeText(transcript)
+        val pong = "Reply with the single word: pong"
+        val sentLog = Files.createTempFile("tandem-sent", ".ndjson")
+        val context = ideContext("docked", listOf("plain-reply"), configDir, null, project, sentLog)
+
+        context.runTandem("docked") {
+            widenToolWindow()
+            waitFor("the sidebar docked beside the chat", 30.seconds) {
+                filterBox().present() && iconButton("Hide sessions").present() && row("Seeded").present()
+            }
+
+            // A session from the docked sidebar's "New session".
+            clickButton("New session")
+            clickButton("Create")
+            typePrompt(pong)
+            waitForText("pong")
+            waitFor("its row", 30.seconds) { row(pong).present() }
+
+            // Rename opens the title field; Escape leaves the title as it was. (A double-click on the title opens it too, but the
+            // robot's double click does not reach Compose as one under Xvfb.)
+            row(pong).rightClick(Point(10, 10))
+            menuItem("Rename").click(Point(10, 10))
+            waitFor("title field open", 30.seconds) { focusedEditable(pong).present() }
+            ui.keyboard {
+                typeText("Zeta", 20)
+                escape()
+            }
+            waitFor("title kept", 30.seconds) { !focusedEditable("Zeta").present() && row(pong).present() && !row("Zeta").present() }
+
+            // Fork the seeded session: the fork opens, selected, under the original's title.
+            row("Seeded").rightClick(Point(10, 10))
+            menuItem("Fork").click(Point(10, 10))
+            waitFor("the fork listed", 30.seconds) { row("Seeded (fork)").present() }
+
+            // Delete… from the menu: the question warns that the open fork has no transcript of its own, and Cancel takes the
+            // focus from the "⋯" that goes away. Escape takes the question back, and the row has the focus again.
+            ui.x("$ROW[contains(@text, 'Seeded') and not(contains(@text, '(fork)'))]").rightClick(Point(10, 10))
+            menuItem("Delete…").click(Point(10, 10))
+            waitFor("the question, with the fork warning, Cancel focused", 30.seconds) {
+                ui.x("//div[@class='ComposeNode' and contains(@visible_text, 'An open fork of it has no transcript')]").present() &&
+                    focusedButton("Cancel").present()
+            }
+            ui.keyboard { escape() }
+            waitFor("question taken back, row focused", 30.seconds) { !button("Delete").present() && focusedRow("Seeded").present() }
+
+            // The context menu key with the focus outside the rows opens no menu, and the next click goes through.
+            filterBox().click(Point(10, 10))
+            waitFor("filter focused", 30.seconds) { focusedEditable("").present() }
+            contextMenuKey()
+            row(pong).click(Point(10, 10))
+            waitFor("no menu, and the click selected the row", 30.seconds) {
+                !menuItem("Copy resume command").present() && ui.x("$ROW[@selected='true' and contains(@text, '$pong')]").present()
+            }
+
+            // The "x" on the hovered open row closes it. The fake CLI writes no transcript, so its row goes, and the fork, its
+            // neighbour, is selected.
+            row(pong).moveMouse(Point(10, 10))
+            iconButton("Close session").click(Point(8, 8))
+            waitFor("closed, the fork selected", 30.seconds) {
+                !row(pong).present() && ui.x("$ROW[@selected='true' and contains(@text, 'Seeded (fork)')]").present()
+            }
+
+            iconButton("Hide sessions").click(Point(10, 10))
+            waitFor("sidebar collapsed", 30.seconds) { !filterBox().present() && iconButton("Show sessions").present() }
+        }
+
+        context.runTandem("docked-again") {
+            widenToolWindow()
+            waitFor("the sidebar still collapsed", 30.seconds) { iconButton("Show sessions").present() && !filterBox().present() }
+            iconButton("Show sessions").click(Point(10, 10))
+            waitFor("docked again", 30.seconds) { filterBox().present() && row("Seeded").present() && iconButton("Hide sessions").present() }
+        }
+    }
+
+    /** Makes the tool window wide enough to dock the sidebar: the IDE gives it less than 500 dp. */
+    private fun Driver.widenToolWindow() {
+        withContext(OnDispatcher.EDT) {
+            val window = service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")
+            val width = window.getComponent().getWidth()
+            if (width < WIDE) window.stretchWidth(WIDE - width)
+        }
+    }
+
     /**
      * The display name of model [index] in the CLI's `initialize` response recorded in `fixtures/permission-mode.ndjson`, next to the
      * fake CLI: the first control_response that lists models.
@@ -327,7 +436,20 @@ class ToolWindowIdeTest {
         sentLog: Path = Files.createTempFile("tandem-sent", ".ndjson"),
         script: Driver.() -> Unit,
     ): List<JsonObject> {
-        val context = Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
+        ideContext(name, fixtures, configDir, gateFile, project, sentLog).runTandem(name, script)
+        return if (sentLog.exists()) sentLog.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject } else emptyList()
+    }
+
+    /** The IDE [runChat] starts, with the plugin and the fake CLI; each [runTandem] on it starts it again, with what it kept. */
+    private fun ideContext(
+        name: String,
+        fixtures: List<String>,
+        configDir: Path?,
+        gateFile: Path?,
+        project: Path,
+        sentLog: Path,
+    ): IDETestContext =
+        Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
             applyVMOptionsPatch {
                 addSystemProperty("tandem.claudePath", fakeClaude)
@@ -341,6 +463,12 @@ class ToolWindowIdeTest {
             }
         }
 
+    /**
+     * Starts this IDE, opens the tool window, runs [script], takes a screenshot named [shot] and closes the IDE. Fails on any error
+     * the IDE's log attributes to the plugin.
+     */
+    private fun IDETestContext.runTandem(shot: String, script: Driver.() -> Unit) {
+        val context = this
         context.runIdeWithDriver().useDriverAndCloseIde {
             waitFor("project opened", 5.minutes) { getOpenProjects().isNotEmpty() }
             waitFor("Tandem plugin loaded", 2.minutes) { isPluginLoaded("dev.daarkolabs.tandem") }
@@ -352,7 +480,7 @@ class ToolWindowIdeTest {
             waitFor("tool window shown", 2.minutes) { newSessionButton().present() }
             script()
             // Kept as a test artifact for people to look at.
-            takeScreenshot(name)
+            takeScreenshot(shot)
         }
 
         // Any exception attributed to the plugin (e.g. a class from an undeclared IDE module) fails the test.
@@ -360,8 +488,6 @@ class ToolWindowIdeTest {
         assertTrue(logs.isNotEmpty(), "no idea.log under ${context.paths.testHome}")
         val pluginErrors = logs.flatMap { it.readLines() }.filter { "Plugin: dev.daarkolabs.tandem" in it }
         assertTrue(pluginErrors.isEmpty(), "errors attributed to Tandem:\n" + pluginErrors.joinToString("\n"))
-
-        return if (sentLog.exists()) sentLog.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject } else emptyList()
     }
 
     // Compose semantics nodes appear in the Driver's UI hierarchy as ComposeNode, with their text and role. They
@@ -390,6 +516,13 @@ class ToolWindowIdeTest {
 
     /** The editable text (a text field or area) that has the keyboard focus, if it holds [text]. */
     private fun Driver.focusedEditable(text: String): UiComponent = ui.x("$EDITABLE[@focused='true' and @editabletext='$text']")
+
+    /** The sidebar's filter. */
+    private fun Driver.filterBox(): UiComponent = ui.x("$EDITABLE[@contentdescription='Filter sessions']")
+
+    /** The button that says [text], if it has the keyboard focus. */
+    private fun Driver.focusedButton(text: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @role='Button' and @text='$text' and @focused='true']")
 
     /** The icon button described as [description], if it has the keyboard focus. */
     private fun Driver.focusedIconButton(description: String): UiComponent =
@@ -438,6 +571,9 @@ class ToolWindowIdeTest {
     private val JsonObject.type: String? get() = this["type"]?.jsonPrimitive?.content
 
     private companion object {
+        /** How wide [widenToolWindow] makes the tool window, in pixels: past 500 dp at the scale the tests run at. */
+        const val WIDE = 900
+
         const val EDITABLE = "//div[@class='ComposeNode' and @editabletext]"
 
         /** Every sidebar row. */
@@ -449,4 +585,22 @@ class ToolWindowIdeTest {
          */
         const val PROMPT_BOX = "($EDITABLE)[last()]"
     }
+}
+
+/** The platform's tool window manager, as the IDE tests reach it. */
+@Remote("com.intellij.openapi.wm.ToolWindowManager")
+interface ToolWindowManagerRef {
+    fun getToolWindow(id: String): ToolWindowRef?
+}
+
+@Remote("com.intellij.openapi.wm.ex.ToolWindowEx")
+interface ToolWindowRef {
+    fun stretchWidth(value: Int)
+
+    fun getComponent(): JComponentRef
+}
+
+@Remote("javax.swing.JComponent")
+interface JComponentRef {
+    fun getWidth(): Int
 }
