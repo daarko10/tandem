@@ -2,7 +2,6 @@ package dev.daarkolabs.tandem.ui
 
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
-import com.intellij.openapi.util.SystemInfo
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
@@ -88,9 +87,12 @@ class SessionSidebarTest {
         assertEquals(emptyList(), sessions.filteredBy("nothing"))
     }
 
-    /** What a focused row in [mode] makes of the key with AWT code [code] going down, the way the IDE reports it. */
-    private fun press(code: Int, mode: RowMode = RowMode.NORMAL, numPad: Boolean = false): RowKey? =
-        rowKey(key(code, numPad), KeyEventType.KeyDown, mode)
+    /**
+     * What a focused row in [mode] makes of the key with AWT code [code] going down, the way the IDE reports it, on macOS when [mac]
+     * and elsewhere when not: every key but Backspace means the same on both.
+     */
+    private fun press(code: Int, mode: RowMode = RowMode.NORMAL, numPad: Boolean = false, mac: Boolean = false): RowKey? =
+        rowKey(key(code, numPad), KeyEventType.KeyDown, mode, mac)
 
     private fun key(code: Int, numPad: Boolean = false): Key =
         Key(code, if (numPad) AwtKeyEvent.KEY_LOCATION_NUMPAD else AwtKeyEvent.KEY_LOCATION_STANDARD)
@@ -133,10 +135,24 @@ class SessionSidebarTest {
     @Test
     fun `Delete asks whether to delete, and Escape takes the question back`() {
         assertEquals(RowKey.DELETE, press(AwtKeyEvent.VK_DELETE))
-        assertEquals(if (SystemInfo.isMac) RowKey.DELETE else null, press(AwtKeyEvent.VK_BACK_SPACE))
+        // The Mac's "delete" key is Backspace, alone or with Command, as in Finder; elsewhere Backspace is left to the IDE.
+        assertEquals(RowKey.DELETE, press(AwtKeyEvent.VK_BACK_SPACE, mac = true))
+        assertNull(press(AwtKeyEvent.VK_BACK_SPACE, mac = false))
+        assertNull(press(AwtKeyEvent.VK_BACK_SPACE, RowMode.CONFIRMING_DELETE, mac = true))
         assertEquals(RowKey.CANCEL_DELETE, press(AwtKeyEvent.VK_ESCAPE, RowMode.CONFIRMING_DELETE))
         // Escape on a row that asks nothing is left to the sidebar over the chat, which it closes.
         assertNull(press(AwtKeyEvent.VK_ESCAPE))
+    }
+
+    @Test
+    fun `on macOS every key but Backspace means what it means elsewhere`() {
+        val codes = listOf(
+            AwtKeyEvent.VK_ENTER, AwtKeyEvent.VK_SPACE, AwtKeyEvent.VK_DOWN, AwtKeyEvent.VK_UP, AwtKeyEvent.VK_HOME, AwtKeyEvent.VK_END,
+            AwtKeyEvent.VK_DELETE, AwtKeyEvent.VK_ESCAPE, AwtKeyEvent.VK_CONTEXT_MENU, AwtKeyEvent.VK_F10, AwtKeyEvent.VK_TAB,
+        )
+        for (mode in RowMode.entries) {
+            for (code in codes) assertEquals(press(code, mode), press(code, mode, mac = true), "${AwtKeyEvent.getKeyText(code)} in $mode")
+        }
     }
 
     @Test

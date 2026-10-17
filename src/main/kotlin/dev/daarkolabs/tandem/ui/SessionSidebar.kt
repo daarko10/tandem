@@ -285,11 +285,11 @@ internal enum class RowKey { SHOW, NEXT, PREVIOUS, FIRST, LAST, DELETE, CANCEL_D
 
 /**
  * What a key going down ([type]) asks of a focused row in [mode]: Enter or Space shows its session, Down and Up move the focus to the
- * next and the previous row, Home and End to the first and the last, Delete (also Backspace on macOS) asks whether to delete it, and
- * Escape takes the question back. Null for anything else, so that the key goes on to the row's parents and the IDE: the context
- * menu key, for one, is the IDE's.
+ * next and the previous row, Home and End to the first and the last, Delete asks whether to delete it, and Escape takes the question
+ * back. On macOS ([mac]) Backspace, which the Mac's "delete" key sends, alone or with Command, asks too, as in Finder. Null for
+ * anything else, so that the key goes on to the row's parents and the IDE: the context menu key, for one, is the IDE's.
  */
-internal fun rowKey(key: Key, type: KeyEventType, mode: RowMode): RowKey? {
+internal fun rowKey(key: Key, type: KeyEventType, mode: RowMode, mac: Boolean = SystemInfo.isMac): RowKey? {
     if (type != KeyEventType.KeyDown) return null
     return when (mode) {
         RowMode.NORMAL -> when (key) {
@@ -299,7 +299,7 @@ internal fun rowKey(key: Key, type: KeyEventType, mode: RowMode): RowKey? {
             Key.MoveHome -> RowKey.FIRST
             Key.MoveEnd -> RowKey.LAST
             Key.Delete -> RowKey.DELETE
-            Key.Backspace -> if (SystemInfo.isMac) RowKey.DELETE else null
+            Key.Backspace -> if (mac) RowKey.DELETE else null
             else -> null
         }
         RowMode.CONFIRMING_DELETE -> if (key == Key.Escape) RowKey.CANCEL_DELETE else null
