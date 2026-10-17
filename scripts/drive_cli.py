@@ -215,10 +215,15 @@ def settings(cli: Cli) -> None:
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
              "permission-mode": permission_mode, "fork": fork, "settings": settings}
 
+# Flags a scenario adds to the caller's. The settings probe loads no user settings: 2.1.301 refuses an update_settings for
+# a source that --setting-sources leaves out, so even a CLI that took the user's settings as the default source would
+# refuse rather than write that file during the probe.
+SCENARIO_FLAGS = {"settings": ["--setting-sources", "project,local"]}
+
 
 def main(scenario: str, out: str, extra: list[str]) -> None:
     run = SCENARIOS[scenario]
-    cli = Cli(extra, model=FIRST_MODEL if scenario == "model-switch" else None)
+    cli = Cli(extra + SCENARIO_FLAGS.get(scenario, []), model=FIRST_MODEL if scenario == "model-switch" else None)
     try:
         cli.call(INITIALIZE)
         run(cli)

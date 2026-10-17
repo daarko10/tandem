@@ -9,7 +9,12 @@ Sources, in order of authority:
    `fixtures/transcripts/` (section 11). Re-record with `scripts/record-fixture.sh` (one-shot prompt) or
    `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too.
 2. Measurements with CLI 2.1.301 where a section says so: headless runs in an empty scratch folder with the variables
-   of section 1.2 removed. Most send only `initialize`, so no model is used; those that needed a prompt say so.
+   of section 1.2 removed. Most send only `initialize`, so no model is used; those that needed a prompt say so. The
+   checks of `--session-id X` and `--resume X` on their own (1.1) ran signed in, with the usual config directory. Those
+   of forks, of `--session-id` together with `--resume`, of the failed starts' `result` ids and of an early
+   `rename_session` (1.1, 4.4) ran without sign-in: a scratch `CLAUDE_CONFIG_DIR` and no variable whose name contains
+   `TOKEN`, `API_KEY` or `OAUTH`. Such a run writes nothing before its `initialize` response, where a signed-in run first
+   writes a `system/ui_invalidate` line with the session id (1.1).
 3. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads).
 4. `claude --help` output.
 
@@ -82,7 +87,8 @@ claude --output-format stream-json --verbose --input-format stream-json \
 | existing, once its `<id>.jsonl` exists | `--resume <id>` |
 | fork of `<id>`, until the fork's own transcript exists | `--resume <id> --fork-session --session-id <new uuid>` |
 
-Measured with CLI 2.1.301, sending only `initialize` (these facts also sit on `SessionManager.configFor`):
+Measured with CLI 2.1.301, sending only `initialize` (conditions in Sources item 2; these facts also sit on
+`SessionManager.configFor`):
 - `--session-id X` without a prompt writes no transcript, not even the project folder: the CLI writes `X.jsonl` with
   the session's first prompt.
 - `--resume X` before that fails: exit code 1, a `result` with subtype `error_during_execution`, and on stderr
@@ -91,8 +97,12 @@ Measured with CLI 2.1.301, sending only `initialize` (these facts also sit on `S
 - `--session-id X` once `X.jsonl` exists fails: exit code 1, "Error: Session ID X is already in use."
 - `--resume X --session-id Z` without `--fork-session` exits with code 1: "Error: --session-id can only be used with
   --continue or --resume if --fork-session is also specified." (`sdk.d.ts` documents the same for `sessionId`.)
-- `--resume X` and `--resume X --fork-session` answer `initialize` and emit nothing else until the first prompt: no
-  `system/init` and no line with a session id. A fork started without `--session-id` therefore has no known id.
+- `--resume X` and `--resume X --fork-session` answer `initialize` but emit no `system/init` until the first prompt.
+  A signed-in run names the session's id before that all the same, in lines the SDK does not document:
+  `system/ui_invalidate` at start (in every recording, and in a run with `--session-id` and no prompt), and
+  `system/session_title_changed` when the original has a title (fixture `fork`: started without `--session-id`, the
+  fork names its new id in both before its `initialize` response). The run without sign-in wrote neither. Tandem
+  passes `--session-id`, a fork's too, so it never relies on those lines.
 
 So Tandem passes `--resume` exactly when `<id>.jsonl` exists, and gives every new session and every fork its id up
 front. Either mistake above would fail again on every retry.
@@ -129,10 +139,9 @@ The recording scripts remove the same list (`drive_cli.py`, `record-fixture.sh`)
 
 Measured with 2.1.301 with the hosted variables removed, as on a CI runner (one prompt each): `CLAUDE_CODE_SESSION_ID`
 on its own is ignored, as `bogus`, as a UUID, and also with `CLAUDECODE=1` and `CLAUDE_CODE_CHILD_SESSION=1`; the CLI
-picks its own id. With
-`--session-id X` as well, `system/init` reports X and the transcript is `X.jsonl`. The nightly contract run checks that
-with `CLAUDE_CODE_SESSION_ID=bogus` set. Which of the hosted variables make the CLI take over an inherited id was not
-measured.
+picks its own id. With `--session-id X` as well, `system/init` reports X and the transcript is `X.jsonl`. The nightly
+contract run checks that with `CLAUDE_CODE_SESSION_ID=bogus` set. Which of the hosted variables make the CLI take over
+an inherited id was not measured.
 
 ### 1.3 cwd, stdio, binary lookup
 
@@ -377,6 +386,13 @@ turn at the default effort, then two requests, then a second turn.
 
 Tandem passes effort only at spawn (`--effort`) for now; `apply_flag_settings` is the way to let a live session change it.
 
+From the 2.1.301 binary's strings, not measured: a `CLAUDE_CODE_EFFORT_LEVEL` environment variable overrides the
+session's effort, and `apply_flag_settings` then refuses an effort change ("apply_flag_settings: CLAUDE_CODE_EFFORT_LEVEL
+overrides effort for this session"); a `maxEffort` setting or an organization's cap also clamps `--effort`. The variable
+passes through `cliEnvironment` (1.2), so the effort badge, which shows what Tandem passed, can disagree with the level
+the CLI runs at. The transcript's `assistant` lines should show the real level (their `effort` followed
+`apply_flag_settings` in the probe above). Phase 4's effort picker has to handle both cases.
+
 ### 4.5 Other CLI → host requests
 
 | subtype | When | Tandem |
@@ -585,7 +601,7 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 | New session | `--session-id <uuid>` with an id Tandem generates. The first prompt's `system/init` reports it, and the CLI writes `<uuid>.jsonl` from that prompt on (section 1.1) |
 | Resume | `--resume <id>` once `<id>.jsonl` exists, else `--session-id <id>` again. The CLI loads the transcript itself and does not stream the history to stdout (fixture `fork`: the second process streams only its own turn); Tandem loads it from the transcript (section 11) |
 | Continue latest in cwd | `--continue` (not used) |
-| Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, which nothing reports before the fork's first prompt |
+| Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, and no `system/init` reports it before the fork's first prompt (only undocumented lines do, section 1.1) |
 | Resume at a point | `--resume <id> --resume-session-at <message uuid>` (not used) |
 | Switch model mid-session | `control_request{set_model, model}`; next turn's `system/init.model` must equal it. `--model` on resume also works |
 | Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`) |
@@ -680,16 +696,18 @@ terminal show up too. Sources: SDK 0.3.300 (`sdk.mjs` reads and writes the same 
 - `<session id>/` beside it holds what else the CLI keeps for the session: a `custom-title.json` after a rename (seen in
   a 2.1.301 recording) and, per the SDK, subagent transcripts and tool results.
 - The file appears with the session's first prompt (section 1.1). A running CLI may be appending to it while Tandem
-  reads: a last line without its newline is skipped like any line that is not a JSON object.
+  reads: a last line the CLI is still writing is not a JSON object yet and is skipped.
 
 ### 11.2 Line types
 
 Each line is one JSON object with a `type`. Most lines also have `sessionId`, `timestamp`, `cwd`, `version`,
-`gitBranch` and `entrypoint`, and the lines that make up the conversation have `uuid` and `parentUuid` (11.3).
+`gitBranch` and `entrypoint`. Tandem takes `cwd` from the first line that has one, whatever its type (lines off the
+current history aside), to tell apart projects that share a folder (11.1). The lines that make up the conversation
+have `uuid` and `parentUuid` (11.3).
 
 | `type` | Fields Tandem reads | Use |
 |---|---|---|
-| `user` | `uuid`, `parentUuid`, `isSidechain`, `isMeta`, `isCompactSummary`, `permissionMode`, `cwd`, `message.content` | prompts (a string or text blocks) and tool results (`tool_result` blocks); the last `permissionMode` is the session's mode |
+| `user` | `uuid`, `parentUuid`, `isSidechain`, `isMeta`, `isCompactSummary`, `permissionMode`, `message.content` | prompts (a string or text blocks) and tool results (`tool_result` blocks); the last `permissionMode` is the session's mode |
 | `assistant` | `uuid`, `parentUuid`, `isSidechain`, `effort`, `message.id`, `message.model`, `message.content` | one line per content block, sharing `message.id`, as on stdout (6.1); the last model and effort |
 | `custom-title` | `customTitle` | the title the user or `rename_session` set |
 | `ai-title` | `aiTitle` | a generated title |
@@ -762,5 +780,6 @@ A loaded chat is settled whatever the file ends with: not busy, no pending permi
 - Delete: `<id>.jsonl` and the `<id>/` folder beside it, which is what the SDK's `deleteSession` removes. Links are
   deleted, never followed.
 
-Tandem reads and writes nothing else under the config directory: credentials (`.credentials*`) and settings files are
-out of bounds (hard rule 3).
+Apart from the binary lookup, which also looks for `claude` in `~/.claude/local` (section 1.3), Tandem reads and writes
+nothing else under the config directory: credentials (`.credentials*`) and settings files are out of bounds (hard
+rule 3).

@@ -30,11 +30,13 @@ The existing options were studied in October 2026:
         ▼
  TandemSessions (ide/)  project service: owns the SessionManager in its coroutine scope, restores the open sessions
         │               from TandemWorkspaceState, reads TandemSettings (claude path, max live sessions; Settings |
-        │               Tools | Tandem), runs SessionNotifier (IDE notifications and sidebar badges)
+        │               Tools | Tandem), runs SessionNotifier (IDE notifications)
         ▼
  SessionManager (session/)  the project's sessions: StateFlow<List<SessionHandle>> and the selection, the live cap,
-        │                   create / open / fork / rename / delete / close, the resume-id mismatch rule
-        ├─ SessionHandle  one session's chat across processes: status, title, prompt queue
+        │                   create / open / fork / rename / delete / close, the resume-id mismatch rule. It raises the
+        │                   attention of a session that is not selected when it waits for a permission or ends a turn;
+        │                   the sidebar draws that as the badge
+        ├─ SessionHandle  one session's chat across processes: status, title, attention, prompt queue
         │    └─ ClaudeSession  one live `claude` process, while the session has one
         │         • spawns `claude --input-format stream-json --output-format stream-json --verbose --include-partial-messages
         │           … --session-id <id>` (or `--resume <id>`, or a fork: `--resume <id> --fork-session --session-id <new>`)
@@ -106,8 +108,9 @@ Resolved while building the sessions spec (its open items; details in `protocol.
   names the session; the nightly contract run checks that. Which hosted variables make the CLI adopt an inherited id
   was not measured.
 - ~~Who titles a fork~~: the CLI writes no "(fork)" title, so Tandem renames the fork itself. Tandem also gives the fork
-  its id (`--resume <id> --fork-session --session-id <new>`), since nothing reports it before the fork's first prompt;
-  the fork's `system/init` reports that id (`protocol.md` 8).
+  its id (`--resume <id> --fork-session --session-id <new>`), since no `system/init` reports it before the fork's first
+  prompt (a signed-in CLI names it earlier only in undocumented lines); the fork's `system/init` then reports that id
+  (`protocol.md` 1.1 and 8).
 - ~~Changing effort on a live session~~: `apply_flag_settings` with `{"effortLevel": …}` changes the next turn's effort
   (the transcript shows it; `init` has no effort); `update_settings` writes settings files and is not for this
   (`protocol.md` 4.4). The effort badge can become a picker later.

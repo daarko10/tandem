@@ -42,7 +42,18 @@ jobs:
           session_id=11111111-1111-4111-8111-111111111111
           work="$(mktemp -d)"
           (cd "$work" && claude -p "Reply with the single word: pong" --output-format stream-json --verbose --safe-mode --session-id "$session_id" < /dev/null > raw.ndjson)
-          python3 -I -c 'import json, sys; init = next(m for m in map(json.loads, filter(str.strip, open(sys.argv[1]))) if m.get("type") == "system" and m.get("subtype") == "init"); assert init["session_id"] == sys.argv[2], "system/init session_id is " + repr(init["session_id"])' "$work/raw.ndjson" "$session_id"
+          # system/init must report the id passed with --session-id. Lines that are not JSON are skipped, as Tandem skips them.
+          python3 -I - "$work/raw.ndjson" "$session_id" <<'PY'
+          import json, sys
+          def parsed(line):
+              try:
+                  return json.loads(line)
+              except ValueError:
+                  return None
+          init = next((m for m in map(parsed, open(sys.argv[1], encoding="utf-8"))
+                       if isinstance(m, dict) and m.get("type") == "system" and m.get("subtype") == "init"), {})
+          assert init.get("session_id") == sys.argv[2], f"system/init session_id is {init.get('session_id')!r}"
+          PY
           python3 -I scripts/copy_transcript.py "$work" "$work/raw.ndjson" build/contract/transcripts session-id
       - name: Decode with Tandem's protocol layer and load the transcripts with its reader
         run: ./gradlew test --tests '*ContractTest*' -Dtandem.contractDir=build/contract

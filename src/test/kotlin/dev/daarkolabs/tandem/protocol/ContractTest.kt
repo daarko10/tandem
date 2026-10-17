@@ -9,9 +9,9 @@ import java.io.File
 import kotlin.test.assertTrue
 
 /**
- * Run by the nightly CLI contract workflow against freshly recorded transcripts (`-Dtandem.contractDir=...`): the stream-json
- * output (`.ndjson` files) and the CLI's own on-disk transcripts of the same runs (`.jsonl` files in `transcripts`). Skipped in
- * normal test runs.
+ * Run by the nightly CLI contract workflow against freshly recorded output of the newest CLI (`-Dtandem.contractDir=...`): its
+ * stream-json output (`.ndjson` files) and the transcripts it wrote to disk (`.jsonl` files in `transcripts`). Skipped in normal
+ * test runs.
  */
 class ContractTest {
     @Test

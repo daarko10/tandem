@@ -562,17 +562,19 @@ class SessionManager internal constructor(
      *
      * A fork ([SessionHandle.forkOf]) without a transcript of its own starts as `--resume <original> --fork-session --session-id <id>`,
      * after a stop too, so that it never goes on as an empty session; once its transcript exists it resumes as itself. Tandem gives
-     * the fork its id because nothing tells it before the fork's first prompt. Measured with 2.1.301 (only `initialize` was sent,
-     * never a prompt):
-     * - `--resume <x>` and `--resume <x> --fork-session` answer `initialize` and send nothing else until the first prompt: no
-     *   `system/init`, no line with a session id, and no transcript for the fork;
+     * the fork its id because no `system/init` tells it before the fork's first prompt. Measured with 2.1.301, sending only
+     * `initialize` (docs/protocol.md lists the conditions under Sources):
+     * - `--resume <x>` and `--resume <x> --fork-session` answer `initialize` and send no `system/init` until the first prompt, and
+     *   the fork has no transcript before it. A signed-in CLI names the id earlier only in lines the SDK does not document
+     *   (`system/ui_invalidate`, and `system/session_title_changed` when the original has a title); Tandem does not rely on them;
      * - `--resume <x> --fork-session --session-id <z>` exits with 0. It answers `rename_session` with `system/session_title_changed`
      *   under `session_id` z, writes nothing before a prompt, and leaves `<x>.jsonl` as it was; the `result` of such a start that
      *   fails ("No conversation found") carries z too;
      * - `--resume <x> --session-id <z>` without `--fork-session` exits with code 1: "Error: --session-id can only be used with
      *   --continue or --resume if --fork-session is also specified."
      *
-     * That the fork's `system/init` then reports z takes a prompt to see, and was not measured; [takeOver] handles one that does not.
+     * With a prompt, the fork's `system/init` then reports z (measured with 2.1.301, docs/protocol.md 8); [takeOver] handles a CLI
+     * that would not.
      *
      * The picks come from [chat]: `--model` is [ChatState.requestedModel] and `--effort` is [ChatState.effort]. `--permission-mode`
      * is [ChatState.permissionMode] when it is a mode Tandem offers (default, acceptEdits, plan). Any other mode a transcript

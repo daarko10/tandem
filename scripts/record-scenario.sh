@@ -4,12 +4,21 @@
 #
 # Usage: scripts/record-scenario.sh <scenario> [out-dir] [extra claude flags...]
 # Example: scripts/record-scenario.sh permission
+# `settings` is a probe, not a fixture: it needs an out-dir outside the fixtures,
+# e.g. scripts/record-scenario.sh settings scratch/rec
 #
 # Like record-fixture.sh, this uses the local `claude` sign-in and never commits the raw transcripts.
 set -euo pipefail
 
-scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | fork | settings}"
+scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | fork | settings (a probe: give an out-dir outside the fixtures)}"
 out_dir="${2:-src/test/resources/fixtures}"
+if [[ "$scenario" == settings ]]; then
+  case "${2:-}" in
+    "" | *src/test/resources/fixtures*)
+      echo "settings is a probe, not a fixture: give an out-dir outside src/test/resources/fixtures, e.g. scratch/rec" >&2
+      exit 2 ;;
+  esac
+fi
 shift $(( $# < 2 ? $# : 2 ))
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
