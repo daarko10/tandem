@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.util.concurrent.CountDownLatch
@@ -23,6 +24,7 @@ import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JLabel
 import kotlin.io.path.createDirectories
+import kotlin.io.path.createFile
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -178,6 +180,31 @@ class TandemSettingsTest {
         } finally {
             release.countDown()
             ShellEnvironment.reset()
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+    }
+
+    @Test
+    fun `Apply during a Test keeps the Test's answer`() = timeoutRunBlocking(30.seconds) {
+        // It answers only once the test lets it, so that Apply's check certainly comes while the Test runs.
+        val gate = tempDir.get().resolve("gate")
+        val slow = script("slow", "while [ ! -e '$gate' ]; do sleep 0.05; done; echo 'slow 1.0'")
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val page = withContext(Dispatchers.EDT) { configurable.createComponent().also { configurable.reset() } }
+            val fake = System.getProperty("tandem.claudePath")
+            while (fake !in labels(page)) delay(20) // the page's own check is done
+            withContext(Dispatchers.EDT) {
+                assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = slow
+                UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+                configurable.apply() // saves the slow path, which runs: its check finds nothing to warn about
+            }
+            delay(500) // time for Apply's check to answer while the Test runs
+            assertTrue("Testing…" in labels(page), labels(page).toString())
+            gate.createFile()
+            withTimeoutOrNull(10.seconds) { while ("slow 1.0" !in labels(page)) delay(20) }
+            assertTrue("slow 1.0" in labels(page), labels(page).toString())
+        } finally {
             withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
     }

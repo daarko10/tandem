@@ -47,8 +47,9 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
     private var checking: Job? = null
 
     /**
-     * Counts what was asked to fill the status line, a [check] or a "Test", on the EDT: each answer shows only if nothing was asked
-     * after it, so that a slow check never overwrites a later Test's answer, nor a slow Test a later check's.
+     * Counts the [check]s and "Test" runs asked for, on the EDT. A check's answer shows in the status line only if nothing was asked
+     * after it and no Test runs: a Test's answer, which the user asked for, is never overwritten by a check, whether the check was
+     * asked for before the Test (a slow one) or while it runs (Apply). A Test's answer always shows, unless a newer Test replaced it.
      */
     private var statusRequests: Int = 0
 
@@ -135,7 +136,7 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
             showOnEdt {
                 detected.text = found?.path ?: "Not found"
                 detectedWhere.text = found?.where?.description.orEmpty()
-                if (request == statusRequests) status.text = if (runs) "" else NOT_EXECUTABLE_TEXT
+                if (request == statusRequests && test?.isActive != true) status.text = if (runs) "" else NOT_EXECUTABLE_TEXT
             }
         }
     }
@@ -148,14 +149,14 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
         val scope = pageScope ?: return
         val status = status ?: return
         status.text = "Testing…"
-        val request = ++statusRequests
+        statusRequests++
         test?.cancel()
         test = scope.launch {
             val answer = withContext(Dispatchers.IO) {
                 val binary = typed.trim().ifEmpty { null } ?: ClaudeBinary.detect()?.path
                 if (binary == null) "No claude executable found" else ClaudeBinary.version(binary)
             }
-            showOnEdt { if (request == statusRequests) status.text = answer }
+            showOnEdt { status.text = answer }
         }
     }
 }
