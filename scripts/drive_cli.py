@@ -11,6 +11,8 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
                    in plan mode the model sometimes drafts a plan instead of replying: the run then stops, record it again
   fork             one turn and a rename_session, then a second process resumes that session with --fork-session
                    for one more turn; its lines follow the first process's in the output
+  settings         a probe, not a fixture: one turn, then update_settings and apply_flag_settings asking for effort
+                   high, then a second turn; the transcript's assistant lines show the effort each turn ran with
 
 Run it from an empty directory (scripts/record-scenario.sh does this) and redact the output
 with redact_fixture.py before committing. Uses whatever sign-in the local `claude` already has.
@@ -198,8 +200,20 @@ def fork(cli: Cli) -> None:
         cli.lines.extend(forked.lines)
 
 
+def settings(cli: Cli) -> None:
+    # Can effort change on a live session? docs/protocol.md 4.4 records the answer. Each request's control_response is in
+    # the output, error or not. Without a `source`, update_settings writes no settings file; apply_flag_settings only
+    # touches the running session.
+    cli.user("Reply with the single word: one")
+    cli.until(is_result)
+    cli.call({"subtype": "update_settings", "settings": {"effortLevel": "high"}})
+    cli.call({"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}})
+    cli.user("Reply with the single word: two")
+    cli.until(is_result)
+
+
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
-             "permission-mode": permission_mode, "fork": fork}
+             "permission-mode": permission_mode, "fork": fork, "settings": settings}
 
 
 def main(scenario: str, out: str, extra: list[str]) -> None:

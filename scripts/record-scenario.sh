@@ -8,7 +8,7 @@
 # Like record-fixture.sh, this uses the local `claude` sign-in and never commits the raw transcripts.
 set -euo pipefail
 
-scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | fork}"
+scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | fork | settings}"
 out_dir="${2:-src/test/resources/fixtures}"
 shift $(( $# < 2 ? $# : 2 ))
 

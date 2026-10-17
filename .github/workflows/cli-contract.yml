@@ -1,5 +1,6 @@
-# Nightly: parse the stream-json output of the newest `claude` CLI with Tandem's protocol decoder.
-# Catches protocol drift before users do. Needs an ANTHROPIC_API_KEY repository secret (a low-budget key).
+# Nightly: parse the stream-json output of the newest `claude` CLI with Tandem's protocol decoder, and load the
+# transcripts it writes to disk with Tandem's transcript reader. Catches protocol drift before users do.
+# Needs an ANTHROPIC_API_KEY repository secret (a low-budget key).
 name: CLI contract
 
 on:
@@ -29,5 +30,19 @@ jobs:
         run: |
           mkdir -p build/contract
           ./scripts/record-fixture.sh contract-hello "Reply with the single word: pong" build/contract
-      - name: Decode with Tandem's protocol layer
+      # Tandem names every new session with --session-id and drops inherited session variables (docs/protocol.md 1.2).
+      # This checks that the id passed with --session-id names the session and its transcript while one is inherited.
+      # Measured with 2.1.301: CLAUDE_CODE_SESSION_ID on its own is ignored; the CLI used an inherited id only inside a
+      # hosted session, whose other variables a runner does not have.
+      - name: Check --session-id with an inherited CLAUDE_CODE_SESSION_ID
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_SESSION_ID: bogus
+        run: |
+          session_id=11111111-1111-4111-8111-111111111111
+          work="$(mktemp -d)"
+          (cd "$work" && claude -p "Reply with the single word: pong" --output-format stream-json --verbose --safe-mode --session-id "$session_id" < /dev/null > raw.ndjson)
+          python3 -I -c 'import json, sys; init = next(m for m in map(json.loads, filter(str.strip, open(sys.argv[1]))) if m.get("type") == "system" and m.get("subtype") == "init"); assert init["session_id"] == sys.argv[2], "system/init session_id is " + repr(init["session_id"])' "$work/raw.ndjson" "$session_id"
+          python3 -I scripts/copy_transcript.py "$work" "$work/raw.ndjson" build/contract/transcripts session-id
+      - name: Decode with Tandem's protocol layer and load the transcripts with its reader
         run: ./gradlew test --tests '*ContractTest*' -Dtandem.contractDir=build/contract

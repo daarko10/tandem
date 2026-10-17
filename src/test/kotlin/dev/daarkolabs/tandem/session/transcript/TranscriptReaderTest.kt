@@ -248,6 +248,19 @@ class TranscriptReaderTest {
     }
 
     @Test
+    fun `a recorded interrupt loads as the Stopped notice and not as a prompt`() = runBlocking<Unit> {
+        // CLI 2.1.301 cut the reply off after its first text delta and wrote its marker the way the test above does:
+        // a user line whose content is [{"type":"text","text":"[Request interrupted by user]"}], parented to the reply.
+        val loaded = TranscriptReader.read(Fixtures.transcript("history-interrupt"))
+        assertEquals(
+            listOf("user: Count from 1 to 300, one number per line, nothing else.", "assistant: 1", "INFO: Stopped."),
+            loaded.state.shape(),
+        )
+        assertFalse(loaded.state.busy)
+        assertEquals("Count from 1 to 300, one number per line, nothing else.", loaded.meta.firstPrompt)
+    }
+
+    @Test
     fun `a compact summary is skipped entirely`(@TempDir dir: Path) = runBlocking<Unit> {
         val f = dir.resolve("13131313-1313-4131-8131-131313131313.jsonl")
         f.writeLines(
