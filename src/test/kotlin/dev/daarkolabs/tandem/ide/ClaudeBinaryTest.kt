@@ -108,16 +108,42 @@ class ClaudeBinaryTest {
     private fun script(name: String, body: String): String =
         File(tmp.toFile(), name).apply { writeText("#!/bin/sh\n$body\n"); setExecutable(true) }.path
 
+    /** [names] joined into a `PATH` value, each an absolute path under the temporary directory. */
+    private fun pathOf(vararg names: String): String = names.joinToString(File.pathSeparator) { File(tmp.toFile(), it).path }
+
     @Test
-    fun `the directory of claude goes to the front of PATH unless PATH has it`() {
-        val sep = File.pathSeparator
+    fun `the directory of claude goes to the end of PATH unless PATH has it`() {
+        val claude = File(tmp.toFile(), ".volta/bin/claude").path
+        // At the end: the user's own node, npm and system tools keep winning; launchd's PATH has no node for it to shadow anyway.
         assertEquals(
-            mapOf("PATH" to "/u/.volta/bin$sep/usr/bin${sep}/bin", "HOME" to "/u"),
-            ClaudeBinary.environmentFor("/u/.volta/bin/claude", mapOf("PATH" to "/usr/bin$sep/bin", "HOME" to "/u")),
+            mapOf("PATH" to pathOf("usr/bin", "bin", ".volta/bin"), "HOME" to "/u"),
+            ClaudeBinary.environmentFor(claude, mapOf("PATH" to pathOf("usr/bin", "bin"), "HOME" to "/u"), windows = false),
         )
-        val onPath = mapOf("PATH" to "/usr/bin$sep/u/.volta/bin/")
-        assertEquals(onPath, ClaudeBinary.environmentFor("/u/.volta/bin/claude", onPath))
-        assertEquals(mapOf("PATH" to "/u/.bun/bin"), ClaudeBinary.environmentFor("/u/.bun/bin/claude", emptyMap()))
+        val onPath = mapOf("PATH" to pathOf("usr/bin", ".volta/bin"))
+        assertEquals(onPath, ClaudeBinary.environmentFor(claude, onPath, windows = false))
+    }
+
+    @Test
+    fun `on Windows PATH is compared ignoring case, under whatever name the environment gives it`() {
+        val claude = File(tmp.toFile(), "Programs/claude.exe").path
+        val onPath = mapOf("Path" to File(tmp.toFile(), "PROGRAMS").path)
+        assertEquals(onPath, ClaudeBinary.environmentFor(claude, onPath, windows = true))
+        assertEquals(
+            mapOf("Path" to pathOf("bin", "Programs")),
+            ClaudeBinary.environmentFor(claude, mapOf("Path" to pathOf("bin")), windows = true),
+        )
+    }
+
+    @Test
+    fun `PATH is left alone when there is none, or for a relative claude, or a directory PATH cannot hold`() {
+        val noPath = mapOf("HOME" to "/u")
+        assertEquals(noPath, ClaudeBinary.environmentFor(File(tmp.toFile(), "bin/claude").path, noPath, windows = false))
+        val path = mapOf("PATH" to pathOf("usr/bin"))
+        assertEquals(path, ClaudeBinary.environmentFor("bin${File.separator}claude", path, windows = false))
+        assertEquals(path, ClaudeBinary.environmentFor(".${File.separator}claude", path, windows = false))
+        assertEquals(path, ClaudeBinary.environmentFor("claude", path, windows = false))
+        val split = File(File(tmp.toFile(), "a${File.pathSeparator}b"), "claude").path
+        assertEquals(path, ClaudeBinary.environmentFor(split, path, windows = false))
     }
 
     /**

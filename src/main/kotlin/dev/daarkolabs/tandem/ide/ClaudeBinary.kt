@@ -81,17 +81,23 @@ internal object ClaudeBinary {
     }
 
     /**
-     * The environment to run [binary] in: [environment] with the binary's directory at the front of its `PATH`, unless the `PATH` has
-     * it already. A `claude` found in an install location ([Where.INSTALL_LOCATION]) or saved in the settings may be a script that
-     * npm, Volta or Bun installed, `#!/usr/bin/env node`, with its `node` beside it; with launchd's `PATH` it would exit with 127.
+     * The environment to run [binary] in: [environment] with the binary's directory at the end of its `PATH`, unless the `PATH` has it
+     * already (ignoring case on Windows, [windows]). A `claude` found in an install location ([Where.INSTALL_LOCATION]) or saved in the
+     * settings may be a script that npm, Volta or Bun installed, `#!/usr/bin/env node`, with its `node` beside it; with launchd's
+     * `PATH`, which has no `node`, it would exit with 127. At the end, so that the user's own `node`, `npm` and system tools still win
+     * for everything the CLI runs. Unchanged when there is no `PATH`, for a relative [binary], and for a directory whose name holds the
+     * path separator, which a `PATH` cannot list.
      */
-    fun environmentFor(binary: String, environment: Map<String, String>): Map<String, String> {
-        val dir = File(binary).parent ?: return environment
+    fun environmentFor(binary: String, environment: Map<String, String>, windows: Boolean = SystemInfo.isWindows): Map<String, String> {
+        val file = File(binary)
+        if (!file.isAbsolute) return environment
+        val dir = file.parent ?: return environment
+        if (File.pathSeparator in dir) return environment
         // Windows names it Path; whatever its case, keep the name the environment uses.
-        val name = environment.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
-        val entries = environment[name].orEmpty().split(File.pathSeparator).filter { it.isNotBlank() }
-        if (entries.any { File(it).path == File(dir).path }) return environment
-        return environment + (name to (listOf(dir) + entries).joinToString(File.pathSeparator))
+        val name = environment.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: return environment
+        val entries = environment.getValue(name).split(File.pathSeparator).filter { it.isNotBlank() }
+        if (entries.any { File(it).path.equals(dir, ignoreCase = windows) }) return environment
+        return environment + (name to (entries + dir).joinToString(File.pathSeparator))
     }
 
     /**
