@@ -610,14 +610,14 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 | Goal | How |
 |---|---|
 | New session | `--session-id <uuid>` with an id Tandem generates. The first prompt's `system/init` reports it, and the CLI writes `<uuid>.jsonl` from that prompt on (section 1.1) |
-| Resume | `--resume <id>` once `<id>.jsonl` exists, else `--session-id <id>` again. The CLI loads the transcript itself and does not stream the history to stdout (fixture `fork`: the second process streams only its own turn); Tandem loads it from the transcript (section 11). Without `--model` the session runs the model it last ran with, not the default (below) |
+| Resume | `--resume <id>` once `<id>.jsonl` exists, else `--session-id <id>` again. The CLI loads the transcript itself and does not stream the history to stdout (fixture `fork`: the second process streams only its own turn); Tandem loads it from the transcript (section 11). Without `--model` the session ran the model it was started with (`--model` at the start), not the default (below); a model switched mid-session with `set_model` was not measured |
 | Continue latest in cwd | `--continue` (not used) |
 | Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, and no `system/init` reports it before the fork's first prompt (only undocumented lines do, section 1.1) |
 | Resume at a point | `--resume <id> --resume-session-at <message uuid>` (not used) |
 | Switch model mid-session | `control_request{set_model, model}`; next turn's `system/init.model` must equal it. `--model` on resume also works |
 | Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`) |
 | Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4); Tandem picks effort only when a session is created |
-| Rename | a live process that has reported its first `system/init`: `control_request{rename_session}` (section 4.4); otherwise append a `custom-title` line (section 11.5), and a live process that has not reported it yet also gets `rename_session` with that init |
+| Rename | a live process that has reported its first `system/init`: `control_request{rename_session}` (section 4.4); otherwise append a `custom-title` line (section 11.5) if the transcript exists. A live process that has not reported it yet also gets `rename_session` with that init, and so does the next process of a session renamed without a transcript or while an earlier title still waited for an init; only the last title is sent |
 | Delete | remove `<id>.jsonl` and `<id>/` (section 11.5) |
 | Rewind files | `rewind_files{user_message_id}` (needs `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` at spawn) |
 
@@ -628,7 +628,9 @@ Model on resume, measured with 2.1.301 (one short prompt each, signed in, from a
 with `--model sonnet --session-id <uuid>` ran `claude-sonnet-5-5`; `--resume <uuid>` without `--model` then reported
 `init.model` `claude-sonnet-5-5`, while that run's `initialize` response listed `default` as `claude-opus-5-5`. The
 transcript's `assistant` lines carry `requestedModel` `claude-sonnet-5-5` for both turns. So the CLI restores the
-session's model itself: Tandem passes `--model` on resume only for a model picked in Tandem, a loaded session's
+model a session was started with itself. Not measured: whether a resume restores a model switched mid-session with
+`set_model` rather than the start-time one; the badge corrects itself either way once `init` reports the model.
+Tandem relies only on the measured case: Tandem passes `--model` on resume only for a model picked in Tandem, a loaded session's
 `requestedModel` stays null, and the badge shows the transcript's last model until `init` confirms it.
 
 Resume-id mismatch: the `session_id` of a process's first `system/init` must be the id Tandem started it with
