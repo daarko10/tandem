@@ -710,6 +710,12 @@ terminal show up too. Sources: SDK 0.3.300 (`sdk.mjs` reads and writes the same 
 - A key cut at 200 characters gets `-<hash>` appended, from the CLI's own hash, which Tandem does not reproduce. For such
   a project Tandem lists every folder whose name starts with the 200-character key and keeps the transcripts whose `cwd`
   is the project path (or that name none).
+- On a case-insensitive volume (macOS by default) `~/Code/App` and `~/code/app` are one directory, and the CLI may have
+  keyed or recorded it in other case than the path Tandem resolved. A short key needs nothing for that: the volume finds
+  the folder whatever the case. For a cut key, a folder whose name starts with the key in other case only is taken, and a
+  `cwd` that is another string is kept, when the file system says it is the same directory (`Files.isSameFile`); case is
+  never folded otherwise, so on a case-sensitive volume they stay another project's. Not measured on a Mac yet: which
+  case the CLI records for a working directory entered in other case.
 - One file per session: `<session id>.jsonl`, the id a lower-case UUID. Other files in the folder, such as a subagent's
   `agent-*.jsonl` or temporary files, are not sessions.
 - `<session id>/` beside it holds what else the CLI keeps for the session: a `custom-title.json` after a rename (seen in

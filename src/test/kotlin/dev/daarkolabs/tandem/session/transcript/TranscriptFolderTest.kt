@@ -1,7 +1,9 @@
 package dev.daarkolabs.tandem.session.transcript
 
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createFile
@@ -98,5 +100,55 @@ class TranscriptFolderTest {
         val long = "/" + "d".repeat(300)
         assertEquals(emptyList<Path>(), TranscriptFolder.candidates(tmp.resolve("missing"), long))
         assertEquals(emptyList<Path>(), TranscriptFolder.candidates(tmp.resolve("projects").createFile(), long))
+    }
+
+    @Test
+    fun `a long key takes a folder that differs in case only when the file system says it is the same folder`(@TempDir projects: Path) {
+        // The project as the IDE resolved it, and its folder as the CLI named it from a working directory spelt in other case.
+        val long = "/" + "e".repeat(300)
+        val key = TranscriptFolder.key(long)
+        projects.resolve("${key.uppercase()}-abc").createDirectories()
+        val caseInsensitive = { a: Path, b: Path -> a.toString().equals(b.toString(), ignoreCase = true) }
+        assertEquals(
+            listOf("${key.uppercase()}-abc"),
+            TranscriptFolder.candidates(projects, long, sameFile = caseInsensitive).map { it.fileName.toString() },
+            "on a case-insensitive volume (macOS) it is this project's folder",
+        )
+        assertEquals(
+            emptyList<Path>(),
+            TranscriptFolder.candidates(projects, long, sameFile = { _, _ -> false }),
+            "on a case-sensitive one it is another project's",
+        )
+    }
+
+    @Test
+    fun `here a long key's folder in other case is taken only where the volume ignores case`(@TempDir projects: Path) {
+        val long = "/" + "f".repeat(300)
+        val key = TranscriptFolder.key(long)
+        projects.resolve("${key.uppercase()}-abc").createDirectories()
+        val found = TranscriptFolder.candidates(projects, long).map { it.fileName.toString() }
+        if (ignoresCase(projects)) {
+            assertEquals(listOf("${key.uppercase()}-abc"), found)
+        } else {
+            assertEquals(emptyList(), found)
+        }
+    }
+
+    @Test
+    fun `a long key's folder in other case is found on a case-insensitive volume`(@TempDir projects: Path) {
+        assumeTrue(ignoresCase(projects), "needs a case-insensitive volume, as macOS has by default")
+        val long = "/" + "g".repeat(300)
+        projects.resolve("${TranscriptFolder.key(long).uppercase()}-abc").createDirectories()
+        assertEquals(1, TranscriptFolder.candidates(projects, long).size)
+    }
+
+    /** Whether the volume of [dir] ignores case in names, as macOS's APFS does by default. */
+    private fun ignoresCase(dir: Path): Boolean {
+        val probe = dir.resolve("CaseProbe").createDirectories()
+        return try {
+            Files.exists(dir.resolve("caseprobe"))
+        } finally {
+            Files.delete(probe)
+        }
     }
 }

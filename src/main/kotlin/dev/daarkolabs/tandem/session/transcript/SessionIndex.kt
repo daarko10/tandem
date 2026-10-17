@@ -135,8 +135,9 @@ class SessionIndex(
      *
      * A project path whose folder key reaches the CLI's limit ([TranscriptFolder.MAX_KEY_LENGTH] characters) shares its folders with
      * every other project whose key starts the same (see [TranscriptFolder.candidates]), even when only one such folder exists. There
-     * a session is dropped if its transcript names another working directory than [projectPath]; one that names none stays. With a
-     * shorter key the folder is the project's own and nothing is dropped.
+     * a session is dropped if its transcript names another working directory than [projectPath] (another string that the file system
+     * does not resolve to the same directory); one that names none stays. With a shorter key the folder is the project's own and
+     * nothing is dropped.
      */
     fun list(): List<SessionSummary> {
         val candidates: List<Path> = tryFileSystem(
@@ -155,9 +156,22 @@ class SessionIndex(
             }
         }
         cache.keys.retainAll(seen) // transcripts that are gone
-        val own = if (sharesFolders) found.filter { it.meta.cwd == null || it.meta.cwd == projectPath } else found
+        val own = if (sharesFolders) {
+            val verdicts = HashMap<String, Boolean>() // transcripts of one other project name the same cwd
+            found.filter { entry -> entry.meta.cwd.let { it == null || verdicts.getOrPut(it) { isProjectPath(it) } } }
+        } else {
+            found
+        }
         return own.map { it.summary }.sortedWith(NEWEST_FIRST)
     }
+
+    /**
+     * Whether [cwd], a transcript's working directory, is [projectPath]: the same string, or the same directory as the file system
+     * says, such as a path that differs in case only on a case-insensitive volume (macOS by default). One that cannot be looked up
+     * (it was deleted, say) is not.
+     */
+    private fun isProjectPath(cwd: String): Boolean =
+        cwd == projectPath || tryFileSystem(onFailure = { false }) { Files.isSameFile(Path.of(cwd), Path.of(projectPath)) }
 
     /** Forgets session [id], so that the next [list] reads its transcript again. */
     fun invalidate(id: String) {

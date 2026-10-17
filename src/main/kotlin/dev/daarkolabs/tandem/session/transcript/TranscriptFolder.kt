@@ -42,13 +42,24 @@ object TranscriptFolder {
      * A key shorter than [MAX_KEY_LENGTH] names one folder, returned whether or not it exists yet. A key at the limit
      * may have had a hash appended, so every directory in [projectsDir] whose name starts with it is returned instead,
      * sorted by name (the exact folder included, if present). A missing or unreadable [projectsDir] then gives an empty list.
+     * A folder whose name starts with the key in other case only is taken when the file system says it is the folder the key
+     * names, as on a case-insensitive volume (macOS by default), where the CLI may have spelt the working directory otherwise.
      */
-    fun candidates(projectsDir: Path, projectPath: String): List<Path> {
+    fun candidates(projectsDir: Path, projectPath: String): List<Path> = candidates(projectsDir, projectPath, ::isSameFile)
+
+    /** [candidates], with [sameFile] in place of the file system's verdict on whether two paths name one folder. */
+    internal fun candidates(projectsDir: Path, projectPath: String, sameFile: (Path, Path) -> Boolean): List<Path> {
         val key = key(projectPath)
         if (key.length < MAX_KEY_LENGTH) return listOf(projectsDir.resolve(key))
+        fun isCandidate(folder: Path): Boolean {
+            val name = folder.name
+            if (name.startsWith(key)) return true
+            // The same folder by the key's spelling: on a case-sensitive volume there is none, or another one.
+            return name.startsWith(key, ignoreCase = true) && sameFile(folder, projectsDir.resolve(key + name.substring(key.length)))
+        }
         return try {
             Files.list(projectsDir).use { entries ->
-                entries.filter { it.name.startsWith(key) && it.isDirectory() }.toList().sortedBy { it.name }
+                entries.filter { it.isDirectory() && isCandidate(it) }.toList().sortedBy { it.name }
             }
         } catch (_: IOException) {
             emptyList()
@@ -56,6 +67,14 @@ object TranscriptFolder {
             emptyList()
         }
     }
+
+    /** Whether [a] and [b] are one file, as the file system says; false when either cannot be looked up. */
+    private fun isSameFile(a: Path, b: Path): Boolean =
+        try {
+            Files.isSameFile(a, b)
+        } catch (_: IOException) {
+            false
+        }
 
     private fun Char.isKeyCharacter(): Boolean = this in 'A'..'Z' || this in 'a'..'z' || this in '0'..'9'
 }

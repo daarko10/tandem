@@ -334,6 +334,36 @@ class SessionIndexTest {
     }
 
     @Test
+    fun `with a long project path, a session whose cwd is the project by another name is ours`(@TempDir root: Path) {
+        // A real directory whose key reaches the CLI's limit, and a link to it: the file system says both name one directory, as a
+        // case-insensitive volume (macOS) does for a path that differs in case only.
+        val project = root.resolve("a".repeat(120)).resolve("b".repeat(120)).createDirectories()
+        val link = Files.createSymbolicLink(root.resolve("link"), project)
+        val elsewhere = root.resolve("elsewhere").createDirectories()
+        val folder = root.resolve("folder").createDirectories()
+        write(folder, "$first.jsonl", mtime = 4_000)
+        write(folder, "$second.jsonl", mtime = 3_000)
+        write(folder, "$third.jsonl", mtime = 2_000)
+        val gone = "44444444-4444-4444-8444-444444444444"
+        write(folder, "$gone.jsonl", mtime = 1_000)
+        val cwds = mapOf(first to project.toString(), second to link.toString(), third to elsewhere.toString(), gone to "$root/gone")
+        val meta = { file: Path -> stubMeta(file, cwds.getValue(file.name.removeSuffix(".jsonl"))) }
+        val index = SessionIndex({ listOf(folder) }, project.toString(), meta)
+        // Another existing directory, or one that cannot be looked up, is another project's.
+        assertEquals(listOf(first, second), index.list().map { it.id })
+    }
+
+    @Test
+    fun `with a long project path on a case-insensitive volume, a cwd that differs in case only is ours`(@TempDir root: Path) {
+        val project = root.resolve("Code".repeat(30)).resolve("App".repeat(40)).createDirectories()
+        assumeTrue(Files.exists(Path.of(project.toString().lowercase())), "needs a case-insensitive volume, as macOS has by default")
+        val folder = root.resolve("folder").createDirectories()
+        write(folder, "$first.jsonl", mtime = 1_000)
+        val index = SessionIndex({ listOf(folder) }, project.toString(), meta = { stubMeta(it, cwd = project.toString().lowercase()) })
+        assertEquals(listOf(first), index.list().map { it.id })
+    }
+
+    @Test
     fun `with a shorter key nothing is dropped, however many folders there are`(@TempDir root: Path) {
         val a = root.resolve("a").createDirectories()
         val b = root.resolve("b").createDirectories()

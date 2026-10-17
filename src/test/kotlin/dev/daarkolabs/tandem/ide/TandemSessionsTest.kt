@@ -190,6 +190,25 @@ class TandemSessionsTest {
     }
 
     @Test
+    fun `a project opened through a link finds the transcripts the CLI keys on the physical directory`() = timeoutRunBlocking(30.seconds) {
+        // As /tmp/x is /private/tmp/x on macOS: the CLI runs in the link, and keys its folder on the directory the link resolves to.
+        val real = tempDir.get().resolve("linked-real").createDirectories()
+        val link = Files.createSymbolicLink(tempDir.get().resolve("linked-link"), real)
+        seed(real, SEEDED)
+        val restored = openProjectAsync(link).useProjectAsync { project ->
+            TandemWorkspaceState.getInstance(project).state.apply {
+                openSessionIds = mutableListOf(SEEDED)
+                selectedSessionId = SEEDED
+            }
+            val sessions = TandemSessions.get(project)
+            sessions.ensureStarted()
+            sessions.manager.selected.first { it == SEEDED }
+            sessions.manager.sessions.value.map { it.id }
+        }
+        assertEquals(listOf(SEEDED), restored)
+    }
+
+    @Test
     fun `a remembered session whose transcript is gone is left out`() = timeoutRunBlocking(30.seconds) {
         val dir = tempDir.get().resolve("gone").createDirectories()
         seed(dir, SEEDED)
