@@ -45,7 +45,7 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
 
 /**
  * The top of the chat: the button that shows or hides the session sidebar, a "+" that starts a new session (the same popup as the
- * sidebar's "New session"), the selected session's title and its status line.
+ * sidebar's "New session", offering [newSession]), the selected session's title and its status line.
  *
  * A double-click on the title, or [renaming] (the sidebar menu's Rename), swaps the title for a text field that starts with all of
  * it selected: Enter renames the session to what it holds ([onRename]) unless that is blank, Escape leaves it as it was. Either
@@ -58,7 +58,7 @@ internal fun SessionHeader(
     handle: SessionHandle?,
     sidebarShown: Boolean,
     onToggleSidebar: () -> Unit,
-    newSessionDefaults: () -> NewSessionOptions,
+    newSession: NewSessionChoices,
     onCreateSession: (NewSessionOptions) -> Unit,
     renaming: Boolean,
     onRenamingChange: (Boolean) -> Unit,
@@ -77,7 +77,7 @@ internal fun SessionHeader(
                     Icon(AllIconsKeys.General.LayoutEditorPreview, contentDescription = description)
                 }
             }
-            NewSessionLauncher(newSessionDefaults, onCreateSession) { open ->
+            NewSessionLauncher(newSession, onCreateSession) { open ->
                 WithTooltip("New session") {
                     IconButton(onClick = open) { Icon(AllIconsKeys.General.Add, contentDescription = "New session") }
                 }

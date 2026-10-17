@@ -40,7 +40,7 @@ import com.intellij.openapi.util.text.StringUtil
 import dev.daarkolabs.tandem.TandemProjectScope
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
-import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionId
@@ -90,6 +90,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val manager = sessions.manager
     val actions = remember(project) { SessionActions(project, manager, TandemProjectScope.get(project).scope) }
     val workspace = remember(project) { TandemWorkspaceState.getInstance(project) }
+    val newSession = remember(workspace, manager) { NewSessionChoices(workspace) { manager.knownModels() } }
     val open by manager.sessions.collectAsState()
     val selectedId by manager.selected.collectAsState()
     val selected = open.firstOrNull { it.id == selectedId }
@@ -130,7 +131,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                 manager,
                 selectedId,
                 actions,
-                newSessionDefaults = { workspace.newSessionOptions() },
+                newSession = newSession,
                 onRename = { id ->
                     actions.show(id)
                     renaming = id
@@ -159,7 +160,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                             drawerOpen = !drawerOpen
                         }
                     },
-                    newSessionDefaults = { workspace.newSessionOptions() },
+                    newSession = newSession,
                     onCreateSession = { options -> sessionShown(actions.create(options)) },
                     renaming = selected != null && renaming == selected.id,
                     onRenamingChange = { editing -> renaming = if (editing) selected?.id else null },
@@ -179,6 +180,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                 project,
                                 selected,
                                 manager,
+                                workspace,
                                 rows,
                                 focusPrompt = promptFocusFor == selected.id,
                                 onPromptFocused = { promptFocusFor = null },
@@ -210,9 +212,15 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     }
 }
 
-/** What a new session starts with: the last choices for the project. */
-private fun TandemWorkspaceState.newSessionOptions(): NewSessionOptions =
-    NewSessionOptions(state.lastModel, state.lastEffort, PermissionMode.fromWire(state.lastPermissionMode))
+/**
+ * The models the CLI offers, as the selected session's process listed them in its `initialize` response, else another open
+ * session's: every session runs the same `claude`. None until a process has answered.
+ */
+private fun SessionManager.knownModels(): List<ModelOption> {
+    val open = sessions.value
+    val first = open.firstOrNull { it.id == selected.value }
+    return (listOfNotNull(first) + open).firstNotNullOfOrNull { handle -> handle.state.value.models.ifEmpty { null } }.orEmpty()
+}
 
 /** The presenters of the [open] sessions, which stop when their session closes or the tool window's content goes away. */
 @Composable

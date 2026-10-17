@@ -44,8 +44,9 @@ import kotlin.time.Duration.Companion.seconds
 
 /**
  * Installs the built plugin ZIP into a real IDE (the release we compile against) and uses the Tandem tool window
- * the way a person does: create sessions, type a prompt, press Send, answer permission prompts, press Stop, switch,
- * rename and delete sessions in the sidebar, with the mouse and the keyboard (the IDE's own context menu key included).
+ * the way a person does: create sessions, type a prompt, press Send, answer permission prompts, press Stop, pick a
+ * permission mode and a model below the prompt, switch, rename and delete sessions in the sidebar, with the mouse and
+ * the keyboard (the IDE's own context menu key included).
  * The tool window keeps the width the IDE gives it, too narrow to dock the sidebar, so the sidebar opens over the chat.
  * The `claude` it talks to is `src/test/resources/fake-claude.py`, which replays a recorded fixture in step with what
  * the UI sends and logs every frame it receives, so each test checks both the rendered UI and the protocol traffic.
@@ -106,6 +107,28 @@ class ToolWindowIdeTest {
         }
         val requests = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject["subtype"]!!.jsonPrimitive.content }
         assertEquals(listOf("initialize", "interrupt"), requests)
+    }
+
+    @Test
+    fun `the pickers send set_permission_mode and set_model`() {
+        val sent = runChat("pickers", fixtures = listOf("permission-mode")) {
+            newSession()
+            typePrompt("Reply with the single word: one")
+            waitForText("one")
+            ui.x("//div[@class='ComposeNode' and @visible_text='Default']").click(Point(10, 10))
+            menuItem("Plan").click(Point(10, 10))
+            typePrompt("Reply with the single word: two")
+            waitForText("two")
+            waitFor("status shows plan", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and contains(@visible_text, 'mode: plan')]").present()
+            }
+            ui.x("//div[@class='ComposeNode' and @visible_text='Default model']").click(Point(10, 10))
+            menuItem(modelName(1)).click(Point(10, 10))
+        }
+        val requests = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject }
+        val setPermissionMode = requests.first { it["subtype"]!!.jsonPrimitive.content == "set_permission_mode" }
+        assertEquals("plan", setPermissionMode["mode"]!!.jsonPrimitive.content)
+        assertTrue(requests.any { it["subtype"]!!.jsonPrimitive.content == "set_model" })
     }
 
     @Test
@@ -244,6 +267,18 @@ class ToolWindowIdeTest {
         assertEquals(1, spawns.count { "--resume" in it }, spawns.toString())
         assertTrue(sent.any { it["request"]?.jsonObject?.get("subtype")?.jsonPrimitive?.content == "rename_session" })
         assertFalse(configDir.walk().any { it.fileName.toString() == "$seeded.jsonl" }, "the seeded transcript is deleted")
+    }
+
+    /**
+     * The display name of model [index] in the CLI's `initialize` response recorded in `fixtures/permission-mode.ndjson`, next to the
+     * fake CLI: the first control_response that lists models.
+     */
+    private fun modelName(index: Int): String {
+        val fixture = Path.of(fakeClaude).resolveSibling("fixtures/permission-mode.ndjson")
+        val models = fixture.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+            .filter { it.type == "control_response" }
+            .firstNotNullOf { it["response"]?.jsonObject?.get("response")?.jsonObject?.get("models")?.jsonArray }
+        return models[index].jsonObject["displayName"]!!.jsonPrimitive.content
     }
 
     /** A new project folder with one file. */

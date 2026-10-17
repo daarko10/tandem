@@ -75,7 +75,6 @@ import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.ui.scale.JBUIScale
 import com.intellij.util.ui.JBUI
-import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
@@ -125,7 +124,7 @@ private val NOT_OPEN: StateFlow<SessionStatus> = MutableStateFlow(SessionStatus.
 private val NO_ATTENTION: StateFlow<Boolean> = MutableStateFlow(false)
 
 /**
- * The session list: a "New session" button, which opens [NewSessionPopup] with [newSessionDefaults], a filter by title, and a row
+ * The session list: a "New session" button, which opens [NewSessionPopup] offering [newSession], a filter by title, and a row
  * for every session of the project, newest first ([SessionManager.summaries]), whether it is open or only has a transcript. A row
  * shows the title (plain text), how long ago the session was last written, a status dot and, when the session asks for the user (it
  * waits for a permission or finished a turn while another one was selected), a "needs you" badge.
@@ -147,7 +146,7 @@ internal fun SessionSidebar(
     manager: SessionManager,
     selectedId: SessionId?,
     actions: SessionActions,
-    newSessionDefaults: () -> NewSessionOptions,
+    newSession: NewSessionChoices,
     onRename: (SessionId) -> Unit,
     modifier: Modifier = Modifier,
     onPicked: () -> Unit = {},
@@ -199,7 +198,7 @@ internal fun SessionSidebar(
     }
 
     Column(modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        NewSessionLauncher(newSessionDefaults, onCreate = { options -> onSessionShown(actions.create(options)) }) { open ->
+        NewSessionLauncher(newSession, onCreate = { options -> onSessionShown(actions.create(options)) }) { open ->
             DefaultButton(onClick = open, modifier = Modifier.fillMaxWidth()) { Text("New session") }
         }
         TextField(
