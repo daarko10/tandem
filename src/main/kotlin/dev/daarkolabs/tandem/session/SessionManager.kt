@@ -99,6 +99,8 @@ class SessionManager internal constructor(
     private val readTranscript: suspend (Path) -> LoadedTranscript,
     /** Appends a rename's `custom-title` line; tests pass one that fails, for the same reason. */
     private val appendTitle: (transcript: Path, id: SessionId, title: String, time: Instant) -> Unit = TranscriptFiles::appendCustomTitle,
+    /** Removes a transcript and its directory; tests pass one that waits, to delete while something else happens. */
+    private val deleteFiles: (transcript: Path) -> Unit = TranscriptFiles::delete,
 ) {
     /** Reads histories with [TranscriptReader]. */
     constructor(
@@ -318,11 +320,14 @@ class SessionManager internal constructor(
      * files are gone; throws the [IOException] of a file that cannot be removed.
      */
     suspend fun delete(id: SessionId) {
-        try {
-            closeThen(id) { withContext(Dispatchers.IO) { index.transcript(id)?.let(TranscriptFiles::delete) } }
-        } finally {
-            index.invalidate(id)
-            refreshIndex()
+        closeThen(id) {
+            try {
+                withContext(Dispatchers.IO) { index.transcript(id)?.let(deleteFiles) }
+            } finally {
+                // Still marked closing: an open waiting for the delete comes after the list no longer has the session.
+                index.invalidate(id)
+                refreshIndex()
+            }
         }
         LOG.info("session $id deleted")
     }
@@ -345,26 +350,31 @@ class SessionManager internal constructor(
 
     /**
      * Takes session [id] out of [sessions] (selecting a neighbour if it was selected), stops it and runs [then], all while it is
-     * marked closing, so that [open] waits for both. If it is closing already, waits for that, then runs [then]; if it is not
-     * open, just runs [then]. True if it was open. Goes on to the end when the caller is cancelled: otherwise [open] could start
-     * a second process while the first is still stopping.
+     * marked closing, so that [open] waits for both. If it is closing already, waits for that first; if it is not open, it is
+     * marked closing all the same while [then] runs. True if it was open. Goes on to the end when the caller is cancelled:
+     * otherwise [open] could start a second process while the first is still stopping.
      */
     private suspend fun closeThen(id: SessionId, then: suspend () -> Unit): Boolean = withContext(NonCancellable) {
-        val removed = synchronized(lock) { removeLocked(id) }
-        if (removed == null) {
-            synchronized(lock) { closing[id] }?.join() // closing already
-            then()
-            return@withContext false
-        }
-        val (handle, done) = removed
+        val (handle, done) = markClosing(id)
         try {
-            handle.close()
+            handle?.close()
             then()
         } finally {
             synchronized(lock) { closing.remove(id) }
             done.complete()
         }
-        true
+        handle != null
+    }
+
+    /**
+     * Marks session [id] closing, once a close already under way has ended: the open handle, now out of [sessions] ([removeLocked]),
+     * or null if it is not open, and the job to complete when done.
+     */
+    private suspend fun markClosing(id: SessionId): Pair<SessionHandle?, CompletableJob> {
+        while (true) {
+            val pending = synchronized(lock) { closing[id] ?: return removeLocked(id) ?: (null to Job().also { closing[id] = it }) }
+            pending.join()
+        }
     }
 
     /**

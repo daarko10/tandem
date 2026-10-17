@@ -102,6 +102,7 @@ class SessionManagerTest {
         clock: () -> Long = System::currentTimeMillis,
         read: suspend (Path) -> LoadedTranscript = TranscriptReader::read,
         appendTitle: (Path, String, String, Instant) -> Unit = TranscriptFiles::appendCustomTitle,
+        deleteFiles: (Path) -> Unit = TranscriptFiles::delete,
         maxLive: Int = 4,
         /** More variables for every process, such as `TANDEM_FAKE_SESSION_ID`. */
         environment: Map<String, String> = emptyMap(),
@@ -124,6 +125,7 @@ class SessionManagerTest {
             clock = clock,
             readTranscript = read,
             appendTitle = appendTitle,
+            deleteFiles = deleteFiles,
         )
     }
 
@@ -989,5 +991,29 @@ class SessionManagerTest {
         assertEquals(other, manager.selected.value, "the deleted session was selected, so the next one is")
         assertEquals(emptyList(), ownFakeProcesses(), "delete returns once the process is gone")
         manager.summaries.first { summaries -> summaries.map { it.id } == listOf(other) }
+    }
+
+    @Test
+    fun `open waits for the delete of a session that has no row`() = test {
+        seed(seeded)
+        val deleting = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val manager = manager(
+            deleteFiles = { file ->
+                deleting.countDown()
+                release.await(10, TimeUnit.SECONDS)
+                TranscriptFiles.delete(file)
+            },
+        )
+        val delete = launch(Dispatchers.Default) { manager.delete(seeded) }
+        runInterruptible(Dispatchers.IO) { deleting.await(10, TimeUnit.SECONDS) }
+        val opening = launch(Dispatchers.Default) { manager.open(seeded, spawn = false) }
+        delay(300)
+        assertFalse(opening.isCompleted, "open waits until the files are gone")
+        release.countDown()
+        delete.join()
+        opening.join()
+        val opened = manager.sessions.value.single()
+        assertTrue(opened.state.value.entries.isEmpty(), "the deleted history is not loaded")
     }
 }
