@@ -20,6 +20,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
+import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -58,6 +59,24 @@ class TandemSettingsTest {
             it.writeText("#!/bin/sh\n$body\n")
             it.toFile().setExecutable(true)
         }.toString()
+
+    /** A `PATH` that finds [executable] first, then the system's tools, for a check that detects by the login shell's `PATH`. */
+    private fun pathFinding(executable: String): String = File(executable).parent + File.pathSeparator + System.getenv("PATH")
+
+    /**
+     * Runs [block] with detection by the login shell's `PATH` alone: without the `tandem.claudePath` hook, which would win, so that
+     * a check that answers shows it by the executable it detects.
+     */
+    private suspend fun <T> withoutHook(block: suspend () -> T): T {
+        val hook = System.getProperty("tandem.claudePath")
+        System.clearProperty("tandem.claudePath")
+        try {
+            return block()
+        } finally {
+            if (hook != null) System.setProperty("tandem.claudePath", hook)
+            ShellEnvironment.reset()
+        }
+    }
 
     /** The text of every label on [page], read on the EDT. */
     private suspend fun labels(page: JComponent): List<String> =
@@ -192,23 +211,30 @@ class TandemSettingsTest {
         // It answers only once the test lets it, so that Apply's check certainly comes while the Test runs.
         val gate = tempDir.get().resolve("gate")
         val slow = script("slow", "while [ ! -e '$gate' ]; do sleep 0.05; done; echo 'slow 1.0'")
-        val configurable = TandemSettingsConfigurable()
-        try {
-            val page = withContext(Dispatchers.EDT) { configurable.createComponent().also { configurable.reset() } }
-            val fake = System.getProperty("tandem.claudePath")
-            while (fake !in labels(page)) delay(20) // the page's own check is done
-            withContext(Dispatchers.EDT) {
-                assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = slow
-                UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
-                configurable.apply() // saves the slow path, which runs: its check finds nothing to warn about
+        // The page's own check detects the first; Apply's, the second: which one shows says that Apply's check has answered.
+        val before = script("detected-before-apply", "exit 0")
+        val after = script("detected-after-apply", "exit 0")
+        val applied = AtomicBoolean(false)
+        withoutHook {
+            ShellEnvironment.source = { System.getenv() + ("PATH" to pathFinding(if (applied.get()) after else before)) }
+            val configurable = TandemSettingsConfigurable()
+            try {
+                val page = withContext(Dispatchers.EDT) { configurable.createComponent().also { configurable.reset() } }
+                while (before !in labels(page)) delay(20) // the page's own check is done
+                withContext(Dispatchers.EDT) {
+                    assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = slow
+                    UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+                    applied.set(true)
+                    configurable.apply() // saves the slow path, which runs: its check finds nothing to warn about
+                }
+                while (after !in labels(page)) delay(20) // Apply's check has answered, while the Test runs
+                assertTrue("Testing…" in labels(page), labels(page).toString())
+                gate.createFile()
+                withTimeoutOrNull(10.seconds) { while ("slow 1.0" !in labels(page)) delay(20) }
+                assertTrue("slow 1.0" in labels(page), labels(page).toString())
+            } finally {
+                withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
             }
-            delay(500) // time for Apply's check to answer while the Test runs
-            assertTrue("Testing…" in labels(page), labels(page).toString())
-            gate.createFile()
-            withTimeoutOrNull(10.seconds) { while ("slow 1.0" !in labels(page)) delay(20) }
-            assertTrue("slow 1.0" in labels(page), labels(page).toString())
-        } finally {
-            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
     }
 
@@ -216,41 +242,42 @@ class TandemSettingsTest {
     fun `a check asked during a Test that answers after it does not overwrite the Test's answer`() = timeoutRunBlocking(30.seconds) {
         val gate = tempDir.get().resolve("gate-during")
         val slow = script("slow-during", "while [ ! -e '$gate' ]; do sleep 0.05; done; echo 'slow 2.0'")
-        val configurable = TandemSettingsConfigurable()
-        // From the third look at the login shell's environment on (Apply's check, after the page's own and the Test's), it waits.
+        val before = script("detected-before-check", "exit 0")
+        val after = script("detected-by-check", "exit 0")
+        // The third look at the login shell's environment, Apply's check after the page's own and the Test's, waits, and detects
+        // the second executable: when it shows, the check has answered.
         val calls = AtomicInteger()
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val returned = CountDownLatch(1)
-        ShellEnvironment.source = {
-            if (calls.incrementAndGet() == 3) {
-                entered.countDown()
-                release.await()
-                returned.countDown()
+        withoutHook {
+            ShellEnvironment.source = {
+                val call = calls.incrementAndGet()
+                if (call == 3) {
+                    entered.countDown()
+                    release.await()
+                }
+                System.getenv() + ("PATH" to pathFinding(if (call >= 3) after else before))
             }
-            System.getenv()
-        }
-        try {
-            val page = withContext(Dispatchers.EDT) { configurable.createComponent().also { configurable.reset() } }
-            val fake = System.getProperty("tandem.claudePath")
-            while (fake !in labels(page)) delay(20) // the page's own check is done
-            withContext(Dispatchers.EDT) {
-                assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = slow
-                UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+            val configurable = TandemSettingsConfigurable()
+            try {
+                val page = withContext(Dispatchers.EDT) { configurable.createComponent().also { configurable.reset() } }
+                while (before !in labels(page)) delay(20) // the page's own check is done
+                withContext(Dispatchers.EDT) {
+                    assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = slow
+                    UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+                }
+                while (calls.get() < 2) delay(20) // the Test runs
+                withContext(Dispatchers.EDT) { configurable.apply() } // its check is asked for during the Test
+                while (entered.count > 0) delay(20)
+                gate.createFile()
+                while ("slow 2.0" !in labels(page)) delay(20) // the Test has answered
+                release.countDown() // and only now does the check
+                while (after !in labels(page)) delay(20) // the check has answered
+                assertTrue("slow 2.0" in labels(page), labels(page).toString())
+            } finally {
+                release.countDown()
+                withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
             }
-            while (calls.get() < 2) delay(20) // the Test runs
-            withContext(Dispatchers.EDT) { configurable.apply() } // its check is asked for during the Test
-            while (entered.count > 0) delay(20)
-            gate.createFile()
-            while ("slow 2.0" !in labels(page)) delay(20) // the Test has answered
-            release.countDown() // and only now does the check
-            while (returned.count > 0) delay(20)
-            delay(500) // time for the check to show what it found
-            assertTrue("slow 2.0" in labels(page), labels(page).toString())
-        } finally {
-            release.countDown()
-            ShellEnvironment.reset()
-            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
     }
 
