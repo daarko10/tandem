@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -33,32 +34,37 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionHandle
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Icon
 import org.jetbrains.jewel.ui.component.IconButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
+import org.jetbrains.jewel.ui.component.Tooltip
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
 
 /**
- * The top of the chat: the button that shows or hides the session sidebar, the selected session's title and its status line.
+ * The top of the chat: the button that shows or hides the session sidebar, a "+" that starts a new session (the same popup as the
+ * sidebar's "New session"), the selected session's title and its status line.
  *
  * A double-click on the title, or [renaming] (the sidebar menu's Rename), swaps the title for a text field that starts with all of
  * it selected: Enter renames the session to what it holds ([onRename]) unless that is blank, Escape leaves it as it was. Either
- * way [onRenamingChange] says when the field opens and closes. With no [handle] (nothing selected) the header holds the button only.
+ * way [onRenamingChange] says when the field opens and closes. With no [handle] (nothing selected) the header holds the buttons only.
  *
- * The toggle is disabled while the window is too narrow to show the sidebar ([canShowSidebar] false).
+ * [toggleFocus] lets the tool window give the toggle the focus back when the sidebar it opened over the chat closes.
  */
 @Composable
 internal fun SessionHeader(
     handle: SessionHandle?,
     sidebarShown: Boolean,
-    canShowSidebar: Boolean,
     onToggleSidebar: () -> Unit,
+    newSessionDefaults: () -> NewSessionOptions,
+    onCreateSession: (NewSessionOptions) -> Unit,
     renaming: Boolean,
     onRenamingChange: (Boolean) -> Unit,
     onRename: (title: String) -> Unit,
+    toggleFocus: FocusRequester,
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -66,9 +72,10 @@ internal fun SessionHeader(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onToggleSidebar, enabled = canShowSidebar) {
+            IconButton(onClick = onToggleSidebar, modifier = Modifier.focusRequester(toggleFocus)) {
                 Icon(AllIconsKeys.General.LayoutEditorPreview, contentDescription = if (sidebarShown) "Hide sessions" else "Show sessions")
             }
+            NewSessionLauncher(newSessionDefaults, onCreateSession) { open -> NewSessionPlus(open) }
             if (handle != null) {
                 val title by handle.title.collectAsState()
                 if (renaming) {
@@ -90,6 +97,16 @@ internal fun SessionHeader(
             val state by handle.state.collectAsState()
             StatusLine(state)
         }
+    }
+}
+
+/** The header's "+", which opens the new session popup ([open]), with the tooltip "New session". */
+// Jewel's Tooltip takes Compose's TooltipPlacement, which is still an experimental foundation API.
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NewSessionPlus(open: () -> Unit) {
+    Tooltip(tooltip = { Text("New session") }) {
+        IconButton(onClick = open) { Icon(AllIconsKeys.General.Add, contentDescription = "New session") }
     }
 }
 

@@ -1,10 +1,12 @@
 package dev.daarkolabs.tandem.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -30,13 +33,23 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -51,6 +64,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.round
 import androidx.compose.ui.window.PopupPositionProvider
+import com.intellij.openapi.util.SystemInfo
 import com.intellij.util.ui.JBUI
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionHandle
@@ -72,6 +86,7 @@ import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.PopupMenu
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
+import org.jetbrains.jewel.ui.focusOutline
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
 import org.jetbrains.jewel.ui.theme.simpleListItemStyle
 import java.time.Instant
@@ -79,6 +94,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
+import java.awt.event.KeyEvent as AwtKeyEvent
 
 /** How often the rows' relative times are worked out again. */
 private const val CLOCK_TICK_MILLIS: Long = 60_000
@@ -89,17 +105,23 @@ private val NOT_OPEN: StateFlow<SessionStatus> = MutableStateFlow(SessionStatus.
 /** The attention of a session that is not open: none. */
 private val NO_ATTENTION: StateFlow<Boolean> = MutableStateFlow(false)
 
+/** The keyboard's context menu key, which Compose has no constant for on the desktop. */
+private val CONTEXT_MENU_KEY: Key = Key(AwtKeyEvent.VK_CONTEXT_MENU)
+
 /**
- * The session list beside the chat: a "New session" button, which opens [NewSessionPopup] with [newSessionDefaults], a filter by
- * title, and a row for every session of the project, newest first ([SessionManager.summaries]), whether it is open or only has a
- * transcript. A row shows the title (plain text), how long ago the session was last written, a status dot and, when the session
- * asks for the user (it waits for a permission or finished a turn while another one was selected), a "needs you" badge.
+ * The session list: a "New session" button, which opens [NewSessionPopup] with [newSessionDefaults], a filter by title, and a row
+ * for every session of the project, newest first ([SessionManager.summaries]), whether it is open or only has a transcript. A row
+ * shows the title (plain text), how long ago the session was last written, a status dot and, when the session asks for the user (it
+ * waits for a permission or finished a turn while another one was selected), a "needs you" badge.
  *
- * A left click shows the session ([SessionActions.show]); a right click opens its menu: Rename (the header's title field, through
- * [onRename]), Fork (only once the session has a transcript), Delete… (asks in the row itself), Copy resume command and, for an
- * open session, Close, which the "x" on a hovered row does too.
+ * A left click, or Enter or Space on a focused row, shows the session ([SessionActions.show]). A right click, Shift+F10 or the context
+ * menu key opens its menu: Rename (the header's title field, through [onRename]), Fork (only once the session has a transcript),
+ * Delete… (asks in the row itself; the Delete key does too), Copy resume command and, for an open session, Close, which the "x" on
+ * a hovered row does too. [onPicked] follows whatever leaves the user looking at a session: a click or Enter on a row, Rename, Fork
+ * and a session created here. Rows, like the filter and the buttons, are reachable with Tab.
  *
- * The list is read again from disk when the sidebar appears, so sessions started elsewhere show up.
+ * The list is read again from disk when the sidebar appears, so sessions started elsewhere show up. With [focusFilter] the filter
+ * takes the focus when the sidebar appears, as it does when the sidebar opens over the chat.
  */
 @Composable
 internal fun SessionSidebar(
@@ -109,11 +131,14 @@ internal fun SessionSidebar(
     newSessionDefaults: () -> NewSessionOptions,
     onRename: (SessionId) -> Unit,
     modifier: Modifier = Modifier,
+    onPicked: () -> Unit = {},
+    focusFilter: Boolean = false,
 ) {
     val summaries by manager.summaries.collectAsState()
     val open by manager.sessions.collectAsState()
     val handles = remember(open) { open.associateBy { it.id } }
     val filter = rememberTextFieldState()
+    val filterFocus = remember { FocusRequester() }
     val query = filter.text.toString()
     val rows = remember(summaries, query) { summaries.filteredBy(query) }
     val now by produceState(System.currentTimeMillis()) {
@@ -123,10 +148,17 @@ internal fun SessionSidebar(
         }
     }
     LaunchedEffect(manager) { manager.refreshIndex() }
+    LaunchedEffect(focusFilter) { if (focusFilter) filterFocus.requestFocus() }
 
     Column(modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        NewSessionButton(newSessionDefaults, actions)
-        TextField(filter, Modifier.fillMaxWidth(), placeholder = { Text("Filter") })
+        NewSessionLauncher(
+            newSessionDefaults,
+            onCreate = { options ->
+                actions.create(options)
+                onPicked()
+            },
+        ) { open -> DefaultButton(onClick = open, modifier = Modifier.fillMaxWidth()) { Text("New session") } }
+        TextField(filter, Modifier.fillMaxWidth().focusRequester(filterFocus), placeholder = { Text("Filter") })
         LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
             items(rows, key = { it.id }) { summary ->
                 SessionRow(
@@ -136,6 +168,7 @@ internal fun SessionSidebar(
                     now = now,
                     actions = actions,
                     onRename = { onRename(summary.id) },
+                    onPicked = onPicked,
                 )
             }
         }
@@ -165,31 +198,12 @@ internal fun relativeTime(then: Long, now: Long, zone: ZoneId = ZoneId.systemDef
     }
 }
 
-/** "New session", and below it, once pressed, the popup that creates one with [defaults] and selects it. */
-@Composable
-private fun NewSessionButton(defaults: () -> NewSessionOptions, actions: SessionActions) {
-    var popupShown by remember { mutableStateOf(false) }
-    Box {
-        DefaultButton(onClick = { popupShown = true }, modifier = Modifier.fillMaxWidth()) { Text("New session") }
-        if (popupShown) {
-            NewSessionPopup(
-                defaults(),
-                onCreate = { options ->
-                    popupShown = false
-                    actions.create(options)
-                },
-                onDismiss = { popupShown = false },
-            )
-        }
-    }
-}
-
 /** A row: what it shows normally, while it asks whether to delete the session, and while the session is being deleted. */
-private enum class RowMode { NORMAL, CONFIRMING_DELETE, DELETING }
+internal enum class RowMode { NORMAL, CONFIRMING_DELETE, DELETING }
 
 /**
  * One session's row (see [SessionSidebar]), a tab to assistive technology and the UI tests: everything in it reads as one, but for
- * its buttons. [handle] is the session's while it is open.
+ * its buttons. [handle] is the session's while it is open. The row takes the focus with Tab and then shows a focus ring.
  */
 @Composable
 private fun SessionRow(
@@ -199,17 +213,27 @@ private fun SessionRow(
     now: Long,
     actions: SessionActions,
     onRename: () -> Unit,
+    onPicked: () -> Unit,
 ) {
     val status by (handle?.status ?: NOT_OPEN).collectAsState()
     val attention by (handle?.attention ?: NO_ATTENTION).collectAsState()
     var mode by remember { mutableStateOf(RowMode.NORMAL) }
     var menuAt by remember { mutableStateOf<Offset?>(null) }
+    var rowHeight by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val interactions = remember { MutableInteractionSource() }
     val hovered by interactions.collectIsHoveredAsState()
-    val currentShow by rememberUpdatedState { actions.show(summary.id) }
+    val focused by interactions.collectIsFocusedAsState()
+    val show = {
+        actions.show(summary.id)
+        onPicked()
+    }
+    val currentShow by rememberUpdatedState(show)
     val currentMode by rememberUpdatedState(mode)
+    // Where a menu opened from the keyboard goes: under the start of the row.
+    val keyboardMenuX = with(LocalDensity.current) { 16.dp.toPx() }
     val listStyle = JewelTheme.simpleListItemStyle
+    val shape = RoundedCornerShape(listStyle.metrics.selectionBackgroundCornerSize)
     val background = when {
         isSelected -> listStyle.colors.backgroundSelected
         hovered -> listStyle.colors.backgroundActive
@@ -219,7 +243,9 @@ private fun SessionRow(
     Box {
         Row(
             Modifier.fillMaxWidth()
-                .background(background, RoundedCornerShape(listStyle.metrics.selectionBackgroundCornerSize))
+                .onSizeChanged { rowHeight = it.height }
+                .background(background, shape)
+                .focusOutline(focused, shape)
                 .hoverable(interactions)
                 .pointerInput(Unit) {
                     detectRowClicks(
@@ -227,6 +253,18 @@ private fun SessionRow(
                         onMenu = { position -> if (currentMode == RowMode.NORMAL) menuAt = position },
                     )
                 }
+                // Before focusable(), so that it gets the keys while the row has the focus.
+                .onKeyEvent { event ->
+                    when (rowKey(event.key, event.type, event.isShiftPressed, mode)) {
+                        RowKey.SHOW -> show()
+                        RowKey.MENU -> menuAt = Offset(keyboardMenuX, rowHeight.toFloat())
+                        RowKey.DELETE -> mode = RowMode.CONFIRMING_DELETE
+                        RowKey.CANCEL_DELETE -> mode = RowMode.NORMAL
+                        null -> return@onKeyEvent false
+                    }
+                    true
+                }
+                .focusable(interactionSource = interactions)
                 .semantics(mergeDescendants = true) {
                     role = Role.Tab
                     selected = isSelected
@@ -281,13 +319,41 @@ private fun SessionRow(
                         enabled = enabled,
                     ) { Text(text) }
                 }
-                item("Rename", action = onRename)
-                item("Fork", enabled = summary.file != null) { actions.fork(summary.id) } // nothing to fork before the first prompt
+                item("Rename") {
+                    onRename()
+                    onPicked()
+                }
+                item("Fork", enabled = summary.file != null) { // nothing to fork before the first prompt
+                    actions.fork(summary.id)
+                    onPicked()
+                }
                 item("Delete…") { mode = RowMode.CONFIRMING_DELETE }
                 item("Copy resume command") { actions.copyResumeCommand(summary.id) }
                 if (handle != null) item("Close") { actions.close(summary.id) }
             }
         }
+    }
+}
+
+/** What a key does to a focused row. */
+internal enum class RowKey { SHOW, MENU, DELETE, CANCEL_DELETE }
+
+/**
+ * What a key going down ([type]) asks of a focused row in [mode]: Enter or Space shows its session, Shift+F10 or the context menu
+ * key opens its menu, Delete (also Backspace on macOS) asks whether to delete it, and Escape takes the question back. Null for
+ * anything else, so that the key goes on to the row's parents.
+ */
+internal fun rowKey(key: Key, type: KeyEventType, shift: Boolean, mode: RowMode): RowKey? {
+    if (type != KeyEventType.KeyDown) return null
+    return when (mode) {
+        RowMode.NORMAL -> when {
+            key == Key.Enter || key == Key.NumPadEnter || key == Key.Spacebar -> RowKey.SHOW
+            key == CONTEXT_MENU_KEY || (key == Key.F10 && shift) -> RowKey.MENU
+            key == Key.Delete || (SystemInfo.isMac && key == Key.Backspace) -> RowKey.DELETE
+            else -> null
+        }
+        RowMode.CONFIRMING_DELETE -> if (key == Key.Escape) RowKey.CANCEL_DELETE else null
+        RowMode.DELETING -> null
     }
 }
 

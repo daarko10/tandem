@@ -1,11 +1,14 @@
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -18,6 +21,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.intellij.notification.NotificationGroupManager
@@ -43,6 +54,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
+import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.Orientation
 import org.jetbrains.jewel.ui.component.Divider
 import org.jetbrains.jewel.ui.component.Text
@@ -61,8 +73,13 @@ private const val NOTIFICATION_GROUP: String = "Tandem"
 
 /**
  * The Tandem tool window: the session sidebar ([SessionSidebar]) beside the selected session's header ([SessionHeader]) and chat
- * ([ChatPane]), or, with nothing selected, a hint. The sidebar shows unless the user collapsed it (remembered in
- * [TandemWorkspaceState.State.sidebarCollapsed]) or the window is narrower than 500 dp.
+ * ([ChatPane]), or, with nothing selected, a hint.
+ *
+ * The sidebar is docked beside the chat unless the user collapsed it (remembered in
+ * [TandemWorkspaceState.State.sidebarCollapsed]) or the window is narrower than 500 dp. In a window that wide the header's toggle
+ * docks and collapses it. In a narrower one the toggle opens the same sidebar over the chat instead, with the filter focused: it
+ * closes when the user picks or creates a session, presses the toggle again, presses Escape or clicks the dimmed chat. The
+ * header's "+" starts a session at any width.
  *
  * Every open session keeps a [ChatRowsPresenter] from the first time it is shown until it is closed, so that switching back to it
  * does not parse its transcript again.
@@ -77,50 +94,98 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val selected = open.firstOrNull { it.id == selectedId }
     val presenters = rememberChatRowsPresenters(open)
     var collapsed by remember { mutableStateOf(workspace.state.sidebarCollapsed) }
+    // The sidebar over the chat, in a window too narrow to dock it.
+    var drawerOpen by remember { mutableStateOf(false) }
+    val toggleFocus = remember { FocusRequester() }
     // The session whose title is being edited in the header; it ends as soon as another session is selected.
     var renaming by remember { mutableStateOf<SessionId?>(null) }
     LaunchedEffect(selectedId) { if (renaming != selectedId) renaming = null }
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    BoxWithConstraints(
+        Modifier.fillMaxSize().onKeyEvent { event ->
+            // Escape that nothing inside took (the title field takes its own) closes the sidebar over the chat.
+            if (!drawerOpen || event.type != KeyEventType.KeyDown || event.key != Key.Escape) return@onKeyEvent false
+            drawerOpen = false
+            toggleFocus.requestFocus()
+            true
+        },
+    ) {
         val wide = maxWidth >= MIN_WIDTH_FOR_SIDEBAR
-        val sidebarShown = wide && !collapsed
+        val docked = wide && !collapsed
+        val drawerShown = drawerOpen && !wide
+        LaunchedEffect(wide) { if (wide) drawerOpen = false }
+        val sidebar: @Composable (Modifier, Boolean) -> Unit = { modifier, overChat ->
+            SessionSidebar(
+                manager,
+                selectedId,
+                actions,
+                newSessionDefaults = { workspace.newSessionOptions() },
+                onRename = { id ->
+                    actions.show(id)
+                    renaming = id
+                },
+                modifier = modifier,
+                onPicked = { drawerOpen = false },
+                focusFilter = overChat,
+            )
+        }
         Row(Modifier.fillMaxSize()) {
-            if (sidebarShown) {
-                SessionSidebar(
-                    manager,
-                    selectedId,
-                    actions,
-                    newSessionDefaults = { workspace.newSessionOptions() },
-                    onRename = { id ->
-                        actions.show(id)
-                        renaming = id
-                    },
-                    modifier = Modifier.width(SIDEBAR_WIDTH).fillMaxHeight(),
-                )
+            if (docked) {
+                sidebar(Modifier.width(SIDEBAR_WIDTH).fillMaxHeight(), false)
                 Divider(Orientation.Vertical, Modifier.fillMaxHeight())
             }
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 SessionHeader(
                     selected,
-                    sidebarShown = sidebarShown,
-                    canShowSidebar = wide,
+                    sidebarShown = docked || drawerShown,
                     onToggleSidebar = {
-                        collapsed = !collapsed
-                        workspace.state.sidebarCollapsed = collapsed
+                        if (wide) {
+                            collapsed = !collapsed
+                            workspace.state.sidebarCollapsed = collapsed
+                        } else {
+                            drawerOpen = !drawerOpen
+                        }
+                    },
+                    newSessionDefaults = { workspace.newSessionOptions() },
+                    onCreateSession = { options ->
+                        actions.create(options)
+                        drawerOpen = false
                     },
                     renaming = selected != null && renaming == selected.id,
                     onRenamingChange = { editing -> renaming = if (editing) selected?.id else null },
                     onRename = { title -> selected?.let { actions.rename(it.id, title) } },
+                    toggleFocus = toggleFocus,
                 )
-                if (selected == null) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("Create a session or pick one from the sidebar.")
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    if (selected == null) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("Create a session with + or open the sidebar.")
+                        }
+                    } else {
+                        // Composed afresh for each session, so that what is typed in one session's prompt box never shows in another's.
+                        key(selected.id) {
+                            val rows = remember(selected) { presenters.rows(selected) }
+                            ChatPane(project, selected, manager, rows)
+                        }
                     }
-                } else {
-                    // Composed afresh for each session, so that what is typed in one session's prompt box never shows in another's.
-                    key(selected.id) {
-                        val rows = remember(selected) { presenters.rows(selected) }
-                        ChatPane(project, selected, manager, rows)
+                    if (drawerShown) {
+                        Row(Modifier.matchParentSize()) {
+                            Row(
+                                Modifier.fillMaxHeight()
+                                    .background(JewelTheme.globalColors.panelBackground)
+                                    // Takes the pointer where the sidebar has nothing to click, so that the chat under it gets none.
+                                    .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } },
+                            ) {
+                                sidebar(Modifier.width(SIDEBAR_WIDTH).fillMaxHeight(), true)
+                                Divider(Orientation.Vertical, Modifier.fillMaxHeight())
+                            }
+                            // The rest of the chat, dimmed: a click on it closes the sidebar.
+                            val scrim = Color.Black.copy(alpha = if (JewelTheme.isDark) 0.4f else 0.2f)
+                            Box(
+                                Modifier.weight(1f).fillMaxHeight().background(scrim)
+                                    .pointerInput(Unit) { detectTapGestures { drawerOpen = false } },
+                            )
+                        }
                     }
                 }
             }

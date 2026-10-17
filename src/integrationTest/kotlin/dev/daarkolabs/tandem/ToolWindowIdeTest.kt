@@ -1,11 +1,8 @@
 package dev.daarkolabs.tandem
 
 import com.intellij.driver.client.Driver
-import com.intellij.driver.client.Remote
-import com.intellij.driver.model.OnDispatcher
 import com.intellij.driver.sdk.closeAndDisableAllBalloonNotifications
 import com.intellij.driver.sdk.getOpenProjects
-import com.intellij.driver.sdk.getToolWindow
 import com.intellij.driver.sdk.isPluginLoaded
 import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.ui.components.UiComponent
@@ -26,6 +23,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
 import java.awt.Point
+import java.awt.event.KeyEvent
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
@@ -43,9 +41,10 @@ import kotlin.time.Duration.Companion.seconds
 /**
  * Installs the built plugin ZIP into a real IDE (the release we compile against) and uses the Tandem tool window
  * the way a person does: create sessions, type a prompt, press Send, answer permission prompts, press Stop, switch,
- * rename and delete sessions in the sidebar. The `claude` it talks to is `src/test/resources/fake-claude.py`, which
- * replays a recorded fixture in step with what the UI sends and logs every frame it receives, so each test checks
- * both the rendered UI and the protocol traffic.
+ * rename and delete sessions in the sidebar, with the mouse and the keyboard. The tool window keeps the width the IDE
+ * gives it, too narrow to dock the sidebar, so the sidebar opens over the chat. The `claude` it talks to is
+ * `src/test/resources/fake-claude.py`, which replays a recorded fixture in step with what the UI sends and logs every
+ * frame it receives, so each test checks both the rendered UI and the protocol traffic.
  *
  * Unlike the platform tests, the plugin is loaded by its own plugin classloader here, as it is for users.
  * Run with `xvfb-run ./gradlew integrationTest` when there is no display.
@@ -120,7 +119,7 @@ class ToolWindowIdeTest {
             "sidebar",
             fixtures = listOf("plain-reply", "permission", "plain-reply"),
             configDir = configDir,
-            delayMs = 8_000,
+            delayMs = 12_000,
             project = project,
         ) {
             newSession()
@@ -129,14 +128,19 @@ class ToolWindowIdeTest {
 
             newSession()
             typePrompt("Create the fixture file")
-            // Switch away before the permission request, which the fake CLI sends 8 s after the prompt.
+            // Switch away before the permission request, which the fake CLI sends 12 s after the prompt. The window is too
+            // narrow to dock the sidebar, so the toggle opens it over the chat, and picking a row closes it.
+            openSidebar()
             row("Reply with the single word: pong").click(Point(10, 10))
+            waitFor("sidebar closed after picking a row", 30.seconds) { !row("Reply with the single word: pong").present() }
+            openSidebar()
             waitFor("badge on the background row", 1.minutes) { row("needs you").present() }
             row("Create the fixture file").click(Point(10, 10))
             waitForText("Allow Bash?")
             clickButton("Allow once")
             waitForText("done.")
-            waitFor("badge cleared", 30.seconds) { !row("needs you").present() }
+            openSidebar()
+            waitFor("badge cleared", 30.seconds) { row("Create the fixture file").present() && !row("needs you").present() }
 
             row("Create the fixture file").rightClick(Point(10, 10))
             menuItem("Rename").click(Point(10, 10))
@@ -144,16 +148,33 @@ class ToolWindowIdeTest {
                 typeText("Alpha", 20)
                 enter()
             }
+            openSidebar()
             waitFor("row renamed", 30.seconds) { row("Alpha").present() }
+            ui.keyboard { escape() }
+            waitFor("Escape closes the sidebar", 30.seconds) { !row("Alpha").present() }
 
-            // The seeded session's history comes from its transcript; opening it resumes it.
-            row("Seeded").click(Point(10, 10))
+            // From the keyboard: the sidebar opens with the filter focused, Tab moves to the one row left, Delete asks to
+            // delete it and Escape takes that back, Enter picks it. The seeded session's history comes from its transcript;
+            // opening it resumes it.
+            openSidebar()
+            waitFor("filter focused", 30.seconds) { ui.x("$EDITABLE[@focused='true' and @editabletext='']").present() }
+            ui.keyboard { typeText("Seeded", 20) }
+            waitFor("rows filtered", 30.seconds) { row("Seeded").present() && !row("Alpha").present() }
+            ui.keyboard { tab() }
+            waitFor("row focused", 30.seconds) { focusedRow("Seeded").present() }
+            ui.keyboard { key(KeyEvent.VK_DELETE) }
+            waitFor("Delete asks", 30.seconds) { button("Delete").present() }
+            ui.keyboard { escape() }
+            waitFor("Escape takes it back", 30.seconds) { !button("Delete").present() && focusedRow("Seeded").present() }
+            ui.keyboard { enter() }
+            waitFor("sidebar closed after Enter", 30.seconds) { !row("Seeded").present() }
             waitForText("pong")
 
+            openSidebar()
             row("Seeded").rightClick(Point(10, 10))
             menuItem("Delete…").click(Point(10, 10))
             clickButton("Delete")
-            waitFor("seeded row gone", 30.seconds) { !row("Seeded").present() }
+            waitFor("seeded row gone", 30.seconds) { !row("Seeded").present() && row("Alpha").present() }
         }
 
         val spawns = sent.filter { it.type == "__spawn__" }.map { spawn -> spawn["argv"]!!.jsonArray.map { it.jsonPrimitive.content } }
@@ -209,9 +230,7 @@ class ToolWindowIdeTest {
             // IDE balloons (e.g. about JVM options) can cover the prompt box and swallow clicks.
             closeAndDisableAllBalloonNotifications()
             openToolWindow("Tandem")
-            // The sidebar shows in a tool window at least 500 px wide; the IDE opens this one narrower.
-            withContext(OnDispatcher.EDT) { cast(getToolWindow("Tandem"), ToolWindowEx::class).stretchWidth(400) }
-            waitFor("sidebar shown", 2.minutes) { button("New session").present() }
+            waitFor("tool window shown", 2.minutes) { newSessionButton().present() }
             script()
             // Kept as a test artifact for people to look at.
             takeScreenshot(name)
@@ -237,12 +256,28 @@ class ToolWindowIdeTest {
     private fun Driver.row(title: String): UiComponent =
         ui.x("//div[@class='ComposeNode' and @role='Tab' and contains(@text, '$title')]")
 
+    /** The sidebar row that has the keyboard focus, if its text contains [title]. */
+    private fun Driver.focusedRow(title: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @role='Tab' and @focused='true' and contains(@text, '$title')]")
+
     private fun Driver.menuItem(text: String): UiComponent = ui.x("//div[@class='ComposeNode' and @visible_text='$text']")
 
-    /** Creates a session from the sidebar with the New session popup's defaults; it is selected. */
+    /** An icon button, found by what it says to assistive technology. */
+    private fun Driver.iconButton(description: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @role='Button' and @contentdescription='$description']")
+
+    /** The header's "+". */
+    private fun Driver.newSessionButton(): UiComponent = iconButton("New session")
+
+    /** Creates a session with the header's "+" and the popup's defaults; it is selected. */
     private fun Driver.newSession() {
-        clickButton("New session")
+        newSessionButton().click(Point(10, 10))
         clickButton("Create")
+    }
+
+    /** Opens the sidebar over the chat with the header's toggle. */
+    private fun Driver.openSidebar() {
+        iconButton("Show sessions").click(Point(10, 10))
     }
 
     private fun Driver.waitForText(text: String) {
@@ -266,13 +301,12 @@ class ToolWindowIdeTest {
     private val JsonObject.type: String? get() = this["type"]?.jsonPrimitive?.content
 
     private companion object {
-        /** The prompt box: the last editable text, since the sidebar's filter box comes first. */
-        const val PROMPT_BOX = "(//div[@class='ComposeNode' and @editabletext])[last()]"
-    }
-}
+        const val EDITABLE = "//div[@class='ComposeNode' and @editabletext]"
 
-/** The IDE's own tool window class, for the call the SDK's [com.intellij.driver.sdk.ToolWindow] does not offer. */
-@Remote("com.intellij.openapi.wm.ex.ToolWindowEx")
-internal interface ToolWindowEx {
-    fun stretchWidth(value: Int)
+        /**
+         * The prompt box: the last editable text, since a docked sidebar's filter box comes first. A sidebar open over the chat
+         * comes after it, so the tests type prompts only while it is closed.
+         */
+        const val PROMPT_BOX = "($EDITABLE)[last()]"
+    }
 }
