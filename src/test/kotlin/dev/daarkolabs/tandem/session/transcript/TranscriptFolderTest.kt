@@ -7,6 +7,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createFile
+import kotlin.io.path.createSymbolicLinkPointingTo
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -52,6 +53,43 @@ class TranscriptFolderTest {
     fun `a blank CLAUDE_CONFIG_DIR is ignored`() {
         assertEquals(Path.of("/h/.claude"), TranscriptFolder.configDir(mapOf("CLAUDE_CONFIG_DIR" to ""), Path.of("/h")))
         assertEquals(Path.of("/h/.claude"), TranscriptFolder.configDir(mapOf("CLAUDE_CONFIG_DIR" to "  "), Path.of("/h")))
+    }
+
+    @Test
+    fun `a CLAUDE_CONFIG_DIR that is no valid path falls back to the home folder`() {
+        assertEquals(Path.of("/h/.claude"), TranscriptFolder.configDir(mapOf("CLAUDE_CONFIG_DIR" to "/cfg\u0000x"), Path.of("/h")))
+    }
+
+    @Test
+    fun `an empty key has no candidates, rather than the projects folder itself`(@TempDir projects: Path) {
+        assertEquals(emptyList<Path>(), TranscriptFolder.candidates(projects, ""))
+    }
+
+    @Test
+    fun `a 199-character key is still one exact folder`(@TempDir projects: Path) {
+        val path = "/" + "h".repeat(198)
+        val key = TranscriptFolder.key(path)
+        assertEquals(199, key.length)
+        projects.resolve("$key-other").createDirectories() // would be a candidate if the key were cut
+        assertEquals(listOf(projects.resolve(key)), TranscriptFolder.candidates(projects, path))
+    }
+
+    @Test
+    fun `a long key with no folder of its own has no candidates`(@TempDir projects: Path) {
+        projects.resolve("-home-u-app").createDirectories()
+        projects.resolve("-" + "i".repeat(150)).createDirectories() // a prefix of the key, not the other way round
+        assertEquals(emptyList<Path>(), TranscriptFolder.candidates(projects, "/" + "i".repeat(300)))
+    }
+
+    @Test
+    fun `a long key takes a linked folder as the folder it links to`(@TempDir root: Path) {
+        val projects = root.resolve("projects").createDirectories()
+        val long = "/" + "j".repeat(300)
+        val key = TranscriptFolder.key(long)
+        val target = root.resolve("elsewhere").createDirectories()
+        projects.resolve("$key-abc").createSymbolicLinkPointingTo(target)
+        projects.resolve("$key-dangling").createSymbolicLinkPointingTo(root.resolve("missing"))
+        assertEquals(listOf(projects.resolve("$key-abc")), TranscriptFolder.candidates(projects, long))
     }
 
     @Test
