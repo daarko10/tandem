@@ -29,12 +29,14 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CountDownLatch
 import kotlin.io.path.appendText
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createDirectory
 import kotlin.io.path.deleteExisting
 import kotlin.io.path.name
 import kotlin.io.path.writeText
+import kotlin.concurrent.thread
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
@@ -229,6 +231,51 @@ class SessionIndexTest {
         index.invalidate("not-a-session") // unknown ids are ignored
         index.list()
         assertEquals(listOf("$first.jsonl"), reads.drop(2))
+    }
+
+    @Test
+    fun `an invalidate while a listing reads that transcript still counts for the next listing`(@TempDir dir: Path) {
+        write(dir, "$first.jsonl", mtime = 1_000)
+        val reading = CountDownLatch(1)
+        val invalidated = CountDownLatch(1)
+        val reads = AtomicInteger()
+        val index = SessionIndex({ listOf(dir) }, "/p", meta = {
+            if (reads.incrementAndGet() == 1) {
+                reading.countDown()
+                invalidated.await(10, TimeUnit.SECONDS)
+            }
+            stubMeta(it)
+        })
+        val listing = thread { index.list() }
+        assertTrue(reading.await(10, TimeUnit.SECONDS))
+        index.invalidate(first) // as a rename does once it wrote the title: what the listing in flight read is out of date
+        invalidated.countDown()
+        listing.join(10_000)
+        index.list()
+        assertEquals(2, reads.get(), "the listing after the invalidate reads the transcript again")
+    }
+
+    @Test
+    fun `a transcript that cannot be read is tried again only once it changed`(@TempDir dir: Path) {
+        val file = write(dir, "$first.jsonl", mtime = 1_000)
+        write(dir, "$second.jsonl", mtime = 2_000)
+        val reads = AtomicInteger()
+        val index = SessionIndex({ listOf(dir) }, "/p", meta = {
+            if (it.name.startsWith("1")) {
+                reads.incrementAndGet()
+                throw IOException("unreadable")
+            }
+            stubMeta(it)
+        })
+        assertEquals(listOf(second), index.list().map { it.id })
+        assertEquals(listOf(second), index.list().map { it.id })
+        assertEquals(1, reads.get(), "not read, nor logged, again while its size and time are the same")
+        Files.setLastModifiedTime(file, FileTime.fromMillis(3_000))
+        index.list()
+        assertEquals(2, reads.get(), "read again once it changed")
+        index.invalidate(first)
+        index.list()
+        assertEquals(3, reads.get(), "and after invalidate")
     }
 
     @Test

@@ -30,6 +30,7 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.name
 
 private val LOG = logger<SessionIndex>()
@@ -96,12 +97,13 @@ data class SessionSummary(
  * The sessions of one project: every `<session id>.jsonl` in the CLI's transcript [folders] (see [TranscriptFolder.candidates]).
  * Other files in them, such as a subagent's `agent-*.jsonl`, are no sessions and are skipped.
  *
- * A transcript's [TranscriptMeta] takes two passes over the whole file, so a file is read again only when its size or modification
+ * A transcript's [TranscriptMeta] takes a pass over the whole file, so a file is read again only when its size or modification
  * time changed, or after [invalidate]. The CLI only appends to a transcript, so one that only grew is not read in full again: the
  * lines appended since are scanned for a new title ([TranscriptReader.withAppendedTitles]), and the rest of what was read stays.
  * It is read in full when it shrank, when it was read before it had a prompt, or when the part read before did not end a line.
  * When the file system fails on a folder or a transcript (an I/O error, a refused access), that one is left out of the listing and
- * a warning goes to the log; [list] does not throw for it. [list] and [invalidate] may be called from several threads; [list]
+ * a warning goes to the log; [list] does not throw for it. A transcript that cannot be read is tried again only once its size or
+ * modification time changed, or after [invalidate]. [list] and [invalidate] may be called from several threads; [list]
  * blocks on file I/O, so call it off the EDT.
  *
  * The project's path is read on first use, by [list], and never by the constructor: a caller that has to ask the file system for it
@@ -124,6 +126,14 @@ class SessionIndex(
 
     private val cache = ConcurrentHashMap<Path, Entry>()
 
+    /** The size and modification time a transcript had when it could not be read: it is not tried again until they change. */
+    private data class Stamp(val size: Long, val modified: FileTime)
+
+    private val unreadable = ConcurrentHashMap<Path, Stamp>()
+
+    /** Counts [invalidate]s, so that a listing that read a transcript meanwhile does not cache what it read ([entryOf]). */
+    private val generation = AtomicLong()
+
     /** The project's path, read from the constructor's function on first use. */
     private val projectPath: String by lazy(projectPath)
 
@@ -137,8 +147,9 @@ class SessionIndex(
      * A project path whose folder key reaches the CLI's limit ([TranscriptFolder.MAX_KEY_LENGTH] characters) shares its folders with
      * every other project whose key starts the same (see [TranscriptFolder.candidates]), even when only one such folder exists. There
      * a session is dropped if its transcript names another working directory than [projectPath] (another string that the file system
-     * does not resolve to the same directory); one that names none stays. With a shorter key the folder is the project's own and
-     * nothing is dropped.
+     * does not resolve to the same directory); one that names none stays. With a shorter key nothing is dropped: the folder is the
+     * one the CLI keeps for this project, and for any other path that gives the same key (every character outside `A–Z a–z 0–9`
+     * becomes `-`, so `/a/b-c` and `/a/b/c` share one).
      */
     fun list(): List<SessionSummary> {
         val candidates: List<Path> = tryFileSystem(
@@ -148,15 +159,18 @@ class SessionIndex(
             },
         ) { folders() }
         val seen = HashSet<Path>()
+        val listed = HashSet<Path>()
         val found = ArrayList<Entry>()
         for (folder in candidates) {
             for (file in transcriptsIn(folder)) {
+                listed.add(file) // `add`, not `+=`: a Path is an Iterable<Path>, so `+=` would add its name elements instead
                 val entry = entryOf(file) ?: continue
-                seen.add(file) // `add`, not `+=`: a Path is an Iterable<Path>, so `+=` would add its name elements instead
+                seen.add(file)
                 found.add(entry)
             }
         }
         cache.keys.retainAll(seen) // transcripts that are gone
+        unreadable.keys.retainAll(listed)
         val own = if (sharesFolders) {
             val verdicts = HashMap<String, Boolean>() // transcripts of one other project name the same cwd
             found.filter { entry -> entry.meta.cwd.let { it == null || verdicts.getOrPut(it) { isProjectPath(it) } } }
@@ -174,9 +188,12 @@ class SessionIndex(
     private fun isProjectPath(cwd: String): Boolean =
         cwd == projectPath || tryFileSystem(onFailure = { false }) { Files.isSameFile(Path.of(cwd), Path.of(projectPath)) }
 
-    /** Forgets session [id], so that the next [list] reads its transcript again. */
+    /** Forgets session [id], so that the next [list] reads its transcript again, even one a [list] in flight is reading now. */
     fun invalidate(id: String) {
+        generation.incrementAndGet()
         cache.values.removeIf { it.summary.id == id }
+        val file = id + TRANSCRIPT_SUFFIX
+        unreadable.keys.removeIf { it.name == file }
     }
 
     /**
@@ -227,10 +244,12 @@ class SessionIndex(
 
     /**
      * What is known about [file]: from the cache if it has not changed, else read afresh, from where it was read before if it only
-     * grew. Null if it is no longer a readable file.
+     * grew. Null if it is no longer a readable file. A transcript that cannot be read is logged once and not read again until its
+     * size or modification time changes, or [invalidate] asks for it.
      */
-    private fun entryOf(file: Path): Entry? =
-        tryFileSystem(
+    private fun entryOf(file: Path): Entry? {
+        val known = generation.get()
+        return tryFileSystem(
             onFailure = { e ->
                 LOG.warn("transcript ${file.name} not listed (${e.javaClass.simpleName})")
                 null
@@ -238,25 +257,37 @@ class SessionIndex(
         ) {
             try {
                 val attributes = Files.readAttributes(file, BasicFileAttributes::class.java)
-                val size = attributes.size()
-                val modified = attributes.lastModifiedTime()
+                val stamp = Stamp(attributes.size(), attributes.lastModifiedTime())
                 val cached = cache[file]
                 when {
                     !attributes.isRegularFile -> null
-                    cached != null && cached.size == size && cached.modified == modified -> cached
+                    cached != null && cached.size == stamp.size && cached.modified == stamp.modified -> cached
+                    unreadable[file] == stamp -> null
                     else -> {
                         // Size and time are taken before the read: if the CLI appends meanwhile, the next listing sees a change.
-                        val transcript = cached?.let { grown(file, it, size) } ?: meta(file)
+                        val transcript = tryFileSystem(
+                            onFailure = { e ->
+                                LOG.warn("transcript ${file.name} not listed (${e.javaClass.simpleName}); tried again once it changes")
+                                unreadable[file] = stamp
+                                return null
+                            },
+                        ) { cached?.let { grown(file, it, stamp.size) } ?: meta(file) }
+                        unreadable.remove(file)
                         val summary = SessionSummary(
-                            file.name.removeSuffix(TRANSCRIPT_SUFFIX), transcript.title, modified.toMillis(), transcript.firstPrompt, file,
+                            file.name.removeSuffix(TRANSCRIPT_SUFFIX), transcript.title, stamp.modified.toMillis(), transcript.firstPrompt, file,
                         )
-                        Entry(size, modified, transcript, summary).also { cache[file] = it }
+                        Entry(stamp.size, stamp.modified, transcript, summary).also { entry ->
+                            cache[file] = entry
+                            // An invalidate since this read began: what was read may be out of date, so the next listing reads again.
+                            if (generation.get() != known) cache.remove(file, entry)
+                        }
                     }
                 }
             } catch (_: NoSuchFileException) {
                 null // deleted since the folder was listed
             }
         }
+    }
 
     /**
      * [cached]'s meta with the titles of the lines appended to [file] since, now that it is [size] bytes long; null when only a full
