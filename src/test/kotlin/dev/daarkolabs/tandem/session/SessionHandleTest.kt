@@ -1,10 +1,14 @@
 package dev.daarkolabs.tandem.session
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.DelicateCoroutinesApi
 import org.junit.jupiter.api.Test
 import java.util.concurrent.Executor
 import kotlin.test.assertEquals
@@ -33,6 +37,26 @@ class SessionHandleTest {
             runQueued()
             assertEquals("Create the fixture file", handle.title.value)
         } finally {
+            scope.cancel()
+            runQueued()
+        }
+    }
+
+    @OptIn(DelicateCoroutinesApi::class)
+    @Test
+    fun `whoever sees the new title sees the chat it comes from`() {
+        val id = "33333333-3333-4333-8333-333333333333"
+        val handle = SessionHandle(id, scope, ChatState(), MutableStateFlow(emptyList()), createdAt = 0)
+        runQueued()
+        // Unconfined: the collector runs as the title is set, as a reader on another thread can, and reads the chat right then.
+        val seen = ArrayList<Pair<String, String?>>()
+        val following = GlobalScope.launch(Dispatchers.Unconfined) { handle.title.collect { seen += it to handle.state.value.firstPrompt() } }
+        try {
+            handle.pick(live = {}, stopped = SessionEvent.UserSent("u1", "Write a haiku"))
+            // The session list pairs the title with the chat's first prompt: it must never see the one without the other.
+            assertEquals(listOf(id to null, "Write a haiku" to "Write a haiku"), seen)
+        } finally {
+            following.cancel()
             scope.cancel()
             runQueued()
         }

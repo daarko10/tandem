@@ -437,15 +437,18 @@ class SessionHandle internal constructor(
         mirror = null
     }
 
-    /** The chat, and whether a process is [attached], as one step: see [snapshot]. The [title] follows a new first prompt first. */
+    /**
+     * The chat, and whether a process is [attached], as one step: see [snapshot]. The [title] follows a new first prompt between
+     * the two: after the chat, so that whoever sees the title sees its chat, and ahead of the [status] that comes from it.
+     */
     private fun publishLocked(chat: ChatState, attached: Boolean) {
+        mutableState.value = chat
         val user = chat.firstUser()
         if (user != firstUser) {
             firstUser = user
             promptTitle = user?.asTitle()
             updateTitleLocked()
         }
-        mutableState.value = chat
         snapshot.value = Snapshot(chat, attached)
     }
 }
