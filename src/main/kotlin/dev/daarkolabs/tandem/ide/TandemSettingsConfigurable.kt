@@ -70,11 +70,14 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
                 path = textFieldWithBrowseButton(FileChooserDescriptorFactory.singleFile().withTitle("Select Claude Executable"))
                     .align(AlignX.FILL)
                     .resizableColumn()
-                    // Trimmed both ways, so that a path pasted with spaces around it is not still "modified" once applied.
+                    // Trimmed, as stored, so that a path pasted with spaces around it is not still "modified" once applied.
                     .bind(
                         { it.text.trim() },
                         { field, text -> field.text = text },
-                        MutableProperty({ settings.state.claudePath.orEmpty() }, { settings.state.claudePath = it.ifEmpty { null } }),
+                        MutableProperty(
+                            { settings.state.claudePath.orEmpty() },
+                            { settings.state.claudePath = TandemSettings.normalisedPath(it) },
+                        ),
                     )
                     .component
                 button("Test") { runTest(path.text) }

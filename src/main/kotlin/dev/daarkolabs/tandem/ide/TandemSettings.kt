@@ -17,11 +17,20 @@ import com.intellij.openapi.components.service
 class TandemSettings : SimplePersistentStateComponent<TandemSettings.State>(TandemSettings.State()) {
     /** What is stored. */
     class State : BaseState() {
-        /** The `claude` to run. Null or blank: [ClaudeBinary.find] looks on `PATH` and in the usual install locations. */
+        /**
+         * The `claude` to run, trimmed: [loadState] and the settings page store it so ([normalisedPath]). Null: [ClaudeBinary.find]
+         * looks on `PATH` and in the usual install locations.
+         */
         var claudePath: String? by string()
 
         /** At most this many sessions run a process at once. Read it with [maxLiveSessions], which keeps it in range. */
         var maxLiveSessions: Int by property(4)
+    }
+
+    /** Takes [state] with its path [normalisedPath], whatever the file says: a hand-edited path may have spaces around it. */
+    override fun loadState(state: State) {
+        state.claudePath = normalisedPath(state.claudePath)
+        super.loadState(state)
     }
 
     /** [State.maxLiveSessions], within [MAX_LIVE_SESSIONS] whatever the file says. */
@@ -32,5 +41,8 @@ class TandemSettings : SimplePersistentStateComponent<TandemSettings.State>(Tand
         val MAX_LIVE_SESSIONS: IntRange = 1..16
 
         fun getInstance(): TandemSettings = service()
+
+        /** [path] as it is stored: trimmed, and null when that leaves nothing. */
+        fun normalisedPath(path: String?): String? = path?.trim()?.ifEmpty { null }
     }
 }

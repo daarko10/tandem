@@ -27,6 +27,7 @@ import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
@@ -179,6 +180,27 @@ class TandemSettingsTest {
             ShellEnvironment.reset()
             withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
+    }
+
+    @Test
+    fun `a saved path with spaces around it is stored trimmed, and the page has nothing to apply`() = timeoutRunBlocking {
+        val settings = TandemSettings.getInstance()
+        settings.loadState(TandemSettings.State().apply { claudePath = "  /opt/claude/bin/claude \t" }) // as hand-edited
+        assertEquals("/opt/claude/bin/claude", settings.state.claudePath)
+        assertEquals("/opt/claude/bin/claude", ClaudeBinary.configured())
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val modified = withContext(Dispatchers.EDT) {
+                configurable.createComponent()
+                configurable.reset()
+                configurable.isModified
+            }
+            assertFalse(modified, "the field shows the stored path as it is")
+        } finally {
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+        settings.loadState(TandemSettings.State().apply { claudePath = "   " })
+        assertNull(settings.state.claudePath, "a blank path is no path")
     }
 
     @Test

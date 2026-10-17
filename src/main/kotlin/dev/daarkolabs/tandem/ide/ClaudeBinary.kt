@@ -50,8 +50,8 @@ internal object ClaudeBinary {
         windows: Boolean = SystemInfo.isWindows,
     ): Found? = find(override, environment["PATH"].orEmpty(), installLocations(home, windows), windows)
 
-    /** The path saved in Settings | Tools | Tandem, trimmed, or null when none is. Reads only the settings. */
-    fun configured(): String? = TandemSettings.getInstance().state.claudePath?.trim()?.ifEmpty { null }
+    /** The path saved in Settings | Tools | Tandem, or null when none is. Reads only the settings, which store it trimmed. */
+    fun configured(): String? = TandemSettings.getInstance().state.claudePath
 
     /** Whether [path] is a file that can be run. A directory is not, though its execute bit (the right to search it) may be set. */
     fun isExecutable(path: String): Boolean = File(path).let { it.isFile && it.canExecute() }
