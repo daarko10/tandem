@@ -157,9 +157,13 @@ class ReducerTest {
         val crashed = reduce(reduce(one, SessionEvent.UserSent("u2", "more")), SessionEvent.Ended("exited with code 137", isError = true))
         assertEquals(2, crashed.turnsEnded)
         assertEquals(TurnEnd.FAILED, crashed.lastTurnEnd)
+        // A clean exit during a turn ends it too, without its result: it failed.
+        val exited = reduce(reduce(one, SessionEvent.UserSent("u2", "more")), SessionEvent.Ended("exited", isError = false))
+        assertEquals(2, exited.turnsEnded)
+        assertEquals(TurnEnd.FAILED, exited.lastTurnEnd)
         // Between turns, an exit ends no turn, error or not.
         assertEquals(1, reduce(one, SessionEvent.Ended("exited with code 1", isError = true)).turnsEnded)
-        assertEquals(1, reduce(reduce(one, SessionEvent.UserSent("u2", "more")), SessionEvent.Ended("exited", isError = false)).turnsEnded)
+        assertEquals(1, reduce(one, SessionEvent.Ended("exited", isError = false)).turnsEnded)
     }
 
     @Test

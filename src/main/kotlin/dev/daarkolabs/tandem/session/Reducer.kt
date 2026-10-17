@@ -58,8 +58,9 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
     is SessionEvent.HostNotice -> state.notice(event.level, event.text)
     is SessionEvent.Ended -> {
-        // A process that exits with an error during a turn ends that turn, as a failure; a clean exit, or one between turns, ends none.
-        val failedTurn = event.isError && state.busy
+        // A process that exits during a turn ends that turn without its result: a failure, whatever its exit code. One that exits
+        // between turns ends none; a Stop, close or eviction lets the process go before it ends, so this never sees it.
+        val failedTurn = state.busy
         state.finishStreaming().copy(
             busy = false,
             ended = true,
