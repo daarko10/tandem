@@ -269,11 +269,18 @@ private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState
         interrupted -> next // the interrupt already showed "Stopped."
         result.isError -> next.notice(
             NoticeLevel.ERROR,
-            "The turn failed (${result.subtype}): " + (result.result ?: result.errors.joinToString("; ").ifEmpty { "no details" }),
+            "The turn failed" + result.failureKind()?.let { " ($it)" }.orEmpty() + ": " +
+                (result.result ?: result.errors.joinToString("; ").ifEmpty { "no details" }),
         )
         else -> next
     }
 }
+
+/**
+ * What kind of failure this error result is: its subtype (`error_max_turns` and the like), or, when the subtype is `success` as for
+ * an API error (with `is_error`), its terminal reason (`api_error`); null when neither says anything.
+ */
+private fun CliMessage.Result.failureKind(): String? = subtype.takeIf { it.isNotEmpty() && it != "success" } ?: terminalReason
 
 /**
  * Compares what the CLI reports with what the user picked. Never silently accept another model:
