@@ -22,6 +22,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.Channels
 import java.nio.channels.FileChannel
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.util.BitSet
@@ -111,12 +112,15 @@ object TranscriptReader {
 
     /**
      * Only the [TranscriptMeta] of the transcript at [path], read the same way as [read]. Blocking: call it off the EDT. A file
-     * that cannot be opened gives a meta with nothing but the id, which is then also the title.
+     * that cannot be opened gives a meta with nothing but the id, which is then also the title; one that is gone (deleted since it
+     * was listed, say) throws its [NoSuchFileException], since it is no session any more.
      */
     fun meta(path: Path): TranscriptMeta {
         val sessionId = sessionIdOf(path)
         return try {
             metaFrom({ path.bufferedReader() }, sessionId)
+        } catch (e: NoSuchFileException) {
+            throw e
         } catch (e: IOException) {
             LOG.debug { "transcript $sessionId not readable (${e.javaClass.simpleName})" }
             emptyMeta(sessionId)

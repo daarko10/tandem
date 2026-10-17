@@ -19,6 +19,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
 import java.io.IOException
 import java.io.StringReader
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.util.BitSet
 import kotlin.io.path.appendText
@@ -617,11 +618,17 @@ class TranscriptReaderTest {
     @Test
     fun `a file that cannot be opened makes read throw and meta fall back to the id`(@TempDir dir: Path) {
         val id = "77777777-7777-4777-8777-777777777777"
-        val missing = dir.resolve("$id.jsonl")
-        assertFailsWith<IOException> { runBlocking { TranscriptReader.read(missing) } }
-        val meta = TranscriptReader.meta(missing)
+        // As root, a test cannot make a file unreadable: a path below a plain file cannot be opened either.
+        val unopenable = dir.resolve("not-a-folder").also { it.writeText("") }.resolve("$id.jsonl")
+        assertFailsWith<IOException> { runBlocking { TranscriptReader.read(unopenable) } }
+        val meta = TranscriptReader.meta(unopenable)
         assertEquals(emptyMeta(id), meta)
         assertEquals(id, meta.title)
+    }
+
+    @Test
+    fun `meta of a file that is gone throws, so that the index leaves it out`(@TempDir dir: Path) {
+        assertFailsWith<NoSuchFileException> { TranscriptReader.meta(dir.resolve("77777777-7777-4777-8777-777777777777.jsonl")) }
     }
 
     @Test

@@ -239,7 +239,8 @@ class SessionIndex(
     /**
      * What is known about [file]: from the cache if it has not changed, else read afresh, from where it was read before if it only
      * grew. Null if it is no longer a readable file. [TranscriptReader.meta] gives a transcript it cannot open a meta with only the
-     * id, which is cached like any other, so that it is not read again until its size or modification time changes.
+     * id, which is cached like any other, so that it is not read again until its size or modification time changes; one deleted
+     * before it is read throws [NoSuchFileException], and is left out quietly.
      */
     private fun entryOf(file: Path): Entry? {
         val known = generation.get()
