@@ -115,6 +115,10 @@ tasks {
         // A GC log, which CI uploads with the test IDE's logs when the build fails: it shows what the test JVM's heap did, such as
         // the platform's leak check filling the heap when the test application closes. Quoted: a Windows path has a colon.
         jvmArgs("-Xlog:gc*:file=\"${layout.buildDirectory.file("test-gc.log").get().asFile.path}\":time,uptime")
+        // The platform's leak check, when the test application closes, fills the whole heap to flush soft references: with the
+        // platform's default of 2 GB that alone took 18 s of the close's 20 s on a 2-CPU CI runner. The tests need far less: the
+        // heap holds about 150 MB live and grows to about 600 MB during a run.
+        maxHeapSize = "1g"
     }
 
     register<Test>("integrationTest") {
