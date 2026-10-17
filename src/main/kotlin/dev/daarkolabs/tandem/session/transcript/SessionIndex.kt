@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session.transcript
 
+import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -95,9 +96,12 @@ data class SessionSummary(
  * Other files in them, such as a subagent's `agent-*.jsonl`, are no sessions and are skipped.
  *
  * A transcript's [TranscriptMeta] takes two passes over the whole file, so a file is read again only when its size or modification
- * time changed, or after [invalidate]. When the file system fails on a folder or a transcript (an I/O error, a refused access), that
- * one is left out of the listing and a warning goes to the log; [list] does not throw for it. [list] and [invalidate] may be called
- * from several threads; [list] blocks on file I/O, so call it off the EDT.
+ * time changed, or after [invalidate]. The CLI only appends to a transcript, so one that only grew is not read in full again: the
+ * lines appended since are scanned for a new title ([TranscriptReader.withAppendedTitles]), and the rest of what was read stays.
+ * It is read in full when it shrank, when it was read before it had a prompt, or when the part read before did not end a line.
+ * When the file system fails on a folder or a transcript (an I/O error, a refused access), that one is left out of the listing and
+ * a warning goes to the log; [list] does not throw for it. [list] and [invalidate] may be called from several threads; [list]
+ * blocks on file I/O, so call it off the EDT.
  *
  * The project's path is read on first use, by [list], and never by the constructor: a caller that has to ask the file system for it
  * (to resolve links) passes a function that does, and can make the index on the EDT. It is read once.
@@ -114,8 +118,8 @@ class SessionIndex(
         meta: (Path) -> TranscriptMeta = TranscriptReader::meta,
     ) : this(folders, { projectPath }, meta)
 
-    /** What [list] knows about a transcript, and the size and modification time it knew it at. */
-    private class Entry(val size: Long, val modified: FileTime, val cwd: String?, val summary: SessionSummary)
+    /** What [list] knows about a transcript, its [meta] and the row made of it, and the size and modification time it knew it at. */
+    private class Entry(val size: Long, val modified: FileTime, val meta: TranscriptMeta, val summary: SessionSummary)
 
     private val cache = ConcurrentHashMap<Path, Entry>()
 
@@ -151,7 +155,7 @@ class SessionIndex(
             }
         }
         cache.keys.retainAll(seen) // transcripts that are gone
-        val own = if (sharesFolders) found.filter { it.cwd == null || it.cwd == projectPath } else found
+        val own = if (sharesFolders) found.filter { it.meta.cwd == null || it.meta.cwd == projectPath } else found
         return own.map { it.summary }.sortedWith(NEWEST_FIRST)
     }
 
@@ -206,7 +210,10 @@ class SessionIndex(
             }
         }
 
-    /** What is known about [file]: from the cache if it has not changed, else read afresh. Null if it is no longer a readable file. */
+    /**
+     * What is known about [file]: from the cache if it has not changed, else read afresh, from where it was read before if it only
+     * grew. Null if it is no longer a readable file.
+     */
     private fun entryOf(file: Path): Entry? =
         tryFileSystem(
             onFailure = { e ->
@@ -224,17 +231,33 @@ class SessionIndex(
                     cached != null && cached.size == size && cached.modified == modified -> cached
                     else -> {
                         // Size and time are taken before the read: if the CLI appends meanwhile, the next listing sees a change.
-                        val transcript = meta(file)
+                        val transcript = cached?.let { grown(file, it, size) } ?: meta(file)
                         val summary = SessionSummary(
                             file.name.removeSuffix(TRANSCRIPT_SUFFIX), transcript.title, modified.toMillis(), transcript.firstPrompt, file,
                         )
-                        Entry(size, modified, transcript.cwd, summary).also { cache[file] = it }
+                        Entry(size, modified, transcript, summary).also { cache[file] = it }
                     }
                 }
             } catch (_: NoSuchFileException) {
                 null // deleted since the folder was listed
             }
         }
+
+    /**
+     * [cached]'s meta with the titles of the lines appended to [file] since, now that it is [size] bytes long; null when only a full
+     * read can tell. That is when the file did not grow (it may have been written anew), when [cached] has no first prompt (it was
+     * read before the prompt's line was written, and the prompt and the working directory may be in the new part), when the part read
+     * before did not end a line, and when the file cannot be read now.
+     */
+    private fun grown(file: Path, cached: Entry, size: Long): TranscriptMeta? {
+        if (size <= cached.size || cached.meta.firstPrompt == null) return null
+        return try {
+            TranscriptReader.withAppendedTitles(file, cached.size, cached.meta)
+        } catch (e: IOException) {
+            LOG.debug { "transcript ${file.name} not scanned from where it was read (${e.javaClass.simpleName})" }
+            null
+        }
+    }
 }
 
 /**

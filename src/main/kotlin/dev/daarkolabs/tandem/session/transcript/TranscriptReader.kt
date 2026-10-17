@@ -18,7 +18,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import java.io.BufferedReader
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.channels.Channels
+import java.nio.channels.FileChannel
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.util.BitSet
 import kotlin.io.path.bufferedReader
 import kotlin.io.path.name
@@ -120,6 +124,25 @@ object TranscriptReader {
         }
     }
 
+    /**
+     * [meta], read when the transcript at [path] was [from] bytes long, with the title lines (`custom-title`, `ai-title`,
+     * `summary`) appended since: what [meta] gives for the whole file now, as far as the title goes, for a transcript the CLI has only
+     * appended to, without reading it all again. Everything else stays as [meta] has it. Null when only a full read can tell: the
+     * first [from] bytes do not end a line (a line was still being written), or the file is no longer that long. Blocking: call it
+     * off the EDT. Throws the [IOException] of a file that cannot be read.
+     */
+    fun withAppendedTitles(path: Path, from: Long, meta: TranscriptMeta): TranscriptMeta? {
+        if (from <= 0) return null
+        FileChannel.open(path, StandardOpenOption.READ).use { channel ->
+            val last = ByteBuffer.allocate(1)
+            if (channel.read(last, from - 1) != 1 || last.get(0) != '\n'.code.toByte()) return null
+            var titled = meta
+            // Like bufferedReader, this decodes with an InputStreamReader, which replaces a malformed byte instead of throwing.
+            Channels.newInputStream(channel.position(from)).bufferedReader().lineSequence().forEach { titled = titled.withTitleOf(it) }
+            return titled
+        }
+    }
+
     /** [read] from what [open] opens, once per pass. Internal so tests can pass readers that fail or never end. */
     internal suspend fun readFrom(open: () -> BufferedReader, sessionId: String): LoadedTranscript {
         val context = currentCoroutineContext()
@@ -143,6 +166,28 @@ object TranscriptReader {
 
 private fun emptyMeta(sessionId: String, lineCount: Int = 0): TranscriptMeta =
     TranscriptMeta(sessionId, null, null, null, null, null, null, null, lineCount)
+
+/** How each kind of title line names its type; a line that has none of these cannot be a title line, and is not parsed. */
+private val TITLE_TYPES: List<String> = listOf("\"custom-title\"", "\"ai-title\"", "\"summary\"")
+
+/** This meta with the title of [line], if it is a title line, taken as [Scan] takes it. */
+private fun TranscriptMeta.withTitleOf(line: String): TranscriptMeta {
+    if (TITLE_TYPES.none { it in line }) return this
+    val title = Ndjson.decode(line).raw?.let(::titleOf) ?: return this
+    return if (title.custom) copy(customTitle = title.text) else copy(generatedTitle = title.text)
+}
+
+/** A title line's title: the [custom] one (`custom-title`), or a generated one (`ai-title`, `summary`). */
+private class Title(val text: String, val custom: Boolean)
+
+/** The title [raw] gives if it is a title line; null for any other line, and for a blank title. */
+private fun titleOf(raw: JsonObject): Title? =
+    when (raw.string("type")) {
+        "custom-title" -> raw.titleText("customTitle")?.let { Title(it, custom = true) }
+        "ai-title" -> raw.titleText("aiTitle")?.let { Title(it, custom = false) }
+        "summary" -> raw.titleText("summary")?.let { Title(it, custom = false) }
+        else -> null
+    }
 
 /** What [readTwice] read: the [history], the [meta], and the [IOException] that ended the reading early, if one did. */
 private class Passes(val history: ChatState, val meta: TranscriptMeta, val failure: IOException?)
@@ -217,10 +262,9 @@ private class Scan(private val sessionId: String, private val withHistory: Boole
             // isMeta and isCompactSummary lines are the CLI's own context, isSidechain lines a subagent's: none is the user's.
             "user" -> if (!raw.isSet("isMeta") && !raw.isSet("isSidechain") && !raw.isSet("isCompactSummary")) userLine(message, raw)
             "assistant" -> if (!raw.isSet("isSidechain")) assistantLine(message, raw)
-            "custom-title" -> raw.titleText("customTitle")?.let { customTitle = it }
-            "ai-title" -> raw.titleText("aiTitle")?.let { generatedTitle = it }
-            "summary" -> raw.titleText("summary")?.let { generatedTitle = it }
-            // Every other type (attachment, queue-operation, cost-state, system, ...) carries no history.
+            // Title lines (custom-title, ai-title, summary) give the title. Every other type (attachment, queue-operation,
+            // cost-state, system, ...) carries no history.
+            else -> titleOf(raw)?.let { if (it.custom) customTitle = it.text else generatedTitle = it.text }
         }
     }
 

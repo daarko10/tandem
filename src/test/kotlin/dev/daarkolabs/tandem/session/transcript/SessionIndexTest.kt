@@ -60,6 +60,16 @@ class SessionIndexTest {
     private fun stubMeta(file: Path, cwd: String? = null): TranscriptMeta =
         TranscriptMeta(file.name.removeSuffix(".jsonl"), null, null, null, null, null, null, cwd, 0)
 
+    /** [TranscriptReader.meta], counted in [reads]: each call reads the whole file. */
+    private fun countingMeta(reads: AtomicInteger): (Path) -> TranscriptMeta = { file ->
+        reads.incrementAndGet()
+        TranscriptReader.meta(file)
+    }
+
+    /** The recorded `history-reply` transcript, titled "Pong" by its `ai-title` line, as session [id]'s. */
+    private fun seedReply(dir: Path, id: String): Path =
+        dir.resolve("$id.jsonl").also { Files.copy(Fixtures.transcript("history-reply"), it) }
+
     @Test
     fun `lists only session transcripts, newest first`(@TempDir dir: Path) {
         write(dir, "11111111-1111-4111-8111-111111111111.jsonl", mtime = 1_000)
@@ -118,10 +128,80 @@ class SessionIndexTest {
         index.list()
         index.list()
         assertEquals(1, reads.get())
-        // The file grows. Its modification time is put back, so the size alone says that it changed.
+        // The file grows. Its modification time is put back, so the size alone says that it changed. (Read in full: it has no
+        // prompt, see `a transcript read before its first prompt was written is read in full when it grows`.)
         file.appendText("b\n")
         Files.setLastModifiedTime(file, FileTime.fromMillis(1_000))
         index.list()
+        assertEquals(2, reads.get())
+    }
+
+    @Test
+    fun `a transcript that only grew is scanned from where it was read, for its titles`(@TempDir dir: Path) {
+        val file = seedReply(dir, first)
+        val reads = AtomicInteger()
+        val index = SessionIndex({ listOf(dir) }, "/p", meta = countingMeta(reads))
+        assertEquals("Pong", index.list().single().title)
+        assertEquals(1, reads.get())
+
+        file.appendText("""{"type":"custom-title","customTitle":"Renamed","sessionId":"$first"}""" + "\n")
+        val renamed = index.list().single()
+        assertEquals("Renamed", renamed.title)
+        assertEquals("Reply with the single word: pong", renamed.firstPrompt, "kept from the full read")
+        assertEquals(Files.getLastModifiedTime(file).toMillis(), renamed.lastModified)
+        // A generated title after it does not beat it, as in a full read, and a turn's lines in between change nothing.
+        file.appendText(
+            """{"type":"user","uuid":"u9","parentUuid":null,"message":{"role":"user","content":"more"}}""" + "\n" +
+                """{"type":"ai-title","aiTitle":"Generated later","sessionId":"$first"}""" + "\n",
+        )
+        assertEquals("Renamed", index.list().single().title)
+        assertEquals(1, reads.get(), "never read in full again")
+        assertEquals(TranscriptReader.meta(file).title, index.list().single().title, "what a full read makes of it")
+    }
+
+    @Test
+    fun `a transcript that shrank, or was invalidated, is read in full again`(@TempDir dir: Path) {
+        val file = seedReply(dir, first)
+        val reads = AtomicInteger()
+        val index = SessionIndex({ listOf(dir) }, "/p", meta = countingMeta(reads))
+        index.list()
+        // Written anew and shorter: what was read before is not there any more.
+        val shorter = Files.readAllLines(file).take(5) + """{"type":"custom-title","customTitle":"Shorter","sessionId":"$first"}"""
+        file.writeText(shorter.joinToString("\n", postfix = "\n"))
+        assertEquals("Shorter", index.list().single().title)
+        assertEquals(2, reads.get())
+        // After invalidate, the next listing reads it in full although it only grew.
+        index.invalidate(first)
+        file.appendText("""{"type":"custom-title","customTitle":"Renamed","sessionId":"$first"}""" + "\n")
+        assertEquals("Renamed", index.list().single().title)
+        assertEquals(3, reads.get())
+    }
+
+    @Test
+    fun `a transcript read while its last line was being written is read in full once it grows`(@TempDir dir: Path) {
+        val file = seedReply(dir, first)
+        file.appendText("""{"type":"custom-title","customTitle":"Half""") // the CLI is still writing this line
+        val reads = AtomicInteger()
+        val index = SessionIndex({ listOf(dir) }, "/p", meta = countingMeta(reads))
+        assertEquals("Pong", index.list().single().title, "a line that is not whole yet is skipped")
+        file.appendText(""" way","sessionId":"$first"}""" + "\n")
+        assertEquals("Half way", index.list().single().title)
+        assertEquals(2, reads.get(), "read in full: what was appended does not start a line")
+    }
+
+    @Test
+    fun `a transcript read before its first prompt was written is read in full when it grows`(@TempDir dir: Path) {
+        val file = dir.resolve("$first.jsonl")
+        file.writeText("""{"type":"queue-operation","operation":"enqueue","sessionId":"$first"}""" + "\n")
+        val reads = AtomicInteger()
+        val index = SessionIndex({ listOf(dir) }, "/p", meta = countingMeta(reads))
+        assertEquals(first, index.list().single().title, "nothing to title it with yet")
+        // Its first prompt, and the working directory the cwd filter needs, come with the lines appended now.
+        val prompt = """{"type":"user","uuid":"u1","parentUuid":null,"cwd":"/p","message":{"role":"user","content":"Hello there"}}"""
+        file.appendText(prompt + "\n")
+        val listed = index.list().single()
+        assertEquals("Hello there", listed.title)
+        assertEquals("Hello there", listed.firstPrompt)
         assertEquals(2, reads.get())
     }
 
