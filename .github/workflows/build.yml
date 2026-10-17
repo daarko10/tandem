@@ -45,6 +45,18 @@ jobs:
         with:
           name: test-reports
           path: ./build/reports/tests
+      # The test IDE's own logs (idea.log, thread dumps of timed-out tests, any leak heap dump) and the test JVM's GC log: what a
+      # test, or the test application's close, waited on.
+      - name: Upload test IDE logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-ide-logs
+          path: |
+            ./.intellijPlatform/sandbox/*/*/log-test/
+            ./build/test-gc.log*
+          include-hidden-files: true
+          if-no-files-found: ignore
 
   verify:
     name: Plugin Verifier

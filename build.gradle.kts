@@ -112,6 +112,9 @@ tasks {
         systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path)
         // Set by the nightly CLI contract workflow: a directory of freshly recorded live transcripts.
         systemProperty("tandem.contractDir", providers.systemProperty("tandem.contractDir").getOrElse(""))
+        // A GC log, which CI uploads with the test IDE's logs when the build fails: it shows what the test JVM's heap did, such as
+        // the platform's leak check filling the heap when the test application closes. Quoted: a Windows path has a colon.
+        jvmArgs("-Xlog:gc*:file=\"${layout.buildDirectory.file("test-gc.log").get().asFile.path}\":time,uptime")
     }
 
     register<Test>("integrationTest") {
