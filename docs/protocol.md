@@ -763,17 +763,19 @@ A rewind or an edited prompt leaves the abandoned turns in the file, so the hist
 pass (`TranscriptChain`) works out which conversational lines (`user` or `assistant`, neither `isSidechain` nor
 `isMeta`) belong to it:
 
-1. The current history is the `parentUuid` chain that ends at the last conversational line. The chain runs through lines
+1. The current history is the `parentUuid` chain that ends at the last conversational line with a `uuid`. The chain runs through lines
    of any type (in the fixtures every `assistant` line's parent is an `attachment` line), so every line with a `uuid` is
    indexed. A line whose parent is not in the file is a root.
 2. If that chain starts at a compaction root, a `user` line with `isCompactSummary` or a `system` line with
-   `subtype: compact_boundary`, the chain of the last conversational line before the root is kept as well, and so on
-   back to the first compaction. A `compact_boundary` line has a null `parentUuid` and points back with
-   `logicalParentUuid` (inferred: no fixture); Tandem does not read that field yet.
+   `subtype: compact_boundary`, the chain before the compaction is kept as well, and so on back to the first compaction. A
+   `compact_boundary` line has a null `parentUuid` and points back with `logicalParentUuid` (inferred: no fixture); that
+   chain starts at the line it names when it names an earlier line, else at the last conversational line with a `uuid`
+   before the root.
 3. Parallel tool calls branch off the chain. An off-chain `assistant` line with the `message.id` of a kept `assistant`
    line joins the history, and so does an off-chain `user` line that holds only `tool_result` blocks and whose parent is
    kept, until nothing changes. A `user` line with text never joins this way: a rewound branch starts with one.
-4. A conversational line without a `uuid` is always kept.
+4. A conversational line without a `uuid` is always kept. A line that was not a JSON object in the first pass (one the
+   CLI was still writing) is left out of the second, even if it is complete by then.
 
 The second pass reads the kept lines the way the live stream would have shown them; title lines count wherever they
 are. The SDK's reader (`getSessionMessages`, 0.3.300) also walks the chain and re-attaches such off-chain lines. No

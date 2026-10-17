@@ -64,7 +64,7 @@ data class TranscriptMeta(
     val lastEffort: String?,
     /** `permissionMode` of the last user line in the current history that names a known mode; compact summaries do not count. */
     val lastPermissionMode: PermissionMode?,
-    /** `cwd` of the first line that has one. */
+    /** `cwd` of the first line that has one, leaving out the lines the history leaves out (turns a rewind abandoned). */
     val cwd: String?,
     /** Every line read, skipped ones included. */
     val lineCount: Int,
@@ -90,7 +90,8 @@ data class LoadedTranscript(
  *
  * A transcript is only ever appended to, so it keeps the turns a rewind abandoned. The file is read twice: the first pass
  * ([TranscriptChain]) finds the current history, the `parentUuid` chain through the transcript with the lines parallel tool
- * calls branch off it; the second reads the lines on it as the live stream would have shown them.
+ * calls branch off it; the second reads the lines on it as the live stream would have shown them. [meta] reads it once, keeping
+ * what each line says about the meta until the first pass has placed it.
  *
  * Prompts (`user` text), tool results (`user` `tool_result` blocks) and `assistant` lines make the history: an interrupt
  * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`. `custom-title`,
@@ -117,7 +118,7 @@ object TranscriptReader {
     fun meta(path: Path): TranscriptMeta {
         val sessionId = sessionIdOf(path)
         return try {
-            readTwice({ path.bufferedReader() }, sessionId, withHistory = false) {}.meta
+            metaFrom({ path.bufferedReader() }, sessionId)
         } catch (e: IOException) {
             LOG.debug { "transcript $sessionId not readable (${e.javaClass.simpleName})" }
             emptyMeta(sessionId)
@@ -143,10 +144,40 @@ object TranscriptReader {
         }
     }
 
+    /**
+     * [meta] from what [open] opens, in one pass: each line is parsed once, and what it says about the meta is kept until the
+     * chain ([TranscriptChain]) says whether it is on the current history. Internal so tests can count how often it opens.
+     */
+    internal fun metaFrom(open: () -> BufferedReader, sessionId: String): TranscriptMeta {
+        val chain = TranscriptChain()
+        val facts = ArrayList<Pair<Int, Facts>>()
+        var cwdFound = false
+        open().use { reader ->
+            reader.feed(Int.MAX_VALUE, {}) { line ->
+                val index = chain.lineCount
+                val message = Ndjson.decode(line)
+                chain.add(message.raw)
+                val raw = message.raw ?: return@feed
+                var lineFacts = factsOf(message, raw)
+                // Only user and assistant lines can be off the history: once another line gave the cwd, no later line counts for it.
+                if (cwdFound) lineFacts = lineFacts.copy(cwd = null)
+                if (lineFacts.cwd != null && raw.string("type") != "user" && raw.string("type") != "assistant") cwdFound = true
+                if (lineFacts != NO_FACTS) facts += index to lineFacts
+            }
+        }?.let { e ->
+            LOG.debug { "transcript $sessionId: meta read stopped after ${chain.lineCount} lines (${e.javaClass.simpleName})" }
+            return emptyMeta(sessionId, chain.lineCount)
+        }
+        val abandoned = chain.abandoned()
+        val meta = MetaBuilder(sessionId)
+        for ((index, lineFacts) in facts) if (!abandoned[index]) meta.take(lineFacts)
+        return meta.build(chain.lineCount)
+    }
+
     /** [read] from what [open] opens, once per pass. Internal so tests can pass readers that fail or never end. */
     internal suspend fun readFrom(open: () -> BufferedReader, sessionId: String): LoadedTranscript {
         val context = currentCoroutineContext()
-        val passes = readTwice(open, sessionId, withHistory = true) { context.ensureActive() }
+        val passes = readTwice(open, sessionId) { context.ensureActive() }
         val meta = passes.meta
         val state = passes.history.settled()
         return LoadedTranscript(
@@ -197,13 +228,13 @@ private class Passes(val history: ChatState, val meta: TranscriptMeta, val failu
  * placed, so lines appended in between wait for the next read. An [IOException] opening the first pass is thrown; one later in
  * it gives an empty history and the number of lines seen. One in the second pass, opening included, keeps what was scanned.
  */
-private fun readTwice(open: () -> BufferedReader, sessionId: String, withHistory: Boolean, beforeLine: () -> Unit): Passes {
+private fun readTwice(open: () -> BufferedReader, sessionId: String, beforeLine: () -> Unit): Passes {
     val chain = TranscriptChain()
     open().use { it.feed(Int.MAX_VALUE, beforeLine, chain::add) }?.let { e ->
         LOG.debug { "transcript $sessionId: first pass stopped after ${chain.lineCount} lines (${e.javaClass.simpleName})" }
         return Passes(ChatState(), emptyMeta(sessionId, chain.lineCount), e)
     }
-    val scan = Scan(sessionId, withHistory, chain.abandoned())
+    val scan = Scan(sessionId, chain.abandoned())
     val failure = try {
         open().use { it.feed(chain.lineCount, beforeLine, scan::accept) }?.also { e ->
             LOG.debug { "transcript $sessionId: second pass stopped after ${scan.lineCount} lines (${e.javaClass.simpleName})" }
@@ -232,13 +263,46 @@ private fun BufferedReader.feed(limit: Int, beforeLine: () -> Unit, onLine: (Str
 }
 
 /**
- * The second pass: collects the [TranscriptMeta] and, [withHistory], reduces the history into [state], one [accept]ed line at a
- * time. [abandoned] lines are counted and otherwise left out.
+ * What one line adds to the [TranscriptMeta], if it is not left out: null adds nothing. A `user` line counts unless it is meta,
+ * sidechain or a compact summary, an `assistant` line unless it is sidechain, and title lines wherever they are.
  */
-private class Scan(private val sessionId: String, private val withHistory: Boolean, private val abandoned: BitSet) {
-    var state: ChatState = ChatState()
-        private set
+private data class Facts(
+    val cwd: String? = null,
+    val title: Title? = null,
+    val permissionMode: PermissionMode? = null,
+    /** A typed prompt's title. */
+    val prompt: String? = null,
+    /** The model of an assistant line the model wrote, not the CLI (`<synthetic>`). */
+    val model: String? = null,
+    val effort: String? = null,
+)
 
+private val NO_FACTS: Facts = Facts()
+
+private fun factsOf(message: CliMessage, raw: JsonObject): Facts {
+    val cwd = raw.string("cwd")?.takeIf { it.isNotEmpty() }
+    return when (raw.string("type")) {
+        // isMeta and isCompactSummary lines are the CLI's own context, isSidechain lines a subagent's: none is the user's.
+        "user" -> if (raw.isSet("isMeta") || raw.isSet("isSidechain") || raw.isSet("isCompactSummary")) {
+            Facts(cwd)
+        } else {
+            val typed = (message as? CliMessage.User)?.let(::userLineOf)?.typed
+            Facts(cwd, permissionMode = PermissionMode.fromWire(raw.string("permissionMode")), prompt = typed?.takeIf { it.isPrompt }?.let { promptTitle(it.text) })
+        }
+        "assistant" -> if (raw.isSet("isSidechain")) {
+            Facts(cwd)
+        } else {
+            // A line the CLI wrote itself, such as an API error, names a model like "<synthetic>": not the session's model.
+            Facts(cwd, model = (message as? CliMessage.Assistant)?.model?.takeUnless { it.startsWith("<") }, effort = raw.string("effort"))
+        }
+        // Title lines (custom-title, ai-title, summary) give the title. Every other type (attachment, queue-operation,
+        // cost-state, system, ...) carries no history.
+        else -> Facts(cwd, title = titleOf(raw))
+    }
+}
+
+/** The [TranscriptMeta] of the lines [take]n, in file order. */
+private class MetaBuilder(private val sessionId: String) {
     private var customTitle: String? = null
     private var generatedTitle: String? = null
     private var firstPrompt: String? = null
@@ -246,51 +310,63 @@ private class Scan(private val sessionId: String, private val withHistory: Boole
     private var lastEffort: String? = null
     private var lastPermissionMode: PermissionMode? = null
     private var cwd: String? = null
+
+    fun take(facts: Facts) {
+        if (cwd == null) cwd = facts.cwd
+        facts.title?.let { if (it.custom) customTitle = it.text else generatedTitle = it.text }
+        facts.permissionMode?.let { lastPermissionMode = it }
+        if (firstPrompt == null) firstPrompt = facts.prompt
+        facts.model?.let { lastModel = it }
+        facts.effort?.let { lastEffort = it }
+    }
+
+    fun build(lineCount: Int): TranscriptMeta =
+        TranscriptMeta(sessionId, customTitle, generatedTitle, firstPrompt, lastModel, lastEffort, lastPermissionMode, cwd, lineCount)
+}
+
+/** A user line as Tandem shows it: an interrupt marker ([interrupted]), else what the user typed, if anything ([typed]). */
+private class UserLine(val interrupted: Boolean, val typed: Typed?)
+
+private fun userLineOf(user: CliMessage.User): UserLine {
+    val text = user.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+    val interrupted = text.startsWith(INTERRUPT_MARKER)
+    return UserLine(interrupted, if (interrupted) null else typedText(text))
+}
+
+/**
+ * The second pass: collects the [TranscriptMeta] and reduces the history into [state], one [accept]ed line at a time. [abandoned]
+ * lines ([TranscriptChain.abandoned]) are counted and otherwise left out.
+ */
+private class Scan(sessionId: String, private val abandoned: BitSet) {
+    var state: ChatState = ChatState()
+        private set
+
+    private val meta = MetaBuilder(sessionId)
     var lineCount: Int = 0
         private set
 
-    fun meta(): TranscriptMeta =
-        TranscriptMeta(sessionId, customTitle, generatedTitle, firstPrompt, lastModel, lastEffort, lastPermissionMode, cwd, lineCount)
+    fun meta(): TranscriptMeta = meta.build(lineCount)
 
     fun accept(line: String) {
         val index = lineCount++
         if (abandoned[index]) return
         val message = Ndjson.decode(line)
         val raw = message.raw ?: return // not a JSON object, e.g. a line the CLI is still writing
-        if (cwd == null) cwd = raw.string("cwd")?.takeIf { it.isNotEmpty() }
+        meta.take(factsOf(message, raw))
         when (raw.string("type")) {
-            // isMeta and isCompactSummary lines are the CLI's own context, isSidechain lines a subagent's: none is the user's.
-            "user" -> if (!raw.isSet("isMeta") && !raw.isSet("isSidechain") && !raw.isSet("isCompactSummary")) userLine(message, raw)
-            "assistant" -> if (!raw.isSet("isSidechain")) assistantLine(message, raw)
-            // Title lines (custom-title, ai-title, summary) give the title. Every other type (attachment, queue-operation,
-            // cost-state, system, ...) carries no history.
-            else -> titleOf(raw)?.let { if (it.custom) customTitle = it.text else generatedTitle = it.text }
+            "user" -> if (!raw.isSet("isMeta") && !raw.isSet("isSidechain") && !raw.isSet("isCompactSummary")) userLine(message)
+            "assistant" -> if (!raw.isSet("isSidechain")) state = reduce(state, SessionEvent.Cli(message))
         }
     }
 
-    private fun userLine(message: CliMessage, raw: JsonObject) {
-        PermissionMode.fromWire(raw.string("permissionMode"))?.let { lastPermissionMode = it }
+    private fun userLine(message: CliMessage) {
         val user = message as? CliMessage.User ?: return
-        val text = user.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+        val shown = userLineOf(user)
         // Tool results and an interrupt marker go through the reducer, as they do live; once per line, since it handles both.
         // The API puts a user message's tool_result blocks first and any text after them, so a prompt comes after its results.
-        val interrupted = text.startsWith(INTERRUPT_MARKER)
-        if (interrupted || user.content.any { it is ContentBlock.ToolResult }) emit(SessionEvent.Cli(user))
-        if (interrupted) return
-        val typed = typedText(text) ?: return
-        if (firstPrompt == null && typed.isPrompt) firstPrompt = promptTitle(typed.text)
-        emit(SessionEvent.UserSent(user.uuid ?: "line-$lineCount", typed.text))
-    }
-
-    private fun assistantLine(message: CliMessage, raw: JsonObject) {
-        // A line the CLI wrote itself, such as an API error, names a model like "<synthetic>": not the session's model.
-        (message as? CliMessage.Assistant)?.model?.takeUnless { it.startsWith("<") }?.let { lastModel = it }
-        raw.string("effort")?.let { lastEffort = it }
-        emit(SessionEvent.Cli(message))
-    }
-
-    private fun emit(event: SessionEvent) {
-        if (withHistory) state = reduce(state, event)
+        if (shown.interrupted || user.content.any { it is ContentBlock.ToolResult }) state = reduce(state, SessionEvent.Cli(user))
+        val typed = shown.typed ?: return
+        state = reduce(state, SessionEvent.UserSent(user.uuid ?: "line-$lineCount", typed.text))
     }
 }
 

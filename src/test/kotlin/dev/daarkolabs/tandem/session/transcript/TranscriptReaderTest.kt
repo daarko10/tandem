@@ -20,6 +20,7 @@ import java.io.BufferedReader
 import java.io.IOException
 import java.io.StringReader
 import java.nio.file.Path
+import java.util.BitSet
 import kotlin.io.path.appendText
 import kotlin.io.path.bufferedWriter
 import kotlin.io.path.fileSize
@@ -430,6 +431,69 @@ class TranscriptReaderTest {
     }
 
     @Test
+    fun `a last conversational line without a uuid does not hide the chain before it`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("25252525-2525-4252-8252-252525252525.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"one"}]}}""",
+            """{"type":"user","message":{"role":"user","content":"no uuid"}}""",
+        )
+        // The chain ends at the last line that has a uuid; the line without one is kept all the same.
+        assertEquals(listOf("user: first", "assistant: one", "user: no uuid"), TranscriptReader.read(f).state.shape())
+    }
+
+    @Test
+    fun `a compaction goes on from its logical parent when the boundary names one`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("26262626-2626-4262-8262-262626262626.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"one"}]}}""",
+            """{"type":"user","uuid":"ux","parentUuid":"a1","message":{"role":"user","content":"compacted from here"}}""",
+            // Written after ux but on a branch the compaction did not continue: the boundary says it follows ux.
+            """{"type":"user","uuid":"uy","parentUuid":"a1","message":{"role":"user","content":"a branch left behind"}}""",
+            """{"type":"system","subtype":"compact_boundary","uuid":"b1","parentUuid":null,"logicalParentUuid":"ux","content":"Conversation compacted"}""",
+            """{"type":"user","uuid":"s1","parentUuid":"b1","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation."}}""",
+            """{"type":"user","uuid":"u2","parentUuid":"s1","message":{"role":"user","content":"second"}}""",
+        )
+        assertEquals(
+            listOf("user: first", "assistant: one", "user: compacted from here", "user: second"),
+            TranscriptReader.read(f).state.shape(),
+        )
+    }
+
+    @Test
+    fun `a user line with text beside its tool results never joins off the chain`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("27272727-2727-4272-8272-272727272727.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"Run it"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"m1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}""",
+            // Off the chain, parent kept, but with a prompt beside the result: a rewound branch, not a parallel call's result.
+            """{"type":"user","uuid":"rx","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"old"},{"type":"text","text":"rewound prompt"}]}}""",
+            """{"type":"user","uuid":"r1","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"files"}]}}""",
+            """{"type":"assistant","uuid":"a2","parentUuid":"r1","message":{"id":"m2","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"Done."}]}}""",
+        )
+        assertEquals(
+            listOf("user: Run it", "assistant: tool Bash", "result: files", "assistant: Done."),
+            TranscriptReader.read(f).state.shape(),
+        )
+    }
+
+    @Test
+    fun `lines that join off the chain keep joining until nothing changes`() {
+        // r2 comes before a2, the line it answers, so it can only join once a2 has: on a second round.
+        val chain = TranscriptChain()
+        listOf(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"Read both files"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"m1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.txt"}}]}}""",
+            """{"type":"user","uuid":"r2","parentUuid":"a2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"bee"}]}}""",
+            """{"type":"assistant","uuid":"a2","parentUuid":"a1","message":{"id":"m1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"b.txt"}}]}}""",
+            """{"type":"user","uuid":"r1","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ay"}]}}""",
+            """{"type":"assistant","uuid":"a3","parentUuid":"r1","message":{"id":"m2","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"Both read."}]}}""",
+        ).forEach(chain::add)
+        assertEquals(BitSet(), chain.abandoned())
+    }
+
+    @Test
     fun `a prompt that quotes a CLI tag further on stays a prompt`(@TempDir dir: Path) = runBlocking<Unit> {
         val f = dir.resolve("18181818-1818-4181-8181-181818181818.jsonl")
         val prompt = "Explain <command-name>/model</command-name> and <bash-stdout> in transcripts"
@@ -595,6 +659,37 @@ class TranscriptReaderTest {
         // The second pass reads only the lines the first pass placed.
         assertEquals(listOf("user: hello"), loaded.state.shape())
         assertEquals(1, loaded.meta.lineCount)
+    }
+
+    @Test
+    fun `a user or assistant line the first pass could not place is left out`() = runBlocking<Unit> {
+        val first = """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"hello"}}"""
+        val complete = """{"type":"user","uuid":"u2","parentUuid":"u1","message":{"role":"user","content":"still being written"}}"""
+        var opened = 0
+        val loaded = TranscriptReader.readFrom(
+            // The CLI was still writing the second line during the first pass, and had finished it by the second.
+            { BufferedReader(StringReader(if (++opened == 1) "$first\n${complete.take(40)}" else "$first\n$complete")) },
+            "29292929-2929-4292-8292-292929292929",
+        )
+        assertEquals(listOf("user: hello"), loaded.state.shape())
+        assertEquals(2, loaded.meta.lineCount)
+    }
+
+    @Test
+    fun `meta reads the file once`() {
+        val lines = listOf(
+            """{"type":"user","uuid":"u1","parentUuid":null,"cwd":"/p","message":{"role":"user","content":"hello"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","effort":"low","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"hi"}]}}""",
+            """{"type":"custom-title","customTitle":"Mine","sessionId":"x"}""",
+        )
+        var opened = 0
+        val id = "30303030-3030-4303-8303-303030303030"
+        val meta = TranscriptReader.metaFrom({
+            opened++
+            BufferedReader(StringReader(lines.joinToString("\n")))
+        }, id)
+        assertEquals(1, opened)
+        assertEquals(TranscriptMeta(id, "Mine", null, "hello", "claude-sonnet-5-5", "low", null, "/p", 3), meta)
     }
 
     @Test
