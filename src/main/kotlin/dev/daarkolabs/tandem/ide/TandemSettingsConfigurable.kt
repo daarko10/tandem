@@ -48,8 +48,9 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
 
     /**
      * Counts the [check]s and "Test" runs asked for, on the EDT. A check's answer shows in the status line only if nothing was asked
-     * after it and no Test runs: a Test's answer, which the user asked for, is never overwritten by a check, whether the check was
-     * asked for before the Test (a slow one) or while it runs (Apply). A Test's answer always shows, unless a newer Test replaced it.
+     * after it, no Test ran when it was asked for and none runs when it answers: a Test's answer, which the user asked for, is never
+     * overwritten by a check, whether the check was asked for before the Test (a slow one) or while it ran (Apply), and whenever it
+     * answers. A Test's answer always shows, unless a newer Test replaced it.
      */
     private var statusRequests: Int = 0
 
@@ -128,6 +129,7 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
         val detectedWhere = detectedWhere ?: return
         val status = status ?: return
         val request = ++statusRequests
+        val duringTest = test?.isActive == true // its answer comes later: this check must not overwrite it
         checking?.cancel()
         checking = scope.launch {
             val (found, runs) = withContext(Dispatchers.IO) {
@@ -136,7 +138,9 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
             showOnEdt {
                 detected.text = found?.path ?: "Not found"
                 detectedWhere.text = found?.where?.description.orEmpty()
-                if (request == statusRequests && test?.isActive != true) status.text = if (runs) "" else NOT_EXECUTABLE_TEXT
+                if (request == statusRequests && !duringTest && test?.isActive != true) {
+                    status.text = if (runs) "" else NOT_EXECUTABLE_TEXT
+                }
             }
         }
     }

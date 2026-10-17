@@ -22,6 +22,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JLabel
@@ -207,6 +208,48 @@ class TandemSettingsTest {
             withTimeoutOrNull(10.seconds) { while ("slow 1.0" !in labels(page)) delay(20) }
             assertTrue("slow 1.0" in labels(page), labels(page).toString())
         } finally {
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+    }
+
+    @Test
+    fun `a check asked during a Test that answers after it does not overwrite the Test's answer`() = timeoutRunBlocking(30.seconds) {
+        val gate = tempDir.get().resolve("gate-during")
+        val slow = script("slow-during", "while [ ! -e '$gate' ]; do sleep 0.05; done; echo 'slow 2.0'")
+        val configurable = TandemSettingsConfigurable()
+        // From the third look at the login shell's environment on (Apply's check, after the page's own and the Test's), it waits.
+        val calls = AtomicInteger()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        ShellEnvironment.source = {
+            if (calls.incrementAndGet() == 3) {
+                entered.countDown()
+                release.await()
+                returned.countDown()
+            }
+            System.getenv()
+        }
+        try {
+            val page = withContext(Dispatchers.EDT) { configurable.createComponent().also { configurable.reset() } }
+            val fake = System.getProperty("tandem.claudePath")
+            while (fake !in labels(page)) delay(20) // the page's own check is done
+            withContext(Dispatchers.EDT) {
+                assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = slow
+                UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+            }
+            while (calls.get() < 2) delay(20) // the Test runs
+            withContext(Dispatchers.EDT) { configurable.apply() } // its check is asked for during the Test
+            while (entered.count > 0) delay(20)
+            gate.createFile()
+            while ("slow 2.0" !in labels(page)) delay(20) // the Test has answered
+            release.countDown() // and only now does the check
+            while (returned.count > 0) delay(20)
+            delay(500) // time for the check to show what it found
+            assertTrue("slow 2.0" in labels(page), labels(page).toString())
+        } finally {
+            release.countDown()
+            ShellEnvironment.reset()
             withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
     }
