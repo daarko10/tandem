@@ -166,4 +166,20 @@ class SessionSidebarTest {
         assertNull(rowKey(key(AwtKeyEvent.VK_ENTER), KeyEventType.KeyUp, RowMode.NORMAL))
         assertNull(rowKey(key(AwtKeyEvent.VK_DOWN), KeyEventType.KeyUp, RowMode.NORMAL))
     }
+
+    @Test
+    fun `the open forks that a delete leaves unable to start are those without a transcript of their own`() {
+        val forkOf = mapOf("fork-new" to "original", "fork-written" to "original", "other-fork" to "other", "plain" to null)
+        val written = setOf("original", "fork-written")
+        assertEquals(listOf("fork-new"), forksStartingFrom("original", forkOf) { it in written })
+        assertEquals(listOf("other-fork"), forksStartingFrom("other", forkOf) { it in written })
+        assertEquals(emptyList(), forksStartingFrom("plain", forkOf) { it in written })
+    }
+
+    @Test
+    fun `deleting a session that open forks start from warns about them`() {
+        assertNull(forkWarning(0))
+        assertEquals("An open fork of it has not started yet, and could not start without it.", forkWarning(1))
+        assertEquals("2 open forks of it have not started yet, and could not start without it.", forkWarning(2))
+    }
 }

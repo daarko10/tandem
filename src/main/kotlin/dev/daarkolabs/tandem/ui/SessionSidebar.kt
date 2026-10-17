@@ -160,6 +160,8 @@ internal fun SessionSidebar(
     val summaries by manager.summaries.collectAsState()
     val open by manager.sessions.collectAsState()
     val handles = remember(open) { open.associateBy { it.id } }
+    val forkOf = remember(open) { open.associate { it.id to it.forkOf } }
+    val written = remember(summaries) { summaries.filter { it.file != null }.mapTo(HashSet()) { it.id } }
     val filter = rememberTextFieldState()
     val filterFocus = remember { FocusRequester() }
     val query = filter.text.toString()
@@ -215,6 +217,7 @@ internal fun SessionSidebar(
                 SessionRow(
                     summary,
                     handles[summary.id],
+                    deleteWarning = forkWarning(forksStartingFrom(summary.id, forkOf) { it in written }.size),
                     isSelected = summary.id == selectedId,
                     now = now,
                     actions = actions,
@@ -351,6 +354,7 @@ private fun inFocusOwner(point: Offset): Point? {
 private fun SessionRow(
     summary: SessionSummary,
     handle: SessionHandle?,
+    deleteWarning: String?,
     isSelected: Boolean,
     now: Long,
     actions: SessionActions,
@@ -433,6 +437,7 @@ private fun SessionRow(
                         if (attention) Badge { Text("needs you") }
                     }
                     RowMode.CONFIRMING_DELETE -> DeleteConfirmation(
+                        deleteWarning,
                         onDelete = {
                             mode = RowMode.DELETING
                             scope.launch { if (!actions.delete(summary.id, summary.title)) mode = RowMode.NORMAL }
@@ -492,11 +497,26 @@ private fun SessionRow(
     }
 }
 
-/** The question a row asks before it deletes its session, with its two answers. */
+/**
+ * The open sessions, by id, of those in [forkOf] (each mapped to the session it forks, if any) that fork session [id] and have no
+ * transcript of their own yet ([hasTranscript]): such a fork starts from [id]'s transcript, and cannot start once it is deleted.
+ */
+internal fun forksStartingFrom(id: SessionId, forkOf: Map<SessionId, SessionId?>, hasTranscript: (SessionId) -> Boolean): List<SessionId> =
+    forkOf.filter { (fork, original) -> original == id && !hasTranscript(fork) }.keys.toList()
+
+/** What the delete question adds when [forks] open forks start from the session's transcript; null for none. */
+internal fun forkWarning(forks: Int): String? = when (forks) {
+    0 -> null
+    1 -> "An open fork of it has not started yet, and could not start without it."
+    else -> "$forks open forks of it have not started yet, and could not start without it."
+}
+
+/** The question a row asks before it deletes its session, with [warning] ([forkWarning]) if it has one, and its two answers. */
 @Composable
-private fun DeleteConfirmation(onDelete: () -> Unit, onCancel: () -> Unit) {
+private fun DeleteConfirmation(warning: String?, onDelete: () -> Unit, onCancel: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("Delete this session and its transcript?", fontWeight = FontWeight.Bold)
+        if (warning != null) Text("⚠ $warning", color = JewelTheme.globalColors.text.warning)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             DefaultButton(onClick = onDelete) { Text("Delete") }
             OutlinedButton(onClick = onCancel) { Text("Cancel") }
