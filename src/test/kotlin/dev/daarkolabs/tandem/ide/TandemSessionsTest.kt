@@ -228,7 +228,7 @@ class TandemSessionsTest {
         // environment does not have it.
         val dir = tempDir.get().resolve("shell-config").createDirectories()
         seed(dir, SEEDED) // into configDir, which only the shell names from here on
-        System.clearProperty("tandem.configDir")
+        System.clearProperty("tandem.configDir") // deliberately, inside the test: with the hook set, the shell would not be asked
         ShellEnvironment.source = { System.getenv() + ("CLAUDE_CONFIG_DIR" to configDir.toString()) }
         try {
             val restored = openProjectAsync(dir).useProjectAsync { project ->

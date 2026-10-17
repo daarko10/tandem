@@ -200,7 +200,7 @@ class SessionNotifierTest {
 
     @Test
     fun `the selected session notifies while the tool window is hidden`() = timeoutRunBlocking(60.seconds) {
-        val (notifications, title) = withSessions("selected-hidden", fixtures = "permission") {
+        val (notifications, title) = withSessions("selected-hidden", fixtures = "permission", visible = { false }) {
             val b = manager.create(NewSessionOptions())
             manager.select(b.id)
             awaitSpawns(1)
