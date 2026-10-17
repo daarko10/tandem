@@ -21,6 +21,7 @@ import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
+import java.nio.file.WatchEvent
 import java.nio.file.WatchKey
 import java.nio.file.WatchService
 import java.nio.file.attribute.FileTime
@@ -444,6 +445,42 @@ class SessionIndexTest {
             withTimeout(15_000) { signals.receive() }
             newTranscript(dir)
             withTimeout(15_000) { signals.receive() }
+        } finally {
+            collecting.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun `the watcher asks the JDK for its highest polling sensitivity`() {
+        // JDK 21, the toolchain's, has com.sun.nio.file.SensitivityWatchEventModifier. Its polling watch service (macOS) then looks
+        // every 2 s instead of every 10 s; the others accept the modifier and ignore it.
+        assertEquals(listOf("HIGH"), watchModifiers().map { it.name() })
+    }
+
+    @Test
+    fun `a modifier the watch service rejects is dropped and the folder is watched without it`(@TempDir dir: Path) = runBlocking<Unit> {
+        val unknown = WatchEvent.Modifier { "UNKNOWN" }
+        val signals = Channel<Unit>(Channel.UNLIMITED)
+        val collecting = launch { watchFolders({ listOf(dir) }, modifiers = listOf(unknown)).collect { signals.send(it) } }
+        try {
+            withTimeout(15_000) { signals.receive() } // the folder is watched
+            newTranscript(dir)
+            withTimeout(15_000) { signals.receive() }
+        } finally {
+            collecting.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun `a transcript written into a watched folder is signalled within a few seconds`(@TempDir dir: Path) = runBlocking<Unit> {
+        // Immediate where the file system notifies (Linux, Windows). Where the watch service polls (macOS), only the high
+        // sensitivity keeps this within the bound: the JDK's default is to look every 10 s.
+        val signals = Channel<Unit>(Channel.UNLIMITED)
+        val collecting = launch { watchFolders({ listOf(dir) }).collect { signals.send(it) } }
+        try {
+            withTimeout(15_000) { signals.receive() } // the folder is watched
+            newTranscript(dir)
+            withTimeout(6_000) { signals.receive() }
         } finally {
             collecting.cancelAndJoin()
         }

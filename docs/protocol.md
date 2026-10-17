@@ -722,9 +722,11 @@ terminal show up too. Sources: SDK 0.3.300 (`sdk.mjs` reads and writes the same 
   a 2.1.301 recording) and, per the SDK, subagent transcripts and tool results.
 - The file appears with the session's first prompt (section 1.1). A running CLI may be appending to it while Tandem
   reads: a last line the CLI is still writing is not a JSON object yet and is skipped.
-- Tandem watches the folders, so a session started elsewhere shows up within a few seconds on Linux and Windows; on
-  macOS the JDK's `WatchService` polls, about every 10 s, so it can take that long there (the sidebar also lists the
-  folders again whenever it appears). For the list, a transcript that only grew since it was read is not read in full
+- Tandem watches the folders, so a session started elsewhere shows up within a few seconds on Linux and Windows. On
+  macOS the JDK's `WatchService` polls, by default every 10 s; Tandem registers the folders with the JDK's
+  `SensitivityWatchEventModifier.HIGH` (looked up by name, since it is deprecated for removal), which makes it poll every
+  2 s, so a session shows up within about 3 s there. A runtime without that modifier, or a watch service that rejects
+  it, watches without it, at the default rate (the sidebar also lists the folders again whenever it appears). For the list, a transcript that only grew since it was read is not read in full
   again: the lines appended since are scanned for title lines (11.4). It is read in full when it shrank, or when the
   part read before had no prompt yet or did not end with a whole line.
 

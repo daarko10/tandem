@@ -23,6 +23,7 @@ import java.nio.file.ProviderMismatchException
 import java.nio.file.StandardWatchEventKinds.ENTRY_CREATE
 import java.nio.file.StandardWatchEventKinds.ENTRY_DELETE
 import java.nio.file.StandardWatchEventKinds.ENTRY_MODIFY
+import java.nio.file.WatchEvent
 import java.nio.file.WatchKey
 import java.nio.file.WatchService
 import java.nio.file.attribute.BasicFileAttributes
@@ -276,14 +277,15 @@ class SessionIndex(
 
 /**
  * One signal once the watching has started, then one per batch of events in the [folders], watched with the service that
- * [newWatchService] creates; the flow behind [SessionIndex.changes], without its debounce. A folder that does not exist, or that was
- * deleted, is looked for every [pollMillis] and signalled when it is found. Internal so tests can pass a watch service that fails,
- * and a shorter poll.
+ * [newWatchService] creates, each registered with the [modifiers] (see [watchModifiers]); the flow behind [SessionIndex.changes],
+ * without its debounce. A folder that does not exist, or that was deleted, is looked for every [pollMillis] and signalled when it is
+ * found. Internal so tests can pass a watch service that fails, a shorter poll and a modifier the watch service rejects.
  */
 internal fun watchFolders(
     folders: () -> List<Path>,
     newWatchService: () -> WatchService = { FileSystems.getDefault().newWatchService() },
     pollMillis: Long = FOLDER_POLL_MILLIS,
+    modifiers: List<WatchEvent.Modifier> = watchModifiers(),
 ): Flow<Unit> = callbackFlow<Unit> {
     val service = tryWatching(onFailure = { e ->
         logGivingUp(e)
@@ -296,7 +298,7 @@ internal fun watchFolders(
     launch {
         try {
             tryWatching(onFailure = ::logGivingUp) {
-                val watch = FolderWatch(service, folders)
+                val watch = FolderWatch(service, folders, modifiers)
                 watch.registerNew()
                 trySend(Unit) // Watched from here on: this makes a caller that listed earlier look again.
                 val pollNanos = TimeUnit.MILLISECONDS.toNanos(pollMillis)
@@ -329,12 +331,41 @@ internal fun watchFolders(
     }
 }.flowOn(Dispatchers.IO)
 
+/**
+ * The JDK's `com.sun.nio.file.SensitivityWatchEventModifier.HIGH`, looked up by name so that nothing depends on it at compile time,
+ * or null where the JDK has none (it is deprecated for removal).
+ */
+private val HIGH_SENSITIVITY: WatchEvent.Modifier? by lazy {
+    try {
+        Class.forName("com.sun.nio.file.SensitivityWatchEventModifier").getField("HIGH").get(null) as? WatchEvent.Modifier
+    } catch (_: ReflectiveOperationException) {
+        null
+    } catch (_: LinkageError) {
+        null
+    } catch (_: SecurityException) {
+        null
+    }
+}
+
+/**
+ * The modifiers each folder is registered with: the highest sensitivity where the JDK has it. A watch service that polls, as the
+ * JDK's on macOS does, then looks every 2 s instead of every 10 s; the others accept it and ignore it.
+ */
+internal fun watchModifiers(): List<WatchEvent.Modifier> = listOfNotNull(HIGH_SENSITIVITY)
+
 private fun logGivingUp(e: Exception) {
     LOG.info("transcript folders cannot be watched (${e.javaClass.simpleName}); sessions show up when the list is refreshed")
 }
 
-/** The folders registered with a watch service. Not thread-safe: one coroutine drives it. */
-private class FolderWatch(private val service: WatchService, private val folders: () -> List<Path>) {
+/** The events a folder is watched for. */
+private val KINDS: Array<WatchEvent.Kind<Path>> = arrayOf(ENTRY_CREATE, ENTRY_MODIFY, ENTRY_DELETE)
+
+/** The folders registered with a watch service, with the [modifiers] it accepts. Not thread-safe: one coroutine drives it. */
+private class FolderWatch(
+    private val service: WatchService,
+    private val folders: () -> List<Path>,
+    private val modifiers: List<WatchEvent.Modifier>,
+) {
     private val watched = HashMap<Path, WatchKey>()
 
     /** Registers each folder that exists and is not watched yet. True if there was one. */
@@ -344,13 +375,25 @@ private class FolderWatch(private val service: WatchService, private val folders
         for (folder in folders()) {
             if (folder in watched || !Files.isDirectory(folder)) continue
             watched[folder] = try {
-                folder.register(service, ENTRY_CREATE, ENTRY_MODIFY, ENTRY_DELETE)
+                register(folder)
             } catch (_: NoSuchFileException) {
                 continue // deleted again since it was found; the next round looks again
             }
             registered = true
         }
         return registered
+    }
+
+    /** Registers [folder] with the [modifiers], or without them if the watch service rejects one. */
+    private fun register(folder: Path): WatchKey {
+        if (modifiers.isNotEmpty()) {
+            try {
+                return folder.register(service, KINDS, *modifiers.toTypedArray())
+            } catch (_: UnsupportedOperationException) {
+                // Not every watch service knows a JDK's modifier: it watches as well without.
+            }
+        }
+        return folder.register(service, *KINDS)
     }
 
     /** Waits up to [nanos] for the next batch of events in a watched folder. True if the batch holds events. */
