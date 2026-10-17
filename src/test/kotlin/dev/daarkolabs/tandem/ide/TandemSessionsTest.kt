@@ -10,15 +10,15 @@ import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.NewSessionOptions
+import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
-import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.RegisterExtension
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.copyTo
@@ -59,29 +59,15 @@ class TandemSessionsTest {
         private const val BROKEN = "55555555-5555-4555-8555-555555555555"
     }
 
-    /** Fake CLI processes that were already running before this test; another test's leftovers are not this test's to judge. */
-    private val earlier: Set<Long> = fakeCliProcesses().map { it.pid() }.toSet()
+    private val ownProcesses = OwnFakeCliProcesses()
 
-    private lateinit var configDir: Path
+    @JvmField
+    @RegisterExtension
+    val ownConfigDir: OwnConfigDir = OwnConfigDir()
 
-    @BeforeEach
-    fun useOwnConfigDir() {
-        configDir = Files.createTempDirectory(tempDir.get(), "config")
-        System.setProperty("tandem.configDir", configDir.toString())
-    }
+    private val configDir: Path get() = ownConfigDir.path
 
-    @AfterEach
-    fun forgetConfigDir() {
-        System.clearProperty("tandem.configDir")
-    }
-
-    /** Live processes running the fake CLI, children of this test JVM. */
-    private fun fakeCliProcesses(): List<ProcessHandle> =
-        ProcessHandle.current().descendants().filter { handle ->
-            handle.isAlive && handle.info().arguments().orElse(emptyArray()).any { it.endsWith("fake-claude.py") }
-        }.toList()
-
-    private fun ownFakeProcesses(): List<ProcessHandle> = fakeCliProcesses().filter { it.pid() !in earlier }
+    private fun ownFakeProcesses(): List<ProcessHandle> = ownProcesses.list()
 
     /** Closing the project must end every process; the timeout of the enclosing test bounds the wait. */
     private suspend fun awaitNoOwnFakeCli() {
@@ -271,14 +257,14 @@ class TandemSessionsTest {
             workspace.selectedSessionId = GONE
             val sessions = TandemSessions.get(project)
             sessions.ensureStarted()
-            // The selected session is gone, so the first one restored is selected in its place.
-            sessions.manager.selected.first { it == SEEDED }
-            // And the workspace forgets the one that is gone.
+            // Restoring selects one session, once; the workspace forgets the one that is gone.
+            val selected = sessions.manager.selected.first { it != null }
             while (workspace.openSessionIds != listOf(SEEDED)) delay(20)
-            sessions.manager.sessions.value.map { it.id } to workspace.selectedSessionId
+            sessions.manager.sessions.value.map { it.id } to listOf(selected, workspace.selectedSessionId)
         }
         assertEquals(listOf(SEEDED), open)
-        assertEquals(SEEDED, selected)
+        // The selected session is gone, so the first one restored is selected in its place, and remembered.
+        assertEquals(listOf(SEEDED, SEEDED), selected)
         assertEquals(emptyList(), ownFakeProcesses().map { it.pid() })
     }
 
@@ -295,12 +281,14 @@ class TandemSessionsTest {
             }
             val sessions = TandemSessions.get(project)
             sessions.ensureStarted()
-            sessions.manager.selected.first { it == SEEDED }
+            val first = sessions.manager.selected.first { it != null } // restoring selects one session, once
+            val openWhenSelected = sessions.manager.sessions.value.map { it.id }
             while (sessions.manager.sessions.value.size < 3) delay(20) // the others follow
-            sessions.manager.sessions.value.map { it.id } to sessions.manager.selected.value
+            sessions.manager.sessions.value.map { it.id } to listOf(first, openWhenSelected.first(), sessions.manager.selected.value)
         }
         assertEquals(listOf(SEEDED, THIRD, OTHER), open)
-        assertEquals(SEEDED, selected)
+        // Selected as soon as it was opened, ahead of the others, and still selected once they are open.
+        assertEquals(listOf(SEEDED, SEEDED, SEEDED), selected)
         assertEquals(emptyList(), ownFakeProcesses().map { it.pid() })
     }
 

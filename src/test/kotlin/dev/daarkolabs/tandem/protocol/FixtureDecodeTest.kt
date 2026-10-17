@@ -6,12 +6,19 @@ import kotlinx.serialization.json.put
 import org.junit.Test
 import kotlin.io.path.readLines
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class FixtureDecodeTest {
+    @Test
+    fun `a transcript fixture that is not there fails at once, naming it`() {
+        val failure = assertFailsWith<IllegalArgumentException> { Fixtures.transcript("no-such-fixture") }
+        assertTrue("no-such-fixture" in failure.message.orEmpty(), failure.message)
+    }
+
     @Test
     fun `every fixture line decodes and core types are never Unknown`() {
         val core = setOf("assistant", "user", "result", "stream_event", "control_request", "control_response")

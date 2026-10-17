@@ -68,8 +68,7 @@ class SessionManagerTest {
     private val fakeClaude: String = System.getProperty("tandem.claudePath") ?: "src/test/resources/fake-claude.py"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    /** Fake CLI processes that were already running before this test; another test's leftovers are not this test's to judge. */
-    private val earlier: Set<Long> = fakeProcesses().map { it.pid() }.toSet()
+    private val ownProcesses = OwnFakeCliProcesses()
 
     /** A session with a recorded transcript (`history-reply`, whose own title is "Pong"). */
     private val seeded = "44444444-4444-4444-8444-444444444444"
@@ -172,12 +171,7 @@ class SessionManagerTest {
 
     private fun ChatState.prompts(): List<String> = entries.filterIsInstance<ChatEntry.User>().map { it.text }
 
-    private fun fakeProcesses(): List<ProcessHandle> =
-        ProcessHandle.current().descendants().filter { handle ->
-            handle.isAlive && handle.info().arguments().orElse(emptyArray()).any { it.endsWith("fake-claude.py") }
-        }.toList()
-
-    private fun ownFakeProcesses(): List<ProcessHandle> = fakeProcesses().filter { it.pid() !in earlier }
+    private fun ownFakeProcesses(): List<ProcessHandle> = ownProcesses.list()
 
     @Test
     fun `create spawns with --session-id and the options`() = test {
