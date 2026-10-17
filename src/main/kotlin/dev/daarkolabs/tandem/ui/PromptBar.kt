@@ -17,57 +17,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
-import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.ChatState
-import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.DefaultButton
-import org.jetbrains.jewel.ui.component.ListComboBox
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextArea
-
-/** The model picker's first entry: the CLI's default model, picked by passing none. */
-private const val DEFAULT_MODEL_LABEL: String = "Default model"
-
-/** How wide a picker's list is, unless the picker itself is wider: wide enough for an entry such as "Default (recommended)". */
-private val PICKER_POPUP_WIDTH: Dp = 220.dp
-
-/** An entry of a picker: the [label] it shows and the [value] it stands for. */
-internal data class PickerEntry<out T>(val label: String, val value: T)
-
-/** The permission modes the picker offers, in its order. The CLI has more, which Tandem does not offer yet. */
-internal val PERMISSION_MODE_ENTRIES: List<PickerEntry<PermissionMode>> = listOf(
-    PickerEntry("Default", PermissionMode.DEFAULT),
-    PickerEntry("Accept edits", PermissionMode.ACCEPT_EDITS),
-    PickerEntry("Plan", PermissionMode.PLAN),
-)
-
-/**
- * The model picker's entries: "Default model" (null: the CLI's default), then the models the CLI offers ([models], by display name),
- * or, while it has not listed them, the model it reports it runs ([active]). A [requested] model that none of these stands for is an
- * entry of its own, so that the picker always shows what was picked.
- */
-internal fun modelEntries(models: List<ModelOption>, requested: String?, active: String?): List<PickerEntry<String?>> {
-    val offered = if (models.isNotEmpty()) {
-        models.map { PickerEntry(it.displayName, it.value) }
-    } else {
-        listOfNotNull(active?.let { PickerEntry(it, it) })
-    }
-    return (listOf(PickerEntry<String?>(DEFAULT_MODEL_LABEL, null)) + offered).withEntryFor(requested)
-}
-
-/** These entries, plus [value] as an entry of its own, labelled with itself, when it is not null and none of them stands for it. */
-internal fun List<PickerEntry<String?>>.withEntryFor(value: String?): List<PickerEntry<String?>> =
-    if (value == null || any { it.value == value }) this else this + PickerEntry(value, value)
-
-/** The position of the entry that stands for [value]; the first entry, the default, when none does. */
-internal fun <T> List<PickerEntry<T>>.positionOf(value: T?): Int = indexOfFirst { it.value == value }.coerceAtLeast(0)
 
 /**
  * The bottom of a session's chat: the prompt with Send, or Stop while a turn runs, and below it the session's model and permission
@@ -142,47 +101,6 @@ private fun PromptBox(handle: SessionHandle, manager: SessionManager, state: Cha
             ) { Text("Send") }
         }
     }
-}
-
-/**
- * The model picker: "Default model", then the models the CLI offers, or the one it runs while it has not listed them
- * ([modelEntries]). It shows [model], the one picked (null: the CLI's default); picking another one calls [onPick] with its value,
- * null for "Default model".
- */
-@Composable
-internal fun ModelPicker(
-    models: List<ModelOption>,
-    model: String?,
-    active: String?,
-    modifier: Modifier = Modifier,
-    onPick: (String?) -> Unit,
-) {
-    val entries = remember(models, model, active) { modelEntries(models, model, active) }
-    Picker(entries, model, modifier, onPick)
-}
-
-/** The permission mode picker: Default, Accept edits and Plan. It shows [mode], and Default for none or for a mode it does not offer. */
-@Composable
-internal fun PermissionModePicker(mode: PermissionMode?, onPick: (PermissionMode) -> Unit) {
-    Picker(PERMISSION_MODE_ENTRIES, mode, onPick = onPick)
-}
-
-/**
- * A drop-down list of [entries] that shows the one standing for [selected] (the first one when none does); picking another one calls
- * [onPick] with its value. Picking the one shown does nothing.
- */
-@Composable
-internal fun <T> Picker(entries: List<PickerEntry<T>>, selected: T?, modifier: Modifier = Modifier, onPick: (T) -> Unit) {
-    val labels = remember(entries) { entries.map { it.label } }
-    ListComboBox(
-        items = labels,
-        selectedIndex = entries.positionOf(selected),
-        onSelectedItemChange = { index -> entries.getOrNull(index)?.let { onPick(it.value) } },
-        modifier = modifier,
-        maxPopupWidth = PICKER_POPUP_WIDTH,
-        // By position, since two entries may show the same text.
-        itemKeys = { index, _ -> index },
-    )
 }
 
 /** The effort the session started with. It cannot change while the session runs, so it is shown and not picked. */

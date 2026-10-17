@@ -111,12 +111,30 @@ class ToolWindowIdeTest {
 
     @Test
     fun `the pickers send set_permission_mode and set_model`() {
-        val sent = runChat("pickers", fixtures = listOf("permission-mode")) {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("pickers", fixtures = listOf("permission-mode"), sentLog = log) {
             newSession()
             typePrompt("Reply with the single word: one")
             waitForText("one")
+            // From the keyboard the open list only moves its highlight: Down goes to Accept edits, and Escape picks nothing.
             ui.x("//div[@class='ComposeNode' and @visible_text='Default']").click(Point(10, 10))
-            menuItem("Plan").click(Point(10, 10))
+            waitFor("the permission modes listed", 30.seconds) { menuItem("Plan").present() }
+            ui.keyboard { down() }
+            ui.keyboard { escape() }
+            waitFor("Escape closed the list, Default kept", 30.seconds) {
+                !menuItem("Plan").present() && picker("Permission mode", "Default").present()
+            }
+            // Down twice passes Accept edits on the way to Plan, and Enter picks Plan: one request.
+            picker("Permission mode", "Default").click(Point(10, 10))
+            waitFor("the permission modes listed again", 30.seconds) { menuItem("Plan").present() }
+            ui.keyboard {
+                down()
+                down()
+                enter()
+            }
+            waitFor("Enter closed the list on Plan", 30.seconds) {
+                !menuItem("Accept edits").present() && picker("Permission mode", "Plan").present()
+            }
             typePrompt("Reply with the single word: two")
             waitForText("two")
             waitFor("status shows plan", 1.minutes) {
@@ -124,11 +142,16 @@ class ToolWindowIdeTest {
             }
             ui.x("//div[@class='ComposeNode' and @visible_text='Default model']").click(Point(10, 10))
             menuItem(modelName(1)).click(Point(10, 10))
+            // The fake CLI answers set_model with the next acknowledgement it recorded, set_permission_mode's acceptEdits one, and
+            // that one's status line: so the session ends in Accept edits. Wait for the frame itself before the IDE closes.
+            waitFor("set_model reached the CLI", 30.seconds) { "\"subtype\":\"set_model\"" in log.readText() }
         }
         val requests = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject }
-        val setPermissionMode = requests.first { it["subtype"]!!.jsonPrimitive.content == "set_permission_mode" }
-        assertEquals("plan", setPermissionMode["mode"]!!.jsonPrimitive.content)
-        assertTrue(requests.any { it["subtype"]!!.jsonPrimitive.content == "set_model" })
+        val modes = requests.filter { it["subtype"]!!.jsonPrimitive.content == "set_permission_mode" }
+            .map { it["mode"]!!.jsonPrimitive.content }
+        assertEquals(listOf("plan"), modes, "Escape picked nothing, and Enter picked Plan alone")
+        val setModel = requests.single { it["subtype"]!!.jsonPrimitive.content == "set_model" }
+        assertEquals("sonnet", setModel["model"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -292,7 +315,8 @@ class ToolWindowIdeTest {
      * Starts the IDE on [project] with the plugin and the fake CLI, opens the tool window, runs [script], and returns the frames
      * the plugin wrote to the CLI's stdin, each process's `__spawn__` line included. The Nth process the plugin starts replays
      * fixture N of [fixtures] (the last one once they run out). [configDir] becomes the CLI's config directory
-     * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists.
+     * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists. The frames go to
+     * [sentLog] as the fake CLI reads them, so that [script] can wait for one.
      */
     private fun runChat(
         name: String,
@@ -300,10 +324,9 @@ class ToolWindowIdeTest {
         configDir: Path? = null,
         gateFile: Path? = null,
         project: Path = newProject(),
+        sentLog: Path = Files.createTempFile("tandem-sent", ".ndjson"),
         script: Driver.() -> Unit,
     ): List<JsonObject> {
-        val sentLog = Files.createTempFile("tandem-sent", ".ndjson")
-
         val context = Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
             applyVMOptionsPatch {
@@ -356,6 +379,10 @@ class ToolWindowIdeTest {
     private fun Driver.focusedRow(title: String): UiComponent = ui.x("$ROW[@focused='true' and contains(@text, '$title')]")
 
     private fun Driver.menuItem(text: String): UiComponent = ui.x("//div[@class='ComposeNode' and @visible_text='$text']")
+
+    /** The picker that assistive technology knows as [description], if it shows [text]. */
+    private fun Driver.picker(description: String, text: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @role='DropdownList' and @contentdescription='$description' and @visible_text='$text']")
 
     /** An icon button, found by what it says to assistive technology. */
     private fun Driver.iconButton(description: String): UiComponent =

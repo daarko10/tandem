@@ -41,8 +41,11 @@ private val LOG = logger<SessionManager>()
 /** How often the session list is read again where the transcript folders cannot be watched. */
 private const val INDEX_POLL_MILLIS: Long = 30_000
 
-/** The permission modes Tandem offers. A process never starts in another one (see [SessionManager.configFor]). */
-private val OFFERED_MODES: Set<PermissionMode> = setOf(PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN)
+/**
+ * The permission modes Tandem offers, in the order its picker lists them. A process never starts in another one (see
+ * [SessionManager.configFor]).
+ */
+internal val OFFERED_MODES: Set<PermissionMode> = setOf(PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN)
 
 /** The chat's notice when a process starts although [SessionManager]'s cap is reached and no session is idle. */
 private const val CAP_EXCEEDED_TEXT: String = "Max live sessions exceeded"
