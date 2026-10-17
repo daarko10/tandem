@@ -77,7 +77,7 @@ internal class SessionSpawner(
      * Starts a process for the session unless one runs, and hands it the queued prompts. A start [forPrompts] (one that
      * [SessionManager.send] asked for) that finds none left does nothing: an earlier start sent them, or dropped them for want of
      * a binary. Holds the session's spawn lock throughout, so that a session never gets two processes. Without a binary the chat
-     * shows the install notice instead, and a fork that has no transcript of its own, and whose original has none any more, says
+     * shows the install notice instead, and a fork that has no transcript of its own, and whose original's is not found, says
      * so in its chat ([SessionManager.FORK_ORIGINAL_GONE_TEXT]) rather than start a `--resume` the CLI would fail. Every process,
      * a respawn's and a fork's too, starts only once [makeRoom] has made room for it under the cap; if it could not, the process
      * starts over the cap when [overCapAllowed], with a notice in the chat, and else not at all.
@@ -100,7 +100,7 @@ internal class SessionSpawner(
             }
             if (originalGone) {
                 val dropped = handle.failToStart(SessionManager.FORK_ORIGINAL_GONE_TEXT)
-                LOG.warn("session ${handle.id}: not started, the session it forks has no transcript any more; $dropped prompt(s) not sent")
+                LOG.warn("session ${handle.id}: not started, the transcript of the session it forks was not found; $dropped prompt(s) not sent")
                 return
             }
             admission.withLock {

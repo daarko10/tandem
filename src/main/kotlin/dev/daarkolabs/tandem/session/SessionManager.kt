@@ -509,10 +509,13 @@ class SessionManager internal constructor(
             "Claude Code was not found. Install it from https://code.claude.com, sign in once with `claude` in a terminal, " +
                 "then reopen this tool window."
 
-        /** The chat's notice when a fork without a transcript of its own is to start, and the session it forks was deleted. */
+        /**
+         * The chat's notice when a fork without a transcript of its own is to start, and the transcript of the session it forks is
+         * not found: deleted, or the lookup failed ([SessionIndex.transcript] gives null for both, and logs a failure).
+         */
         internal const val FORK_ORIGINAL_GONE_TEXT: String =
-            "The session this fork was made from was deleted before the fork's first prompt, so the fork cannot start. " +
-                "Close it and fork again from another session."
+            "The transcript of the session this fork was made from was not found (it was deleted, or could not be looked up), " +
+                "so the fork cannot start. Close it and fork again from another session."
     }
 }
 
