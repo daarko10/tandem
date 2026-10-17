@@ -3,6 +3,7 @@ package dev.daarkolabs.tandem.ide
 import com.intellij.notification.Notification
 import com.intellij.notification.NotificationType
 import com.intellij.notification.Notifications
+import com.intellij.openapi.application.EDT
 import com.intellij.openapi.util.Disposer
 import com.intellij.testFramework.common.timeoutRunBlocking
 import com.intellij.testFramework.junit5.TestApplication
@@ -10,21 +11,22 @@ import com.intellij.testFramework.junit5.fixture.tempPathFixture
 import com.intellij.testFramework.openProjectAsync
 import com.intellij.testFramework.useProjectAsync
 import dev.daarkolabs.tandem.session.NewSessionOptions
+import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.SessionStatus
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import java.nio.file.Files
+import org.junit.jupiter.api.extension.RegisterExtension
 import java.nio.file.Path
 import java.util.Collections
 import kotlin.io.path.createDirectories
@@ -44,26 +46,13 @@ class SessionNotifierTest {
         private val tempDir = tempPathFixture()
     }
 
-    /** Fake CLI processes that were already running before this test; another test's leftovers are not this test's to judge. */
-    private val earlier: Set<Long> = fakeCliProcesses().map { it.pid() }.toSet()
+    private val ownProcesses = OwnFakeCliProcesses()
 
-    private lateinit var configDir: Path
+    @JvmField
+    @RegisterExtension
+    val ownConfigDir: OwnConfigDir = OwnConfigDir()
 
-    @BeforeEach
-    fun useOwnConfigDir() {
-        configDir = Files.createTempDirectory(tempDir.get(), "config")
-        System.setProperty("tandem.configDir", configDir.toString())
-    }
-
-    @AfterEach
-    fun forgetConfigDir() {
-        System.clearProperty("tandem.configDir")
-    }
-
-    private fun fakeCliProcesses(): List<ProcessHandle> =
-        ProcessHandle.current().descendants().filter { handle ->
-            handle.isAlive && handle.info().arguments().orElse(emptyArray()).any { it.endsWith("fake-claude.py") }
-        }.toList()
+    private val configDir: Path get() = ownConfigDir.path
 
     /**
      * What a test sees: the sessions, the notifications posted to the project so far, and how many processes have started. With a
@@ -92,14 +81,15 @@ class SessionNotifierTest {
      * Opens a project whose processes replay [fixtures], starts its sessions and runs [block] while the project's notifications are
      * collected; returns once the project is closed and every process it started has ended.
      *
-     * With [hold], the notifier is not the one [TandemSessions.ensureStarted] starts but one of the test's own, which runs [hold]
-     * before each post, ahead of its check on the EDT. With [lateNotifier], nothing is started: the test's own notifier starts
+     * With [hold] or [visible], the notifier is not the one [TandemSessions.ensureStarted] starts but one of the test's own, which
+     * runs [hold] before each post, ahead of its check on the EDT, and asks [visible] whether the tool window shows. With [lateNotifier], nothing is started: the test's own notifier starts
      * when the test calls [Run.startNotifier].
      */
     private suspend fun <T> withSessions(
         name: String,
         fixtures: String,
         hold: (suspend () -> Unit)? = null,
+        visible: (() -> Boolean)? = null,
         lateNotifier: Boolean = false,
         block: suspend Run.() -> T,
     ): T {
@@ -123,11 +113,14 @@ class SessionNotifierTest {
                 sessions.extraEnvironment = mapOf("TANDEM_FAKE_LOG" to log.toString(), "TANDEM_FAKE_FIXTURES" to fixtures)
                 when {
                     lateNotifier -> {}
-                    hold == null -> {
+                    hold == null && visible == null -> {
                         sessions.ensureStarted()
                         sessions.ensureStarted() // once is enough: a second call starts nothing, so nothing is notified twice
                     }
-                    else -> SessionNotifier(project, sessions.manager, notifying).apply { beforePosting = hold }.start()
+                    else -> SessionNotifier(project, sessions.manager, notifying).apply {
+                        hold?.let { beforePosting = it }
+                        visible?.let { toolWindowVisible = it }
+                    }.start()
                 }
                 Run(sessions.manager, posted, log) { SessionNotifier(project, sessions.manager, notifying).start() }.block()
             } finally {
@@ -135,7 +128,7 @@ class SessionNotifierTest {
                 Disposer.dispose(listening)
             }
         }
-        while (fakeCliProcesses().any { it.pid() !in earlier }) delay(20)
+        while (ownProcesses.list().isNotEmpty()) delay(20)
         return result
     }
 
@@ -317,5 +310,52 @@ class SessionNotifierTest {
             posted.toList()
         }
         assertEquals(emptyList(), notifications.map { it.title })
+    }
+
+    @Test
+    fun `the selected session is never announced while the tool window shows`() = timeoutRunBlocking(60.seconds) {
+        val notifications = withSessions("selected-visible", fixtures = "permission,permission", visible = { true }) {
+            val a = manager.create(NewSessionOptions())
+            manager.select(a.id)
+            awaitSpawns(1)
+            manager.send(a.id, "Create the selected file")
+            a.status.first { it == SessionStatus.WAITING }
+            val b = manager.create(NewSessionOptions())
+            awaitSpawns(2)
+            manager.send(b.id, "Create the background file")
+            b.status.first { it == SessionStatus.WAITING }
+            notifications() // B's, which comes after A's would have
+        }
+        // A asks while the user looks at it; B, which is not selected, is announced all the same.
+        assertEquals(listOf("Create the background file needs your permission"), notifications.map { it.title })
+    }
+
+    @Test
+    fun `the notification's Open selects the session`() = timeoutRunBlocking(60.seconds) {
+        val (selected, expired) = withSessions("open-action", fixtures = "plain-reply,permission") {
+            val a = manager.create(NewSessionOptions())
+            manager.select(a.id)
+            awaitSpawns(1)
+            val b = manager.create(NewSessionOptions())
+            awaitSpawns(2)
+            manager.send(b.id, "Create the fixture file")
+            val warning = notifications().single()
+            withContext(Dispatchers.EDT) { Notification.fire(warning, warning.actions.single(), null) }
+            listOf(manager.selected.value == b.id, b.attention.value) to warning.isExpired
+        }
+        assertEquals(listOf(true, false), selected, "B is selected, and no longer asks for attention")
+        assertTrue(expired, "Open expires the notification")
+    }
+
+    @Test
+    fun `a turn whose running status was conflated away between a permission request and its end is a finished turn`() {
+        assertEquals(SessionNotifier.Event.FINISHED, SessionNotifier.eventOf(SessionStatus.WAITING, SessionStatus.IDLE))
+        assertEquals(SessionNotifier.Event.FINISHED, SessionNotifier.eventOf(SessionStatus.RUNNING, SessionStatus.IDLE))
+        assertEquals(SessionNotifier.Event.PERMISSION, SessionNotifier.eventOf(SessionStatus.RUNNING, SessionStatus.WAITING))
+        assertEquals(SessionNotifier.Event.PERMISSION, SessionNotifier.eventOf(null, SessionStatus.WAITING))
+        assertEquals(null, SessionNotifier.eventOf(null, SessionStatus.IDLE), "a session followed from now on finished nothing")
+        assertEquals(null, SessionNotifier.eventOf(SessionStatus.STOPPED, SessionStatus.IDLE), "a process that started")
+        assertEquals(null, SessionNotifier.eventOf(SessionStatus.WAITING, SessionStatus.STOPPED), "stopped, not finished")
+        assertEquals(null, SessionNotifier.eventOf(SessionStatus.IDLE, SessionStatus.IDLE))
     }
 }

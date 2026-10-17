@@ -51,6 +51,13 @@ class SessionNotifier(private val project: Project, private val manager: Session
     @set:TestOnly
     internal var beforePosting: suspend () -> Unit = {}
 
+    /** Whether the Tandem tool window shows, asked on the EDT: headless, it never does, so tests put their own answer here. */
+    @Volatile
+    @set:TestOnly
+    internal var toolWindowVisible: () -> Boolean = {
+        ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.isVisible == true
+    }
+
     /** Follows every session that is open or opened later. Call once. */
     fun start() {
         scope.launch(CoroutineName("SessionNotifier")) {
@@ -131,9 +138,6 @@ class SessionNotifier(private val project: Project, private val manager: Session
             Event.FINISHED -> true
         }
 
-    /** Whether the Tandem tool window shows. On the EDT. */
-    private fun toolWindowVisible(): Boolean = ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.isVisible == true
-
     /** The notification's "Open", on the EDT: selects session [id] and shows the tool window. */
     private fun open(id: SessionId) {
         if (project.isDisposed) return
@@ -142,7 +146,7 @@ class SessionNotifier(private val project: Project, private val manager: Session
     }
 
     /** What a notification tells. */
-    private enum class Event(val type: NotificationType, private val what: String) {
+    internal enum class Event(val type: NotificationType, private val what: String) {
         PERMISSION(NotificationType.WARNING, "needs your permission"),
         FINISHED(NotificationType.INFORMATION, "finished"),
         ;
@@ -150,14 +154,18 @@ class SessionNotifier(private val project: Project, private val manager: Session
         fun title(session: String): String = "$session $what"
     }
 
-    /**
-     * The event a change of status from [previous] to [status] is, as the manager raises attention for it; null for none. From no
-     * [previous] status (the session is followed from now on), only a permission request it waits on is one.
-     */
-    private fun eventOf(previous: SessionStatus?, status: SessionStatus): Event? = when {
-        status == previous -> null
-        status == SessionStatus.WAITING -> Event.PERMISSION
-        previous == SessionStatus.RUNNING && status == SessionStatus.IDLE -> Event.FINISHED
-        else -> null
+    internal companion object {
+        /**
+         * The event a change of status from [previous] to [status] is; null for none. A turn ends when a session that was busy
+         * (running, or waiting for a permission within the turn) becomes idle: the status is a state, which conflates, so the
+         * RUNNING between an answered request and the end of the turn may never be seen. From no [previous] status (the session is
+         * followed from now on), only a permission request it waits on is one.
+         */
+        internal fun eventOf(previous: SessionStatus?, status: SessionStatus): Event? = when {
+            status == previous -> null
+            status == SessionStatus.WAITING -> Event.PERMISSION
+            (previous == SessionStatus.RUNNING || previous == SessionStatus.WAITING) && status == SessionStatus.IDLE -> Event.FINISHED
+            else -> null
+        }
     }
 }
