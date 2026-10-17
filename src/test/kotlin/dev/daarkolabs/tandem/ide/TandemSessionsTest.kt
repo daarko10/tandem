@@ -27,6 +27,7 @@ import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.readLines
 import kotlin.io.path.readText
+import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -142,6 +143,32 @@ class TandemSessionsTest {
         val spawn = log.readLines().first { "__spawn__" in it }
         assertTrue("\"CLAUDE_TANDEM_SHELL_PROBE\":\"from-shell\"" in spawn, spawn)
         assertFalse("\"CLAUDECODE\"" in spawn, "the parent-session variables are still dropped: $spawn")
+        awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `a claude whose interpreter is beside it, outside PATH, starts`() = timeoutRunBlocking(30.seconds) {
+        // As npm, Volta or Bun install it: `#!/usr/bin/env node`, with node in the same directory, which PATH does not list.
+        val fake = System.getProperty("tandem.claudePath")
+        val bin = tempDir.get().resolve("install-location").createDirectories()
+        bin.resolve("tandem-test-node").writeText("#!/bin/sh\nshift\nexec python3 '$fake' \"\$@\"\n")
+        bin.resolve("claude").writeText("#!/usr/bin/env tandem-test-node\n")
+        listOf("tandem-test-node", "claude").forEach { bin.resolve(it).toFile().setExecutable(true) }
+        val dir = tempDir.get().resolve("interpreter-beside").createDirectories()
+        System.setProperty("tandem.claudePath", bin.resolve("claude").toString())
+        try {
+            val state = openProjectAsync(dir).useProjectAsync { project ->
+                val sessions = TandemSessions.get(project)
+                sessions.ensureStarted()
+                val handle = sessions.manager.create(NewSessionOptions())
+                sessions.manager.send(handle.id, "Reply with the single word: pong")
+                handle.state.first { s -> s.ended || s.entries.any { it is ChatEntry.Assistant && !it.streaming } }
+            }
+            assertTrue(state.entries.any { it is ChatEntry.Assistant }, "no reply: ${state.entries}")
+            assertEquals("pong", state.replyText())
+        } finally {
+            System.setProperty("tandem.claudePath", fake)
+        }
         awaitNoOwnFakeCli()
     }
 

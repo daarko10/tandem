@@ -109,6 +109,34 @@ class ClaudeBinaryTest {
         File(tmp.toFile(), name).apply { writeText("#!/bin/sh\n$body\n"); setExecutable(true) }.path
 
     @Test
+    fun `the directory of claude goes to the front of PATH unless PATH has it`() {
+        val sep = File.pathSeparator
+        assertEquals(
+            mapOf("PATH" to "/u/.volta/bin$sep/usr/bin${sep}/bin", "HOME" to "/u"),
+            ClaudeBinary.environmentFor("/u/.volta/bin/claude", mapOf("PATH" to "/usr/bin$sep/bin", "HOME" to "/u")),
+        )
+        val onPath = mapOf("PATH" to "/usr/bin$sep/u/.volta/bin/")
+        assertEquals(onPath, ClaudeBinary.environmentFor("/u/.volta/bin/claude", onPath))
+        assertEquals(mapOf("PATH" to "/u/.bun/bin"), ClaudeBinary.environmentFor("/u/.bun/bin/claude", emptyMap()))
+    }
+
+    /**
+     * A `claude` in a directory of its own, run the way npm, Volta or Bun install it: by `#!/usr/bin/env` and an interpreter beside
+     * it (`node` for them, here a script that prints a version), which a `PATH` without that directory does not find.
+     */
+    private fun claudeWithInterpreterBeside(): String {
+        val dir = File(tmp.toFile(), "install-location").apply { mkdirs() }
+        dir.resolve("tandem-test-node").apply { writeText("#!/bin/sh\necho '2.0.0 (Claude Code)'\n"); setExecutable(true) }
+        return dir.resolve("claude").apply { writeText("#!/usr/bin/env tandem-test-node\n"); setExecutable(true) }.path
+    }
+
+    @Test
+    fun `version finds an interpreter installed beside claude`() = runBlocking {
+        val launchdPath = mapOf("PATH" to "/usr/bin:/bin:/usr/sbin:/sbin")
+        assertEquals("2.0.0 (Claude Code)", ClaudeBinary.version(claudeWithInterpreterBeside(), environment = launchdPath))
+    }
+
+    @Test
     fun `version is the first line the executable prints`() = runBlocking {
         assertEquals("2.1.301 (Claude Code)", ClaudeBinary.version(script("claude", "echo; echo '2.1.301 (Claude Code)'; echo more")))
         // It runs as a session's CLI does, with Tandem's entrypoint.

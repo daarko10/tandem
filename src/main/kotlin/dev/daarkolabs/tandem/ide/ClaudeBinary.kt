@@ -81,7 +81,22 @@ internal object ClaudeBinary {
     }
 
     /**
-     * Runs `[binary] --version` in the environment a session's CLI gets ([cliEnvironment] of the login shell's [environment]) and
+     * The environment to run [binary] in: [environment] with the binary's directory at the front of its `PATH`, unless the `PATH` has
+     * it already. A `claude` found in an install location ([Where.INSTALL_LOCATION]) or saved in the settings may be a script that
+     * npm, Volta or Bun installed, `#!/usr/bin/env node`, with its `node` beside it; with launchd's `PATH` it would exit with 127.
+     */
+    fun environmentFor(binary: String, environment: Map<String, String>): Map<String, String> {
+        val dir = File(binary).parent ?: return environment
+        // Windows names it Path; whatever its case, keep the name the environment uses.
+        val name = environment.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
+        val entries = environment[name].orEmpty().split(File.pathSeparator).filter { it.isNotBlank() }
+        if (entries.any { File(it).path == File(dir).path }) return environment
+        return environment + (name to (listOf(dir) + entries).joinToString(File.pathSeparator))
+    }
+
+    /**
+     * Runs `[binary] --version` in the environment a session's CLI gets ([cliEnvironment] of the login shell's [environment], with
+     * [environmentFor]'s `PATH`) and
      * says what came of it: the first line it printed, or how it failed. Returns within about [timeout] whatever the process does: its
      * output is polled, never waited on, so not even a child that keeps the output open after the process has exited holds it up.
      * Never throws for the process (an I/O failure is an answer too). The process, and whatever it started, is gone when this returns,
@@ -96,7 +111,7 @@ internal object ClaudeBinary {
             ProcessBuilder(binary, "--version").redirectErrorStream(true).apply {
                 environment().run {
                     clear()
-                    putAll(cliEnvironment(environment))
+                    putAll(cliEnvironment(environmentFor(binary, environment)))
                 }
             }.start()
         } catch (e: IOException) {

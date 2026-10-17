@@ -158,7 +158,8 @@ an inherited id was not measured.
   `~/.claude/local` (the older local install), and outside Windows `/opt/homebrew/bin` and `/usr/local/bin` (Homebrew,
   and npm's global bin for a Node from Homebrew or nodejs.org), `~/.npm-global/bin`, `~/.bun/bin` and `~/.volta/bin`
   (inferred locations). On Windows it looks for `claude.exe`, `claude.cmd`, then `claude`. The settings page shows what
-  it found and where. Spawn the native binary directly.
+  it found and where. Spawn the native binary directly. When the binary's directory is not on the `PATH`, it goes to the
+  front of the child's `PATH`: a `claude` that npm, Volta or Bun installed is `#!/usr/bin/env node`, with `node` beside it.
 
 ### 1.4 Startup sequence
 

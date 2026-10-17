@@ -6,6 +6,7 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.session.DefaultProcessLauncher
 import dev.daarkolabs.tandem.session.NewSessionOptions
+import dev.daarkolabs.tandem.session.ProcessLauncher
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
@@ -72,9 +73,13 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     val manager: SessionManager = SessionManager(
         scope = scope,
         index = index,
-        // The login shell's environment, not the IDE's: launched from the Dock or Finder, the IDE has launchd's minimal PATH. The
-        // launcher runs on a background thread, where waiting for the platform to load it is fine.
-        launcher = DefaultProcessLauncher { ShellEnvironment.get() + extraEnvironment },
+        // The login shell's environment, not the IDE's: launched from the Dock or Finder, the IDE has launchd's minimal PATH. With
+        // claude's directory on the PATH, for a claude whose node is beside it. The launcher runs on a background thread, where
+        // waiting for the platform to load the environment is fine.
+        launcher = ProcessLauncher { argv, workingDirectory ->
+            val environment = ClaudeBinary.environmentFor(argv.first(), ShellEnvironment.get()) + extraEnvironment
+            DefaultProcessLauncher { environment }.launch(argv, workingDirectory)
+        },
         binary = ClaudeBinary::find,
         workingDirectory = directory,
         maxLive = { TandemSettings.getInstance().maxLiveSessions() },
