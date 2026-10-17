@@ -14,12 +14,12 @@ kotlin {
 
 // IDE Starter tests: boot a real IDE with the built plugin installed and drive it with the UI Driver.
 // Slow (downloads and starts an IDE), so they run in their own task: xvfb-run ./gradlew integrationTest
-val integrationTest: SourceSet by sourceSets.creating {
+val integrationTest: SourceSet = sourceSets.create("integrationTest") {
     compileClasspath += sourceSets.main.get().output
     runtimeClasspath += sourceSets.main.get().output
 }
-val integrationTestImplementation: Configuration by configurations.getting
-val integrationTestRuntimeOnly: Configuration by configurations.getting
+val integrationTestImplementation: Configuration = configurations.getByName("integrationTestImplementation")
+val integrationTestRuntimeOnly: Configuration = configurations.getByName("integrationTestRuntimeOnly")
 
 dependencies {
     // Tree API only (JsonElement). No serialization compiler plugin, so unknown fields never break parsing.

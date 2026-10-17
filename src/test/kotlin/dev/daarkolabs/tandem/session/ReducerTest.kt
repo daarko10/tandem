@@ -99,8 +99,7 @@ class ReducerTest {
     fun `a model the user did not pick is never silent`() {
         // The user picked Opus, but the recorded session ran Sonnet then Haiku.
         val final = replay("model-switch", ChatState(requestedModel = "claude-opus-5-5")).last()
-        assertNotNull(final.modelWarning)
-        assertTrue(final.modelWarning!!.contains("claude-haiku-5-5"))
+        assertTrue(assertNotNull(final.modelWarning).contains("claude-haiku-5-5"))
         val warnings = final.entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == NoticeLevel.WARNING }
         assertEquals(2, warnings.size, "one notice per distinct mismatch: $warnings")
     }
