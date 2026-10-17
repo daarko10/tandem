@@ -212,6 +212,11 @@ private fun physical(path: Path): Path =
         path
     }
 
-/** The `tandem.configDir` test hook when it is set, else the CLI's config directory ([TranscriptFolder.configDir]). */
+/**
+ * The `tandem.configDir` test hook when it is set, else the CLI's config directory ([TranscriptFolder.configDir]) as the CLI sees it:
+ * from the login shell's environment, which sessions start with, since a `CLAUDE_CONFIG_DIR` may be exported only in the shell
+ * profile. May block while the platform loads that environment: call off the EDT.
+ */
 private fun configDir(): Path =
-    System.getProperty(CONFIG_DIR_PROPERTY)?.takeIf { it.isNotBlank() }?.let { Path.of(it) } ?: TranscriptFolder.configDir()
+    System.getProperty(CONFIG_DIR_PROPERTY)?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
+        ?: TranscriptFolder.configDir(ShellEnvironment.get())

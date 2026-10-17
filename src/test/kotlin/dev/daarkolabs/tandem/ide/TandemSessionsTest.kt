@@ -15,6 +15,7 @@ import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -206,6 +207,31 @@ class TandemSessionsTest {
             sessions.manager.sessions.value.map { it.id }
         }
         assertEquals(listOf(SEEDED), restored)
+    }
+
+    @Test
+    fun `transcripts are looked for in the CLAUDE_CONFIG_DIR of the login shell`() = timeoutRunBlocking(30.seconds) {
+        // Exported only in the shell profile: the CLI, which gets the shell's environment, writes there, and the IDE's own
+        // environment does not have it.
+        val dir = tempDir.get().resolve("shell-config").createDirectories()
+        seed(dir, SEEDED) // into configDir, which only the shell names from here on
+        System.clearProperty("tandem.configDir")
+        ShellEnvironment.source = { System.getenv() + ("CLAUDE_CONFIG_DIR" to configDir.toString()) }
+        try {
+            val restored = openProjectAsync(dir).useProjectAsync { project ->
+                TandemWorkspaceState.getInstance(project).state.apply {
+                    openSessionIds = mutableListOf(SEEDED)
+                    selectedSessionId = SEEDED
+                }
+                val sessions = TandemSessions.get(project)
+                sessions.ensureStarted()
+                withTimeoutOrNull(10.seconds) { sessions.manager.selected.first { it == SEEDED } }
+                sessions.manager.sessions.value.map { it.id }
+            }
+            assertEquals(listOf(SEEDED), restored)
+        } finally {
+            ShellEnvironment.reset()
+        }
     }
 
     @Test
