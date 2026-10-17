@@ -1261,4 +1261,24 @@ class SessionManagerTest {
             SessionManager.NO_CLI_TEXT,
         )
     }
+
+    @Test
+    fun `a turn that ends while a resumed-as-new session is taken over asks for attention`() = test {
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val (manager, handle) = scripted(process)
+        val resumedAs = UUID.randomUUID().toString()
+        // Between the new row taking the process and the manager adding it, the turn in progress ends.
+        manager.beforeTakenOverAdded = { taken ->
+            process.script.println(Fixtures.lines("plain-reply").first { "\"type\":\"result\"" in it })
+            taken.state.first { it.turnsEnded == 1 }
+        }
+        try {
+            // The process reports another session than the one it was started for: a new row takes it over.
+            process.script.println(Fixtures.lines("plain-reply").first { "\"subtype\":\"init\"" in it }.replace("<session_id-2>", resumedAs))
+            val taken = withTimeout(5_000) { manager.sessions.first { open -> open.any { it.id == resumedAs } } }.single { it.id == resumedAs }
+            assertEquals(true, withTimeoutOrNull(5_000) { taken.attention.first { it } }, "the turn that ended meanwhile asks for attention")
+        } finally {
+            manager.sessions.value.forEach { manager.close(it.id) }
+        }
+    }
 }

@@ -129,7 +129,12 @@ class SessionManager internal constructor(
         scope, index, launcher, binary, workingDirectory, maxLive, clock, listing,
         sessions = { mutableSessions.value },
         addTakenOver = ::addTakenOver,
+        beforeAddTakenOver = { beforeTakenOverAdded(it) },
     )
+
+    /** Runs between a resumed-as-new session's row taking its process over and its being added: tests let a turn end there. */
+    @Volatile
+    internal var beforeTakenOverAdded: suspend (SessionHandle) -> Unit = {}
 
     /** The open sessions, in the order they were opened. */
     val sessions: StateFlow<List<SessionHandle>> = mutableSessions.asStateFlow()
@@ -416,17 +421,21 @@ class SessionManager internal constructor(
         return handle to true
     }
 
-    /** [SessionSpawner]'s `addTakenOver`: adds [handle], selected if [from] is, unless its id is open already. */
-    private fun addTakenOver(from: SessionHandle, handle: SessionHandle): Boolean = synchronized(lock) {
+    /**
+     * [SessionSpawner]'s `addTakenOver`: adds [handle], selected if [from] is, unless its id is open already. A turn that ended after
+     * [turnsEnded], while the process was being handed over, asks for attention.
+     */
+    private fun addTakenOver(from: SessionHandle, handle: SessionHandle, turnsEnded: Int): Boolean = synchronized(lock) {
         if (handle(handle.id) != null) return@synchronized false
-        addLocked(handle)
+        addLocked(handle, turnsEnded)
         if (mutableSelected.value == from.id) selectLocked(handle.id)
         true
     }
 
-    private fun addLocked(handle: SessionHandle) {
+    /** Adds [handle] and follows it; turns that end after [turnsEnded] ask for attention. */
+    private fun addLocked(handle: SessionHandle, turnsEnded: Int = handle.state.value.turnsEnded) {
         mutableSessions.value += handle
-        watch(handle)
+        watch(handle, turnsEnded)
     }
 
     /**
@@ -456,9 +465,9 @@ class SessionManager internal constructor(
     /**
      * Follows the session's status: every change counts as use, and a session that is not selected asks for attention when it
      * starts waiting for a permission, or when a turn ends ([ChatState.turnsEnded] grows: a count, which no conflation of the status
-     * hides, and which a permission answered outside a turn or a Stop leaves alone).
+     * hides, and which a permission answered outside a turn or a Stop leaves alone), from [turnsEnded] on.
      */
-    private fun watch(handle: SessionHandle) {
+    private fun watch(handle: SessionHandle, turnsEnded: Int) {
         // Undispatched, so that it sees the status from the start: the session's process may start right away.
         handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
             var previous = handle.status.value
@@ -470,7 +479,7 @@ class SessionManager internal constructor(
             }
         }
         handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            var ended = handle.state.value.turnsEnded
+            var ended = turnsEnded
             handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
                 if (count > ended) raiseAttentionUnlessSelected(handle)
                 ended = count
