@@ -117,6 +117,12 @@ class SessionManager internal constructor(
     /** Sessions being closed, until their process has ended: [open] waits for them. Guarded by [lock]. */
     private val closing = HashMap<SessionId, CompletableJob>()
 
+    /**
+     * How often each session was marked closing ([markClosing]), so that an [open] whose history read overlapped a whole close or
+     * delete, one that came and went meanwhile, reads it again. Guarded by [lock].
+     */
+    private val closings = HashMap<SessionId, Long>()
+
     /** Starts the sessions' processes. */
     private val spawner = SessionSpawner(
         scope, index, launcher, binary, workingDirectory, maxLive, clock, listing,
@@ -174,15 +180,17 @@ class SessionManager internal constructor(
      */
     suspend fun open(id: SessionId, spawn: Boolean = true): SessionHandle {
         while (true) {
-            val pendingClose = synchronized(lock) { closing[id] }
+            val (pendingClose, closed) = synchronized(lock) { closing[id] to closings[id] }
             if (pendingClose != null) {
                 pendingClose.join()
                 continue
             }
             handle(id)?.let { return it }
             val history = history(id)
-            // Meanwhile a close may have started, or another open may have added the session.
-            val (handle, isNew) = synchronized(lock) { if (closing[id] == null) registerLocked(id, history) else null } ?: continue
+            // Meanwhile a close may have started, or come and gone (a delete, say), or another open may have added the session.
+            val (handle, isNew) = synchronized(lock) {
+                if (closing[id] == null && closings[id] == closed) registerLocked(id, history) else null
+            } ?: continue
             if (isNew && spawn) spawner.start(handle, forPrompts = false, overCapAllowed = false)
             return handle
         }
@@ -364,7 +372,12 @@ class SessionManager internal constructor(
      */
     private suspend fun markClosing(id: SessionId): Pair<SessionHandle?, CompletableJob> {
         while (true) {
-            val pending = synchronized(lock) { closing[id] ?: return removeLocked(id) ?: (null to Job().also { closing[id] = it }) }
+            val pending = synchronized(lock) {
+                closing[id] ?: run {
+                    closings[id] = (closings[id] ?: 0) + 1
+                    return removeLocked(id) ?: (null to Job().also { closing[id] = it })
+                }
+            }
             pending.join()
         }
     }

@@ -1125,4 +1125,26 @@ class SessionManagerTest {
         SessionManager(scope, index, DefaultProcessLauncher(), { fakeClaude }, dir, maxLive = { 4 })
             .summaries.first { summaries -> summaries.map { it.id } == listOf(seeded) }
     }
+
+    @Test
+    fun `an open does not keep a history read before a delete that came and went meanwhile`() = test {
+        seed(seeded)
+        val read = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val manager = manager(
+            read = { file ->
+                val loaded = TranscriptReader.read(file) // read in full before the delete starts
+                read.countDown()
+                runInterruptible(Dispatchers.IO) { release.await(10, TimeUnit.SECONDS) }
+                loaded
+            },
+        )
+        val opening = launch(Dispatchers.Default) { manager.open(seeded, spawn = false) }
+        runInterruptible(Dispatchers.IO) { read.await(10, TimeUnit.SECONDS) }
+        manager.delete(seeded) // no row yet: it starts and ends while the open waits
+        assertFalse(folder.resolve("$seeded.jsonl").exists())
+        release.countDown()
+        opening.join()
+        assertEquals(emptyList(), manager.sessions.value.single().state.value.entries, "the deleted history is not shown")
+    }
 }
