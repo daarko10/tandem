@@ -4,6 +4,10 @@ import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 import kotlin.system.measureTimeMillis
 import kotlin.test.assertEquals
@@ -106,6 +110,47 @@ class ReducerTest {
             cli("""{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"s","errors":["max turns"]}"""),
         )
         assertEquals(TurnEnd.FAILED, failed.lastTurnEnd)
+    }
+
+    @Test
+    fun `an interrupt without a terminal reason is still a stopped turn`() {
+        // As a CLI that does not send terminal_reason would: the recorded interrupt, its result without the field.
+        val lines = Fixtures.lines("interrupt").map { line ->
+            val json = Json.parseToJsonElement(line).jsonObject
+            if (json["type"]?.jsonPrimitive?.content == "result") JsonObject(json - "terminal_reason").toString() else line
+        }
+        val final = lines.fold(ChatState()) { state, line -> reduce(state, cli(line)) }
+        assertEquals(TurnEnd.INTERRUPTED, final.lastTurnEnd)
+        assertTrue(final.entries.none { it is ChatEntry.Notice && it.text.startsWith("The turn failed") }, final.entries.toString())
+        // The next turn starts afresh: its result alone says how it ended.
+        val result = Fixtures.lines("plain-reply").first { "\"type\":\"result\"" in it }
+        val next = reduce(reduce(final, SessionEvent.UserSent("u2", "again")), cli(result))
+        assertEquals(TurnEnd.COMPLETED, next.lastTurnEnd)
+    }
+
+    @Test
+    fun `turns end with a result, or with a process that fails during one`() {
+        val result = Fixtures.lines("plain-reply").first { "\"type\":\"result\"" in it }
+        assertEquals(0, ChatState().turnsEnded)
+        val one = reduce(reduce(ChatState(), SessionEvent.UserSent("u1", "hi")), cli(result))
+        assertEquals(1, one.turnsEnded)
+        // A process that dies during a turn: the turn failed.
+        val crashed = reduce(reduce(one, SessionEvent.UserSent("u2", "more")), SessionEvent.Ended("exited with code 137", isError = true))
+        assertEquals(2, crashed.turnsEnded)
+        assertEquals(TurnEnd.FAILED, crashed.lastTurnEnd)
+        // Between turns, an exit ends no turn, error or not.
+        assertEquals(1, reduce(one, SessionEvent.Ended("exited with code 1", isError = true)).turnsEnded)
+        assertEquals(1, reduce(reduce(one, SessionEvent.UserSent("u2", "more")), SessionEvent.Ended("exited", isError = false)).turnsEnded)
+    }
+
+    @Test
+    fun `a permission answered outside a turn ends no turn`() {
+        val request = Fixtures.lines("permission").first { "\"can_use_tool\"" in it }
+        val waiting = reduce(ChatState(), cli(request))
+        assertEquals(1, waiting.pendingPermissions.size)
+        val answered = reduce(waiting, SessionEvent.PermissionAnswered(waiting.pendingPermissions.single().requestId))
+        assertEquals(0, answered.turnsEnded)
+        assertNull(answered.lastTurnEnd)
     }
 
     @Test

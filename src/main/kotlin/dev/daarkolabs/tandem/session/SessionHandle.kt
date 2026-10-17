@@ -39,13 +39,6 @@ enum class SessionStatus {
     STOPPED,
 }
 
-/**
- * Whether a change of status from [previous] to [status] is the end of a turn: a busy session (running, or waiting for a permission
- * within the turn) became idle. The status is a state, which conflates: the RUNNING between an answered permission request and the
- * end of the turn may never be seen, and a result that comes while a request is pending goes from WAITING to IDLE at once.
- */
-internal fun turnEnded(previous: SessionStatus?, status: SessionStatus): Boolean =
-    (previous == SessionStatus.RUNNING || previous == SessionStatus.WAITING) && status == SessionStatus.IDLE
 
 /**
  * A session the [SessionManager] has open: its chat, which outlives each process started for it, and that process while one runs.

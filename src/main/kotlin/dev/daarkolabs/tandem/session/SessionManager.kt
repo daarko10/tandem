@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -454,7 +455,8 @@ class SessionManager internal constructor(
 
     /**
      * Follows the session's status: every change counts as use, and a session that is not selected asks for attention when it
-     * starts waiting for a permission, or when a turn ends ([turnEnded]).
+     * starts waiting for a permission, or when a turn ends ([ChatState.turnsEnded] grows: a count, which no conflation of the status
+     * hides, and which a permission answered outside a turn or a Stop leaves alone).
      */
     private fun watch(handle: SessionHandle) {
         // Undispatched, so that it sees the status from the start: the session's process may start right away.
@@ -463,12 +465,21 @@ class SessionManager internal constructor(
             handle.status.collect { status ->
                 if (status == previous) return@collect
                 handle.lastUsed = clock()
-                if (status == SessionStatus.WAITING || turnEnded(previous, status)) {
-                    synchronized(lock) { if (mutableSelected.value != handle.id) handle.raiseAttention() }
-                }
+                if (status == SessionStatus.WAITING) raiseAttentionUnlessSelected(handle)
                 previous = status
             }
         }
+        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            var ended = handle.state.value.turnsEnded
+            handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
+                if (count > ended) raiseAttentionUnlessSelected(handle)
+                ended = count
+            }
+        }
+    }
+
+    private fun raiseAttentionUnlessSelected(handle: SessionHandle) {
+        synchronized(lock) { if (mutableSelected.value != handle.id) handle.raiseAttention() }
     }
 
     /** The history in session [id]'s transcript, as [load] reads it: empty while there is none. */

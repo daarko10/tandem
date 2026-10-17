@@ -46,7 +46,7 @@ sealed interface SessionEvent {
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
 fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.Cli -> reduceCli(state, event.message)
-    is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text)).copy(busy = true)
+    is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text)).copy(busy = true, turnInterrupted = false)
     // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch.
     is SessionEvent.ModelRequested -> state.copy(requestedModel = event.model, modelWarning = null)
     // Shown at once; what the CLI reports next (system/status, system/init) has the last word, and a rejection takes it back.
@@ -57,8 +57,19 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     )
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
     is SessionEvent.HostNotice -> state.notice(event.level, event.text)
-    is SessionEvent.Ended -> state.finishStreaming().copy(busy = false, ended = true, pendingPermissions = emptyList(), permissionModeChanges = emptyMap())
-        .notice(if (event.isError) NoticeLevel.ERROR else NoticeLevel.INFO, event.detail)
+    is SessionEvent.Ended -> {
+        // A process that exits with an error during a turn ends that turn, as a failure; a clean exit, or one between turns, ends none.
+        val failedTurn = event.isError && state.busy
+        state.finishStreaming().copy(
+            busy = false,
+            ended = true,
+            pendingPermissions = emptyList(),
+            permissionModeChanges = emptyMap(),
+            lastTurnEnd = if (failedTurn) TurnEnd.FAILED else state.lastTurnEnd,
+            turnsEnded = if (failedTurn) state.turnsEnded + 1 else state.turnsEnded,
+            turnInterrupted = false,
+        ).notice(if (event.isError) NoticeLevel.ERROR else NoticeLevel.INFO, event.detail)
+    }
 }
 
 private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (message) {
@@ -187,7 +198,8 @@ private fun reduceUser(state: ChatState, message: CliMessage.User): ChatState {
         next = when (block) {
             is ContentBlock.ToolResult ->
                 next.append(ChatEntry.ToolResult("result-${block.toolUseId}", block.toolUseId, toolResultText(block), block.isError))
-            is ContentBlock.Text -> if (isInterruptMarker(block.text)) next.notice(NoticeLevel.INFO, "Stopped.") else next
+            is ContentBlock.Text ->
+                if (isInterruptMarker(block.text)) next.notice(NoticeLevel.INFO, "Stopped.").copy(turnInterrupted = true) else next
             is ContentBlock.Thinking, is ContentBlock.ToolUse, is ContentBlock.Other -> next
         }
     }
@@ -238,8 +250,10 @@ private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent): Cha
 }
 
 private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState {
+    // An interrupt: the result says so, or, from a CLI that sends no terminal_reason, the turn carried the interrupt marker.
+    val interrupted = result.terminalReason == "aborted_streaming" || state.turnInterrupted
     val end = when {
-        result.terminalReason == "aborted_streaming" -> TurnEnd.INTERRUPTED
+        interrupted -> TurnEnd.INTERRUPTED
         result.isError -> TurnEnd.FAILED
         else -> TurnEnd.COMPLETED
     }
@@ -248,9 +262,11 @@ private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState
         sessionId = result.sessionId ?: state.sessionId,
         pendingPermissions = emptyList(),
         lastTurnEnd = end,
+        turnsEnded = state.turnsEnded + 1,
+        turnInterrupted = false,
     )
     return when {
-        result.terminalReason == "aborted_streaming" -> next // the interrupt already showed "Stopped."
+        interrupted -> next // the interrupt already showed "Stopped."
         result.isError -> next.notice(
             NoticeLevel.ERROR,
             "The turn failed (${result.subtype}): " + (result.result ?: result.errors.joinToString("; ").ifEmpty { "no details" }),

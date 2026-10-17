@@ -13,13 +13,14 @@ import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.TurnEnd
-import dev.daarkolabs.tandem.session.turnEnded
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.annotations.TestOnly
@@ -95,6 +96,15 @@ class SessionNotifier(private val project: Project, private val manager: Session
                 val event = eventOf(previous, status)
                 previous = status
                 if (event != null && manager.selected.value == handle.id) notify(handle) { event.takeIf { stillDue(handle, it) } }
+            }
+        }
+        launch {
+            // A turn ends when the count of ended turns grows, as the manager raises attention for it: a count, which no conflation
+            // of the status hides. Turns that ended before this follows the session are not news.
+            var ended = handle.state.value.turnsEnded
+            handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
+                if (count > ended && manager.selected.value == handle.id) notify(handle) { Event.FINISHED }
+                ended = count
             }
         }
     }
@@ -176,14 +186,11 @@ class SessionNotifier(private val project: Project, private val manager: Session
 
     internal companion object {
         /**
-         * The event a change of status from [previous] to [status] is, as the manager raises attention for it ([turnEnded]); null
-         * for none. From no [previous] status (the session is followed from now on), only a permission request it waits on is one.
+         * The event a change of status from [previous] to [status] is: a permission request when the session starts to wait, null
+         * otherwise (the end of a turn is told by [dev.daarkolabs.tandem.session.ChatState.turnsEnded], not by the status). From no
+         * [previous] status (the session is followed from now on), a request it already waits on is one.
          */
-        internal fun eventOf(previous: SessionStatus?, status: SessionStatus): Event? = when {
-            status == previous -> null
-            status == SessionStatus.WAITING -> Event.PERMISSION
-            turnEnded(previous, status) -> Event.FINISHED
-            else -> null
-        }
+        internal fun eventOf(previous: SessionStatus?, status: SessionStatus): Event? =
+            if (status == SessionStatus.WAITING && previous != SessionStatus.WAITING) Event.PERMISSION else null
     }
 }

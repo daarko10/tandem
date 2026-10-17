@@ -172,6 +172,60 @@ class SessionNotifierTest {
         assertEquals("$title stopped", stopped.title, "the turn was interrupted")
     }
 
+    /** Kills the newest fake CLI process this test started, as a crash would end it: the session sees it exit with an error. */
+    private fun crashNewestProcess() {
+        ownProcesses.list().maxBy { it.info().startInstant().orElse(java.time.Instant.MIN) }.destroyForcibly()
+    }
+
+    @Test
+    fun `a background session whose process dies during a turn is announced as ended with an error`() = timeoutRunBlocking(60.seconds) {
+        val (notifications, title) = withSessions("background-crash", fixtures = "plain-reply,interrupt") {
+            val a = manager.create(NewSessionOptions())
+            manager.select(a.id)
+            awaitSpawns(1)
+            val b = manager.create(NewSessionOptions())
+            awaitSpawns(2) // B replays interrupt: it streams, then waits
+            manager.send(b.id, "Count to a hundred")
+            b.status.first { it == SessionStatus.RUNNING }
+            crashNewestProcess()
+            (withTimeoutOrNull(10_000) { notifications() } ?: posted.toList()) to b.title.value
+        }
+        assertEquals(listOf("$title ended with an error"), notifications.map { it.title })
+    }
+
+    @Test
+    fun `the selected session whose process dies during a turn is announced while the tool window is hidden`() =
+        timeoutRunBlocking(60.seconds) {
+            val (notifications, title) = withSessions("selected-crash", fixtures = "interrupt", visible = { false }) {
+                val b = manager.create(NewSessionOptions())
+                manager.select(b.id)
+                awaitSpawns(1)
+                manager.send(b.id, "Count to a hundred")
+                b.status.first { it == SessionStatus.RUNNING }
+                crashNewestProcess()
+                (withTimeoutOrNull(10_000) { notifications() } ?: posted.toList()) to b.title.value
+            }
+            assertEquals(listOf("$title ended with an error"), notifications.map { it.title })
+        }
+
+    @Test
+    fun `a background session the user stops is not announced`() = timeoutRunBlocking(60.seconds) {
+        val notifications = withSessions("background-stop", fixtures = "plain-reply,interrupt") {
+            val a = manager.create(NewSessionOptions())
+            manager.select(a.id)
+            awaitSpawns(1)
+            val b = manager.create(NewSessionOptions())
+            awaitSpawns(2)
+            manager.send(b.id, "Count to a hundred")
+            b.status.first { it == SessionStatus.RUNNING }
+            manager.stop(b.id)
+            b.status.first { it == SessionStatus.STOPPED }
+            delay(1_000) // time for a wrong notification
+            posted.toList()
+        }
+        assertEquals(emptyList(), notifications.map { it.title })
+    }
+
     @Test
     fun `a background turn that completes is announced as finished`() = timeoutRunBlocking(60.seconds) {
         val (notifications, title) = withSessions("background-completed", fixtures = "plain-reply,plain-reply") {
@@ -375,14 +429,13 @@ class SessionNotifierTest {
     }
 
     @Test
-    fun `a turn whose running status was conflated away between a permission request and its end is a finished turn`() {
-        assertEquals(SessionNotifier.Event.FINISHED, SessionNotifier.eventOf(SessionStatus.WAITING, SessionStatus.IDLE))
-        assertEquals(SessionNotifier.Event.FINISHED, SessionNotifier.eventOf(SessionStatus.RUNNING, SessionStatus.IDLE))
+    fun `a status change is a permission request when the session starts to wait, and nothing else`() {
         assertEquals(SessionNotifier.Event.PERMISSION, SessionNotifier.eventOf(SessionStatus.RUNNING, SessionStatus.WAITING))
         assertEquals(SessionNotifier.Event.PERMISSION, SessionNotifier.eventOf(null, SessionStatus.WAITING))
-        assertEquals(null, SessionNotifier.eventOf(null, SessionStatus.IDLE), "a session followed from now on finished nothing")
-        assertEquals(null, SessionNotifier.eventOf(SessionStatus.STOPPED, SessionStatus.IDLE), "a process that started")
-        assertEquals(null, SessionNotifier.eventOf(SessionStatus.WAITING, SessionStatus.STOPPED), "stopped, not finished")
-        assertEquals(null, SessionNotifier.eventOf(SessionStatus.IDLE, SessionStatus.IDLE))
+        assertEquals(null, SessionNotifier.eventOf(SessionStatus.WAITING, SessionStatus.WAITING))
+        // The end of a turn is told by the count of ended turns, which a status change between busy and idle may not match.
+        assertEquals(null, SessionNotifier.eventOf(SessionStatus.WAITING, SessionStatus.IDLE))
+        assertEquals(null, SessionNotifier.eventOf(SessionStatus.RUNNING, SessionStatus.IDLE))
+        assertEquals(null, SessionNotifier.eventOf(SessionStatus.RUNNING, SessionStatus.STOPPED))
     }
 }

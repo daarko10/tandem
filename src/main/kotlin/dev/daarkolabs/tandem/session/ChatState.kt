@@ -29,6 +29,13 @@ data class ChatState(
     val pendingPermissions: List<PendingPermission> = emptyList(),
     /** How the last turn ended, from its `result` line; null before the first. */
     val lastTurnEnd: TurnEnd? = null,
+    /**
+     * How many turns have ended: with a result, or with a process that failed during one. A permission answered outside a turn ends
+     * none. Only grows while a process runs, so that whoever follows it sees every turn end, which [busy] alone, a state, may hide.
+     */
+    val turnsEnded: Int = 0,
+    /** Whether the CLI marked the turn in progress as interrupted ("[Request interrupted by user]"); cleared when a turn starts or ends. */
+    val turnInterrupted: Boolean = false,
     val ended: Boolean = false,
     /** Monotonic id source for notices; entry ids must stay unique even after retractions shrink [entries]. */
     val noticeCount: Int = 0,
@@ -50,10 +57,10 @@ enum class TurnEnd {
     /** It ran to its end. */
     COMPLETED,
 
-    /** It was interrupted (Stop): the result's terminal reason is `aborted_streaming`. */
+    /** It was interrupted (Stop): the result's terminal reason is `aborted_streaming`, or the CLI marked the turn as interrupted. */
     INTERRUPTED,
 
-    /** It failed: any other result that is an error. */
+    /** It failed: any other result that is an error, or the process exited with an error during the turn. */
     FAILED,
 }
 
@@ -121,4 +128,5 @@ internal fun ChatState.settled(): ChatState = copy(
     pendingPermissions = emptyList(),
     permissionModeChanges = emptyMap(),
     ended = false,
+    turnInterrupted = false,
 )

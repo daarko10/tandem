@@ -1142,10 +1142,26 @@ class SessionManagerTest {
         assertEquals(emptyList(), manager.sessions.value.single().state.value.entries, "the deleted history is not shown")
     }
 
-    /** A real process for input and ending ([real]), whose output is what the test writes to [script], line by line. */
+    /**
+     * A real process for input and ending ([real]), whose output is what the test writes to [script], line by line. A read
+     * interrupted by the session's cancellation ends the output, as a real pipe's read is never interrupted but closed.
+     */
     private class ScriptedProcess(private val real: Process) : Process() {
-        private val output = java.io.PipedInputStream(64 * 1024)
-        val script: java.io.PrintStream = java.io.PrintStream(java.io.PipedOutputStream(output), true, Charsets.UTF_8)
+        private val pipe = java.io.PipedInputStream(64 * 1024)
+        val script: java.io.PrintStream = java.io.PrintStream(java.io.PipedOutputStream(pipe), true, Charsets.UTF_8)
+        private val output = object : java.io.InputStream() {
+            override fun read(): Int = try {
+                pipe.read()
+            } catch (_: java.io.InterruptedIOException) {
+                -1
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int = try {
+                pipe.read(b, off, len)
+            } catch (_: java.io.InterruptedIOException) {
+                -1
+            }
+        }
 
         override fun getOutputStream(): java.io.OutputStream = real.outputStream
         override fun getInputStream(): java.io.InputStream = output
@@ -1192,5 +1208,58 @@ class SessionManagerTest {
         } finally {
             manager.close(handle.id)
         }
+    }
+
+    /** A manager whose one process is [process], and that process's session, started and idle, with no session selected. */
+    private suspend fun scripted(process: ScriptedProcess): Pair<SessionManager, SessionHandle> {
+        val index = SessionIndex({ listOf(folder) }, "/project")
+        val manager = SessionManager(scope, index, { _, _ -> process }, { "claude" }, dir, maxLive = { 4 })
+        val handle = manager.create(NewSessionOptions())
+        handle.status.first { it == SessionStatus.IDLE }
+        return manager to handle
+    }
+
+    @Test
+    fun `a permission answered outside a turn does not ask for attention as a finished turn`() = test {
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val (manager, handle) = scripted(process)
+        try {
+            // A request while no turn runs: it asks for attention as a request, and the user looks at it.
+            process.script.println(Fixtures.lines("permission").first { "\"can_use_tool\"" in it })
+            handle.status.first { it == SessionStatus.WAITING }
+            manager.select(handle.id)
+            manager.select(null)
+            manager.allow(handle.id, handle.state.value.pendingPermissions.single().requestId, always = false)
+            handle.status.first { it == SessionStatus.IDLE }
+            assertNull(withTimeoutOrNull(1_000) { handle.attention.first { it } }, "no turn ended")
+        } finally {
+            manager.close(handle.id)
+        }
+    }
+
+    @Test
+    fun `a process that fails during a turn asks for attention, and a Stop does not`() = test {
+        // The process exits with code 3 once the test lets it, in the middle of the turn.
+        val gate = dir.resolve("exit-now")
+        val failing = ScriptedProcess(ProcessBuilder("sh", "-c", "while [ ! -e '$gate' ]; do sleep 0.05; done; exit 3").start())
+        val (manager, handle) = scripted(failing)
+        manager.send(handle.id, "Count to a hundred")
+        handle.status.first { it == SessionStatus.RUNNING }
+        gate.writeText("")
+        failing.waitFor()
+        failing.script.close() // its output ends with it
+        handle.status.first { it == SessionStatus.STOPPED }
+        assertEquals(true, withTimeoutOrNull(5_000) { handle.attention.first { it } }, "the failed turn asks for attention")
+        assertEquals(TurnEnd.FAILED, handle.state.value.lastTurnEnd)
+        manager.close(handle.id)
+
+        val stopped = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val (other, second) = scripted(stopped)
+        other.send(second.id, "Count to a hundred")
+        second.status.first { it == SessionStatus.RUNNING }
+        other.stop(second.id)
+        second.status.first { it == SessionStatus.STOPPED }
+        assertNull(withTimeoutOrNull(1_000) { second.attention.first { it } }, "the user stopped it")
+        other.close(second.id)
     }
 }
