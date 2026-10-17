@@ -56,7 +56,8 @@ The existing options were studied in October 2026:
 Key choices:
 - **One long-lived CLI process per live session.** No per-message spawn. Several sessions run at once, up to a cap
   (default 4): past it, the least recently used idle session is stopped and resumes with its next prompt. A busy
-  session is never stopped.
+  session is never stopped: with none idle, a new session or a prompt starts over the cap and says so, and a past
+  session that is only opened waits for its first prompt.
 - **The CLI's transcripts are the session store.** Tandem keeps no session format of its own: the sidebar lists the
   CLI's `.jsonl` files for the project and history loads from them, so terminal sessions show up too. Its only writes
   there are a rename's `custom-title` line and deleting a session (`protocol.md` 11).

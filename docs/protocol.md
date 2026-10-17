@@ -14,7 +14,8 @@ Sources, in order of authority:
    of forks, of `--session-id` together with `--resume`, of the failed starts' `result` ids and of an early
    `rename_session` (1.1, 4.4) ran without sign-in: a scratch `CLAUDE_CONFIG_DIR` and no variable whose name contains
    `TOKEN`, `API_KEY` or `OAUTH`. Such a run writes nothing before its `initialize` response, where a signed-in run first
-   writes a `system/ui_invalidate` line with the session id (1.1).
+   writes a `system/ui_invalidate` line with the session id (1.1). The fork probe without sign-in forked a session that
+   had no title line, so its missing `system/session_title_changed` (1.1) says nothing about sign-in.
 3. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads).
 4. `claude --help` output.
 
@@ -368,8 +369,10 @@ Examples:
 `rename_session` sent before the session's first prompt (measured with 2.1.301, `initialize` and `rename_session`
 only): `system/session_title_changed` under the session's id, then success, for a new session (`--session-id`) and for
 a fork with `--session-id` alike, and nothing is written to disk yet. Whether that title reaches the transcript once a
-prompt creates it was not measured; Tandem sends a fork's title only after the fork's first `system/init`. The CLI also
-keeps the title in `<id>/custom-title.json` beside the transcript (seen in the `fork` recording, not committed).
+prompt creates it was not measured, so Tandem sends a title set before a process's first `system/init`, a fork's or a
+rename's, only with that init. A session whose transcript exists already also gets the `custom-title` line from Tandem
+at once (11.5), since the process may never get a prompt. The CLI also keeps the title in `<id>/custom-title.json`
+beside the transcript (seen in the `fork` recording, not committed).
 
 Effort on a live session, probed once with `scripts/drive_cli.py settings` against CLI 2.1.301 (not a fixture): one
 turn at the default effort, then two requests, then a second turn.
@@ -391,7 +394,8 @@ session's effort, and `apply_flag_settings` then refuses an effort change ("appl
 overrides effort for this session"); a `maxEffort` setting or an organization's cap also clamps `--effort`. The variable
 passes through `cliEnvironment` (1.2), so the effort badge, which shows what Tandem passed, can disagree with the level
 the CLI runs at. The transcript's `assistant` lines should show the real level (their `effort` followed
-`apply_flag_settings` in the probe above). Phase 4's effort picker has to handle both cases.
+`apply_flag_settings` in the probe above). The effort picker of Phase 4 (the sessions spec's numbering: dialogs and
+control panels) has to handle both cases.
 
 ### 4.5 Other CLI → host requests
 
@@ -599,18 +603,26 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 | Goal | How |
 |---|---|
 | New session | `--session-id <uuid>` with an id Tandem generates. The first prompt's `system/init` reports it, and the CLI writes `<uuid>.jsonl` from that prompt on (section 1.1) |
-| Resume | `--resume <id>` once `<id>.jsonl` exists, else `--session-id <id>` again. The CLI loads the transcript itself and does not stream the history to stdout (fixture `fork`: the second process streams only its own turn); Tandem loads it from the transcript (section 11) |
+| Resume | `--resume <id>` once `<id>.jsonl` exists, else `--session-id <id>` again. The CLI loads the transcript itself and does not stream the history to stdout (fixture `fork`: the second process streams only its own turn); Tandem loads it from the transcript (section 11). Without `--model` the session runs the model it last ran with, not the default (below) |
 | Continue latest in cwd | `--continue` (not used) |
 | Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, and no `system/init` reports it before the fork's first prompt (only undocumented lines do, section 1.1) |
 | Resume at a point | `--resume <id> --resume-session-at <message uuid>` (not used) |
 | Switch model mid-session | `control_request{set_model, model}`; next turn's `system/init.model` must equal it. `--model` on resume also works |
 | Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`) |
 | Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4); Tandem picks effort only when a session is created |
-| Rename | a live process: `control_request{rename_session}` (section 4.4); otherwise append a `custom-title` line (section 11.5) |
+| Rename | a live process that has reported its first `system/init`: `control_request{rename_session}` (section 4.4); otherwise append a `custom-title` line (section 11.5), and a live process that has not reported it yet also gets `rename_session` with that init |
 | Delete | remove `<id>.jsonl` and `<id>/` (section 11.5) |
 | Rewind files | `rewind_files{user_message_id}` (needs `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` at spawn) |
 
 The `session_id` on every line is authoritative; it changes after fork.
+
+Model on resume, measured with 2.1.301 (one short prompt each, signed in, from an empty scratch folder, spawned as
+`drive_cli.py` spawns the CLI: the parent-session variables of section 1.2 removed, `--safe-mode`): a session started
+with `--model sonnet --session-id <uuid>` ran `claude-sonnet-5-5`; `--resume <uuid>` without `--model` then reported
+`init.model` `claude-sonnet-5-5`, while that run's `initialize` response listed `default` as `claude-opus-5-5`. The
+transcript's `assistant` lines carry `requestedModel` `claude-sonnet-5-5` for both turns. So the CLI restores the
+session's model itself: Tandem passes `--model` on resume only for a model picked in Tandem, a loaded session's
+`requestedModel` stays null, and the badge shows the transcript's last model until `init` confirms it.
 
 Resume-id mismatch: the `session_id` of a process's first `system/init` must be the id Tandem started it with
 (`--session-id`, `--resume`, or a fork's own id). If it is another id, Tandem never relabels the session: the process and
@@ -697,6 +709,11 @@ terminal show up too. Sources: SDK 0.3.300 (`sdk.mjs` reads and writes the same 
   a 2.1.301 recording) and, per the SDK, subagent transcripts and tool results.
 - The file appears with the session's first prompt (section 1.1). A running CLI may be appending to it while Tandem
   reads: a last line the CLI is still writing is not a JSON object yet and is skipped.
+- Tandem watches the folders, so a session started elsewhere shows up within a few seconds on Linux and Windows; on
+  macOS the JDK's `WatchService` polls, about every 10 s, so it can take that long there (the sidebar also lists the
+  folders again whenever it appears). For the list, a transcript that only grew since it was read is not read in full
+  again: the lines appended since are scanned for title lines (11.4). It is read in full when it shrank, or when the
+  part read before had no prompt yet or did not end with a whole line.
 
 ### 11.2 Line types
 
@@ -773,10 +790,11 @@ A loaded chat is settled whatever the file ends with: not busy, no pending permi
 
 ### 11.5 What Tandem writes
 
-- Rename of a session without a live process: one line appended, the one the SDK's `renameSession` appends:
+- Rename of a session without a live process, or whose process has not reported its first `system/init` yet: one line
+  appended, the one the SDK's `renameSession` appends:
   `{"type":"custom-title","customTitle":<title>,"sessionId":<id>,"uuid":<random UUID>,"timestamp":<ISO-8601 UTC, ms>}`.
   A file that ends inside a line gets its newline first. A live session is renamed with `rename_session` (4.4), and the
-  CLI appends the line itself.
+  CLI appends the line itself; a process that has not reported its `system/init` gets `rename_session` with it.
 - Delete: `<id>.jsonl` and the `<id>/` folder beside it, which is what the SDK's `deleteSession` removes. Links are
   deleted, never followed.
 
