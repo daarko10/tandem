@@ -68,6 +68,8 @@ class ToolWindowIdeTest {
     fun `a typed prompt is sent and the streamed reply is rendered`() {
         val sent = runChat("typedPrompt", fixtures = listOf("plain-reply")) {
             newSession()
+            // Send with nothing typed sends nothing: the one prompt the CLI gets is the typed one (asserted below).
+            clickButton("Send")
             typePrompt("Reply with the single word: pong")
             waitForText("Reply with the single word: pong")
             waitForText("pong")
@@ -145,6 +147,17 @@ class ToolWindowIdeTest {
             waitFor("status shows plan", 1.minutes) {
                 ui.x("//div[@class='ComposeNode' and contains(@visible_text, 'mode: plan')]").present()
             }
+            // A pick in the prompt bar is the project's last one: the new-session popup starts from it. Escape closes the popup
+            // and creates nothing.
+            newSessionButton().click(Point(10, 10))
+            // The prompt bar's picker shows Plan too: the popup's is the second one.
+            waitFor("the popup, on the last pick", 30.seconds) {
+                button("Create").present() &&
+                    ui.xx("//div[@class='ComposeNode' and @role='DropdownList' and @contentdescription='Permission mode' and @visible_text='Plan']")
+                        .list().size == 2
+            }
+            ui.keyboard { escape() }
+            waitFor("Escape closed the popup", 30.seconds) { !button("Create").present() }
             ui.x("//div[@class='ComposeNode' and @visible_text='Default model']").click(Point(10, 10))
             menuItem(modelName(1)).click(Point(10, 10))
             // The fake CLI answers set_model with the next acknowledgement it recorded, set_permission_mode's acceptEdits one, and
@@ -157,6 +170,7 @@ class ToolWindowIdeTest {
         assertEquals(listOf("plan"), modes, "Escape picked nothing, and Enter picked Plan alone")
         val setModel = requests.single { it["subtype"]!!.jsonPrimitive.content == "set_model" }
         assertEquals("sonnet", setModel["model"]!!.jsonPrimitive.content)
+        assertEquals(1, sent.count { it.type == "__spawn__" }, "the popup closed with Escape started no session")
     }
 
     @Test
@@ -352,16 +366,38 @@ class ToolWindowIdeTest {
             menuItem("Fork").click(Point(10, 10))
             waitFor("the fork listed", 30.seconds) { row("Seeded (fork)").present() }
 
-            // Delete… from the menu: the question warns that the open fork has no transcript of its own, and Cancel takes the
-            // focus from the "⋯" that goes away. Escape takes the question back, and the row has the focus again.
-            ui.x("$ROW[contains(@text, 'Seeded') and not(contains(@text, '(fork)'))]").rightClick(Point(10, 10))
+            // Delete… from a right click while typing a prompt asks in the row, and leaves the focus in the prompt box.
+            val original = "$ROW[contains(@text, 'Seeded') and not(contains(@text, '(fork)'))]"
+            promptBox().click(Point(20, 20))
+            waitFor("prompt box focused before the right click", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
+            ui.x(original).rightClick(Point(10, 10))
+            menuItem("Delete…").click(Point(10, 10))
+            waitFor("the question, the prompt box still focused", 30.seconds) {
+                button("Delete").present() && ui.x("$PROMPT_BOX[@focused='true']").present()
+            }
+            clickButton("Cancel")
+            waitFor("question taken back by Cancel", 30.seconds) { !button("Delete").present() }
+
+            // From the keyboard: End focuses the last row, the original, and the context menu key opens its menu. Delete… there
+            // warns that the open fork has no transcript of its own, and Cancel takes the focus from the "⋯" that goes away.
+            // Escape takes the question back, and the row has the focus again.
+            filterBox().click(Point(10, 10))
+            waitFor("filter focused for the keyboard", 30.seconds) { focusedEditable("").present() }
+            ui.keyboard {
+                tab()
+                key(KeyEvent.VK_END)
+            }
+            waitFor("the original focused", 30.seconds) { ui.x("$original[@focused='true']").present() }
+            contextMenuKey()
             menuItem("Delete…").click(Point(10, 10))
             waitFor("the question, with the fork warning, Cancel focused", 30.seconds) {
                 ui.x("//div[@class='ComposeNode' and contains(@visible_text, 'An open fork of it has no transcript')]").present() &&
                     focusedButton("Cancel").present()
             }
             ui.keyboard { escape() }
-            waitFor("question taken back, row focused", 30.seconds) { !button("Delete").present() && focusedRow("Seeded").present() }
+            waitFor("question taken back, row focused", 30.seconds) {
+                !button("Delete").present() && ui.x("$original[@focused='true']").present()
+            }
 
             // The context menu key with the focus outside the rows opens no menu, and the next click goes through.
             filterBox().click(Point(10, 10))
@@ -378,6 +414,17 @@ class ToolWindowIdeTest {
             iconButton("Close session").click(Point(8, 8))
             waitFor("closed, the fork selected", 30.seconds) {
                 !row(pong).present() && ui.x("$ROW[@selected='true' and contains(@text, 'Seeded (fork)')]").present()
+            }
+
+            // Deleting the focused first row, the fork, hands the focus to the next one.
+            filterBox().click(Point(10, 10))
+            waitFor("filter focused for the delete", 30.seconds) { focusedEditable("").present() }
+            ui.keyboard { tab() }
+            waitFor("the fork focused", 30.seconds) { ui.x("$ROW[@focused='true' and contains(@text, 'Seeded (fork)')]").present() }
+            ui.keyboard { key(KeyEvent.VK_DELETE) }
+            clickButton("Delete")
+            waitFor("the fork gone, the next row focused", 30.seconds) {
+                !row("Seeded (fork)").present() && ui.x("$original[@focused='true']").present()
             }
 
             iconButton("Hide sessions").click(Point(10, 10))
