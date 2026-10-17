@@ -30,6 +30,7 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 - `./gradlew verifyPlugin` Plugin Verifier against every supported IDE release.
 - `./gradlew buildPlugin` installable ZIP in `build/distributions/`.
 - `scripts/record-fixture.sh <name> "<prompt>"` records a real CLI transcript as a test fixture. Needs a logged-in `claude`.
+- `cd scripts && python3 -m unittest` tests the recording scripts (the redactor's safety net, `copy_transcript.py`, `drive_cli.py`'s control calls) without Gradle or a real `claude`.
 
 ## Tools and skills to use
 - IntelliJ's MCP server (Settings | Tools | MCP Server): run `get_file_problems` / `lint_files` on files you change, and prefer `rename_refactoring` over text edits.

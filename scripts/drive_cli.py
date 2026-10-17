@@ -85,12 +85,17 @@ class Cli:
         self.next_id += 1
         self.send({"type": "control_request", "request_id": f"host-{self.next_id}", "request": request})
 
-    def call(self, request: dict) -> dict:
-        """Sends a control request and waits for the CLI's control_response to it."""
+    def call(self, request: dict, allow_error: bool = False) -> dict:
+        """Sends a control request and waits for the CLI's control_response to it. Fails if the CLI answers with an
+        error, unless `allow_error` (a probe that records what the CLI says either way)."""
         self.request(request)
         request_id = f"host-{self.next_id}"
-        return self.until(lambda m: m.get("type") == "control_response"
-                          and m.get("response", {}).get("request_id") == request_id)
+        message = self.until(lambda m: m.get("type") == "control_response"
+                             and m.get("response", {}).get("request_id") == request_id)
+        response = message.get("response", {})
+        if response.get("subtype") == "error" and not allow_error:
+            raise RuntimeError(f"claude rejected {request.get('subtype')}: {response.get('error')}")
+        return message
 
     def user(self, text: str) -> None:
         self.next_id += 1
@@ -158,9 +163,7 @@ def interrupt(cli: Cli) -> None:
 def model_switch(cli: Cli) -> None:
     cli.user("Reply with the single word: one")
     cli.until(is_result)
-    cli.request({"subtype": "set_model", "model": SECOND_MODEL})
-    cli.until(lambda m: m.get("type") == "control_response"
-              and m.get("response", {}).get("request_id") == f"host-{cli.next_id}")
+    cli.call({"subtype": "set_model", "model": SECOND_MODEL})
     cli.user("Reply with the single word: two")
     cli.until(is_result)
 
@@ -206,8 +209,8 @@ def settings(cli: Cli) -> None:
     # touches the running session.
     cli.user("Reply with the single word: one")
     cli.until(is_result)
-    cli.call({"subtype": "update_settings", "settings": {"effortLevel": "high"}})
-    cli.call({"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}})
+    cli.call({"subtype": "update_settings", "settings": {"effortLevel": "high"}}, allow_error=True)
+    cli.call({"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}}, allow_error=True)
     cli.user("Reply with the single word: two")
     cli.until(is_result)
 

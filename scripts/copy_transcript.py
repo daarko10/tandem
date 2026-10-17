@@ -18,12 +18,13 @@ import os
 import re
 import shutil
 import sys
+from typing import NoReturn
 
 MAX_BYTES = 2 * 1024 * 1024
 MAX_KEY_LENGTH = 200
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     sys.exit(f"copy_transcript: {message}")
 
 
