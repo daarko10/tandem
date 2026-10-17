@@ -113,6 +113,15 @@ class ReducerTest {
     }
 
     @Test
+    fun `a recorded error result is a failed turn`() {
+        // Recorded with --model claude-nonexistent-0: a result with is_error and terminal_reason api_error.
+        val final = replay("invalid-model").last()
+        assertEquals(TurnEnd.FAILED, final.lastTurnEnd)
+        assertEquals(1, final.turnsEnded)
+        assertFalse(final.busy)
+    }
+
+    @Test
     fun `an interrupt without a terminal reason is still a stopped turn`() {
         // As a CLI that does not send terminal_reason would: the recorded interrupt, its result without the field.
         val lines = Fixtures.lines("interrupt").map { line ->
