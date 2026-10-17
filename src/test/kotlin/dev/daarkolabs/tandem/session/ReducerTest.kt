@@ -252,6 +252,60 @@ class ReducerTest {
     }
 
     @Test
+    fun `a confirmed permission mode change leaves nothing waiting for an answer`() {
+        // The fixture's own request ids: its success responses answer them, the first with plan, the second with acceptEdits.
+        var state = reduce(ChatState(), SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "<request_id-21>"))
+        state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.ACCEPT_EDITS, "<request_id-47>"))
+        assertEquals(2, state.permissionModeChanges.size)
+        for (m in Fixtures.decode("permission-mode")) state = reduce(state, SessionEvent.Cli(m))
+        assertEquals(PermissionMode.ACCEPT_EDITS, state.permissionMode)
+        assertEquals(emptyMap(), state.permissionModeChanges)
+        assertTrue(state.entries.none { it is ChatEntry.Notice })
+    }
+
+    /** A `control_response` error for [requestId], in the envelope of docs/protocol.md 4.1 (no recorded rejection exists). */
+    private fun rejection(requestId: String, error: String): SessionEvent =
+        cli("""{"type":"control_response","response":{"subtype":"error","request_id":"$requestId","error":"$error"}}""")
+
+    @Test
+    fun `a rejected permission mode change goes back to the mode before it and says which change was rejected`() {
+        var state = ChatState(permissionMode = PermissionMode.DEFAULT)
+        state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "tandem-7"))
+        assertEquals(PermissionMode.PLAN, state.permissionMode, "shown at once")
+        state = reduce(state, rejection("tandem-7", "Cannot switch modes now"))
+        assertEquals(PermissionMode.DEFAULT, state.permissionMode)
+        assertEquals(emptyMap(), state.permissionModeChanges)
+        val notice = state.entries.last() as ChatEntry.Notice
+        assertEquals(NoticeLevel.ERROR, notice.level)
+        assertEquals("The CLI rejected the switch to permission mode plan (Cannot switch modes now); it stays default.", notice.text)
+    }
+
+    @Test
+    fun `a rejection after a later pick keeps the later pick`() {
+        var state = ChatState(permissionMode = PermissionMode.DEFAULT)
+        state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "tandem-7"))
+        state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.ACCEPT_EDITS, "tandem-8"))
+        state = reduce(state, rejection("tandem-7", "busy"))
+        assertEquals(PermissionMode.ACCEPT_EDITS, state.permissionMode)
+        assertEquals(setOf("tandem-8"), state.permissionModeChanges.keys)
+        assertTrue((state.entries.last() as ChatEntry.Notice).text.startsWith("The CLI rejected the switch to permission mode plan"))
+    }
+
+    @Test
+    fun `a rejected request that is no mode change keeps the general notice`() {
+        val state = reduce(ChatState(permissionMode = PermissionMode.PLAN), rejection("tandem-9", "Unknown subtype"))
+        assertEquals(PermissionMode.PLAN, state.permissionMode)
+        assertEquals("The CLI rejected a request: Unknown subtype", (state.entries.last() as ChatEntry.Notice).text)
+    }
+
+    @Test
+    fun `a mode change still unanswered when the process ends is dropped with the settled state`() {
+        val state = reduce(ChatState(), SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "tandem-7"))
+        assertEquals(emptyMap(), state.settled().permissionModeChanges)
+        assertEquals(emptyMap(), reduce(state, SessionEvent.Ended("exited", isError = false)).permissionModeChanges)
+    }
+
+    @Test
     fun `the initialize response fills the model list`() {
         val state = Fixtures.decode("permission").fold(ChatState()) { s, m -> reduce(s, SessionEvent.Cli(m)) }
         assertEquals("default", state.models.first().value)

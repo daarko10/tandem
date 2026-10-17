@@ -28,8 +28,11 @@ sealed interface SessionEvent {
     /** The user picked a model (at spawn or via `set_model`); null means the CLI default. */
     data class ModelRequested(val model: String?) : SessionEvent
 
-    /** The user picked a permission mode (via `set_permission_mode`). `system/status` or the next `system/init` confirms it. */
-    data class PermissionModeRequested(val mode: PermissionMode) : SessionEvent
+    /**
+     * The user picked a permission mode: with [requestId], the `set_permission_mode` request sent for it, whose answer confirms
+     * or rejects it (`system/status` and the next `system/init` confirm it too); without, for the next process to start with.
+     */
+    data class PermissionModeRequested(val mode: PermissionMode, val requestId: String? = null) : SessionEvent
 
     data class PermissionAnswered(val requestId: String) : SessionEvent
 
@@ -46,11 +49,15 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text)).copy(busy = true)
     // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch.
     is SessionEvent.ModelRequested -> state.copy(requestedModel = event.model, modelWarning = null)
-    // Shown at once; what the CLI reports next (system/status, system/init) has the last word.
-    is SessionEvent.PermissionModeRequested -> state.copy(permissionMode = event.mode)
+    // Shown at once; what the CLI reports next (system/status, system/init) has the last word, and a rejection takes it back.
+    is SessionEvent.PermissionModeRequested -> state.copy(
+        permissionMode = event.mode,
+        permissionModeChanges = event.requestId?.let { state.permissionModeChanges + (it to PermissionModeChange(event.mode, state.permissionMode)) }
+            ?: state.permissionModeChanges,
+    )
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
     is SessionEvent.HostNotice -> state.notice(event.level, event.text)
-    is SessionEvent.Ended -> state.finishStreaming().copy(busy = false, ended = true, pendingPermissions = emptyList())
+    is SessionEvent.Ended -> state.finishStreaming().copy(busy = false, ended = true, pendingPermissions = emptyList(), permissionModeChanges = emptyMap())
         .notice(if (event.isError) NoticeLevel.ERROR else NoticeLevel.INFO, event.detail)
 }
 
@@ -98,13 +105,27 @@ private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (
         is InboundRequest.Other -> state
     }
     is CliMessage.ControlCancelRequest -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != message.requestId })
-    is CliMessage.ControlResponse ->
-        if (message.isSuccess) {
-            state.withModels(message.payload)
-        } else {
-            state.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
+    is CliMessage.ControlResponse -> {
+        val change = state.permissionModeChanges[message.requestId]
+        val answered = if (change == null) state else state.copy(permissionModeChanges = state.permissionModeChanges - message.requestId)
+        when {
+            message.isSuccess -> answered.withModels(message.payload)
+            change == null -> answered.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
+            else -> answered.rejectModeChange(change, message.error)
         }
+    }
     is CliMessage.KeepAlive, is CliMessage.Unknown -> state
+}
+
+/**
+ * The CLI rejected [change]: the mode shown before it comes back, unless another pick replaced it meanwhile, and the chat says which
+ * switch was rejected.
+ */
+private fun ChatState.rejectModeChange(change: PermissionModeChange, error: String?): ChatState {
+    val mode = if (permissionMode == change.requested) change.previous else permissionMode
+    val reason = error?.let { " ($it)" }.orEmpty()
+    val now = mode?.let { "; it stays ${it.wire}." } ?: "."
+    return copy(permissionMode = mode).notice(NoticeLevel.ERROR, "The CLI rejected the switch to permission mode ${change.requested.wire}$reason$now")
 }
 
 private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant): ChatState {

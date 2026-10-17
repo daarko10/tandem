@@ -17,6 +17,11 @@ data class ChatState(
     /** The models the CLI offers, in its order, from the `models` of its `initialize` response; empty until it answers. */
     val models: List<ModelOption> = emptyList(),
     val permissionMode: PermissionMode? = null,
+    /**
+     * The `set_permission_mode` requests the CLI has not answered yet, by request id: [permissionMode] shows the mode each asked
+     * for at once, and goes back to the mode before it if the CLI rejects it. Empty once a state is [settled].
+     */
+    val permissionModeChanges: Map<String, PermissionModeChange> = emptyMap(),
     /** What Tandem passed with `--effort`, or what a loaded transcript recorded: the recorded `system/init` carries no effort. */
     val effort: String? = null,
     val claudeCodeVersion: String? = null,
@@ -34,6 +39,9 @@ data class ChatState(
      */
     val entryIndex: Map<String, Int> = emptyMap(),
 )
+
+/** A `set_permission_mode` request still to be answered: the mode it asks for, and the mode shown before it. */
+data class PermissionModeChange(val requested: PermissionMode, val previous: PermissionMode?)
 
 /** A model the CLI offers: [value] is what `--model` and `set_model` take, [displayName] and [description] are for people. */
 data class ModelOption(val value: String, val displayName: String, val description: String?)
@@ -94,5 +102,6 @@ internal fun ChatState.settled(): ChatState = copy(
     entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it },
     busy = false,
     pendingPermissions = emptyList(),
+    permissionModeChanges = emptyMap(),
     ended = false,
 )

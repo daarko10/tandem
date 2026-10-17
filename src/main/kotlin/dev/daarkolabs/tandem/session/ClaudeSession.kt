@@ -202,10 +202,14 @@ class ClaudeSession(
         send(HostMessages.setModel(newRequestId(), model))
     }
 
-    /** Asks for another permission mode. It shows at once; `system/status` or the next `system/init` confirms it. */
+    /**
+     * Asks for another permission mode. It shows at once; the answer to the request, `system/status` or the next `system/init`
+     * confirms it, and a rejection puts back the mode shown before ([reduce]).
+     */
     fun setPermissionMode(mode: PermissionMode) {
-        dispatch(SessionEvent.PermissionModeRequested(mode))
-        send(HostMessages.setPermissionMode(newRequestId(), mode))
+        val requestId = newRequestId()
+        dispatch(SessionEvent.PermissionModeRequested(mode, requestId))
+        send(HostMessages.setPermissionMode(requestId, mode))
     }
 
     /** Asks the CLI to give the session a custom title (`rename_session`). */
