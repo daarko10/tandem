@@ -35,7 +35,10 @@ data class ChatState(
      * entry without scanning a long history. [reduce] keeps it in a persistent map and in step with [entries]: an append adds
      * the new position, a replacement keeps the id at its position, and a removal rebuilds it. A state built by hand may leave
      * it empty: [reduce] checks every position it reads, scans [entries] while the index is empty or out of step, and
-     * re-indexes them on its first append.
+     * re-indexes them on its first append. It tells "out of step" only by the last entry, so whoever changes [entries] other
+     * than by appending through [reduce] (inserting, removing or moving entries while the last one stays) must reset this to
+     * empty, or an entry may not be found. It takes part in equality: two states with the same entries, one indexed and one
+     * not, are not equal.
      */
     val entryIndex: Map<String, Int> = emptyMap(),
 )

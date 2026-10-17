@@ -326,6 +326,24 @@ class ReducerTest {
     }
 
     @Test
+    fun `odd model lists are read as far as they make sense`() {
+        val earlier = listOf(ModelOption("default", "Default", null))
+        fun modelsAfter(models: String): List<ModelOption> = reduce(
+            ChatState(models = earlier),
+            cli("""{"type":"control_response","response":{"subtype":"success","request_id":"r1","response":{"models":$models}}}"""),
+        ).models
+        assertEquals(emptyList(), modelsAfter("[]"), "an empty list: the CLI offers none")
+        assertEquals(earlier, modelsAfter("\"opus\""), "not a list: no model list at all")
+        assertEquals(earlier, modelsAfter("""{"value":"opus"}"""))
+        assertEquals(emptyList(), modelsAfter("""[{"value":5},{"value":null},{"value":["opus"]}]"""), "a value that is no string")
+        assertEquals(
+            listOf(ModelOption("opus", "opus", null), ModelOption("haiku", "Haiku", "Fast")),
+            modelsAfter("""[{"value":"opus","displayName":7,"description":{"text":"x"}},{"value":"haiku","displayName":"Haiku","description":"Fast"}]"""),
+            "a display name or description that is no string counts as missing",
+        )
+    }
+
+    @Test
     fun `responses without a model list leave it as it is`() {
         val models = listOf(ModelOption("default", "Default", null))
         val acknowledged = reduce(
