@@ -1141,4 +1141,56 @@ class SessionManagerTest {
         opening.join()
         assertEquals(emptyList(), manager.sessions.value.single().state.value.entries, "the deleted history is not shown")
     }
+
+    /** A real process for input and ending ([real]), whose output is what the test writes to [script], line by line. */
+    private class ScriptedProcess(private val real: Process) : Process() {
+        private val output = java.io.PipedInputStream(64 * 1024)
+        val script: java.io.PrintStream = java.io.PrintStream(java.io.PipedOutputStream(output), true, Charsets.UTF_8)
+
+        override fun getOutputStream(): java.io.OutputStream = real.outputStream
+        override fun getInputStream(): java.io.InputStream = output
+        override fun getErrorStream(): java.io.InputStream = real.errorStream
+        override fun waitFor(): Int = real.waitFor()
+        override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = real.waitFor(timeout, unit)
+        override fun exitValue(): Int = real.exitValue()
+        override fun isAlive(): Boolean = real.isAlive
+        override fun pid(): Long = real.pid()
+        override fun toHandle(): ProcessHandle = real.toHandle()
+        override fun descendants() = real.descendants()
+
+        override fun destroy() {
+            real.destroy()
+            script.close()
+        }
+
+        override fun destroyForcibly(): Process {
+            real.destroyForcibly()
+            script.close()
+            return this
+        }
+    }
+
+    @Test
+    fun `a turn that goes from waiting for a permission straight to idle asks for attention`() = test {
+        // The status is a state, which conflates: the RUNNING between an answered request and the end of the turn may never be
+        // seen. Here there is none: the turn's result comes while the request is still pending.
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val index = SessionIndex({ listOf(folder) }, "/project")
+        val manager = SessionManager(scope, index, { _, _ -> process }, { "claude" }, dir, maxLive = { 4 })
+        val handle = manager.create(NewSessionOptions())
+        try {
+            handle.status.first { it == SessionStatus.IDLE }
+            process.script.println(Fixtures.lines("permission").first { "\"can_use_tool\"" in it })
+            handle.status.first { it == SessionStatus.WAITING }
+            // The user looks at the request, which clears the attention it asked for, then at no session.
+            manager.select(handle.id)
+            manager.select(null)
+            assertFalse(handle.attention.value)
+            process.script.println(Fixtures.lines("plain-reply").first { "\"type\":\"result\"" in it })
+            handle.status.first { it == SessionStatus.IDLE }
+            assertEquals(true, withTimeoutOrNull(5_000) { handle.attention.first { it } }, "the end of the turn asks for attention")
+        } finally {
+            manager.close(handle.id)
+        }
+    }
 }

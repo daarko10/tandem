@@ -12,6 +12,7 @@ import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.SessionStatus
+import dev.daarkolabs.tandem.session.turnEnded
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -156,15 +157,13 @@ class SessionNotifier(private val project: Project, private val manager: Session
 
     internal companion object {
         /**
-         * The event a change of status from [previous] to [status] is; null for none. A turn ends when a session that was busy
-         * (running, or waiting for a permission within the turn) becomes idle: the status is a state, which conflates, so the
-         * RUNNING between an answered request and the end of the turn may never be seen. From no [previous] status (the session is
-         * followed from now on), only a permission request it waits on is one.
+         * The event a change of status from [previous] to [status] is, as the manager raises attention for it ([turnEnded]); null
+         * for none. From no [previous] status (the session is followed from now on), only a permission request it waits on is one.
          */
         internal fun eventOf(previous: SessionStatus?, status: SessionStatus): Event? = when {
             status == previous -> null
             status == SessionStatus.WAITING -> Event.PERMISSION
-            (previous == SessionStatus.RUNNING || previous == SessionStatus.WAITING) && status == SessionStatus.IDLE -> Event.FINISHED
+            turnEnded(previous, status) -> Event.FINISHED
             else -> null
         }
     }

@@ -454,7 +454,7 @@ class SessionManager internal constructor(
 
     /**
      * Follows the session's status: every change counts as use, and a session that is not selected asks for attention when it
-     * starts waiting for a permission, or when a turn ends (running, then idle).
+     * starts waiting for a permission, or when a turn ends ([turnEnded]).
      */
     private fun watch(handle: SessionHandle) {
         // Undispatched, so that it sees the status from the start: the session's process may start right away.
@@ -463,7 +463,7 @@ class SessionManager internal constructor(
             handle.status.collect { status ->
                 if (status == previous) return@collect
                 handle.lastUsed = clock()
-                if (status == SessionStatus.WAITING || (previous == SessionStatus.RUNNING && status == SessionStatus.IDLE)) {
+                if (status == SessionStatus.WAITING || turnEnded(previous, status)) {
                     synchronized(lock) { if (mutableSelected.value != handle.id) handle.raiseAttention() }
                 }
                 previous = status
