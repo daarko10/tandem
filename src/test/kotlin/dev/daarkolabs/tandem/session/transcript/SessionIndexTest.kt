@@ -20,6 +20,7 @@ import java.nio.file.ClosedWatchServiceException
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.WatchEvent
 import java.nio.file.WatchKey
@@ -256,26 +257,33 @@ class SessionIndexTest {
     }
 
     @Test
-    fun `a transcript that cannot be read is tried again only once it changed`(@TempDir dir: Path) {
-        val file = write(dir, "$first.jsonl", mtime = 1_000)
-        write(dir, "$second.jsonl", mtime = 2_000)
+    fun `a transcript deleted while it is listed is left out quietly and read again if it comes back`(@TempDir dir: Path) {
+        write(dir, "$first.jsonl", mtime = 1_000)
         val reads = AtomicInteger()
+        // Deleted between the look at its size and the read; then written again, as it was.
         val index = SessionIndex({ listOf(dir) }, "/p", meta = {
-            if (it.name.startsWith("1")) {
-                reads.incrementAndGet()
-                throw IOException("unreadable")
-            }
+            if (reads.incrementAndGet() == 1) throw NoSuchFileException(it.toString())
             stubMeta(it)
         })
-        assertEquals(listOf(second), index.list().map { it.id })
-        assertEquals(listOf(second), index.list().map { it.id })
-        assertEquals(1, reads.get(), "not read, nor logged, again while its size and time are the same")
+        assertEquals(emptyList(), index.list())
+        assertEquals(listOf(first), index.list().map { it.id })
+    }
+
+    @Test
+    fun `the real reader lists a transcript it cannot open by its id and does not read it again until it changes`(@TempDir dir: Path) {
+        val file = write(dir, "$first.jsonl", mtime = 1_000)
+        val reads = AtomicInteger()
+        // As root, a test cannot make a file unreadable: the reader opens a path that is gone in its place.
+        val index = SessionIndex({ listOf(dir) }, "/p", meta = {
+            reads.incrementAndGet()
+            TranscriptReader.meta(dir.resolve("gone").resolve(it.name))
+        })
+        assertEquals(listOf(first to first), index.list().map { it.id to it.title })
+        index.list()
+        assertEquals(1, reads.get())
         Files.setLastModifiedTime(file, FileTime.fromMillis(3_000))
         index.list()
-        assertEquals(2, reads.get(), "read again once it changed")
-        index.invalidate(first)
-        index.list()
-        assertEquals(3, reads.get(), "and after invalidate")
+        assertEquals(2, reads.get())
     }
 
     @Test
