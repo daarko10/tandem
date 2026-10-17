@@ -1,6 +1,5 @@
 package dev.daarkolabs.tandem.ui
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
@@ -41,7 +41,6 @@ import org.jetbrains.jewel.ui.component.Icon
 import org.jetbrains.jewel.ui.component.IconButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
-import org.jetbrains.jewel.ui.component.Tooltip
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
 
 /**
@@ -72,24 +71,34 @@ internal fun SessionHeader(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onToggleSidebar, modifier = Modifier.focusRequester(toggleFocus)) {
-                Icon(AllIconsKeys.General.LayoutEditorPreview, contentDescription = if (sidebarShown) "Hide sessions" else "Show sessions")
+            WithTooltip("Toggle sidebar") {
+                IconButton(onClick = onToggleSidebar, modifier = Modifier.focusRequester(toggleFocus)) {
+                    val description = if (sidebarShown) "Hide sessions" else "Show sessions"
+                    Icon(AllIconsKeys.General.LayoutEditorPreview, contentDescription = description)
+                }
             }
-            NewSessionLauncher(newSessionDefaults, onCreateSession) { open -> NewSessionPlus(open) }
+            NewSessionLauncher(newSessionDefaults, onCreateSession) { open ->
+                WithTooltip("New session") {
+                    IconButton(onClick = open) { Icon(AllIconsKeys.General.Add, contentDescription = "New session") }
+                }
+            }
             if (handle != null) {
-                val title by handle.title.collectAsState()
-                if (renaming) {
-                    TitleField(
-                        title,
-                        onConfirm = { name ->
-                            onRename(name)
-                            onRenamingChange(false)
-                        },
-                        onCancel = { onRenamingChange(false) },
-                        modifier = Modifier.weight(1f),
-                    )
-                } else {
-                    SessionTitle(title, onDoubleClick = { onRenamingChange(true) }, modifier = Modifier.weight(1f))
+                // Per session, so that a title field open for one session never carries its text over to another.
+                key(handle.id) {
+                    val title by handle.title.collectAsState()
+                    if (renaming) {
+                        TitleField(
+                            title,
+                            onConfirm = { name ->
+                                onRename(name)
+                                onRenamingChange(false)
+                            },
+                            onCancel = { onRenamingChange(false) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        SessionTitle(title, onDoubleClick = { onRenamingChange(true) }, modifier = Modifier.weight(1f))
+                    }
                 }
             }
         }
@@ -97,16 +106,6 @@ internal fun SessionHeader(
             val state by handle.state.collectAsState()
             StatusLine(state)
         }
-    }
-}
-
-/** The header's "+", which opens the new session popup ([open]), with the tooltip "New session". */
-// Jewel's Tooltip takes Compose's TooltipPlacement, which is still an experimental foundation API.
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun NewSessionPlus(open: () -> Unit) {
-    Tooltip(tooltip = { Text("New session") }) {
-        IconButton(onClick = open) { Icon(AllIconsKeys.General.Add, contentDescription = "New session") }
     }
 }
 

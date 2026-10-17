@@ -1,8 +1,11 @@
 package dev.daarkolabs.tandem
 
 import com.intellij.driver.client.Driver
+import com.intellij.driver.client.service
+import com.intellij.driver.sdk.ActionManager
 import com.intellij.driver.sdk.closeAndDisableAllBalloonNotifications
 import com.intellij.driver.sdk.getOpenProjects
+import com.intellij.driver.sdk.invokeAction
 import com.intellij.driver.sdk.isPluginLoaded
 import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.ui.components.UiComponent
@@ -27,6 +30,7 @@ import java.awt.event.KeyEvent
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
+import kotlin.io.path.createFile
 import kotlin.io.path.exists
 import kotlin.io.path.readLines
 import kotlin.io.path.readText
@@ -41,10 +45,10 @@ import kotlin.time.Duration.Companion.seconds
 /**
  * Installs the built plugin ZIP into a real IDE (the release we compile against) and uses the Tandem tool window
  * the way a person does: create sessions, type a prompt, press Send, answer permission prompts, press Stop, switch,
- * rename and delete sessions in the sidebar, with the mouse and the keyboard. The tool window keeps the width the IDE
- * gives it, too narrow to dock the sidebar, so the sidebar opens over the chat. The `claude` it talks to is
- * `src/test/resources/fake-claude.py`, which replays a recorded fixture in step with what the UI sends and logs every
- * frame it receives, so each test checks both the rendered UI and the protocol traffic.
+ * rename and delete sessions in the sidebar, with the mouse and the keyboard (the IDE's own context menu key included).
+ * The tool window keeps the width the IDE gives it, too narrow to dock the sidebar, so the sidebar opens over the chat.
+ * The `claude` it talks to is `src/test/resources/fake-claude.py`, which replays a recorded fixture in step with what
+ * the UI sends and logs every frame it receives, so each test checks both the rendered UI and the protocol traffic.
  *
  * Unlike the platform tests, the plugin is loaded by its own plugin classloader here, as it is for users.
  * Run with `xvfb-run ./gradlew integrationTest` when there is no display.
@@ -112,29 +116,35 @@ class ToolWindowIdeTest {
         // A session from an earlier run, in the CLI's transcript folder for the project: the sidebar lists it as "Seeded".
         val transcript = Path.of(fakeClaude).resolveSibling("fixtures/transcripts/history-reply.jsonl").readText() +
             """{"type":"custom-title","customTitle":"Seeded","sessionId":"$seeded"}""" + "\n"
-        configDir.resolve("projects").resolve(TranscriptFolder.key(project.toString())).createDirectories()
+        configDir.resolve("projects").resolve(TranscriptFolder.key(project.toRealPath().toString())).createDirectories()
             .resolve("$seeded.jsonl").writeText(transcript)
+        // The fake CLI holds every permission request back until this file exists.
+        val gate = Files.createTempDirectory("tandem-gate").resolve("open")
+        val pong = "Reply with the single word: pong"
 
         val sent = runChat(
             "sidebar",
             fixtures = listOf("plain-reply", "permission", "plain-reply"),
             configDir = configDir,
-            delayMs = 12_000,
+            gateFile = gate,
             project = project,
         ) {
             newSession()
-            typePrompt("Reply with the single word: pong")
+            typePrompt(pong)
             waitForText("pong")
 
             newSession()
             typePrompt("Create the fixture file")
-            // Switch away before the permission request, which the fake CLI sends 12 s after the prompt. The window is too
-            // narrow to dock the sidebar, so the toggle opens it over the chat, and picking a row closes it.
+            // Switch away before the permission request arrives, then let the fake CLI send it. The window is too narrow to
+            // dock the sidebar, so the toggle opens it over the chat, and picking a row closes it.
             openSidebar()
-            row("Reply with the single word: pong").click(Point(10, 10))
-            waitFor("sidebar closed after picking a row", 30.seconds) { !row("Reply with the single word: pong").present() }
+            row(pong).click(Point(10, 10))
+            waitFor("sidebar closed after picking a row, prompt box focused", 30.seconds) {
+                !row(pong).present() && ui.x("$PROMPT_BOX[@focused='true']").present()
+            }
+            gate.createFile()
             openSidebar()
-            waitFor("badge on the background row", 1.minutes) { row("needs you").present() }
+            waitFor("badge on the background row", 1.minutes) { row("Create the fixture file", "needs you").present() }
             row("Create the fixture file").click(Point(10, 10))
             waitForText("Allow Bash?")
             clickButton("Allow once")
@@ -142,35 +152,86 @@ class ToolWindowIdeTest {
             openSidebar()
             waitFor("badge cleared", 30.seconds) { row("Create the fixture file").present() && !row("needs you").present() }
 
+            // Rename from the "⋯" a hovered row shows. A title field open for one session never carries over to another:
+            // with the pong session's field still open, Rename on another row's menu shows that row's title.
+            row(pong).moveMouse(Point(10, 10))
+            iconButton("Session actions").click(Point(10, 10))
+            menuItem("Rename").click(Point(10, 10))
+            waitFor("title field open", 30.seconds) { focusedEditable(pong).present() }
+            openSidebar()
             row("Create the fixture file").rightClick(Point(10, 10))
             menuItem("Rename").click(Point(10, 10))
-            ui.x("//div[@class='ComposeNode' and @editabletext and @focused='true']").keyboard {
+            waitFor("the other title in the field", 30.seconds) { focusedEditable("Create the fixture file").present() }
+            ui.keyboard {
                 typeText("Alpha", 20)
                 enter()
             }
             openSidebar()
             waitFor("row renamed", 30.seconds) { row("Alpha").present() }
             ui.keyboard { escape() }
+            waitFor("Escape closes the sidebar and focuses the toggle", 30.seconds) {
+                !row("Alpha").present() && focusedIconButton("Show sessions").present()
+            }
+
+            // From the keyboard: the sidebar opens with the filter focused, Tab goes to the first row and then to its "⋯",
+            // whose menu Enter opens and Escape closes.
+            openSidebar()
+            waitFor("filter focused", 30.seconds) { focusedEditable("").present() }
+            ui.keyboard { tab() }
+            waitFor("Tab focuses the first row", 30.seconds) { ui.x("$ROW[@focused='true']").present() }
+            ui.keyboard { tab() }
+            waitFor("its ⋯ focused", 30.seconds) { focusedIconButton("Session actions").present() }
+            ui.keyboard { enter() }
+            waitFor("menu opened from the ⋯", 30.seconds) { menuItem("Copy resume command").present() }
+            ui.keyboard { escape() }
+            waitFor("menu closed, sidebar still open", 30.seconds) { !menuItem("Copy resume command").present() && row("Alpha").present() }
+            ui.keyboard { escape() }
             waitFor("Escape closes the sidebar", 30.seconds) { !row("Alpha").present() }
 
-            // From the keyboard: the sidebar opens with the filter focused, Tab moves to the one row left, Delete asks to
-            // delete it and Escape takes that back, Enter picks it. The seeded session's history comes from its transcript;
-            // opening it resumes it.
+            // Two rows left by the filter, newest first. Down and Up move between them, End and Home go to the last and the
+            // first. The IDE's context menu key opens the focused row's menu: Close only for the open session. Delete asks and
+            // Escape takes it back. Down and Enter show the second row's session, with the focus in its prompt box. The seeded
+            // session's history comes from its transcript; opening it resumes it.
+            val showPopupMenu = service<ActionManager>().getKeyboardShortcut("ShowPopupMenu")?.getFirstKeyStroke()
+            assertEquals(KeyEvent.VK_CONTEXT_MENU, showPopupMenu?.getKeyCode(), "the context menu key runs ShowPopupMenu")
             openSidebar()
-            waitFor("filter focused", 30.seconds) { ui.x("$EDITABLE[@focused='true' and @editabletext='']").present() }
-            ui.keyboard { typeText("Seeded", 20) }
-            waitFor("rows filtered", 30.seconds) { row("Seeded").present() && !row("Alpha").present() }
+            waitFor("filter focused again", 30.seconds) { focusedEditable("").present() }
+            ui.keyboard { typeText("e", 20) }
+            waitFor("rows filtered", 30.seconds) { row(pong).present() && row("Seeded").present() && !row("Alpha").present() }
             ui.keyboard { tab() }
-            waitFor("row focused", 30.seconds) { focusedRow("Seeded").present() }
+            waitFor("Tab focuses the first filtered row", 30.seconds) { focusedRow(pong).present() }
+            ui.keyboard { down() }
+            waitFor("Down focuses the second row", 30.seconds) { focusedRow("Seeded").present() }
+            ui.keyboard { up() }
+            waitFor("Up focuses the first row again", 30.seconds) { focusedRow(pong).present() }
+            ui.keyboard { key(KeyEvent.VK_END) }
+            waitFor("End focuses the last row", 30.seconds) { focusedRow("Seeded").present() }
+            contextMenuKey()
+            waitFor("the seeded row's menu, without Close", 30.seconds) {
+                menuItem("Copy resume command").present() && !menuItem("Close").present()
+            }
+            ui.keyboard { escape() }
+            waitFor("menu closed", 30.seconds) { !menuItem("Copy resume command").present() && focusedRow("Seeded").present() }
+            ui.keyboard { key(KeyEvent.VK_HOME) }
+            waitFor("Home focuses the first row", 30.seconds) { focusedRow(pong).present() }
+            contextMenuKey()
+            waitFor("the open session's menu, with Close", 30.seconds) { menuItem("Close").present() }
+            ui.keyboard { escape() }
+            waitFor("menu closed again", 30.seconds) { !menuItem("Close").present() && focusedRow(pong).present() }
             ui.keyboard { key(KeyEvent.VK_DELETE) }
             waitFor("Delete asks", 30.seconds) { button("Delete").present() }
             ui.keyboard { escape() }
-            waitFor("Escape takes it back", 30.seconds) { !button("Delete").present() && focusedRow("Seeded").present() }
+            waitFor("Escape takes it back", 30.seconds) { !button("Delete").present() && focusedRow(pong).present() }
+            ui.keyboard { down() }
+            waitFor("Down focuses the second row again", 30.seconds) { focusedRow("Seeded").present() }
             ui.keyboard { enter() }
-            waitFor("sidebar closed after Enter", 30.seconds) { !row("Seeded").present() }
+            waitFor("sidebar closed after Enter, prompt box focused", 30.seconds) {
+                !row("Seeded").present() && ui.x("$PROMPT_BOX[@focused='true']").present()
+            }
             waitForText("pong")
-
             openSidebar()
+            waitFor("seeded row selected", 30.seconds) { ui.x("$ROW[@selected='true' and contains(@text, 'Seeded')]").present() }
+
             row("Seeded").rightClick(Point(10, 10))
             menuItem("Delete…").click(Point(10, 10))
             clickButton("Delete")
@@ -196,13 +257,13 @@ class ToolWindowIdeTest {
      * Starts the IDE on [project] with the plugin and the fake CLI, opens the tool window, runs [script], and returns the frames
      * the plugin wrote to the CLI's stdin, each process's `__spawn__` line included. The Nth process the plugin starts replays
      * fixture N of [fixtures] (the last one once they run out). [configDir] becomes the CLI's config directory
-     * (`CLAUDE_CONFIG_DIR`), and [delayMs] delays every permission request the fake CLI sends by that long.
+     * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists.
      */
     private fun runChat(
         name: String,
         fixtures: List<String>,
         configDir: Path? = null,
-        delayMs: Int? = null,
+        gateFile: Path? = null,
         project: Path = newProject(),
         script: Driver.() -> Unit,
     ): List<JsonObject> {
@@ -218,7 +279,7 @@ class ToolWindowIdeTest {
                 withEnv("TANDEM_FAKE_FIXTURES", fixtures.joinToString(","))
                 withEnv("TANDEM_FAKE_LOG", sentLog.toString())
                 if (configDir != null) withEnv("CLAUDE_CONFIG_DIR", configDir.toString())
-                if (delayMs != null) withEnv("TANDEM_FAKE_DELAY_MS", delayMs.toString())
+                if (gateFile != null) withEnv("TANDEM_FAKE_GATE_FILE", gateFile.toString())
             }
         }
 
@@ -252,19 +313,25 @@ class ToolWindowIdeTest {
 
     private fun Driver.button(text: String): UiComponent = ui.x("//div[@class='ComposeNode' and @role='Button' and @text='$text']")
 
-    /** The sidebar row whose text (title, time, badge) contains [title]. */
-    private fun Driver.row(title: String): UiComponent =
-        ui.x("//div[@class='ComposeNode' and @role='Tab' and contains(@text, '$title')]")
+    /** The sidebar row whose text (title, time, badge) contains [title] and each of [also]. */
+    private fun Driver.row(title: String, vararg also: String): UiComponent =
+        ui.x("$ROW[" + (listOf(title) + also).joinToString(" and ") { "contains(@text, '$it')" } + "]")
 
     /** The sidebar row that has the keyboard focus, if its text contains [title]. */
-    private fun Driver.focusedRow(title: String): UiComponent =
-        ui.x("//div[@class='ComposeNode' and @role='Tab' and @focused='true' and contains(@text, '$title')]")
+    private fun Driver.focusedRow(title: String): UiComponent = ui.x("$ROW[@focused='true' and contains(@text, '$title')]")
 
     private fun Driver.menuItem(text: String): UiComponent = ui.x("//div[@class='ComposeNode' and @visible_text='$text']")
 
     /** An icon button, found by what it says to assistive technology. */
     private fun Driver.iconButton(description: String): UiComponent =
         ui.x("//div[@class='ComposeNode' and @role='Button' and @contentdescription='$description']")
+
+    /** The editable text (a text field or area) that has the keyboard focus, if it holds [text]. */
+    private fun Driver.focusedEditable(text: String): UiComponent = ui.x("$EDITABLE[@focused='true' and @editabletext='$text']")
+
+    /** The icon button described as [description], if it has the keyboard focus. */
+    private fun Driver.focusedIconButton(description: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @role='Button' and @contentdescription='$description' and @focused='true']")
 
     /** The header's "+". */
     private fun Driver.newSessionButton(): UiComponent = iconButton("New session")
@@ -273,6 +340,14 @@ class ToolWindowIdeTest {
     private fun Driver.newSession() {
         newSessionButton().click(Point(10, 10))
         clickButton("Create")
+    }
+
+    /**
+     * Does what the context menu key does: runs the IDE's ShowPopupMenu, which the keymap binds to it, on what has the focus. The
+     * robot cannot press that key under Xvfb, where it arrives as an undefined key.
+     */
+    private fun Driver.contextMenuKey() {
+        invokeAction("ShowPopupMenu")
     }
 
     /** Opens the sidebar over the chat with the header's toggle. */
@@ -302,6 +377,9 @@ class ToolWindowIdeTest {
 
     private companion object {
         const val EDITABLE = "//div[@class='ComposeNode' and @editabletext]"
+
+        /** Every sidebar row. */
+        const val ROW = "//div[@class='ComposeNode' and @role='Tab']"
 
         /**
          * The prompt box: the last editable text, since a docked sidebar's filter box comes first. A sidebar open over the chat

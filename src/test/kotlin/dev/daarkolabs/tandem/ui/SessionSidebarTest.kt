@@ -10,7 +10,9 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.Locale
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import java.awt.event.KeyEvent as AwtKeyEvent
 
 class SessionSidebarTest {
@@ -72,8 +74,8 @@ class SessionSidebarTest {
     }
 
     /** What a focused row in [mode] makes of the key with AWT code [code] going down, the way the IDE reports it. */
-    private fun press(code: Int, mode: RowMode = RowMode.NORMAL, shift: Boolean = false, numPad: Boolean = false): RowKey? =
-        rowKey(key(code, numPad), KeyEventType.KeyDown, shift, mode)
+    private fun press(code: Int, mode: RowMode = RowMode.NORMAL, numPad: Boolean = false): RowKey? =
+        rowKey(key(code, numPad), KeyEventType.KeyDown, mode)
 
     private fun key(code: Int, numPad: Boolean = false): Key =
         Key(code, if (numPad) AwtKeyEvent.KEY_LOCATION_NUMPAD else AwtKeyEvent.KEY_LOCATION_STANDARD)
@@ -86,10 +88,31 @@ class SessionSidebarTest {
     }
 
     @Test
-    fun `Shift+F10 and the context menu key open the row's menu, F10 alone does not`() {
-        assertEquals(RowKey.MENU, press(AwtKeyEvent.VK_F10, shift = true))
-        assertEquals(RowKey.MENU, press(AwtKeyEvent.VK_CONTEXT_MENU))
+    fun `Down and Up move to the next and the previous row, Home and End to the first and the last`() {
+        assertEquals(RowKey.NEXT, press(AwtKeyEvent.VK_DOWN))
+        assertEquals(RowKey.PREVIOUS, press(AwtKeyEvent.VK_UP))
+        assertEquals(RowKey.FIRST, press(AwtKeyEvent.VK_HOME))
+        assertEquals(RowKey.LAST, press(AwtKeyEvent.VK_END))
+    }
+
+    @Test
+    fun `Enter, the keypad's Enter and Space open the menu of a focused row's ⋯ as they go down`() {
+        for (key in listOf(key(AwtKeyEvent.VK_ENTER), key(AwtKeyEvent.VK_ENTER, numPad = true), key(AwtKeyEvent.VK_SPACE))) {
+            assertTrue(opensMenu(key, KeyEventType.KeyDown), key.toString())
+            assertFalse(opensMenu(key, KeyEventType.KeyUp), key.toString())
+        }
+        assertFalse(opensMenu(key(AwtKeyEvent.VK_DELETE), KeyEventType.KeyDown))
+        assertFalse(opensMenu(key(AwtKeyEvent.VK_CONTEXT_MENU), KeyEventType.KeyDown))
+    }
+
+    @Test
+    fun `the IDE's keys are left to it, the context menu key among them`() {
+        // ShowPopupMenu: it clicks the focused row's middle, which the row gives it as CONTEXT_MENU_POINT.
+        assertNull(press(AwtKeyEvent.VK_CONTEXT_MENU))
+        // Shift+F10 is Run: the row leaves F10 alone, with Shift or without.
         assertNull(press(AwtKeyEvent.VK_F10))
+        assertNull(press(AwtKeyEvent.VK_LEFT))
+        assertNull(press(AwtKeyEvent.VK_TAB))
     }
 
     @Test
@@ -103,11 +126,13 @@ class SessionSidebarTest {
 
     @Test
     fun `while it asks or deletes, a row takes no other key, and no key coming up`() {
-        assertNull(press(AwtKeyEvent.VK_ENTER, RowMode.CONFIRMING_DELETE))
-        assertNull(press(AwtKeyEvent.VK_DELETE, RowMode.CONFIRMING_DELETE))
-        for (code in listOf(AwtKeyEvent.VK_ENTER, AwtKeyEvent.VK_DELETE, AwtKeyEvent.VK_ESCAPE)) {
+        for (code in listOf(AwtKeyEvent.VK_ENTER, AwtKeyEvent.VK_DELETE, AwtKeyEvent.VK_DOWN, AwtKeyEvent.VK_HOME)) {
+            assertNull(press(code, RowMode.CONFIRMING_DELETE), AwtKeyEvent.getKeyText(code))
+        }
+        for (code in listOf(AwtKeyEvent.VK_ENTER, AwtKeyEvent.VK_DELETE, AwtKeyEvent.VK_ESCAPE, AwtKeyEvent.VK_DOWN)) {
             assertNull(press(code, RowMode.DELETING), AwtKeyEvent.getKeyText(code))
         }
-        assertNull(rowKey(key(AwtKeyEvent.VK_ENTER), KeyEventType.KeyUp, shift = false, RowMode.NORMAL))
+        assertNull(rowKey(key(AwtKeyEvent.VK_ENTER), KeyEventType.KeyUp, RowMode.NORMAL))
+        assertNull(rowKey(key(AwtKeyEvent.VK_DOWN), KeyEventType.KeyUp, RowMode.NORMAL))
     }
 }

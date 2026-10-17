@@ -108,7 +108,7 @@ tasks {
         useJUnitPlatform()
         // Protocol tests run against recorded CLI transcripts; they never spawn a real `claude`.
         systemProperty("tandem.fixtures", layout.projectDirectory.dir("src/test/resources/fixtures").asFile.path)
-        // Platform tests start TandemChat against a fake CLI that replays a fixture, never a real `claude`.
+        // Platform tests start sessions against a fake CLI that replays a fixture, never a real `claude`.
         systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path)
         // Set by the nightly CLI contract workflow: a directory of freshly recorded live transcripts.
         systemProperty("tandem.contractDir", providers.systemProperty("tandem.contractDir").getOrElse(""))

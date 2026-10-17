@@ -13,6 +13,9 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
                           Every frame the host writes follows, one per line
   TANDEM_FAKE_SESSION_ID  the session id to use, whatever the arguments say
   TANDEM_FAKE_DELAY_MS    sleep this long before emitting each control_request
+  TANDEM_FAKE_GATE_FILE   before emitting each control_request (after the delay, if both are set), wait until this file
+                          exists, checking every 100 ms for up to 60 s, then emit it anyway: a test holds a request
+                          back until it is ready for it, in place of guessing a delay
 
 Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
 with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
@@ -38,6 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 log_path = os.environ.get("TANDEM_FAKE_LOG")
 delay_ms = int(os.environ.get("TANDEM_FAKE_DELAY_MS") or 0)
+gate_file = os.environ.get("TANDEM_FAKE_GATE_FILE")
 SPAWN_PREFIX = '{"type":"__spawn__"'
 SESSION_PLACEHOLDER = re.compile(r"<session_id-\d+>")
 SECRET_NAME_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH")
@@ -109,6 +113,16 @@ def wait_for(predicate):
             return frame
 
 
+def wait_for_gate():
+    """Waits until TANDEM_FAKE_GATE_FILE exists, for up to 60 s."""
+    deadline = time.monotonic() + 60
+    while not os.path.exists(gate_file):
+        if time.monotonic() > deadline:
+            sys.stderr.write("gate file never appeared; going on\n")
+            return
+        time.sleep(0.1)
+
+
 def emit(message):
     line = SESSION_PLACEHOLDER.sub(lambda _: escaped_session_id, json.dumps(message, separators=(",", ":")))
     sys.stdout.write(line + "\n")
@@ -134,6 +148,8 @@ for message in lines:
         message["response"]["request_id"] = request.get("request_id")
     if kind == "control_request" and delay_ms:
         time.sleep(delay_ms / 1000)
+    if kind == "control_request" and gate_file:
+        wait_for_gate()
     emit(message)
     if kind == "control_request":
         wait_for(lambda m: m.get("type") == "control_response"

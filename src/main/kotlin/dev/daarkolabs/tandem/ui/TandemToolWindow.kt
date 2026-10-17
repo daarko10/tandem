@@ -78,8 +78,9 @@ private const val NOTIFICATION_GROUP: String = "Tandem"
  * The sidebar is docked beside the chat unless the user collapsed it (remembered in
  * [TandemWorkspaceState.State.sidebarCollapsed]) or the window is narrower than 500 dp. In a window that wide the header's toggle
  * docks and collapses it. In a narrower one the toggle opens the same sidebar over the chat instead, with the filter focused: it
- * closes when the user picks or creates a session, presses the toggle again, presses Escape or clicks the dimmed chat. The
- * header's "+" starts a session at any width.
+ * closes when the user picks or creates a session, presses the toggle again, presses Escape (the toggle then has the focus) or clicks
+ * the dimmed chat. The header's "+" starts a session at any width. A session picked in the sidebar or created gets the focus in its
+ * prompt box.
  *
  * Every open session keeps a [ChatRowsPresenter] from the first time it is shown until it is closed, so that switching back to it
  * does not parse its transcript again.
@@ -99,7 +100,17 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val toggleFocus = remember { FocusRequester() }
     // The session whose title is being edited in the header; it ends as soon as another session is selected.
     var renaming by remember { mutableStateOf<SessionId?>(null) }
-    LaunchedEffect(selectedId) { if (renaming != selectedId) renaming = null }
+    // The session whose prompt box takes the focus when it shows: the one last picked or created. One still being opened when
+    // another is selected (a fork, say) does not take it any more.
+    var promptFocusFor by remember { mutableStateOf<SessionId?>(null) }
+    LaunchedEffect(selectedId) {
+        if (renaming != selectedId) renaming = null
+        if (promptFocusFor != selectedId) promptFocusFor = null
+    }
+    val sessionShown: (SessionId) -> Unit = { id ->
+        drawerOpen = false
+        promptFocusFor = id
+    }
 
     BoxWithConstraints(
         Modifier.fillMaxSize().onKeyEvent { event ->
@@ -123,9 +134,11 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                 onRename = { id ->
                     actions.show(id)
                     renaming = id
+                    promptFocusFor = null
                 },
                 modifier = modifier,
                 onPicked = { drawerOpen = false },
+                onSessionShown = sessionShown,
                 focusFilter = overChat,
             )
         }
@@ -147,10 +160,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                         }
                     },
                     newSessionDefaults = { workspace.newSessionOptions() },
-                    onCreateSession = { options ->
-                        actions.create(options)
-                        drawerOpen = false
-                    },
+                    onCreateSession = { options -> sessionShown(actions.create(options)) },
                     renaming = selected != null && renaming == selected.id,
                     onRenamingChange = { editing -> renaming = if (editing) selected?.id else null },
                     onRename = { title -> selected?.let { actions.rename(it.id, title) } },
@@ -165,7 +175,14 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                         // Composed afresh for each session, so that what is typed in one session's prompt box never shows in another's.
                         key(selected.id) {
                             val rows = remember(selected) { presenters.rows(selected) }
-                            ChatPane(project, selected, manager, rows)
+                            ChatPane(
+                                project,
+                                selected,
+                                manager,
+                                rows,
+                                focusPrompt = promptFocusFor == selected.id,
+                                onPromptFocused = { promptFocusFor = null },
+                            )
                         }
                     }
                     if (drawerShown) {
@@ -259,11 +276,12 @@ internal class SessionActions(private val project: Project, private val manager:
         }
     }
 
-    /** Starts a new session with [options] and selects it. */
-    fun create(options: NewSessionOptions) {
+    /** Starts a new session with [options] and selects it; returns its id. */
+    fun create(options: NewSessionOptions): SessionId {
         val handle = manager.create(options)
         requested = handle.id
         manager.select(handle.id)
+        return handle.id
     }
 
     /** Renames session [id] to [title]. */
