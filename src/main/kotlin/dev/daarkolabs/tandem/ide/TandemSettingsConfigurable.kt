@@ -77,7 +77,7 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
                         { field, text -> field.text = text },
                         MutableProperty(
                             { settings.state.claudePath.orEmpty() },
-                            { settings.state.claudePath = TandemSettings.normalisedPath(it) },
+                            { settings.state.claudePath = it }, // which stores it normalised
                         ),
                     )
                     .component

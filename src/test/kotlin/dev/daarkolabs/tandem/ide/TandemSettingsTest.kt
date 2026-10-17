@@ -4,6 +4,7 @@ import com.intellij.configurationStore.saveSettings
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
+import com.intellij.openapi.util.JDOMUtil
 import com.intellij.testFramework.common.timeoutRunBlocking
 import com.intellij.testFramework.junit5.TestApplication
 import com.intellij.testFramework.junit5.fixture.tempPathFixture
@@ -11,6 +12,7 @@ import com.intellij.testFramework.openProjectAsync
 import com.intellij.testFramework.useProjectAsync
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.UIUtil
+import com.intellij.util.xmlb.XmlSerializer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -207,6 +209,21 @@ class TandemSettingsTest {
         } finally {
             withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
+    }
+
+    @Test
+    fun `the stored path is trimmed whoever writes it`() {
+        val state = TandemSettings.State()
+        state.claudePath = "  /opt/claude/bin/claude \n"
+        assertEquals("/opt/claude/bin/claude", state.claudePath)
+        state.claudePath = " \t "
+        assertNull(state.claudePath, "a blank path is no path")
+        state.claudePath = "/usr/local/bin/claude"
+        assertEquals("/usr/local/bin/claude", state.claudePath)
+        // Still saved and read back under its name, as tandem.xml holds it.
+        val saved = XmlSerializer.serialize(state)
+        assertTrue("claudePath" in JDOMUtil.write(saved), JDOMUtil.write(saved))
+        assertEquals("/usr/local/bin/claude", XmlSerializer.deserialize(saved, TandemSettings.State::class.java).claudePath)
     }
 
     @Test
