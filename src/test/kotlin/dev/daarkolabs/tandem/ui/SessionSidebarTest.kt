@@ -168,7 +168,7 @@ class SessionSidebarTest {
     }
 
     @Test
-    fun `the open forks that a delete leaves unable to start are those without a transcript of their own`() {
+    fun `the open forks that a delete leaves unable to start again are those without a transcript of their own`() {
         val forkOf = mapOf("fork-new" to "original", "fork-written" to "original", "other-fork" to "other", "plain" to null)
         val written = setOf("original", "fork-written")
         assertEquals(listOf("fork-new"), forksStartingFrom("original", forkOf) { it in written })
@@ -179,7 +179,7 @@ class SessionSidebarTest {
     @Test
     fun `deleting a session that open forks start from warns about them`() {
         assertNull(forkWarning(0))
-        assertEquals("An open fork of it has not started yet, and could not start without it.", forkWarning(1))
-        assertEquals("2 open forks of it have not started yet, and could not start without it.", forkWarning(2))
+        assertEquals("An open fork of it has no transcript of its own yet, and could not start again without this one.", forkWarning(1))
+        assertEquals("2 open forks of it have no transcript of their own yet, and could not start again without this one.", forkWarning(2))
     }
 }

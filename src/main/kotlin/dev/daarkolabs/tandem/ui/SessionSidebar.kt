@@ -16,12 +16,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -34,7 +36,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.awt.ComposePanel
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -47,13 +48,13 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
@@ -71,10 +72,8 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.round
 import androidx.compose.ui.window.PopupPositionProvider
-import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.diagnostic.fileLogger
 import com.intellij.openapi.util.SystemInfo
-import com.intellij.ui.scale.JBUIScale
 import com.intellij.util.ui.JBUI
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionId
@@ -89,7 +88,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jetbrains.jewel.bridge.toComposeColor
-import org.jetbrains.jewel.foundation.actionSystem.provideData
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Badge
 import org.jetbrains.jewel.ui.component.DefaultButton
@@ -102,8 +100,6 @@ import org.jetbrains.jewel.ui.component.TextField
 import org.jetbrains.jewel.ui.focusOutline
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
 import org.jetbrains.jewel.ui.theme.simpleListItemStyle
-import java.awt.KeyboardFocusManager
-import java.awt.Point
 import java.awt.event.MouseEvent
 import java.time.Instant
 import java.time.ZoneId
@@ -111,7 +107,6 @@ import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
 import javax.swing.SwingUtilities
-import kotlin.math.roundToInt
 
 private val LOG = fileLogger()
 
@@ -135,15 +130,16 @@ private val NO_ATTENTION: StateFlow<Boolean> = MutableStateFlow(false)
  *
  * A left click, or Enter or Space on a focused row, shows the session ([SessionActions.show]) and then [onSessionShown] is told, as it
  * is of a session created here. The row's menu (Rename, Fork, Delete…, Copy resume command and, for an open session, Close) opens
- * with a right click, the "⋯" a hovered or focused row shows, or the IDE's context menu key ([PlatformDataKeys.CONTEXT_MENU_POINT]
- * is the focused row's middle). Rename goes to the header's title field through [onRename]; Rename and Fork then call [onPicked].
+ * with a right click, the "⋯" a hovered or focused row shows, or the IDE's context menu key while the row or its "⋯" has the focus
+ * ([RowMenus]: the row is scrolled into view first). Rename goes to the header's title field through [onRename]; Rename and Fork then call [onPicked].
  * Delete… asks in the row itself, as the Delete key does; the "x" on a hovered open row closes it.
  *
  * Rows take the focus with Tab, like the filter and the buttons; Up and Down move it between rows, Home and End to the first and the
  * last.
  *
  * The list is read again from disk when the sidebar appears, so sessions started elsewhere show up. With [focusFilter] the filter
- * takes the focus when the sidebar appears, as it does when the sidebar opens over the chat.
+ * takes the focus when the sidebar appears, as it does when the sidebar opens over the chat. [onFilterFocused] is told whenever the
+ * filter takes the focus. [rowMenus] lets the tool window open the focused row's menu, and [newSessionFocus] focus "New session".
  */
 @Composable
 internal fun SessionSidebar(
@@ -156,6 +152,9 @@ internal fun SessionSidebar(
     onPicked: () -> Unit = {},
     onSessionShown: (SessionId) -> Unit = {},
     focusFilter: Boolean = false,
+    onFilterFocused: () -> Unit = {},
+    rowMenus: RowMenus = remember { RowMenus() },
+    newSessionFocus: FocusRequester? = null,
 ) {
     val summaries by manager.summaries.collectAsState()
     val open by manager.sessions.collectAsState()
@@ -168,6 +167,8 @@ internal fun SessionSidebar(
     val rows = remember(summaries, query) { summaries.filteredBy(query) }
     val listState = rememberLazyListState()
     val rowFocus = remember { HashMap<SessionId, FocusRequester>() }
+    // The row whose menu the context menu key asked for, once it is in view.
+    var menuFor by remember { mutableStateOf<SessionId?>(null) }
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val now by produceState(System.currentTimeMillis()) {
@@ -192,6 +193,25 @@ internal fun SessionSidebar(
         }
     }
 
+    /** Opens the menu of row [id], scrolled into view first if any of it is out of view. */
+    fun openMenu(id: SessionId) {
+        val index = rows.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: return
+        scope.launch {
+            if (!listState.fullyVisible(id)) listState.scrollToItem(index)
+            withTimeoutOrNull(SCROLL_WAIT_MILLIS) { snapshotFlow { listState.fullyVisible(id) }.first { it } } ?: return@launch
+            menuFor = id
+        }
+    }
+    // The rows of the last composition, not those of the first.
+    val currentOpenMenu by rememberUpdatedState<(SessionId) -> Unit>(::openMenu)
+    DisposableEffect(rowMenus) {
+        rowMenus.open = { id -> currentOpenMenu(id) }
+        onDispose {
+            rowMenus.open = null
+            rowMenus.focused = null
+        }
+    }
+
     /** Moves the focus from row [from] as [key] asks: to the next or the previous row, the first or the last; never out of the list. */
     fun moveFocus(from: Int, key: RowKey) {
         when (key) {
@@ -205,11 +225,15 @@ internal fun SessionSidebar(
 
     Column(modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         NewSessionLauncher(newSession, onCreate = { options -> onSessionShown(actions.create(options)) }) { open ->
-            DefaultButton(onClick = open, modifier = Modifier.fillMaxWidth()) { Text("New session") }
+            val focus = newSessionFocus?.let { Modifier.focusRequester(it) } ?: Modifier
+            DefaultButton(onClick = open, modifier = Modifier.fillMaxWidth().then(focus)) { Text("New session") }
         }
         TextField(
             filter,
-            Modifier.fillMaxWidth().focusRequester(filterFocus).semantics { contentDescription = "Filter sessions" },
+            Modifier.fillMaxWidth()
+                .focusRequester(filterFocus)
+                .onFocusChanged { if (it.hasFocus) onFilterFocused() }
+                .semantics { contentDescription = "Filter sessions" },
             placeholder = { Text("Filter") },
         )
         LazyColumn(Modifier.fillMaxWidth().weight(1f), state = listState) {
@@ -235,6 +259,11 @@ internal fun SessionSidebar(
                         onPicked()
                     },
                     onMoveFocus = { key -> moveFocus(index, key) },
+                    onFocusWithin = { within ->
+                        if (within) rowMenus.focused = summary.id else if (rowMenus.focused == summary.id) rowMenus.focused = null
+                    },
+                    menuRequested = menuFor == summary.id,
+                    onMenuRequestTaken = { menuFor = null },
                 )
             }
         }
@@ -328,21 +357,6 @@ private class RowPlaces {
         val more = more?.takeIf { it.isAttached } ?: return Offset.Zero
         return row.localPositionOf(more, Offset(0f, more.size.height.toFloat()))
     }
-
-    /** The middle of the row's visible part, in the Compose root's pixels; null while it is not placed. */
-    fun middle(): Offset? = row?.takeIf { it.isAttached }?.boundsInRoot()?.center
-}
-
-/**
- * [point], in the Compose root's pixels, in the coordinates of the AWT focus owner, which [PlatformDataKeys.CONTEXT_MENU_POINT] is
- * relative to; null when the focus is not in a Compose panel. Compose lays out in device pixels: a point is divided by the screen's
- * scale, as Jewel's own popups do, and not by LocalDensity, which Jewel multiplies by the IDE's zoom.
- */
-private fun inFocusOwner(point: Offset): Point? {
-    val owner = KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner ?: return null
-    val panel = owner as? ComposePanel ?: SwingUtilities.getAncestorOfClass(ComposePanel::class.java, owner) ?: return null
-    val scale = JBUIScale.sysScale(panel)
-    return SwingUtilities.convertPoint(panel, Point((point.x / scale).roundToInt(), (point.y / scale).roundToInt()), owner)
 }
 
 /**
@@ -363,10 +377,15 @@ private fun SessionRow(
     onRename: () -> Unit,
     onFork: () -> Unit,
     onMoveFocus: (RowKey) -> Unit,
+    onFocusWithin: (Boolean) -> Unit,
+    menuRequested: Boolean,
+    onMenuRequestTaken: () -> Unit,
 ) {
     val status by (handle?.status ?: NOT_OPEN).collectAsState()
     val attention by (handle?.attention ?: NO_ATTENTION).collectAsState()
     var mode by remember { mutableStateOf(RowMode.NORMAL) }
+    // Whether the question takes the focus when it shows: asked from the menu, whose "⋯" goes away with the question.
+    var focusQuestion by remember { mutableStateOf(false) }
     var menuAt by remember { mutableStateOf<Offset?>(null) }
     var focusWithin by remember { mutableStateOf(false) }
     val places = remember { RowPlaces() }
@@ -377,6 +396,18 @@ private fun SessionRow(
     val currentShow by rememberUpdatedState(onShow)
     val currentMode by rememberUpdatedState(mode)
     val listStyle = JewelTheme.simpleListItemStyle
+    LaunchedEffect(menuRequested) {
+        if (!menuRequested) return@LaunchedEffect
+        if (mode == RowMode.NORMAL) menuAt = places.underMore()
+        onMenuRequestTaken()
+    }
+
+    /** Takes the question back; the row gets back the focus that its buttons had. */
+    fun cancelDelete() {
+        if (focusWithin) focusRequester.requestFocus()
+        mode = RowMode.NORMAL
+    }
+
     val shape = RoundedCornerShape(listStyle.metrics.selectionBackgroundCornerSize)
     val background = when {
         isSelected -> listStyle.colors.backgroundSelected
@@ -397,16 +428,20 @@ private fun SessionRow(
                         onMenu = { position -> if (currentMode == RowMode.NORMAL) menuAt = position },
                     )
                 }
-                // While the row has the focus, the IDE's context menu key (ShowPopupMenu) clicks its middle, which opens its menu.
-                .provideData { places.middle()?.let(::inFocusOwner)?.let { set(PlatformDataKeys.CONTEXT_MENU_POINT.name, it) } }
-                .onFocusChanged { focusWithin = it.hasFocus }
+                .onFocusChanged {
+                    focusWithin = it.hasFocus
+                    onFocusWithin(it.hasFocus)
+                }
                 // Before focusable(), so that it gets the keys while the row has the focus.
                 .onKeyEvent { event ->
                     when (val rowKey = rowKey(event.key, event.type, mode)) {
                         RowKey.SHOW -> onShow()
                         RowKey.NEXT, RowKey.PREVIOUS, RowKey.FIRST, RowKey.LAST -> onMoveFocus(rowKey)
-                        RowKey.DELETE -> mode = RowMode.CONFIRMING_DELETE
-                        RowKey.CANCEL_DELETE -> mode = RowMode.NORMAL
+                        RowKey.DELETE -> {
+                            focusQuestion = false
+                            mode = RowMode.CONFIRMING_DELETE
+                        }
+                        RowKey.CANCEL_DELETE -> cancelDelete()
                         null -> return@onKeyEvent false
                     }
                     true
@@ -438,11 +473,14 @@ private fun SessionRow(
                     }
                     RowMode.CONFIRMING_DELETE -> DeleteConfirmation(
                         deleteWarning,
+                        focusCancel = focusQuestion,
                         onDelete = {
+                            // The buttons go away: the row keeps the focus they had.
+                            if (focusWithin) focusRequester.requestFocus()
                             mode = RowMode.DELETING
                             scope.launch { if (!actions.delete(summary.id, summary.title)) mode = RowMode.NORMAL }
                         },
-                        onCancel = { mode = RowMode.NORMAL },
+                        onCancel = ::cancelDelete,
                     )
                     RowMode.DELETING -> Text("Deleting…", color = JewelTheme.globalColors.text.info)
                 }
@@ -489,7 +527,10 @@ private fun SessionRow(
                 }
                 item("Rename", action = onRename)
                 item("Fork", enabled = summary.file != null, action = onFork) // nothing to fork before the first prompt
-                item("Delete…") { mode = RowMode.CONFIRMING_DELETE }
+                item("Delete…") {
+                    focusQuestion = true
+                    mode = RowMode.CONFIRMING_DELETE
+                }
                 item("Copy resume command") { actions.copyResumeCommand(summary.id) }
                 if (handle != null) item("Close") { actions.close(summary.id) }
             }
@@ -499,7 +540,7 @@ private fun SessionRow(
 
 /**
  * The open sessions, by id, of those in [forkOf] (each mapped to the session it forks, if any) that fork session [id] and have no
- * transcript of their own yet ([hasTranscript]): such a fork starts from [id]'s transcript, and cannot start once it is deleted.
+ * transcript of their own yet ([hasTranscript]): such a fork starts from [id]'s transcript, and cannot start again once it is deleted.
  */
 internal fun forksStartingFrom(id: SessionId, forkOf: Map<SessionId, SessionId?>, hasTranscript: (SessionId) -> Boolean): List<SessionId> =
     forkOf.filter { (fork, original) -> original == id && !hasTranscript(fork) }.keys.toList()
@@ -507,19 +548,24 @@ internal fun forksStartingFrom(id: SessionId, forkOf: Map<SessionId, SessionId?>
 /** What the delete question adds when [forks] open forks start from the session's transcript; null for none. */
 internal fun forkWarning(forks: Int): String? = when (forks) {
     0 -> null
-    1 -> "An open fork of it has not started yet, and could not start without it."
-    else -> "$forks open forks of it have not started yet, and could not start without it."
+    1 -> "An open fork of it has no transcript of its own yet, and could not start again without this one."
+    else -> "$forks open forks of it have no transcript of their own yet, and could not start again without this one."
 }
 
-/** The question a row asks before it deletes its session, with [warning] ([forkWarning]) if it has one, and its two answers. */
+/**
+ * The question a row asks before it deletes its session, with [warning] ([forkWarning]) if it has one, and its two answers. With
+ * [focusCancel] Cancel takes the focus when the question shows.
+ */
 @Composable
-private fun DeleteConfirmation(warning: String?, onDelete: () -> Unit, onCancel: () -> Unit) {
+private fun DeleteConfirmation(warning: String?, focusCancel: Boolean, onDelete: () -> Unit, onCancel: () -> Unit) {
+    val cancelFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { if (focusCancel) cancelFocus.requestFocus() }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("Delete this session and its transcript?", fontWeight = FontWeight.Bold)
         if (warning != null) Text("⚠ $warning", color = JewelTheme.globalColors.text.warning)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             DefaultButton(onClick = onDelete) { Text("Delete") }
-            OutlinedButton(onClick = onCancel) { Text("Cancel") }
+            OutlinedButton(onClick = onCancel, modifier = Modifier.focusRequester(cancelFocus)) { Text("Cancel") }
         }
     }
 }
@@ -547,8 +593,8 @@ private fun StatusDot(status: SessionStatus) {
 }
 
 /**
- * Calls [onSelect] on a left click and [onMenu], with where the pointer is, on a right press or the IDE's own context click. A press
- * or release that a child takes, such as a button's, is left to it.
+ * Calls [onSelect] on a left click and [onMenu], with where the pointer is, on a right press. A press or release that a child takes,
+ * such as a button's, is left to it, and so is the IDE's context click, which [interceptContextClicks] takes first.
  */
 private suspend fun PointerInputScope.detectRowClicks(onSelect: () -> Unit, onMenu: (Offset) -> Unit) {
     awaitEachGesture {
@@ -558,11 +604,6 @@ private suspend fun PointerInputScope.detectRowClicks(onSelect: () -> Unit, onMe
         val awt = event.nativeEvent as? MouseEvent
         val press = event.type == PointerEventType.Press
         when {
-            awt != null && awt.isContextClick() -> {
-                change.consume()
-                onMenu(change.position)
-                awt.releaseLater()
-            }
             press && (event.buttons.isSecondaryPressed || awt?.isPopupTrigger == true) -> {
                 change.consume()
                 onMenu(change.position)
@@ -576,18 +617,60 @@ private suspend fun PointerInputScope.detectRowClicks(onSelect: () -> Unit, onMe
 private const val BUTTONS_DOWN: Int = MouseEvent.BUTTON1_DOWN_MASK or MouseEvent.BUTTON2_DOWN_MASK or MouseEvent.BUTTON3_DOWN_MASK
 
 /**
- * Whether this is the click the IDE's ShowPopupMenu action (the context menu key) sends to the middle of the focused row: a press
+ * Whether this is the click the IDE's ShowPopupMenu action (the context menu key) sends to where it guesses the focus is: a press
  * that AWT marks as a popup trigger, with no button down.
  */
 private fun MouseEvent.isContextClick(): Boolean = id == MouseEvent.MOUSE_PRESSED && isPopupTrigger && modifiersEx and BUTTONS_DOWN == 0
 
 /**
  * Sends the release that the IDE's context click lacks, once it has been handled. Without it Compose takes the pointer for still
- * down, and sends the next context click to the row that took this one.
+ * down, and sends the next press to whatever took this one.
  */
 private fun MouseEvent.releaseLater() {
     val release = MouseEvent(component, MouseEvent.MOUSE_RELEASED, `when`, 0, x, y, 1, false, button)
     SwingUtilities.invokeLater { component.dispatchEvent(release) }
+}
+
+/**
+ * What the IDE's context menu key does in the tool window: open the menu of the sidebar row that has the focus, or one of its
+ * buttons ([focused]), through the sidebar showing it ([open]). Set and read on the EDT.
+ */
+internal class RowMenus {
+    /** The row that has the focus, or one of its buttons; null when none has. */
+    var focused: SessionId? = null
+
+    /** Opens the menu of a row, scrolled into view first; null while no sidebar shows. */
+    var open: ((SessionId) -> Unit)? = null
+
+    /** The context menu key was pressed: the focused row's menu opens; without one, nothing happens. */
+    fun contextMenuKey() {
+        val id = focused ?: return
+        open?.invoke(id)
+    }
+}
+
+/**
+ * Takes every context click the IDE's context menu key sends (ShowPopupMenu presses where it guesses the focus is, with no release)
+ * before anything under it, so that it never lands on a row out of view, the dimmed chat or the middle of the panel: [onKey] is
+ * called instead, and the missing release is sent. Real right clicks go through.
+ */
+internal suspend fun PointerInputScope.interceptContextClicks(onKey: () -> Unit) {
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val awt = event.nativeEvent as? MouseEvent ?: continue
+            if (!awt.isContextClick()) continue
+            event.changes.forEach { it.consume() }
+            awt.releaseLater()
+            onKey()
+        }
+    }
+}
+
+/** Whether all of item [key] is in the list's view. */
+private fun LazyListState.fullyVisible(key: Any): Boolean {
+    val item = layoutInfo.visibleItemsInfo.firstOrNull { it.key == key } ?: return false
+    return item.offset >= layoutInfo.viewportStartOffset && item.offset + item.size <= layoutInfo.viewportEndOffset
 }
 
 /**

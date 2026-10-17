@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -20,7 +21,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -75,10 +78,14 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     // The sidebar over the chat, in a window too narrow to dock it.
     var drawerOpen by remember { mutableStateOf(false) }
     val toggleFocus = remember { FocusRequester() }
+    val rowMenus = remember { RowMenus() }
+    // The header's "+" and the sidebar over the chat's "New session": Tab goes from one to the other past the dimmed chat.
+    val newSessionFocus = remember { FocusRequester() }
+    val drawerEntryFocus = remember { FocusRequester() }
     // The session whose title is being edited in the header; it ends as soon as another session is selected.
     var renaming by remember { mutableStateOf<SessionId?>(null) }
     // The session whose prompt box takes the focus when it shows: the one last picked or created. One still being opened when
-    // another is selected (a fork, say) does not take it any more.
+    // another is selected (a fork, say) does not take it any more, nor once the user has moved to the filter or the title field.
     var promptFocusFor by remember { mutableStateOf<SessionId?>(null) }
     LaunchedEffect(selectedId) {
         if (renaming != selectedId) renaming = null
@@ -90,13 +97,16 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     }
 
     BoxWithConstraints(
-        Modifier.fillMaxSize().onKeyEvent { event ->
-            // Escape that nothing inside took (the title field takes its own) closes the sidebar over the chat.
-            if (!drawerOpen || event.type != KeyEventType.KeyDown || event.key != Key.Escape) return@onKeyEvent false
-            drawerOpen = false
-            toggleFocus.requestFocus()
-            true
-        },
+        Modifier.fillMaxSize()
+            // The context menu key opens the focused row's menu, and does nothing elsewhere.
+            .pointerInput(rowMenus) { interceptContextClicks(rowMenus::contextMenuKey) }
+            .onKeyEvent { event ->
+                // Escape that nothing inside took (the title field takes its own) closes the sidebar over the chat.
+                if (!drawerOpen || event.type != KeyEventType.KeyDown || event.key != Key.Escape) return@onKeyEvent false
+                drawerOpen = false
+                toggleFocus.requestFocus()
+                true
+            },
     ) {
         val wide = maxWidth >= MIN_WIDTH_FOR_SIDEBAR
         val docked = wide && !collapsed
@@ -117,6 +127,9 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                 onPicked = { drawerOpen = false },
                 onSessionShown = sessionShown,
                 focusFilter = overChat,
+                onFilterFocused = { promptFocusFor = null },
+                rowMenus = rowMenus,
+                newSessionFocus = if (overChat) drawerEntryFocus else null,
             )
         }
         Row(Modifier.fillMaxSize()) {
@@ -139,28 +152,43 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     newSession = newSession,
                     onCreateSession = { options -> sessionShown(actions.create(options)) },
                     renaming = selected != null && renaming == selected.id,
-                    onRenamingChange = { editing -> renaming = if (editing) selected?.id else null },
+                    onRenamingChange = { editing ->
+                        renaming = if (editing) selected?.id else null
+                        if (editing) promptFocusFor = null
+                    },
                     onRename = { title -> selected?.let { actions.rename(it.id, title) } },
                     toggleFocus = toggleFocus,
+                    newSessionFocus = newSessionFocus,
                 )
                 Box(Modifier.weight(1f).fillMaxWidth()) {
+                    // Under the sidebar over the chat, the dimmed chat takes no focus: Tab and Shift+Tab pass it by.
+                    val chatFocus = Modifier.focusProperties {
+                        onEnter = {
+                            if (drawerShown) {
+                                val to = if (requestedFocusDirection == FocusDirection.Previous) newSessionFocus else drawerEntryFocus
+                                to.requestFocus()
+                            }
+                        }
+                    }.focusGroup()
                     if (selected == null) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxSize().then(chatFocus), contentAlignment = Alignment.Center) {
                             Text("Create a session with + or open the sidebar.")
                         }
                     } else {
                         // Composed afresh for each session, so that what is typed in one session's prompt box never shows in another's.
                         key(selected.id) {
                             val rows = remember(selected) { presenters.rows(selected) }
-                            ChatPane(
-                                project,
-                                selected,
-                                manager,
-                                workspace,
-                                rows,
-                                focusPrompt = promptFocusFor == selected.id,
-                                onPromptFocused = { promptFocusFor = null },
-                            )
+                            Box(chatFocus) {
+                                ChatPane(
+                                    project,
+                                    selected,
+                                    manager,
+                                    workspace,
+                                    rows,
+                                    focusPrompt = promptFocusFor == selected.id,
+                                    onPromptFocused = { promptFocusFor = null },
+                                )
+                            }
                         }
                     }
                     if (drawerShown) {

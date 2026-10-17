@@ -51,7 +51,8 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
  * it selected: Enter renames the session to what it holds ([onRename]) unless that is blank, Escape leaves it as it was. Either
  * way [onRenamingChange] says when the field opens and closes. With no [handle] (nothing selected) the header holds the buttons only.
  *
- * [toggleFocus] lets the tool window give the toggle the focus back when the sidebar it opened over the chat closes.
+ * [toggleFocus] lets the tool window give the toggle the focus back when the sidebar it opened over the chat closes, and
+ * [newSessionFocus] give the "+" the focus.
  */
 @Composable
 internal fun SessionHeader(
@@ -64,6 +65,7 @@ internal fun SessionHeader(
     onRenamingChange: (Boolean) -> Unit,
     onRename: (title: String) -> Unit,
     toggleFocus: FocusRequester,
+    newSessionFocus: FocusRequester = remember { FocusRequester() },
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -79,7 +81,7 @@ internal fun SessionHeader(
             }
             NewSessionLauncher(newSession, onCreateSession) { open ->
                 WithTooltip("New session") {
-                    IconButton(onClick = open) { Icon(AllIconsKeys.General.Add, contentDescription = "New session") }
+                    IconButton(onClick = open, modifier = Modifier.focusRequester(newSessionFocus)) { Icon(AllIconsKeys.General.Add, contentDescription = "New session") }
                 }
             }
             if (handle != null) {
