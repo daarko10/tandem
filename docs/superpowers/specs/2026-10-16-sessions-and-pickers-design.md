@@ -54,6 +54,7 @@ Below the prompt box, like the desktop:
 - **Model picker:** entries from the `initialize` response (`models[]`: `value`, `displayName`, `description`), "Default" first. Choosing one sends `set_model` on a live session; on a stopped session the choice is applied with `--model` when the process starts. The next `system/init` confirms it; a mismatch shows the existing warning.
 - **Permission mode picker:** Default, Accept edits, Plan. Sends `set_permission_mode` on a live session; `--permission-mode` at start otherwise. Confirmed by `system/status.permissionMode` or the next `init`.
 - **Effort badge:** read-only, from `init.effort`. Effort is chosen in the New Session popup and passed as `--effort`.
+  *Superseded:* the recorded `system/init` has no `effort` field, so the badge shows what Tandem passed with `--effort`, or the last assistant line's `effort` from a loaded transcript (see the plan's findings and `ChatState.effort`).
 
 ### Several live sessions
 
@@ -119,6 +120,7 @@ Tandem never reads anything else under the config directory. `.credentials*` and
 - **`TandemSettings`** (`PersistentStateComponent`, application level, roaming disabled): `claudePath: String?`, `maxLiveSessions: Int = 4`. A `Configurable` built with Kotlin UI DSL v2.
 - **`TandemWorkspaceState`** (project level, workspace file): `openSessionIds`, `selectedSessionId`, `sidebarCollapsed`, `lastModel`, `lastEffort`, `lastPermissionMode`.
 - **`SessionNotifier`**: collects every handle's state; on a permission request or turn end in a non-selected session, posts the IDE notification and sets the badge.
+  *Superseded:* `SessionManager` raises the badge (`SessionHandle.attention`) as it follows each session's status, and clears it on select; `SessionNotifier` only posts the IDE notification.
 - `ClaudeBinary.find()` reads the override from `TandemSettings` instead of a system property; the property stays as a test hook.
 
 ### `ui/`
