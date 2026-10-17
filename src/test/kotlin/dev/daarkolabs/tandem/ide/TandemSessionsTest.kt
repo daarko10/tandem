@@ -110,6 +110,23 @@ class TandemSessionsTest {
     }
 
     @Test
+    fun `the models a session's CLI lists are remembered for the next IDE run`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("models").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            // A recording whose `initialize` response lists the models.
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "permission-mode")
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            val models = handle.state.first { it.models.isNotEmpty() }.models
+            // The new-session popup offers them before any session of the next run has answered `initialize`.
+            val workspace = TandemWorkspaceState.getInstance(project)
+            while (workspace.knownModels() != models) delay(20)
+        }
+        awaitNoOwnFakeCli()
+    }
+
+    @Test
     fun `a session's CLI starts from the login shell's environment`() = timeoutRunBlocking(30.seconds) {
         val dir = tempDir.get().resolve("shell-env").createDirectories()
         val log = configDir.resolve("fake-cli.log")

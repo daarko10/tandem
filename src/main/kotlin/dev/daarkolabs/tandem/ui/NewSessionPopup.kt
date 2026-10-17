@@ -31,9 +31,9 @@ private const val DEFAULT_EFFORT_LABEL: String = "Default effort"
 private val EFFORT_LEVELS: List<String> = listOf("low", "medium", "high", "max")
 
 /**
- * What [NewSessionPopup] offers and where its picks go: [models] lists the models the CLI offers, as far as an open session has been
- * told them (none until one has), and [workspace] holds the project's last picks, which prefill the popup and which "Create"
- * replaces.
+ * What [NewSessionPopup] offers and where its picks go: [models] lists the models the CLI offers, as an open session was told them
+ * or, until one is, as a session was told them last ([TandemWorkspaceState.knownModels]), and [workspace] holds the project's last
+ * picks, which prefill the popup and which "Create" replaces.
  */
 internal class NewSessionChoices(val workspace: TandemWorkspaceState, val models: () -> List<ModelOption>)
 

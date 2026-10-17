@@ -17,9 +17,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import org.jetbrains.annotations.TestOnly
@@ -108,7 +112,8 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
      *   first, and selected again at once, then the others in their order. One whose transcript is gone, or that fails to open, is
      *   left out; if that is the selected one, the first one opened is selected in its place. Nothing is selected if the user has
      *   selected a session meanwhile.
-     * - From then on the open sessions and the selection go to the workspace file ([TandemWorkspaceState]) whenever they change.
+     * - From then on the open sessions and the selection go to the workspace file ([TandemWorkspaceState]) whenever they change, and
+ *   so do the models a session's CLI lists.
      * - With `-Dtandem.autoPrompt=<prompt>`, a development hook, a new session is created, selected and sent the prompt.
      */
     fun ensureStarted() {
@@ -175,7 +180,11 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
             false
         }
 
-    /** Writes the open sessions and the selection to the workspace file whenever they change. */
+    /**
+     * Writes the open sessions and the selection to the workspace file whenever they change, and the models whenever a session's CLI
+     * lists them: every session runs the same `claude`, so the last list stands for all of them.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
     private fun rememberInWorkspace() {
         val workspace = TandemWorkspaceState.getInstance(project)
         scope.launch(CoroutineName("TandemSessions.workspace")) {
@@ -185,6 +194,12 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
                 state.openSessionIds = open.toMutableList()
                 state.selectedSessionId = selected
             }
+        }
+        scope.launch(CoroutineName("TandemSessions.models")) {
+            manager.sessions.flatMapLatest { open -> open.map { handle -> handle.state.map { it.models } }.merge() }
+                .filter { it.isNotEmpty() }
+                .distinctUntilChanged()
+                .collect(workspace::rememberModels)
         }
     }
 
