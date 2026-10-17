@@ -16,13 +16,16 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 
 ## Layout
 - `protocol/` pure Kotlin: NDJSON codec, typed messages, control requests. No IntelliJ imports, so it unit-tests fast.
-- `session/` one `ClaudeSession` per chat: spawns the CLI, owns stdin/stdout, reconciles partial and complete messages, exposes `StateFlow`s.
-- `ide/` IDE-side integration: MCP server with edit tools, permission dialogs, diff, file context.
+- `session/` `SessionManager` owns the project's sessions (`SessionHandle`), each with one `ClaudeSession` per live process: spawns the CLI, owns stdin/stdout, reconciles partial and complete messages, exposes `StateFlow`s. Imports only the JDK, kotlinx.coroutines, kotlinx.serialization.json, the platform's kotlinx.collections.immutable and `com.intellij.openapi.diagnostic`.
+- `session/transcript/` the CLI's own transcripts, `<config>/projects/<key>/<id>.jsonl` (`docs/protocol.md` 11): folder key, index, reader. Read-only, except a rename's `custom-title` line and delete.
+- `ide/` IDE-side integration: the `TandemSessions` project service, the settings page (Settings | Tools | Tandem: `claude` path, max live sessions), workspace state, notifications. Later the MCP server with edit tools, diff and file context.
 - `ui/` Jewel tool window. Renders state from `session/`; holds no protocol logic.
 
 ## Commands
 - `./gradlew test` unit, fixture and headless platform tests (no real `claude`; a fake CLI replays fixtures).
-- `xvfb-run ./gradlew integrationTest` IDE Starter + UI Driver tests: install the built ZIP in a real IDE, type prompts, answer permission prompts and press Stop against a fake CLI (`src/test/resources/fake-claude.py`). Slow; catch plugin-classloader and UI problems the platform tests cannot.
+- `xvfb-run ./gradlew integrationTest` IDE Starter + UI Driver tests: install the built ZIP in a real IDE, type prompts, answer permission prompts, press Stop, use the pickers and run two sessions from the sidebar against a fake CLI (`src/test/resources/fake-claude.py`). Slow; catch plugin-classloader and UI problems the platform tests cannot.
+- Test hooks (system properties): `tandem.claudePath` is the `claude` to run (the test tasks point it at the fake CLI); `tandem.configDir` replaces `$CLAUDE_CONFIG_DIR` / `~/.claude` when looking for transcripts.
+- The fake CLI (see its docstring) reads `TANDEM_FAKE_FIXTURE` (one fixture) or `TANDEM_FAKE_FIXTURES` (comma list, one per spawn), `TANDEM_FAKE_LOG` (its argv and env, then every frame the host writes), `TANDEM_FAKE_SESSION_ID`, `TANDEM_FAKE_DELAY_MS` and `TANDEM_FAKE_GATE_FILE` (holds each `control_request` back until the file exists).
 - `./gradlew runIde` sandbox IDE with the plugin. Use it to check feel, freezes and focus; agents cannot judge these.
 - `./gradlew verifyPlugin` Plugin Verifier against every supported IDE release.
 - `./gradlew buildPlugin` installable ZIP in `build/distributions/`.
