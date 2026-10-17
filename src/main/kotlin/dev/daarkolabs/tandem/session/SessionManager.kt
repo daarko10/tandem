@@ -503,20 +503,29 @@ class SessionManager internal constructor(
      * Starts a process for the session unless one runs, and hands it the queued prompts. A start [forPrompts] (one that [send]
      * asked for) that finds none left does nothing: an earlier start sent them, or dropped them for want of a binary. Holds the
      * session's spawn lock throughout, so that a session never gets two processes. Without a binary the chat shows the install
-     * notice instead. Every process, a respawn's and a fork's too, starts only once [makeRoom] has made room for it under the cap;
+     * notice instead, and a fork that has no transcript of its own, and whose original has none any more, says so in its chat
+     * ([FORK_ORIGINAL_GONE_TEXT]) rather than start a `--resume` the CLI would fail. Every process, a respawn's and a fork's too, starts only once [makeRoom] has made room for it under the cap;
      * if it could not, the process starts over the cap when [overCapAllowed], with a notice in the chat, and else not at all.
      */
     private suspend fun start(handle: SessionHandle, forPrompts: Boolean, overCapAllowed: Boolean) {
         handle.spawnLock.withLock {
             if (handle.isClosed || handle.deliverQueued()) return
             if (forPrompts && !handle.hasQueued()) return
-            val (path, hasTranscript) = withContext(Dispatchers.IO) {
+            val (path, hasTranscript, originalGone) = withContext(Dispatchers.IO) {
                 val path = binary()
-                path to (path != null && index.transcript(handle.id) != null)
+                val hasTranscript = path != null && index.transcript(handle.id) != null
+                // A fork without a transcript of its own starts from its original's (configFor), which must still be there.
+                val originalGone = path != null && !hasTranscript && handle.forkOf?.let { index.transcript(it) == null } == true
+                Triple(path, hasTranscript, originalGone)
             }
             if (path == null) {
                 val dropped = handle.failToStart(NO_CLI_TEXT)
                 LOG.info("session ${handle.id}: claude not found, $dropped prompt(s) not sent")
+                return
+            }
+            if (originalGone) {
+                val dropped = handle.failToStart(FORK_ORIGINAL_GONE_TEXT)
+                LOG.warn("session ${handle.id}: not started, the session it forks has no transcript any more; $dropped prompt(s) not sent")
                 return
             }
             admission.withLock {
@@ -579,7 +588,14 @@ class SessionManager internal constructor(
         session.notice(NoticeLevel.WARNING, "Resumed as a new session $id")
         val handle = SessionHandle(id, scope, session.state.value, listing, clock())
         // Nobody else knows the new handle yet, so it has no process of its own and takes this one.
-        handle.adopt(process) { adopted, reported -> firstInit(handle, adopted, reported) }
+        if (!handle.adopt(process) { adopted, reported -> firstInit(handle, adopted, reported) }) {
+            // Cannot happen while the handle is new; should it, the process must not run on where no row shows it.
+            LOG.warn("session ${from.id}: the CLI resumed it as session $id, whose row could not take the process; it is stopped")
+            handle.close()
+            session.close()
+            from.notice(NoticeLevel.WARNING, "Resumed as session $id, which could not be shown, so that process was stopped.")
+            return
+        }
         val added = synchronized(lock) {
             if (handle(id) != null) return@synchronized false
             addLocked(handle)
@@ -664,6 +680,11 @@ class SessionManager internal constructor(
         internal const val NO_CLI_TEXT: String =
             "Claude Code was not found. Install it from https://code.claude.com, sign in once with `claude` in a terminal, " +
                 "then reopen this tool window."
+
+        /** The chat's notice when a fork without a transcript of its own is to start, and the session it forks was deleted. */
+        internal const val FORK_ORIGINAL_GONE_TEXT: String =
+            "The session this fork was made from was deleted before the fork's first prompt, so the fork cannot start. " +
+                "Close it and fork again from another session."
     }
 }
 

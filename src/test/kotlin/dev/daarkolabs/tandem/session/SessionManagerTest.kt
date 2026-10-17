@@ -1016,4 +1016,22 @@ class SessionManagerTest {
         val opened = manager.sessions.value.single()
         assertTrue(opened.state.value.entries.isEmpty(), "the deleted history is not loaded")
     }
+
+    @Test
+    fun `a fork whose original was deleted before it had a transcript says so instead of starting`() = test {
+        seed(seeded)
+        val manager = manager()
+        val fork = assertNotNull(manager.fork(seeded))
+        awaitLog { spawns().size == 1 }
+        manager.stop(fork.id) // before a prompt: the fork has no transcript of its own
+        manager.delete(seeded)
+
+        manager.send(fork.id, "Reply with the single word: pong")
+        val ended = fork.state.first { it.ended }
+        val notice = ended.entries.last() as ChatEntry.Notice
+        assertEquals(NoticeLevel.ERROR, notice.level)
+        assertEquals(SessionManager.FORK_ORIGINAL_GONE_TEXT, notice.text)
+        assertEquals(1, spawns().size, "no process is started to fail on the missing original")
+        assertEquals(SessionStatus.STOPPED, fork.status.value)
+    }
 }
