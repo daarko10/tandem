@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.OFFERED_MODES
+import org.jetbrains.jewel.foundation.lazy.rememberSelectableLazyListState
 import org.jetbrains.jewel.ui.component.ListComboBox
 
 /** The model picker's first entry: the CLI's default model, picked by passing none. */
@@ -68,14 +69,21 @@ internal fun <T> List<PickerEntry<T>>.withEntryFor(value: T?, label: (T & Any) -
 /** The position of the entry that stands for [value]; the first entry, the default, when none does. */
 internal fun <T> List<PickerEntry<T>>.positionOf(value: T?): Int = indexOfFirst { it.value == value }.coerceAtLeast(0)
 
+/** A picker's list key for an entry: its [Value], or its [Position] where the value cannot tell it apart. Never one for the other. */
+internal sealed interface PickerKey {
+    data class Value(val value: Any) : PickerKey
+
+    data class Position(val index: Int) : PickerKey
+}
+
 /**
  * A key per entry, for a picker's list: its value where that is not null and no other entry has it, else its position. With these
  * the list keeps its highlight on the same entry when the entries change while it is open: the models arrive, or the CLI reports
  * another mode.
  */
-internal fun <T> List<PickerEntry<T>>.pickerKeys(): List<Any> {
+internal fun <T> List<PickerEntry<T>>.pickerKeys(): List<PickerKey> {
     val counts = groupingBy { it.value }.eachCount()
-    return mapIndexed { index, entry -> entry.value?.takeIf { counts[it] == 1 } ?: index }
+    return mapIndexed { index, entry -> entry.value?.takeIf { counts[it] == 1 }?.let { PickerKey.Value(it) } ?: PickerKey.Position(index) }
 }
 
 /**
@@ -86,7 +94,7 @@ internal fun <T> List<PickerEntry<T>>.pickerKeys(): List<Any> {
  * pick the picker goes on showing it until what it is given to show changes ([settled]), so that the entry it showed before does
  * not flash back while the pick is on its way to the session.
  */
-internal data class PickerList(val open: Boolean = false, val held: Any? = null) {
+internal data class PickerList(val open: Boolean = false, val held: PickerKey? = null) {
     /** The list opened, with nothing held. */
     fun opened(): PickerList = PickerList(open = true)
 
@@ -101,26 +109,31 @@ internal data class PickerList(val open: Boolean = false, val held: Any? = null)
 internal data class PickerStep(val list: PickerList, val pick: Int?)
 
 /** The position of the entry the picker shows: the held one while it is still listed, else [shown]. */
-internal fun PickerList.position(keys: List<Any>, shown: Int): Int = held?.let { keys.indexOf(it) }?.takeIf { it >= 0 } ?: shown
+internal fun PickerList.position(keys: List<PickerKey>, shown: Int): Int = held?.let { keys.indexOf(it) }?.takeIf { it >= 0 } ?: shown
+
+/** The key of the entry an open list is to highlight ([position]); null when there is none. */
+internal fun PickerList.highlighted(keys: List<PickerKey>, shown: Int): PickerKey? = keys.getOrNull(position(keys, shown))
 
 /**
  * The list selected the entry at [index]. While it is open, that entry is held. While it is closed, which Jewel's list does not do
- * today, the entry is picked at once unless it is the one [shown].
+ * today, the entry is picked at once unless it is the one [shown], or the one just picked that is still on its way.
  */
-internal fun PickerList.selected(index: Int, keys: List<Any>, shown: Int): PickerStep {
+internal fun PickerList.selected(index: Int, keys: List<PickerKey>, shown: Int): PickerStep {
     val key = keys.getOrNull(index) ?: return PickerStep(this, null)
     return when {
         open -> PickerStep(copy(held = key), null)
         index == shown -> PickerStep(PickerList(), null)
+        key == held -> PickerStep(this, null)
         else -> PickerStep(PickerList(held = key), index)
     }
 }
 
 /**
  * The list closed: the held entry is picked if it is still listed and is not the one [shown], and the picker goes on showing it until
- * [PickerList.settled]. Without one, nothing is picked.
+ * [PickerList.settled]. Without one, nothing is picked; nor when the list was not open, as when Jewel reports the close twice.
  */
-internal fun PickerList.closed(keys: List<Any>, shown: Int): PickerStep {
+internal fun PickerList.closed(keys: List<PickerKey>, shown: Int): PickerStep {
+    if (!open) return PickerStep(this, null)
     val pick = held?.let { keys.indexOf(it) }?.takeIf { it >= 0 && it != shown }
     return PickerStep(if (pick == null) PickerList() else PickerList(held = held), pick)
 }
@@ -155,6 +168,15 @@ internal fun <T> Picker(
     }
 
     LaunchedEffect(shown) { list = list.settled() }
+    // Jewel's open list keeps its highlight where it was when what the picker shows changes under it (the CLI reports another mode,
+    // the models arrive): move it to the entry the picker shows now.
+    val listState = rememberSelectableLazyListState(list.position(keys, shown).coerceIn(0, (keys.size - 1).coerceAtLeast(0)))
+    LaunchedEffect(keys, shown) {
+        if (!list.open) return@LaunchedEffect
+        val key = list.highlighted(keys, shown) ?: return@LaunchedEffect
+        listState.selectedKeys = setOf(key)
+        listState.lastActiveItemIndex = keys.indexOf(key)
+    }
     ListComboBox(
         items = labels,
         selectedIndex = list.position(keys, shown),
@@ -168,7 +190,8 @@ internal fun <T> Picker(
             },
         maxPopupWidth = PICKER_POPUP_WIDTH,
         onPopupVisibleChange = { visible -> if (visible) list = list.opened() else take(list.closed(currentKeys, currentShown)) },
-        itemKeys = remember(keys) { { index: Int, _: String -> keys.getOrElse(index) { index } } },
+        itemKeys = remember(keys) { { index: Int, _: String -> keys.getOrElse(index) { PickerKey.Position(index) } } },
+        listState = listState,
     )
 }
 

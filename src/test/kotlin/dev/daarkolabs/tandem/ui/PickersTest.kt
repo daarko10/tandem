@@ -16,7 +16,12 @@ class PickersTest {
     )
 
     /** The permission mode picker's list keys, which are its modes. */
-    private val modeKeys: List<Any> = listOf(PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN)
+    private val modeKeys: List<PickerKey> =
+        listOf(PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN).map { PickerKey.Value(it) }
+
+    private val plan = PickerKey.Value(PermissionMode.PLAN)
+
+    private fun keys(vararg keys: Any): List<PickerKey> = keys.map { if (it is Int) PickerKey.Position(it) else PickerKey.Value(it) }
 
     @Test
     fun `the model picker lists Default model, then the models the CLI offers in its order`() {
@@ -84,8 +89,38 @@ class PickersTest {
             PickerEntry("Opus", "opus"),
             PickerEntry("Opus, again", "opus"),
         )
-        assertEquals(listOf<Any>(0, "sonnet", 2, 3), entries.pickerKeys())
+        assertEquals(keys(0, "sonnet", 2, 3), entries.pickerKeys())
         assertEquals(modeKeys, permissionModeEntries(null).pickerKeys())
+    }
+
+    @Test
+    fun `a value that is a number never takes another entry's position key`() {
+        val entries = listOf(PickerEntry<Int?>("None", null), PickerEntry("Zero", 0), PickerEntry("One", 1))
+        val keys = entries.pickerKeys()
+        assertEquals(3, keys.toSet().size, keys.toString())
+        assertEquals(2, PickerList().opened().selected(2, keys, shown = 0).list.position(keys, shown = 0))
+    }
+
+    @Test
+    fun `a list that closes twice, or selects the same entry twice while closed, picks once`() {
+        val held = PickerList().opened().selected(2, modeKeys, shown = 0).list
+        val closed = held.closed(modeKeys, shown = 0)
+        assertEquals(2, closed.pick)
+        assertEquals(PickerStep(closed.list, null), closed.list.closed(modeKeys, shown = 0))
+        val selected = PickerList().selected(2, modeKeys, shown = 0)
+        assertEquals(2, selected.pick)
+        assertEquals(PickerStep(selected.list, null), selected.list.selected(2, modeKeys, shown = 0))
+    }
+
+    @Test
+    fun `an open list is highlighted on the held entry, else on the one shown, when the entries or the one shown change`() {
+        val open = PickerList().opened()
+        assertEquals(modeKeys[2], open.highlighted(modeKeys, shown = 2))
+        val held = open.selected(1, modeKeys, shown = 0).list
+        assertEquals(modeKeys[1], held.highlighted(modeKeys, shown = 2))
+        // The held entry left the list: the one shown.
+        assertEquals(modeKeys[0], held.highlighted(listOf(modeKeys[0], modeKeys[2]), shown = 0))
+        assertNull(open.highlighted(emptyList(), shown = 0))
     }
 
     @Test
@@ -125,28 +160,28 @@ class PickersTest {
 
     @Test
     fun `the held entry stays the same entry when the entries change while the list is open`() {
-        val before = listOf<Any>(0, "sonnet", "opus")
-        val after = listOf<Any>(0, "default", "sonnet", "opus")
+        val before = keys(0, "sonnet", "opus")
+        val after = keys(0, "default", "sonnet", "opus")
         val held = PickerList().opened().selected(2, before, shown = 0).list
         assertEquals(3, held.position(after, shown = 0))
         assertEquals(3, held.closed(after, shown = 0).pick)
         // An entry that left the list is not picked.
-        assertNull(held.closed(listOf<Any>(0, "sonnet"), shown = 0).pick)
+        assertNull(held.closed(keys(0, "sonnet"), shown = 0).pick)
     }
 
     @Test
     fun `a selection while the list is closed picks at once, unless it is the entry shown`() {
-        assertEquals(PickerStep(PickerList(held = PermissionMode.PLAN), 2), PickerList().selected(2, modeKeys, shown = 0))
+        assertEquals(PickerStep(PickerList(held = plan), 2), PickerList().selected(2, modeKeys, shown = 0))
         assertEquals(PickerStep(PickerList(), null), PickerList().selected(0, modeKeys, shown = 0))
         assertEquals(PickerStep(PickerList(), null), PickerList().selected(7, modeKeys, shown = 0))
     }
 
     @Test
     fun `opening the list again forgets a pick on its way, and an open list does not settle`() {
-        assertEquals(PickerList(open = true), PickerList(held = PermissionMode.PLAN).opened())
-        val open = PickerList(open = true, held = PermissionMode.PLAN)
+        assertEquals(PickerList(open = true), PickerList(held = plan).opened())
+        val open = PickerList(open = true, held = plan)
         assertEquals(open, open.settled())
-        assertEquals(PickerList(held = PermissionMode.PLAN), PickerList(held = PermissionMode.PLAN).escaped())
+        assertEquals(PickerList(held = plan), PickerList(held = plan).escaped())
     }
 
     @Test
