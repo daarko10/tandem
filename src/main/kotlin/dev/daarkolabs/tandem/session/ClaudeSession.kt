@@ -7,6 +7,7 @@ import dev.daarkolabs.tandem.protocol.HostMessages
 import dev.daarkolabs.tandem.protocol.InboundRequest
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -83,10 +84,6 @@ data class SessionConfig(
 /** Starts a process. Replaced in tests by a fake CLI. */
 fun interface ProcessLauncher {
     fun launch(argv: List<String>, workingDirectory: Path): Process
-
-    companion object {
-        val Default: ProcessLauncher = DefaultProcessLauncher()
-    }
 }
 
 /**
@@ -158,9 +155,13 @@ class ClaudeSession(
     private suspend fun run() {
         val p = try {
             launcher.launch(config.argv(), config.workingDirectory)
-        } catch (e: IOException) {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Not only an IOException: ProcessBuilder.start also throws for arguments it cannot pass, and a launcher can fail.
             LOG.warn("could not start claude", e)
-            dispatch(SessionEvent.Ended("Could not start `${config.binary}`: ${e.message}. Is Claude Code installed?", isError = true))
+            val reason = e.message ?: e.javaClass.simpleName
+            dispatch(SessionEvent.Ended("Could not start `${config.binary}`: $reason. Is Claude Code installed?", isError = true))
             return
         }
         process = p

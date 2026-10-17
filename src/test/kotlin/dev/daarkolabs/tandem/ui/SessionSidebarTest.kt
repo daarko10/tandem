@@ -4,12 +4,15 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import com.intellij.openapi.util.SystemInfo
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.Locale
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -23,6 +26,18 @@ class SessionSidebarTest {
         LocalDateTime.of(year, month, day, hour, minute).atZone(zone).toInstant().toEpochMilli()
 
     private fun ago(then: Long): String = relativeTime(then, now, zone, Locale.US)
+
+    @Test
+    fun `a session list that cannot be read again is logged, not thrown at the composition`() = runBlocking<Unit> {
+        var tried = false
+        refreshLogged {
+            tried = true
+            throw IllegalStateException("a bug in the index")
+        }
+        assertTrue(tried)
+        // A cancellation is no failure: the sidebar leaving the screen cancels the refresh, and that must go through.
+        assertFailsWith<CancellationException> { refreshLogged { throw CancellationException("left the screen") } }
+    }
 
     @Test
     fun `under a minute is just now, and so is a time after now`() {

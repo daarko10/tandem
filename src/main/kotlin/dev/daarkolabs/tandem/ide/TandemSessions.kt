@@ -8,8 +8,11 @@ import dev.daarkolabs.tandem.session.DefaultProcessLauncher
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
+import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
+import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -60,6 +63,11 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     @set:TestOnly
     internal var extraEnvironment: Map<String, String> = emptyMap()
 
+    /** Reads a session's history when it is opened: tests make it fail for one session. */
+    @Volatile
+    @set:TestOnly
+    internal var readTranscript: suspend (Path) -> LoadedTranscript = TranscriptReader::read
+
     /** The project's sessions. */
     val manager: SessionManager = SessionManager(
         scope = scope,
@@ -68,6 +76,8 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         binary = ClaudeBinary::find,
         workingDirectory = directory,
         maxLive = { TandemSettings.getInstance().maxLiveSessions() },
+        clock = System::currentTimeMillis,
+        readTranscript = { readTranscript(it) },
     )
 
     private val started = AtomicBoolean(false)
@@ -87,9 +97,10 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
      * - Until every session's process has ended, a JVM shutdown hook kills them ([SessionManager.killAllNow]): when the IDE exits, the
      *   JVM can stop before the sessions' coroutines have ended their processes.
      * - The [SessionNotifier] starts.
-     * - The sessions that were open when the project was last closed open again, in their order, without a process; one whose
-     *   transcript is gone is left out. The one that was selected is selected again, or, if it was left out, the first one opened, as
-     *   long as the user has selected none meanwhile.
+     * - The sessions that were open when the project was last closed open again, without a process: the one that was selected
+     *   first, and selected again at once, then the others in their order. One whose transcript is gone, or that fails to open, is
+     *   left out; if that is the selected one, the first one opened is selected in its place. Nothing is selected if the user has
+     *   selected a session meanwhile.
      * - From then on the open sessions and the selection go to the workspace file ([TandemWorkspaceState]) whenever they change.
      * - With `-Dtandem.autoPrompt=<prompt>`, a development hook, a new session is created, selected and sent the prompt.
      */
@@ -120,27 +131,42 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         }
     }
 
-    /** Opens the sessions the workspace file lists, without a process, and selects the one it names; see [ensureStarted]. On IO. */
+    /**
+     * Opens the sessions the workspace file lists, without a process, and selects the one it names, which is opened first, so that
+     * it shows before the others' transcripts are read; see [ensureStarted]. On IO.
+     */
     private suspend fun restore() {
         val saved = TandemWorkspaceState.getInstance(project).state
-        val selected = saved.selectedSessionId
-        val restored = ArrayList<SessionId>()
-        for (id in saved.openSessionIds.distinct()) {
+        val ids = saved.openSessionIds.distinct()
+        val wanted = saved.selectedSessionId
+        val order = if (wanted != null && wanted in ids) listOf(wanted) + (ids - wanted) else ids
+        var restored = 0
+        for (id in order) {
+            if (!reopen(id)) continue
+            restored++
+            // The saved selection, or, if it was left out, the first one opened in its place.
+            if (restored == 1 && wanted != null && manager.selected.value == null) manager.select(id)
+        }
+        LOG.info("$restored session(s) restored")
+    }
+
+    /** Opens session [id] without a process; false if it has no transcript any more, or fails to open. */
+    private suspend fun reopen(id: SessionId): Boolean =
+        try {
             if (index.transcript(id) == null) {
                 LOG.info("session $id not restored: it has no transcript")
-                continue
+                false
+            } else {
+                manager.open(id, spawn = false)
+                true
             }
-            manager.open(id, spawn = false)
-            restored.add(id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // The class only: a message can quote the transcript.
+            LOG.warn("session $id not restored (${e.javaClass.name})")
+            false
         }
-        val selection = when (selected) {
-            null -> null
-            in restored -> selected
-            else -> restored.firstOrNull() // the selected one was left out
-        }
-        if (selection != null && manager.selected.value == null) manager.select(selection)
-        LOG.info("${restored.size} session(s) restored")
-    }
 
     /** Writes the open sessions and the selection to the workspace file whenever they change. */
     private fun rememberInWorkspace() {

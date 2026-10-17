@@ -12,6 +12,7 @@ import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
+import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import org.junit.jupiter.api.AfterEach
@@ -22,6 +23,7 @@ import java.nio.file.Path
 import kotlin.io.path.copyTo
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.name
 import kotlin.io.path.readLines
 import kotlin.io.path.readText
 import kotlin.test.assertEquals
@@ -47,6 +49,12 @@ class TandemSessionsTest {
 
         /** Another session with a recorded transcript. */
         private const val OTHER = "88888888-8888-4888-8888-888888888888"
+
+        /** And another. */
+        private const val THIRD = "99999999-9999-4999-8999-999999999999"
+
+        /** A session with a transcript that fails to open in a way nothing expects. */
+        private const val BROKEN = "55555555-5555-4555-8555-555555555555"
     }
 
     /** Fake CLI processes that were already running before this test; another test's leftovers are not this test's to judge. */
@@ -180,22 +188,49 @@ class TandemSessionsTest {
     }
 
     @Test
-    fun `restored sessions keep their saved order and selection`() = timeoutRunBlocking(30.seconds) {
+    fun `the selected session is restored first, then the others in their saved order`() = timeoutRunBlocking(30.seconds) {
         val dir = tempDir.get().resolve("order").createDirectories()
         seed(dir, SEEDED)
         seed(dir, OTHER)
+        seed(dir, THIRD)
         val (open, selected) = openProjectAsync(dir).useProjectAsync { project ->
             TandemWorkspaceState.getInstance(project).state.apply {
-                openSessionIds = mutableListOf(OTHER, SEEDED) // not in the order of their ids
-                selectedSessionId = SEEDED // the second one
+                openSessionIds = mutableListOf(THIRD, SEEDED, OTHER) // not in the order of their ids
+                selectedSessionId = SEEDED // the second one: it shows before the others' transcripts are read
             }
             val sessions = TandemSessions.get(project)
             sessions.ensureStarted()
-            sessions.manager.selected.first { it == SEEDED } // the last step of restoring
+            sessions.manager.selected.first { it == SEEDED }
+            while (sessions.manager.sessions.value.size < 3) delay(20) // the others follow
             sessions.manager.sessions.value.map { it.id } to sessions.manager.selected.value
         }
-        assertEquals(listOf(OTHER, SEEDED), open)
+        assertEquals(listOf(SEEDED, THIRD, OTHER), open)
         assertEquals(SEEDED, selected)
+        assertEquals(emptyList(), ownFakeProcesses().map { it.pid() })
+    }
+
+    @Test
+    fun `a session that fails to open is left out and the others are restored`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("broken").createDirectories()
+        seed(dir, BROKEN)
+        seed(dir, SEEDED)
+        seed(dir, OTHER)
+        val (open, remembered) = openProjectAsync(dir).useProjectAsync { project ->
+            val workspace = TandemWorkspaceState.getInstance(project).state
+            workspace.openSessionIds = mutableListOf(BROKEN, SEEDED, OTHER)
+            workspace.selectedSessionId = OTHER
+            val sessions = TandemSessions.get(project)
+            // Not a transcript that cannot be read, which opens with a warning in its chat (SessionManagerTest), but a failure
+            // nothing expects, such as a bug in the reader.
+            sessions.readTranscript = { path -> if (path.name.startsWith(BROKEN)) error("a bug") else TranscriptReader.read(path) }
+            sessions.ensureStarted()
+            sessions.manager.selected.first { it == OTHER }
+            // The workspace follows the open sessions from then on, so it forgets the one left out.
+            while (workspace.openSessionIds != listOf(OTHER, SEEDED)) delay(20)
+            sessions.manager.sessions.value.map { it.id } to workspace.selectedSessionId
+        }
+        assertEquals(listOf(OTHER, SEEDED), open)
+        assertEquals(OTHER, remembered)
         assertEquals(emptyList(), ownFakeProcesses().map { it.pid() })
     }
 

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.nio.file.Path
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
@@ -45,6 +46,15 @@ class ClaudeBinaryTest {
     fun `non-executable files are skipped`() {
         File(tmp.toFile(), "a").apply { mkdirs() }.resolve("claude").writeText("not executable")
         assertNull(ClaudeBinary.find(null, "$tmp/a", "$tmp/home", windows = false))
+    }
+
+    @Test
+    fun `a directory is not executable, though it can be searched`() {
+        val dir = File(tmp.toFile(), "claude-dir").apply { mkdirs() }
+        assertTrue(dir.canExecute(), "the permission to search a directory is its execute bit")
+        assertFalse(ClaudeBinary.isExecutable(dir.path))
+        val onPath = executable("a")
+        assertEquals(onPath, ClaudeBinary.find(dir.path, "$tmp/a", "$tmp/home", windows = false), "a directory as the override is ignored")
     }
 
     /** A shell script named [name] that runs [body]. */

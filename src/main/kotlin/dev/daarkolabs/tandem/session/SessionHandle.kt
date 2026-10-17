@@ -73,9 +73,9 @@ class SessionHandle internal constructor(
     internal val spawnLock: Mutex = Mutex()
 
     /**
-     * Guards [attachment], [mirror], [queued], [closed] and [renameOnInit], and makes each change of the chat ([publishLocked]) one
-     * step with them: a pick or a prompt is either in the state a process starts from, or goes to that process. Only held for steps
-     * that never wait.
+     * Guards [attachment], [mirror], [queued], [closed], [renameOnInit] and [replaced], and makes each change of the chat
+     * ([publishLocked]) one step with them: a pick or a prompt is either in the state a process starts from, or goes to that
+     * process. Only held for steps that never wait.
      */
     private val lock = Any()
 
@@ -89,8 +89,14 @@ class SessionHandle internal constructor(
     private val queued = ArrayList<String>()
     private var closed = false
 
-    /** Whether the CLI is still to be told [titleOverride] (`rename_session`) once a process reports its first `system/init`. */
-    private var renameOnInit = pendingTitle != null
+    /**
+     * A title the CLI is still to be told (`rename_session`) once a process reports its first `system/init`: a fork's, or one set
+     * ([rename]) while the process had not reported it yet. Kept apart from [titleOverride], which the index's listing clears.
+     */
+    private var renameOnInit: String? = pendingTitle
+
+    /** What the last [rename] replaced, [titleOverride] and [renameOnInit], until [revertRename] puts them back. */
+    private var replaced: Pair<String?, String?>? = null
 
     /** A chat and whether a process is attached to it ([attachment] is set), which together make the [SessionStatus]. */
     private data class Snapshot(val chat: ChatState, val attached: Boolean) {
@@ -230,26 +236,48 @@ class SessionHandle internal constructor(
     }
 
     /**
-     * Shows [title] as this session's at once, until the index lists it. A running process is asked to rename the session
-     * (`rename_session`), which makes the CLI append the `custom-title` line, and true is returned; without one, false, and the
-     * caller writes the line.
+     * Shows [title] as this session's at once, until the index lists it. A running process that has reported its first
+     * `system/init` is asked to rename the session (`rename_session`), which makes the CLI append the `custom-title` line, and true
+     * is returned. Otherwise false, and the caller writes the line if the session has a transcript. A process that has not reported
+     * its `system/init` yet is told with it, as a fork is its title ([sendPendingTitle]): before then the CLI may keep a title
+     * without writing it (docs/protocol.md 4.4).
      */
     internal fun rename(title: String): Boolean = synchronized(lock) {
+        replaced = titleOverride.value to renameOnInit
         titleOverride.value = title
         val live = liveLocked() ?: return false
+        if (live.reportedSessionId.value == null) {
+            renameOnInit = title
+            return false
+        }
         live.rename(title)
         true
     }
 
     /**
-     * Tells [session] the title set in Tandem (`rename_session`) if the CLI is still to be told it, as a fork's: once a process has
-     * reported its `system/init`, the CLI has a transcript to write it to. Nothing if [session] is no longer attached.
+     * Takes back [rename] to [title], whose `custom-title` line could not be written: the title shown before it, and the one the CLI
+     * was still to be told, count again. Nothing if the title changed since, by another rename or the index.
+     */
+    internal fun revertRename(title: String) {
+        synchronized(lock) {
+            val (override, onInit) = replaced ?: return
+            if (titleOverride.value != title) return
+            replaced = null
+            titleOverride.value = override
+            if (renameOnInit == title) renameOnInit = onInit
+        }
+    }
+
+    /**
+     * Tells [session] the title the CLI is still to be told ([renameOnInit]), a fork's or one set before the process reported its
+     * first `system/init`: from that init on, the CLI has a transcript to write it to. Nothing if [session] is no longer attached.
      */
     internal fun sendPendingTitle(session: ClaudeSession) {
         synchronized(lock) {
-            if (!renameOnInit || attachment?.session !== session) return
-            renameOnInit = false
-            titleOverride.value?.let(session::rename)
+            val title = renameOnInit ?: return
+            if (attachment?.session !== session) return
+            renameOnInit = null
+            session.rename(title)
         }
     }
 

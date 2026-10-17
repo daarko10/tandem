@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.round
 import androidx.compose.ui.window.PopupPositionProvider
 import com.intellij.openapi.actionSystem.PlatformDataKeys
+import com.intellij.openapi.diagnostic.fileLogger
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.ui.scale.JBUIScale
 import com.intellij.util.ui.JBUI
@@ -80,6 +81,7 @@ import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -110,6 +112,8 @@ import java.time.format.FormatStyle
 import java.util.Locale
 import javax.swing.SwingUtilities
 import kotlin.math.roundToInt
+
+private val LOG = fileLogger()
 
 /** How often the rows' relative times are worked out again. */
 private const val CLOCK_TICK_MILLIS: Long = 60_000
@@ -170,7 +174,7 @@ internal fun SessionSidebar(
             value = System.currentTimeMillis()
         }
     }
-    LaunchedEffect(manager) { manager.refreshIndex() }
+    LaunchedEffect(manager) { refreshLogged(manager::refreshIndex) }
     LaunchedEffect(focusFilter) { if (focusFilter) filterFocus.requestFocus() }
     LaunchedEffect(summaries) { rowFocus.keys.retainAll(summaries.mapTo(HashSet()) { it.id }) }
 
@@ -231,6 +235,22 @@ internal fun SessionSidebar(
                 )
             }
         }
+    }
+}
+
+/**
+ * Runs [refresh], which reads the session list again from disk. A failure, such as a bug in reading a transcript, is logged and the
+ * list stays as it was: thrown in a [LaunchedEffect], it would take the whole tool window's composition down. A cancellation, as when
+ * the sidebar leaves the screen, goes through.
+ */
+internal suspend fun refreshLogged(refresh: suspend () -> Unit) {
+    try {
+        refresh()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        // The class only: a message can quote a transcript.
+        LOG.warn("session list not read again (${e.javaClass.name})")
     }
 }
 

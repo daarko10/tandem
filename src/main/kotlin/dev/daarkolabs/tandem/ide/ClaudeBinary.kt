@@ -42,8 +42,8 @@ internal object ClaudeBinary {
     /** The path saved in Settings | Tools | Tandem, trimmed, or null when none is. Reads only the settings. */
     fun configured(): String? = TandemSettings.getInstance().state.claudePath?.trim()?.ifEmpty { null }
 
-    /** Whether [path] is a file that can be run. */
-    fun isExecutable(path: String): Boolean = File(path).canExecute()
+    /** Whether [path] is a file that can be run. A directory is not, though its execute bit (the right to search it) may be set. */
+    fun isExecutable(path: String): Boolean = File(path).let { it.isFile && it.canExecute() }
 
     /** [override] wins when it is executable; then each `PATH` entry; then the CLI's usual install locations under [home]. */
     fun find(override: String?, path: String, home: String, windows: Boolean): String? {

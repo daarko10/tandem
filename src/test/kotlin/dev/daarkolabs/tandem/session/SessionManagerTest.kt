@@ -5,6 +5,7 @@ import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
+import dev.daarkolabs.tandem.session.transcript.TranscriptFiles
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -19,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
@@ -28,6 +30,9 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.io.BufferedReader
+import java.io.IOException
+import java.io.StringReader
 import java.nio.file.AccessDeniedException
 import java.nio.file.Path
 import java.time.Instant
@@ -42,6 +47,7 @@ import kotlin.io.path.readLines
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -95,6 +101,7 @@ class SessionManagerTest {
         lookup: () -> String? = { binary },
         clock: () -> Long = System::currentTimeMillis,
         read: suspend (Path) -> LoadedTranscript = TranscriptReader::read,
+        appendTitle: (Path, String, String, Instant) -> Unit = TranscriptFiles::appendCustomTitle,
         maxLive: Int = 4,
         /** More variables for every process, such as `TANDEM_FAKE_SESSION_ID`. */
         environment: Map<String, String> = emptyMap(),
@@ -107,7 +114,17 @@ class SessionManagerTest {
         }
         val launcher = DefaultProcessLauncher { System.getenv() + fake }
         val index = SessionIndex({ listOf(folder) }, "/project")
-        return SessionManager(scope, index, launcher, lookup, dir, maxLive = { maxLive }, clock = clock, readTranscript = read)
+        return SessionManager(
+            scope,
+            index,
+            launcher,
+            lookup,
+            dir,
+            maxLive = { maxLive },
+            clock = clock,
+            readTranscript = read,
+            appendTitle = appendTitle,
+        )
     }
 
     private fun test(block: suspend CoroutineScope.() -> Unit): Unit = runBlocking { withTimeout(30_000, block) }
@@ -195,6 +212,20 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `a resumed session starts without --model, so the CLI runs the session's own`() = test {
+        seed(seeded) // its assistant line ran claude-sonnet-5-5 and carries it as requestedModel too
+        val manager = manager()
+        val handle = manager.open(seeded)
+        awaitLog { spawns().isNotEmpty() }
+        val argv = spawns().single()
+        assertEquals(seeded, argv.valueOf("--resume"))
+        // Measured with 2.1.301 (docs/protocol.md 8): `--resume` without `--model` runs the session's last model, not the default.
+        assertFalse("--model" in argv, argv.toString())
+        assertNull(handle.state.value.requestedModel, "nothing was picked")
+        assertEquals("claude-sonnet-5-5", handle.state.value.activeModel)
+    }
+
+    @Test
     fun `a transcript that cannot be read opens with a warning in place of the history`() = test {
         seed(seeded)
         // Run as root, a test cannot make a file unreadable, so the reader fails in its place.
@@ -203,6 +234,41 @@ class SessionManagerTest {
         val notice = handle.state.value.entries.single() as ChatEntry.Notice
         assertEquals(NoticeLevel.WARNING, notice.level)
         assertEquals("The session's history could not be read: AccessDeniedException", notice.text)
+    }
+
+    @Test
+    fun `a transcript that fails while it is read opens with what was read and a warning`() = test {
+        seed(seeded)
+        val text = folder.resolve("$seeded.jsonl").readText()
+
+        // Reads the transcript through readers that fail after their fifth line in pass [failing] (1 or 2) of the reader.
+        fun failingIn(failing: Int): suspend (Path) -> LoadedTranscript = {
+            var opened = 0
+            TranscriptReader.readFrom(
+                {
+                    val failAfter = if (++opened == failing) 5 else Int.MAX_VALUE
+                    object : BufferedReader(StringReader(text)) {
+                        private var lines = 0
+
+                        override fun readLine(): String? = if (++lines > failAfter) throw IOException("device gone") else super.readLine()
+                    }
+                },
+                seeded,
+            )
+        }
+
+        // The second pass had read the prompt (the transcript's third line) when it failed: that much shows, then the warning.
+        val partly = manager(read = failingIn(2)).open(seeded, spawn = false).state.value
+        assertEquals(listOf("Reply with the single word: pong"), partly.prompts())
+        val warning = partly.entries.last() as ChatEntry.Notice
+        assertEquals(NoticeLevel.WARNING, warning.level)
+        assertEquals("The session's history was read only partly: IOException", warning.text)
+
+        // A failure in the first pass leaves nothing to show but the warning.
+        val nothing = manager(read = failingIn(1)).open(seeded, spawn = false).state.value
+        val notice = nothing.entries.single() as ChatEntry.Notice
+        assertEquals(NoticeLevel.WARNING, notice.level)
+        assertEquals("The session's history could not be read: IOException", notice.text)
     }
 
     @Test
@@ -533,6 +599,34 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `a session opened when nothing is idle stays stopped until its first prompt starts it over the cap`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "interrupt,plain-reply", maxLive = 1)
+        val busy = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.send(busy.id, "Count to a hundred")
+        busy.status.await(SessionStatus.RUNNING) // the fixture streams, then waits for an interrupt
+
+        val opened = manager.open(seeded)
+        delay(300) // time for a wrong start to show in the log
+        assertEquals(1, spawns().size, "opening a session never starts a process over the cap")
+        assertEquals(SessionStatus.STOPPED, opened.status.value)
+        assertEquals(listOf("Reply with the single word: pong"), opened.state.value.prompts(), "its history")
+        assertTrue(opened.state.value.entries.none { it is ChatEntry.Notice }, "no notice: nothing was started")
+
+        // The user's prompt is what the user asked for: it starts the process over the cap, and the chat says so.
+        manager.send(seeded, "Reply with the single word: pong")
+        awaitLog { spawns().size == 2 }
+        assertEquals(seeded, spawns().last().valueOf("--resume"))
+        val started = opened.state.first { s -> s.entries.any { it is ChatEntry.Notice } }
+        val notice = started.entries.filterIsInstance<ChatEntry.Notice>().single()
+        assertEquals(NoticeLevel.INFO, notice.level)
+        assertEquals("Max live sessions exceeded", notice.text)
+        assertEquals(SessionStatus.RUNNING, busy.status.value, "a session in a turn is never stopped")
+        opened.state.first { s -> !s.busy && s.entries.count { it is ChatEntry.Assistant } == 2 } // and the prompt is answered
+    }
+
+    @Test
     fun `rename sends rename_session when live and appends a custom-title line when stopped`() = test {
         seed(seeded)
         seed(other)
@@ -541,7 +635,9 @@ class SessionManagerTest {
         val lines = stoppedTranscript.readLines().size
         val manager = manager(clock = { Instant.parse("2026-10-16T12:34:56.789Z").toEpochMilli() })
         val live = manager.open(seeded)
-        awaitLog { spawns().size == 1 }
+        // A process that has reported its first system/init is told at once; one that has not, with that init (tests below).
+        manager.send(seeded, "Reply with the single word: pong")
+        live.state.first { s -> !s.busy && s.entries.count { it is ChatEntry.Assistant } == 2 }
         manager.refreshIndex() // lists both, as "Pong"
 
         manager.rename(seeded, "Alpha")
@@ -577,6 +673,51 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `a rename before the first system-init is sent with that init`() = test {
+        val manager = manager()
+        val created = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 } // a process, which reports no system/init before its first prompt
+        manager.rename(created.id, "Epsilon")
+        created.title.await("Epsilon") // shown at once
+
+        manager.send(created.id, "Reply with the single word: pong")
+        created.state.first { s -> !s.busy && s.entries.any { it is ChatEntry.Assistant } }
+        awaitLog { frames().any { it.subtype() == "rename_session" } }
+        val sent = frames()
+        val rename = sent.indexOfFirst { it.subtype() == "rename_session" }
+        assertTrue(sent.indexOfFirst { it.type() == "user" } < rename, "sent once the first prompt's init arrived")
+        assertEquals("Epsilon", sent[rename]["request"]!!.jsonObject["title"]!!.jsonPrimitive.content)
+        assertEquals(1, sent.count { it.subtype() == "rename_session" })
+        assertEquals("Epsilon", created.title.value)
+    }
+
+    @Test
+    fun `a resumed session renamed before its first system-init gets the line now and tells the CLI with the init`() = test {
+        seed(seeded)
+        val transcript = folder.resolve("$seeded.jsonl")
+        val lines = transcript.readLines().size
+        val manager = manager()
+        val live = manager.open(seeded)
+        awaitLog { spawns().size == 1 } // a process, which reports no system/init before its first prompt
+        manager.rename(seeded, "Zeta")
+        live.title.await("Zeta")
+        // No prompt may ever come, so Tandem writes the line itself, as for a session without a process.
+        val written = transcript.readLines()
+        assertEquals(lines + 1, written.size)
+        assertEquals("Zeta", Json.parseToJsonElement(written.last()).jsonObject["customTitle"]!!.jsonPrimitive.content)
+
+        // The CLI, which read the old title when it started, is told the new one with its first system/init.
+        manager.send(seeded, "Reply with the single word: pong")
+        awaitLog { frames().any { it.subtype() == "rename_session" } }
+        val sent = frames()
+        val rename = sent.indexOfFirst { it.subtype() == "rename_session" }
+        assertTrue(sent.indexOfFirst { it.type() == "user" } < rename, "sent once the first prompt's init arrived")
+        assertEquals("Zeta", sent[rename]["request"]!!.jsonObject["title"]!!.jsonPrimitive.content)
+        live.state.first { s -> !s.busy && s.entries.count { it is ChatEntry.Assistant } == 2 }
+        assertEquals(1, frames().count { it.subtype() == "rename_session" })
+    }
+
+    @Test
     fun `a stopped session without a transcript keeps a new title in memory only`() = test {
         val manager = manager()
         val created = manager.create(NewSessionOptions())
@@ -588,6 +729,20 @@ class SessionManagerTest {
         assertFalse(folder.resolve("${created.id}.jsonl").exists(), "no transcript is made for the title")
         assertEquals(0, frames().count { it.subtype() == "rename_session" })
         manager.summaries.first { summaries -> summaries.any { it.id == created.id && it.title == "Delta" } }
+    }
+
+    @Test
+    fun `a title line that cannot be written takes the new title back`() = test {
+        seed(seeded)
+        // Run as root, a test cannot make a file read-only, so the append fails in its place.
+        val manager = manager(appendTitle = { file, _, _, _ -> throw AccessDeniedException(file.toString()) })
+        val stopped = manager.open(seeded, spawn = false)
+        manager.refreshIndex()
+        stopped.title.await("Pong")
+
+        assertFailsWith<AccessDeniedException> { manager.rename(seeded, "Eta") }
+        val shown = withTimeoutOrNull(5_000) { stopped.title.first { it == "Pong" } }
+        assertEquals("Pong", shown, "the title from before the rename is back")
     }
 
     @Test

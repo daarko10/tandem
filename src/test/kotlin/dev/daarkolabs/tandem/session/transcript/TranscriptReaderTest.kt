@@ -304,6 +304,20 @@ class TranscriptReaderTest {
     }
 
     @Test
+    fun `an assistant line's requestedModel is no pick, so a resume leaves the model to the CLI`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("12121212-1212-4212-8212-121212121212.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"hello"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","requestedModel":"claude-opus-5-5","message":{"id":"msg_1","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"hi"}]}}""",
+        )
+        val loaded = TranscriptReader.read(f)
+        // The CLI resumes a session with the model it last ran (docs/protocol.md 8): Tandem passes no --model unless one is picked.
+        assertNull(loaded.state.requestedModel)
+        assertEquals("claude-opus-5-5", loaded.state.activeModel)
+        assertEquals("claude-opus-5-5", loaded.meta.lastModel)
+    }
+
+    @Test
     fun `a synthetic assistant line changes neither the last model nor the last effort`(@TempDir dir: Path) = runBlocking<Unit> {
         val f = dir.resolve("15151515-1515-4151-8151-151515151515.jsonl")
         f.writeLines(
@@ -547,6 +561,7 @@ class TranscriptReaderTest {
         val first = TranscriptReader.readFrom({ reader(failAfter = 2) }, id)
         assertEquals(emptyList(), first.state.entries)
         assertEquals(emptyMeta(id, lineCount = 2), first.meta)
+        assertEquals("IOException", first.readError, "the history is not all there, and the caller is told why")
 
         // In the second pass: what was parsed before it.
         var opened = 0
@@ -555,12 +570,17 @@ class TranscriptReaderTest {
         assertFalse(second.state.busy)
         assertEquals(2, second.meta.lineCount)
         assertEquals("claude-sonnet-5-5", second.meta.lastModel)
+        assertEquals("IOException", second.readError)
 
         // The file cannot be opened again for the second pass: nothing was parsed.
         opened = 0
         val reopened = TranscriptReader.readFrom({ if (++opened == 1) reader() else throw IOException("gone") }, id)
         assertEquals(emptyList(), reopened.state.entries)
         assertEquals(emptyMeta(id), reopened.meta)
+        assertEquals("IOException", reopened.readError)
+
+        // Read to the end: no error.
+        assertNull(TranscriptReader.readFrom({ reader() }, id).readError)
     }
 
     @Test

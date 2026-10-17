@@ -100,6 +100,11 @@ class TandemSettingsTest {
         // One that cannot run: sessions use the detected one.
         TandemSettings.getInstance().state.claudePath = tempDir.get().resolve("missing").toString()
         assertEquals(ClaudeBinary.detect(), ClaudeBinary.find())
+        // Nor can a directory, though its execute bit is set: the page says it is not executable, and no session starts it.
+        val directory = tempDir.get().resolve("a-directory").createDirectories().toString()
+        TandemSettings.getInstance().state.claudePath = directory
+        assertFalse(ClaudeBinary.isExecutable(directory))
+        assertEquals(ClaudeBinary.detect(), ClaudeBinary.find())
     }
 
     @Test

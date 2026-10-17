@@ -20,6 +20,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -205,6 +206,42 @@ class SessionNotifierTest {
         }
         // The request was answered: announcing it would be wrong. That the turn finished may be announced.
         assertTrue(notifications.none { it.type == NotificationType.WARNING }, notifications.joinToString { it.title })
+    }
+
+    @Test
+    fun `a turn that ends after a notification found nothing to announce is announced`() = timeoutRunBlocking(60.seconds) {
+        val held = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val hold: suspend () -> Unit = {
+            held.complete(Unit)
+            release.await()
+        }
+        val notifications = withSessions("finished-later", fixtures = "plain-reply,permission,interrupt", hold) {
+            val a = manager.create(NewSessionOptions())
+            manager.select(a.id)
+            awaitSpawns(1)
+            val b = manager.create(NewSessionOptions())
+            awaitSpawns(2) // B's first process replays permission
+            manager.send(b.id, "Create the fixture file")
+            held.await() // the notifier saw B ask, and is about to post, as after waiting for a modal dialog
+            // Meanwhile B starts again, with a turn that runs until it is interrupted: the request is gone, and B is busy.
+            manager.stop(b.id)
+            manager.send(b.id, "Count to a hundred")
+            awaitSpawns(3) // B's second process replays interrupt: it streams, then waits for the interrupt
+            b.status.first { it == SessionStatus.RUNNING }
+            release.complete(Unit)
+            delay(1_000) // the held post finds B running, with nothing to announce
+            assertEquals(emptyList(), posted.map { it.title })
+            // B has asked for attention all along, and nobody has looked: the end of its turn is announced.
+            manager.interrupt(b.id)
+            b.status.first { it == SessionStatus.IDLE }
+            withTimeoutOrNull(10_000) { while (posted.isEmpty()) delay(20) }
+            delay(300) // time for a wrong second notification
+            posted.toList()
+        }
+        val finished = notifications.single()
+        assertEquals(NotificationType.INFORMATION, finished.type)
+        assertTrue(finished.title.endsWith(" finished"), finished.title)
     }
 
     @Test

@@ -17,6 +17,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.annotations.TestOnly
@@ -39,7 +40,8 @@ private const val GROUP_ID: String = "Tandem"
  * and clears when the session is selected: one notification until the user has looked. The selected session raises no attention, so
  * its status is followed instead. What a notification says is decided on the EDT just before it is posted, so that one that had to
  * wait (for a modal dialog, say) never announces what no longer stands: a permission request already answered, or one the user has
- * looked at.
+ * looked at. When there is nothing to announce then (a new turn runs), the session's next change of status, while it still asks for
+ * attention, is announced in its place: the end of that turn, say.
  *
  * Runs in [scope], from [start] until the scope ends.
  */
@@ -64,10 +66,14 @@ class SessionNotifier(private val project: Project, private val manager: Session
     /** Notifies about [handle]'s permission requests and finished turns, until it is closed. */
     private suspend fun follow(handle: SessionHandle): Unit = coroutineScope {
         launch {
-            var raised = false
-            handle.attention.collect { attention ->
-                if (attention && !raised) notify(handle) { dueForAttention(handle) }
-                raised = attention
+            // Whether the attention asked for has been announced; until it is, every change of status is another chance.
+            var announced = false
+            combine(handle.attention, handle.status) { attention, _ -> attention }.collect { attention ->
+                if (!attention) {
+                    announced = false
+                } else if (!announced) {
+                    announced = notify(handle) { dueForAttention(handle) }
+                }
             }
         }
         launch {
@@ -82,12 +88,12 @@ class SessionNotifier(private val project: Project, private val manager: Session
 
     /**
      * Posts the event [due] gives for [handle], if it gives one, unless the user is looking at the session: it is selected and the
-     * tool window is visible. [due] runs on the EDT, right before the post.
+     * tool window is visible. [due] runs on the EDT, right before the post. True if a notification was posted.
      *
      * On the EDT, where the platform also closes the project, after cancelling this scope: so nothing is ever posted to a project
      * being closed. Like a notification the platform delivers from another thread, it waits until no modal dialog is open.
      */
-    private suspend fun notify(handle: SessionHandle, due: () -> Event?) {
+    private suspend fun notify(handle: SessionHandle, due: () -> Event?): Boolean {
         beforePosting()
         val posted = withContext(Dispatchers.EDT) {
             if (project.isDisposed || (manager.selected.value == handle.id && toolWindowVisible())) return@withContext null
@@ -100,6 +106,7 @@ class SessionNotifier(private val project: Project, private val manager: Session
             event
         }
         if (posted != null) LOG.info("session ${handle.id}: notified, ${posted.name.lowercase()}")
+        return posted != null
     }
 
     /**

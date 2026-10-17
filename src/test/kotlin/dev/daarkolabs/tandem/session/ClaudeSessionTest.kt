@@ -126,6 +126,22 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `a launcher that fails in an unexpected way ends the session with a visible error too`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        // ProcessBuilder.start throws more than IOException: an argument it cannot pass, a security manager, a broken launcher.
+        val launcher = ProcessLauncher { _, _ -> throw IllegalStateException("launcher broke") }
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        val final = withTimeout(10_000) {
+            session.start()
+            session.state.first { it.ended }
+        }
+        val notice = assertNotNull(final.entries.last() as? ChatEntry.Notice)
+        assertEquals(NoticeLevel.ERROR, notice.level)
+        assertTrue(notice.text.startsWith("Could not start `claude`: launcher broke"), notice.text)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
     fun `a crash is reported with the exit code and stderr`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("echo 'bad flag' >&2; exit 3"))

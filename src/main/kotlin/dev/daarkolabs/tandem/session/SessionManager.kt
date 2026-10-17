@@ -50,6 +50,12 @@ internal val OFFERED_MODES: Set<PermissionMode> = setOf(PermissionMode.DEFAULT, 
 /** The chat's notice when a process starts although [SessionManager]'s cap is reached and no session is idle. */
 private const val CAP_EXCEEDED_TEXT: String = "Max live sessions exceeded"
 
+/** The chat's warning, before the reason, when a session's transcript cannot be read, so that its history is empty. */
+private const val NOT_READ_TEXT: String = "The session's history could not be read: "
+
+/** The chat's warning, before the reason, when reading a session's transcript failed part way, after the history it shows. */
+private const val PARTLY_READ_TEXT: String = "The session's history was read only partly: "
+
 /** What a new session starts with; null leaves it to the CLI. */
 data class NewSessionOptions(val model: String? = null, val effort: String? = null, val permissionMode: PermissionMode? = null)
 
@@ -72,7 +78,8 @@ data class NewSessionOptions(val model: String? = null, val effort: String? = nu
  * closing and opened again: [open] waits until the old one has ended.
  *
  * At most [maxLive] sessions run a process at once: before a process starts, the least recently used idle session is stopped
- * ([makeRoom]). If none is idle, the process starts anyway and its chat says the cap was exceeded.
+ * ([makeRoom]). If none is idle, a process the user asked for ([create], [fork], a prompt) starts anyway and its chat says the cap
+ * was exceeded; a session that is only being opened ([open]) gets no process then, and starts with its first prompt.
  *
  * A process whose first `system/init` reports another session id than the one it was started for does not run that session:
  * its row is never relabelled. The row stays, STOPPED, and a new row for the reported id takes over the process ([takeOver]).
@@ -90,6 +97,8 @@ class SessionManager internal constructor(
     private val clock: () -> Long,
     /** Reads a session's history; tests pass one that fails, since a test run as root cannot make a file unreadable. */
     private val readTranscript: suspend (Path) -> LoadedTranscript,
+    /** Appends a rename's `custom-title` line; tests pass one that fails, for the same reason. */
+    private val appendTitle: (transcript: Path, id: SessionId, title: String, time: Instant) -> Unit = TranscriptFiles::appendCustomTitle,
 ) {
     /** Reads histories with [TranscriptReader]. */
     constructor(
@@ -165,8 +174,9 @@ class SessionManager internal constructor(
     /**
      * Session [id]'s handle. One that is open is returned as it is: a stopped session starts again with its next prompt ([send]).
      * Otherwise a new handle gets the history from the session's transcript (none if there is no transcript yet, and a warning
-     * in the chat if it cannot be read) and, with [spawn], a process. A session that is closing is opened again only once its
-     * process has ended. The selection does not change.
+     * in the chat if it cannot be read, or only partly) and, with [spawn], a process if the cap leaves room for one: when [maxLive]
+     * sessions run a process and none of them is idle, the session stays STOPPED, without a notice, until its first prompt. A
+     * session that is closing is opened again only once its process has ended. The selection does not change.
      */
     suspend fun open(id: SessionId, spawn: Boolean = true): SessionHandle {
         while (true) {
@@ -179,7 +189,7 @@ class SessionManager internal constructor(
             val history = history(id)
             // Meanwhile a close may have started, or another open may have added the session.
             val (handle, isNew) = synchronized(lock) { if (closing[id] == null) registerLocked(id, history) else null } ?: continue
-            if (isNew && spawn) start(handle, forPrompts = false)
+            if (isNew && spawn) start(handle, forPrompts = false, overCapAllowed = false)
             return handle
         }
     }
@@ -255,19 +265,27 @@ class SessionManager internal constructor(
 
     /**
      * Renames session [id] to [title], trimmed; a blank title is ignored. An open session shows the new title at once
-     * ([SessionHandle.title]). A running process is asked to rename the session (`rename_session`), and the CLI appends the
-     * `custom-title` line to the transcript itself. Otherwise Tandem appends the line the SDK's `renameSession` appends
-     * ([TranscriptFiles.appendCustomTitle]); a session without a transcript yet keeps the title in memory only. Either way the index
-     * then reads the transcript again. Throws the [IOException] of a line that cannot be appended.
+     * ([SessionHandle.title]). A running process that has reported its first `system/init` is asked to rename the session
+     * (`rename_session`), and the CLI appends the `custom-title` line to the transcript itself. Otherwise Tandem appends the line the
+     * SDK's `renameSession` appends ([TranscriptFiles.appendCustomTitle]); a session without a transcript yet keeps the title in
+     * memory only. A process that has not reported its first `system/init` yet is also told, with that init, as a fork is its title
+     * ([SessionHandle.rename]). Either way the index then reads the transcript again. Throws the [IOException] of a line that
+     * cannot be appended, and the title shown before the rename comes back.
      */
     suspend fun rename(id: SessionId, title: String) {
         val name = title.trim()
         if (name.isEmpty()) return
-        val sent = handle(id)?.rename(name) ?: false
+        val handle = handle(id)
+        val sent = handle?.rename(name) ?: false
         try {
             if (!sent) {
-                withContext(Dispatchers.IO) {
-                    index.transcript(id)?.let { TranscriptFiles.appendCustomTitle(it, id, name, Instant.ofEpochMilli(clock())) }
+                try {
+                    withContext(Dispatchers.IO) {
+                        index.transcript(id)?.let { appendTitle(it, id, name, Instant.ofEpochMilli(clock())) }
+                    }
+                } catch (e: IOException) {
+                    handle?.revertRename(name)
+                    throw e
                 }
             }
         } finally {
@@ -438,33 +456,47 @@ class SessionManager internal constructor(
 
     /**
      * The history in [file], session [id]'s transcript, and its title. When it cannot be read, the history is only a warning
-     * saying why, so that an empty chat is never a mystery, and there is no title.
+     * saying why, so that an empty chat is never a mystery, and there is no title. When reading it fails part way, the history is
+     * what was read, if anything, and then that warning.
      */
     private suspend fun load(id: SessionId, file: Path): Pair<ChatState, String?> =
         try {
             val loaded = readTranscript(file)
-            loaded.state to loaded.meta.title
+            val reason = loaded.readError
+            when {
+                reason == null -> loaded.state
+                loaded.state.entries.isEmpty() -> {
+                    LOG.warn("session $id: transcript not read ($reason)")
+                    reduce(loaded.state, SessionEvent.HostNotice(NoticeLevel.WARNING, "$NOT_READ_TEXT$reason"))
+                }
+                else -> {
+                    LOG.warn("session $id: transcript read only partly ($reason)")
+                    reduce(loaded.state, SessionEvent.HostNotice(NoticeLevel.WARNING, "$PARTLY_READ_TEXT$reason"))
+                }
+            } to loaded.meta.title
         } catch (e: IOException) {
             val reason = e.javaClass.simpleName
             LOG.warn("session $id: transcript not read ($reason)")
-            reduce(ChatState(), SessionEvent.HostNotice(NoticeLevel.WARNING, "The session's history could not be read: $reason")) to null
+            reduce(ChatState(), SessionEvent.HostNotice(NoticeLevel.WARNING, "$NOT_READ_TEXT$reason")) to null
         }
 
     /**
      * [start] in the session's scope, undispatched: it takes its place in line for the spawn lock before this returns, so that
-     * what is asked later ([stop], another prompt) comes after it.
+     * what is asked later ([stop], another prompt) comes after it. What the user asked for ([create], [fork], a prompt) starts
+     * over the cap if it has to.
      */
     private fun startInBackground(handle: SessionHandle, forPrompts: Boolean) {
-        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) { start(handle, forPrompts) }
+        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) { start(handle, forPrompts, overCapAllowed = true) }
     }
 
     /**
      * Starts a process for the session unless one runs, and hands it the queued prompts. A start [forPrompts] (one that [send]
      * asked for) that finds none left does nothing: an earlier start sent them, or dropped them for want of a binary. Holds the
      * session's spawn lock throughout, so that a session never gets two processes. Without a binary the chat shows the install
-     * notice instead. Every process, a respawn's and a fork's too, starts only once [makeRoom] has made room for it under the cap.
+     * notice instead. Every process, a respawn's and a fork's too, starts only once [makeRoom] has made room for it under the cap;
+     * if it could not, the process starts over the cap when [overCapAllowed], with a notice in the chat, and else not at all.
      */
-    private suspend fun start(handle: SessionHandle, forPrompts: Boolean) {
+    private suspend fun start(handle: SessionHandle, forPrompts: Boolean, overCapAllowed: Boolean) {
         handle.spawnLock.withLock {
             if (handle.isClosed || handle.deliverQueued()) return
             if (forPrompts && !handle.hasQueued()) return
@@ -479,6 +511,10 @@ class SessionManager internal constructor(
             }
             admission.withLock {
                 val overCap = !makeRoom(handle)
+                if (overCap && !overCapAllowed) {
+                    LOG.info("session ${handle.id}: not started, the cap of ${maxLive()} live session(s) is reached and none is idle")
+                    return
+                }
                 val kind = when {
                     hasTranscript -> "resume"
                     handle.forkOf != null -> "fork"
@@ -496,8 +532,8 @@ class SessionManager internal constructor(
     /**
      * Makes room for [starting]'s process under the cap: while [maxLive] other sessions run a process, the least recently used one
      * that is idle is stopped ([SessionHandle.stopIfIdle]), and keeps its row and its chat. A session in a turn or waiting for a
-     * permission is never stopped. False if none was idle: the process then starts over the cap. Called with [admission] held,
-     * so that two starts never count the same room.
+     * permission is never stopped. False if none was idle: the process then starts over the cap, or not at all ([start]). Called
+     * with [admission] held, so that two starts never count the same room.
      */
     private suspend fun makeRoom(starting: SessionHandle): Boolean {
         while (true) {

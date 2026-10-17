@@ -71,7 +71,15 @@ data class TranscriptMeta(
 }
 
 /** A transcript loaded as chat history. Its [state] is settled (no turn is in progress) and has the session id from the file name. */
-data class LoadedTranscript(val state: ChatState, val meta: TranscriptMeta)
+data class LoadedTranscript(
+    val state: ChatState,
+    val meta: TranscriptMeta,
+    /**
+     * The class of the [IOException] that ended the read before the end of the file, null when it was read to the end. The
+     * history is then empty, if the read ended in its first pass, or what came before it.
+     */
+    val readError: String? = null,
+)
 
 /**
  * Reads the CLI's own transcript of a session, `<session id>.jsonl`, through [Ndjson.decode] and [reduce].
@@ -90,7 +98,7 @@ object TranscriptReader {
     /**
      * The history of the transcript at [path], with its [TranscriptMeta]. Reads on [Dispatchers.IO] and stops between lines
      * once cancelled. A file that cannot be opened throws its [IOException]. An [IOException] after that ends the read: in the
-     * first pass with an empty history, in the second with what was parsed before it.
+     * first pass with an empty history, in the second with what was parsed before it; [LoadedTranscript.readError] says so.
      */
     suspend fun read(path: Path): LoadedTranscript = withContext(Dispatchers.IO) {
         // kotlin.io.path's bufferedReader decodes with an InputStreamReader, which replaces a malformed byte instead of
@@ -105,7 +113,7 @@ object TranscriptReader {
     fun meta(path: Path): TranscriptMeta {
         val sessionId = sessionIdOf(path)
         return try {
-            readTwice({ path.bufferedReader() }, sessionId, withHistory = false) {}.second
+            readTwice({ path.bufferedReader() }, sessionId, withHistory = false) {}.meta
         } catch (e: IOException) {
             LOG.debug { "transcript $sessionId not readable (${e.javaClass.simpleName})" }
             emptyMeta(sessionId)
@@ -115,8 +123,9 @@ object TranscriptReader {
     /** [read] from what [open] opens, once per pass. Internal so tests can pass readers that fail or never end. */
     internal suspend fun readFrom(open: () -> BufferedReader, sessionId: String): LoadedTranscript {
         val context = currentCoroutineContext()
-        val (history, meta) = readTwice(open, sessionId, withHistory = true) { context.ensureActive() }
-        val state = history.settled()
+        val passes = readTwice(open, sessionId, withHistory = true) { context.ensureActive() }
+        val meta = passes.meta
+        val state = passes.history.settled()
         return LoadedTranscript(
             state.copy(
                 sessionId = meta.sessionId,
@@ -125,6 +134,7 @@ object TranscriptReader {
                 effort = meta.lastEffort ?: state.effort,
             ),
             meta,
+            passes.failure?.javaClass?.simpleName,
         )
     }
 
@@ -134,31 +144,30 @@ object TranscriptReader {
 private fun emptyMeta(sessionId: String, lineCount: Int = 0): TranscriptMeta =
     TranscriptMeta(sessionId, null, null, null, null, null, null, null, lineCount)
 
+/** What [readTwice] read: the [history], the [meta], and the [IOException] that ended the reading early, if one did. */
+private class Passes(val history: ChatState, val meta: TranscriptMeta, val failure: IOException?)
+
 /**
  * Both passes over what [open] opens, [beforeLine] running before every line of each; the second reads only the lines the first
  * placed, so lines appended in between wait for the next read. An [IOException] opening the first pass is thrown; one later in
  * it gives an empty history and the number of lines seen. One in the second pass, opening included, keeps what was scanned.
  */
-private fun readTwice(
-    open: () -> BufferedReader,
-    sessionId: String,
-    withHistory: Boolean,
-    beforeLine: () -> Unit,
-): Pair<ChatState, TranscriptMeta> {
+private fun readTwice(open: () -> BufferedReader, sessionId: String, withHistory: Boolean, beforeLine: () -> Unit): Passes {
     val chain = TranscriptChain()
     open().use { it.feed(Int.MAX_VALUE, beforeLine, chain::add) }?.let { e ->
         LOG.debug { "transcript $sessionId: first pass stopped after ${chain.lineCount} lines (${e.javaClass.simpleName})" }
-        return ChatState() to emptyMeta(sessionId, chain.lineCount)
+        return Passes(ChatState(), emptyMeta(sessionId, chain.lineCount), e)
     }
     val scan = Scan(sessionId, withHistory, chain.abandoned())
-    try {
-        open().use { it.feed(chain.lineCount, beforeLine, scan::accept) }?.let { e ->
+    val failure = try {
+        open().use { it.feed(chain.lineCount, beforeLine, scan::accept) }?.also { e ->
             LOG.debug { "transcript $sessionId: second pass stopped after ${scan.lineCount} lines (${e.javaClass.simpleName})" }
         }
     } catch (e: IOException) {
         LOG.debug { "transcript $sessionId not reopened (${e.javaClass.simpleName})" }
+        e
     }
-    return scan.state to scan.meta()
+    return Passes(scan.state, scan.meta(), failure)
 }
 
 /**
