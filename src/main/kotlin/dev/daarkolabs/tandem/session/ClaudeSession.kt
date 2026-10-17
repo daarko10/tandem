@@ -19,6 +19,8 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -282,11 +284,16 @@ class ClaudeSession(
      * [read], a blocking read of [p]'s stdout or stderr; null if the output failed because the process is over. The JDK can close
      * the pipe of a process that exits under a waiting read: when Tandem ended the process, or it ended by itself, its output is
      * over and the exit code tells the rest. A failure while it runs on, and Tandem did not end it, is one, and is thrown.
+     *
+     * Cancelling this interrupts the reading thread ([runInterruptible]): a stream that can be interrupted then throws
+     * `InterruptedIOException`, an [IOException], and runInterruptible interrupts only once the cancellation has begun. While this is
+     * being cancelled, that, or any I/O failure, is the cancellation, never a failure to show.
      */
     private suspend fun <T> readOutput(p: Process, read: () -> T): T? =
         try {
             runInterruptible(block = read)
         } catch (e: IOException) {
+            currentCoroutineContext().ensureActive() // being cancelled: this is the cancellation, thrown as such
             if (stopping || !p.isAlive) null else throw e
         }
 

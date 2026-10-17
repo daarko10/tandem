@@ -1142,26 +1142,10 @@ class SessionManagerTest {
         assertEquals(emptyList(), manager.sessions.value.single().state.value.entries, "the deleted history is not shown")
     }
 
-    /**
-     * A real process for input and ending ([real]), whose output is what the test writes to [script], line by line. A read
-     * interrupted by the session's cancellation ends the output, as a real pipe's read is never interrupted but closed.
-     */
+    /** A real process for input and ending ([real]), whose output is what the test writes to [script], line by line. */
     private class ScriptedProcess(private val real: Process) : Process() {
-        private val pipe = java.io.PipedInputStream(64 * 1024)
-        val script: java.io.PrintStream = java.io.PrintStream(java.io.PipedOutputStream(pipe), true, Charsets.UTF_8)
-        private val output = object : java.io.InputStream() {
-            override fun read(): Int = try {
-                pipe.read()
-            } catch (_: java.io.InterruptedIOException) {
-                -1
-            }
-
-            override fun read(b: ByteArray, off: Int, len: Int): Int = try {
-                pipe.read(b, off, len)
-            } catch (_: java.io.InterruptedIOException) {
-                -1
-            }
-        }
+        private val output = java.io.PipedInputStream(64 * 1024)
+        val script: java.io.PrintStream = java.io.PrintStream(java.io.PipedOutputStream(output), true, Charsets.UTF_8)
 
         override fun getOutputStream(): java.io.OutputStream = real.outputStream
         override fun getInputStream(): java.io.InputStream = output
@@ -1243,23 +1227,29 @@ class SessionManagerTest {
         val gate = dir.resolve("exit-now")
         val failing = ScriptedProcess(ProcessBuilder("sh", "-c", "while [ ! -e '$gate' ]; do sleep 0.05; done; exit 3").start())
         val (manager, handle) = scripted(failing)
-        manager.send(handle.id, "Count to a hundred")
-        handle.status.first { it == SessionStatus.RUNNING }
-        gate.writeText("")
-        failing.waitFor()
-        failing.script.close() // its output ends with it
-        handle.status.first { it == SessionStatus.STOPPED }
-        assertEquals(true, withTimeoutOrNull(5_000) { handle.attention.first { it } }, "the failed turn asks for attention")
-        assertEquals(TurnEnd.FAILED, handle.state.value.lastTurnEnd)
-        manager.close(handle.id)
+        try {
+            manager.send(handle.id, "Count to a hundred")
+            handle.status.first { it == SessionStatus.RUNNING }
+            gate.writeText("")
+            failing.waitFor()
+            failing.script.close() // its output ends with it
+            handle.status.first { it == SessionStatus.STOPPED }
+            assertEquals(true, withTimeoutOrNull(5_000) { handle.attention.first { it } }, "the failed turn asks for attention")
+            assertEquals(TurnEnd.FAILED, handle.state.value.lastTurnEnd)
+        } finally {
+            manager.close(handle.id)
+        }
 
         val stopped = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
         val (other, second) = scripted(stopped)
-        other.send(second.id, "Count to a hundred")
-        second.status.first { it == SessionStatus.RUNNING }
-        other.stop(second.id)
-        second.status.first { it == SessionStatus.STOPPED }
-        assertNull(withTimeoutOrNull(1_000) { second.attention.first { it } }, "the user stopped it")
-        other.close(second.id)
+        try {
+            other.send(second.id, "Count to a hundred")
+            second.status.first { it == SessionStatus.RUNNING }
+            other.stop(second.id)
+            second.status.first { it == SessionStatus.STOPPED }
+            assertNull(withTimeoutOrNull(1_000) { second.attention.first { it } }, "the user stopped it")
+        } finally {
+            other.close(second.id)
+        }
     }
 }

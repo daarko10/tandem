@@ -392,5 +392,51 @@ class ClaudeSessionTest {
         run.scope.coroutineContext.job.cancelAndJoin()
     }
 
+    /** An output that nothing writes to, as a quiet CLI's: a read waits on it, interruptibly, and [reading] says when one does. */
+    private class QuietOutput : java.io.PipedInputStream() {
+        val writer = java.io.PipedOutputStream(this)
+        val reading = CountDownLatch(1)
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            reading.countDown()
+            return super.read(b, off, len)
+        }
+    }
+
+    /** [real], whose output is [output] in place of its own. */
+    private class QuietProcess(private val real: Process, private val output: InputStream) : Process() {
+        override fun getOutputStream() = real.outputStream
+        override fun getInputStream(): InputStream = output
+        override fun getErrorStream(): InputStream = real.errorStream
+        override fun waitFor(): Int = real.waitFor()
+        override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = real.waitFor(timeout, unit)
+        override fun exitValue(): Int = real.exitValue()
+        override fun isAlive(): Boolean = real.isAlive
+        override fun pid(): Long = real.pid()
+        override fun toHandle(): ProcessHandle = real.toHandle()
+        override fun descendants() = real.descendants()
+        override fun destroy() = real.destroy()
+        override fun destroyForcibly(): Process = real.destroyForcibly()
+    }
+
+    @Test
+    fun `cancelling a session while a read waits on an interruptible output is no failure`() = runBlocking {
+        // Cancelling interrupts the reading thread; an interruptible stream then throws InterruptedIOException, an IOException.
+        val output = QuietOutput()
+        val real = ProcessBuilder("sh", "-c", "cat > /dev/null").start()
+        val uncaught: MutableList<Throwable> = Collections.synchronizedList(ArrayList())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> uncaught.add(e) })
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), ProcessLauncher { _, _ -> QuietProcess(real, output) })
+        try {
+            session.start()
+            withTimeout(5_000) { while (!output.reading.await(20, TimeUnit.MILLISECONDS)) delay(1) } // the read waits
+            scope.coroutineContext.job.cancelAndJoin()
+            assertEquals(emptyList(), uncaught.map { it.stackTraceToString().take(1500) }, "a cancelled read is no failure")
+        } finally {
+            real.destroyForcibly()
+            output.writer.close()
+        }
+    }
+
     private fun assertNull(value: Any?) = kotlin.test.assertNull(value)
 }
