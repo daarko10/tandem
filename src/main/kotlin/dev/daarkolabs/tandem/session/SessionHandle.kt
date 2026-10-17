@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.job
@@ -44,6 +46,9 @@ enum class SessionStatus {
  * [state] is the running process's own [ClaudeSession.state] while there is one; after it, what that process left; before the
  * first, the history loaded from the transcript. [status] and [title] derive from it in the manager's scope. Every property is
  * safe to read from any thread; only the manager changes anything.
+ *
+ * A process can move to another session ([handOver], [adopt]) when the CLI reports another session id for it, so a process is a
+ * child of the manager's scope, not of this session's: [stop] and [close] end this session's own.
  */
 class SessionHandle internal constructor(
     val id: SessionId,
@@ -52,31 +57,42 @@ class SessionHandle internal constructor(
     /** The index's last listing, for the [title]. */
     listing: StateFlow<List<SessionSummary>>,
     createdAt: Long,
+    /** The session this one is a fork of: its processes fork that one again for as long as this one has no transcript. */
+    internal val forkOf: SessionId? = null,
+    /** A title the CLI is still to be told, such as a fork's: shown at once, and sent once a process reports its `system/init`. */
+    pendingTitle: String? = null,
 ) {
-    /** This session's coroutines and the parent of its processes: a child of the manager's scope, cancelled by [close]. */
+    /** A process attached to a session: its [session], the job that runs it, and the chat it started from. */
+    internal class Attachment(val session: ClaudeSession, val running: Job, val startedFrom: ChatState)
+
+    /** This session's coroutines: a child of the manager's scope, cancelled by [close]. */
     internal val scope: CoroutineScope =
         CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext.job) + CoroutineName("SessionHandle"))
 
-    /** Held while a process is started or stopped, so that a session never has two. */
+    /** Held while a process is started, stopped or taken over, so that a session never has two. */
     internal val spawnLock: Mutex = Mutex()
 
     /**
-     * Guards [session], [mirror], [queued] and [closed], and makes each change of the chat ([publishLocked]) one step with them: a
-     * pick or a prompt is either in the state a process starts from, or goes to that process. Only held for steps that never wait.
+     * Guards [attachment], [mirror], [queued], [closed] and [renameOnInit], and makes each change of the chat ([publishLocked]) one
+     * step with them: a pick or a prompt is either in the state a process starts from, or goes to that process. Only held for steps
+     * that never wait.
      */
     private val lock = Any()
 
-    /** The process's session, from [attach] until it is let go ([releaseLocked]). */
-    private var session: ClaudeSession? = null
+    /** The process, from [attach] or [adopt] until it is let go ([releaseLocked]) or handed over ([handOver]). */
+    private var attachment: Attachment? = null
 
-    /** Copies [session]'s state into the chat. */
+    /** Copies the process's state into the chat, and waits for its first `system/init`. */
     private var mirror: Job? = null
 
     /** Prompts sent while no process runs, in order: the next process gets them. */
     private val queued = ArrayList<String>()
     private var closed = false
 
-    /** A chat and whether a process is attached to it ([session] is set), which together make the [SessionStatus]. */
+    /** Whether the CLI is still to be told [titleOverride] (`rename_session`) once a process reports its first `system/init`. */
+    private var renameOnInit = pendingTitle != null
+
+    /** A chat and whether a process is attached to it ([attachment] is set), which together make the [SessionStatus]. */
     private data class Snapshot(val chat: ChatState, val attached: Boolean) {
         val status: SessionStatus
             get() = when {
@@ -93,9 +109,12 @@ class SessionHandle internal constructor(
      */
     private val snapshot = MutableStateFlow(Snapshot(initialState, attached = false))
 
-    /** [Snapshot.chat], written in the same step as [snapshot], so that [state] follows it without a coroutine in between. */
+    /** [Snapshot.chat], written in the same step as [snapshot] and just before it, so that [status] never runs ahead of [state]. */
     private val mutableState = MutableStateFlow(initialState)
     private val mutableAttention = MutableStateFlow(false)
+
+    /** A title set in Tandem ([rename], or a fork's) that the index does not list yet: it wins until the index lists the same. */
+    private val titleOverride = MutableStateFlow(pendingTitle)
 
     /** The chat: the running process's state, else what the last process left (settled once it was stopped), else the loaded history. */
     val state: StateFlow<ChatState> = mutableState.asStateFlow()
@@ -104,14 +123,22 @@ class SessionHandle internal constructor(
     val status: StateFlow<SessionStatus> =
         snapshot.map { it.status }.stateIn(scope, SharingStarted.Eagerly, snapshot.value.status)
 
-    /** The index's title for this session, else its first prompt (the first line, cut to 80 characters), else the [id]. */
+    /**
+     * A title set in Tandem until the index lists it ([rename]), else the index's title for this session, else its first prompt
+     * (the first line, cut to 80 characters), else the [id].
+     */
     val title: StateFlow<String> =
         combine(
+            titleOverride,
             listing.map { it.titleOf(id) },
             // The first prompt rarely changes, so its title is worked out only when it does, not on every streamed word.
             mutableState.map { it.firstUser() }.distinctUntilChanged().map { it?.asTitle() },
-        ) { indexed, prompt -> indexed ?: prompt ?: id }
-            .stateIn(scope, SharingStarted.Eagerly, listing.value.titleOf(id) ?: initialState.firstPrompt() ?: id)
+        ) { override, indexed, prompt ->
+            // The index lists the title set in Tandem: its title counts again, so that a later rename elsewhere shows. Cleared here,
+            // with the listing this title is worked out from, so that the title never goes back to the index's older one meanwhile.
+            if (override != null && override == indexed) titleOverride.compareAndSet(override, null)
+            override ?: indexed ?: prompt ?: id
+        }.stateIn(scope, SharingStarted.Eagerly, pendingTitle ?: listing.value.titleOf(id) ?: initialState.firstPrompt() ?: id)
 
     /** Whether the user should look at this session: it asked for permission or finished a turn while another one was selected. */
     val attention: StateFlow<Boolean> = mutableAttention.asStateFlow()
@@ -157,26 +184,72 @@ class SessionHandle internal constructor(
     /**
      * Starts the session [create] makes from the chat's current state, in one step with every pick and prompt: a pick made before
      * is in the state [create] gets, one made after goes to the process ([pick]), and the queued prompts go to it first, in order.
-     * A previous session that ended is let go first. Nothing happens after [close].
+     * A previous session that ended is let go first. Nothing happens after [close]. [onFirstInit] gets the session id of the
+     * process's first `system/init`, unless the process is let go before that comes.
      */
-    internal fun attach(create: (ChatState) -> ClaudeSession) {
+    internal fun attach(create: (ChatState) -> ClaudeSession, onFirstInit: (ClaudeSession, SessionId) -> Unit) {
         synchronized(lock) {
             if (closed) return
-            session?.let { releaseLocked(it) }
-            val created = create(mutableState.value)
-            session = created
-            publishLocked(created.state.value, attached = true)
-            mirror = scope.launch {
-                created.state.collect { chat -> synchronized(lock) { if (session === created) publishLocked(chat, attached = true) } }
-            }
-            val running = created.start()
+            attachment?.let { releaseLocked(it.session) }
+            val chat = mutableState.value
+            val created = create(chat)
+            val running = created.start() // initialize goes to stdin first, ahead of the queued prompts
+            connectLocked(Attachment(created, running, chat), onFirstInit)
             flushLocked(created)
-            // A process that ends by itself (it exits, crashes or cannot start) leaves its last state, error notice included.
-            scope.launch {
-                running.join()
-                release(created)
-                created.close()
+        }
+    }
+
+    /**
+     * Takes over [process], which another session handed over ([handOver]), as [attach] would have started it: its state becomes
+     * the chat, prompts queued here go to it, and [onFirstInit] is called as for [attach]. False, and nothing changes, if this
+     * session is closed or has a process of its own.
+     */
+    internal suspend fun adopt(process: Attachment, onFirstInit: (ClaudeSession, SessionId) -> Unit): Boolean =
+        spawnLock.withLock {
+            synchronized(lock) {
+                val free = !closed && liveLocked() == null
+                if (free) {
+                    attachment?.let { releaseLocked(it.session) } // one that ended: its state must not overwrite the one taken over
+                    connectLocked(process, onFirstInit)
+                    flushLocked(process.session)
+                }
+                free
             }
+        }
+
+    /**
+     * Lets [session] go without ending it, for another session to [adopt]: the CLI reported another session id for it. The chat
+     * goes back to what it was when that process started, settled, and the session is STOPPED. Null if [session] is no longer
+     * attached: it was stopped, or it ended.
+     */
+    internal fun handOver(session: ClaudeSession): Attachment? = synchronized(lock) {
+        val process = attachment?.takeIf { it.session === session } ?: return null
+        detachLocked()
+        publishLocked(process.startedFrom.settled(), attached = false)
+        process
+    }
+
+    /**
+     * Shows [title] as this session's at once, until the index lists it. A running process is asked to rename the session
+     * (`rename_session`), which makes the CLI append the `custom-title` line, and true is returned; without one, false, and the
+     * caller writes the line.
+     */
+    internal fun rename(title: String): Boolean = synchronized(lock) {
+        titleOverride.value = title
+        val live = liveLocked() ?: return false
+        live.rename(title)
+        true
+    }
+
+    /**
+     * Tells [session] the title set in Tandem (`rename_session`) if the CLI is still to be told it, as a fork's: once a process has
+     * reported its `system/init`, the CLI has a transcript to write it to. Nothing if [session] is no longer attached.
+     */
+    internal fun sendPendingTitle(session: ClaudeSession) {
+        synchronized(lock) {
+            if (!renameOnInit || attachment?.session !== session) return
+            renameOnInit = false
+            titleOverride.value?.let(session::rename)
         }
     }
 
@@ -190,10 +263,15 @@ class SessionHandle internal constructor(
             if (running != null) {
                 live(running)
             } else {
-                session?.let { releaseLocked(it) } // one that ended: its state must not overwrite the pick
+                attachment?.let { releaseLocked(it.session) } // one that ended: its state must not overwrite the pick
                 publishLocked(reduce(mutableState.value, stopped), attached = false)
             }
         }
+    }
+
+    /** Shows a notice in the chat: through the running process, whose state the chat follows, or straight in the chat without one. */
+    internal fun notice(level: NoticeLevel, text: String) {
+        pick(live = { it.notice(level, text) }, stopped = SessionEvent.HostNotice(level, text))
     }
 
     /**
@@ -201,7 +279,7 @@ class SessionHandle internal constructor(
      * nothing can take now. Returns how many there were.
      */
     internal fun failToStart(detail: String): Int = synchronized(lock) {
-        session?.let { releaseLocked(it) }
+        attachment?.let { releaseLocked(it.session) }
         val dropped = queued.size
         queued.clear()
         publishLocked(reduce(mutableState.value, SessionEvent.Ended(detail, isError = true)), attached = false)
@@ -211,11 +289,31 @@ class SessionHandle internal constructor(
     /** Ends the process, if one runs, and returns once it is gone. The chat stays, settled: no turn in progress, nothing pending. */
     internal suspend fun stop() {
         spawnLock.withLock {
-            val current = synchronized(lock) { session } ?: return
-            release(current, settle = true)
+            // Let go in the same step as it is taken, so that a process handed over meanwhile is never ended here.
+            val current = synchronized(lock) { attachment?.session?.also { releaseLocked(it, settle = true) } } ?: return
             current.close()
         }
     }
+
+    /**
+     * [stop], but only while a process runs and is idle ([isIdle]), checked again in the same step as the process is let go, so
+     * that a prompt sent meanwhile is never cut off. Gives up at once, with false, while a start or a stop of this session holds
+     * its spawn lock: waiting for it could deadlock with a start of this session that waits for room under the cap.
+     */
+    internal suspend fun stopIfIdle(): Boolean {
+        if (!spawnLock.tryLock()) return false
+        try {
+            val idle = synchronized(lock) { attachment?.session?.takeIf(::idleLocked)?.also { releaseLocked(it, settle = true) } }
+                ?: return false
+            idle.close()
+            return true
+        } finally {
+            spawnLock.unlock()
+        }
+    }
+
+    /** Whether a process runs and nothing is in progress: no turn, no pending permission, no prompt waiting to be sent. */
+    internal fun isIdle(): Boolean = synchronized(lock) { attachment?.session?.let(::idleLocked) ?: false }
 
     /** Stops for good: queued prompts are dropped, no process starts again, and this session's coroutines end. */
     internal suspend fun close() {
@@ -235,31 +333,62 @@ class SessionHandle internal constructor(
         mutableAttention.value = false
     }
 
-    private fun liveLocked(): ClaudeSession? = session?.takeIf { !it.state.value.ended }
+    private fun liveLocked(): ClaudeSession? = attachment?.session?.takeIf { !it.state.value.ended }
+
+    /** [isIdle] for [session], from its own state, which a prompt changes at once ([status] follows a step later). */
+    private fun idleLocked(session: ClaudeSession): Boolean {
+        val chat = session.state.value
+        return !chat.ended && !chat.busy && chat.pendingPermissions.isEmpty() && queued.isEmpty()
+    }
 
     private fun flushLocked(live: ClaudeSession) {
         queued.forEach(live::sendUserMessage)
         queued.clear()
     }
 
+    /** Makes [process] this session's: its state becomes the chat, its first `system/init` goes to [onFirstInit], its end is followed. */
+    private fun connectLocked(process: Attachment, onFirstInit: (ClaudeSession, SessionId) -> Unit) {
+        val session = process.session
+        attachment = process
+        publishLocked(session.state.value, attached = true)
+        mirror = scope.launch {
+            // A child of the mirror, so that it ends when the process is let go or handed over before its first system/init.
+            launch { onFirstInit(session, session.reportedSessionId.filterNotNull().first()) }
+            session.state.collect { chat ->
+                synchronized(lock) { if (attachment?.session === session) publishLocked(chat, attached = true) }
+            }
+        }
+        // A process that ends by itself (it exits, crashes or cannot start) leaves its last state, error notice included.
+        scope.launch {
+            process.running.join()
+            release(session)
+            session.close()
+        }
+    }
+
     private fun release(ended: ClaudeSession, settle: Boolean = false) {
         synchronized(lock) { releaseLocked(ended, settle) }
     }
 
-    /** Lets [ended] go if it is still the attached session: its last state becomes the chat's, [settle]d if asked. */
+    /** Lets [ended] go if it is still the attached process: its last state becomes the chat's, [settle]d if asked. */
     private fun releaseLocked(ended: ClaudeSession, settle: Boolean = false) {
-        if (session !== ended) return
-        session = null
-        mirror?.cancel()
-        mirror = null
+        if (attachment?.session !== ended) return
+        detachLocked()
         val last = ended.state.value
         publishLocked(if (settle) last.settled() else last, attached = false)
     }
 
+    /** Stops following the attached process, which runs on until someone ends it. */
+    private fun detachLocked() {
+        attachment = null
+        mirror?.cancel()
+        mirror = null
+    }
+
     /** The chat, and whether a process is [attached], as one step: see [snapshot]. */
     private fun publishLocked(chat: ChatState, attached: Boolean) {
-        snapshot.value = Snapshot(chat, attached)
         mutableState.value = chat
+        snapshot.value = Snapshot(chat, attached)
     }
 }
 

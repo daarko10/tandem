@@ -8,6 +8,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
@@ -152,8 +153,49 @@ class ClaudeSessionTest {
             base + listOf("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit", "--resume", "s2", "--fork-session"),
             SessionConfig("claude", tmp, resumeSessionId = "s2", forkSession = true).argv(),
         )
+        // A fork may bring its own id: the only case where both ids are passed.
+        assertEquals(
+            base + listOf("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit") +
+                listOf("--resume", "s2", "--fork-session", "--session-id", "s3"),
+            SessionConfig("claude", tmp, sessionId = "s3", resumeSessionId = "s2", forkSession = true).argv(),
+        )
         assertFailsWith<IllegalArgumentException> { SessionConfig("claude", tmp) }
+        // The CLI refuses --session-id with --resume unless --fork-session is given too.
         assertFailsWith<IllegalArgumentException> { SessionConfig("claude", tmp, sessionId = "a", resumeSessionId = "b") }
+        // A fork without the session it forks would silently start a new session.
+        assertFailsWith<IllegalArgumentException> { SessionConfig("claude", tmp, sessionId = "a", forkSession = true) }
+    }
+
+    @Test
+    fun `the result of a start that fails is no system init, though it carries a session id`() = runBlocking {
+        // What the CLI prints for `--resume` of a session it does not find, then it exits with code 1.
+        val result = """{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"$newSessionId",""" +
+            """"errors":["No conversation found with session ID: $newSessionId"]}"""
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, resumeSessionId = newSessionId), fakeCli("echo '$result'; exit 1"))
+        session.start()
+        val ended = withTimeout(10_000) { session.state.first { it.ended } }
+        assertEquals(newSessionId, ended.sessionId)
+        assertNull(session.reportedSessionId.value)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `reports the session id of the first system init, which comes with the first prompt, and shows host notices`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig(fakeClaude, tmp, sessionId = newSessionId), DefaultProcessLauncher())
+        session.start()
+        delay(300) // time for a wrong id to show: the fake sends no system/init before a prompt, as the CLI does
+        assertNull(session.reportedSessionId.value)
+        session.sendUserMessage("Reply with the single word: pong")
+        assertEquals(newSessionId, withTimeout(10_000) { session.reportedSessionId.filterNotNull().first() })
+
+        withTimeout(10_000) { session.state.first { s -> !s.busy && s.entries.any { it is ChatEntry.Assistant } } }
+        session.notice(NoticeLevel.WARNING, "Resumed as a new session")
+        val notice = session.state.value.entries.last() as ChatEntry.Notice
+        assertEquals(NoticeLevel.WARNING, notice.level)
+        assertEquals("Resumed as a new session", notice.text)
+        scope.coroutineContext.job.cancelAndJoin()
     }
 
     @Test

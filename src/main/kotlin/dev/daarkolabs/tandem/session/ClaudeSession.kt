@@ -36,11 +36,15 @@ import java.util.concurrent.atomic.AtomicLong
 
 private val LOG = logger<ClaudeSession>()
 
-/** How to start the CLI for one chat. Exactly one of [sessionId] and [resumeSessionId] is set. */
+/**
+ * How to start the CLI for one chat: a new session ([sessionId]), an existing one ([resumeSessionId]), or a fork of an existing one
+ * ([resumeSessionId] with [forkSession], and optionally [sessionId] as the fork's own id). Only a fork may set both ids: the CLI
+ * refuses `--session-id` with `--resume` unless `--fork-session` is given too.
+ */
 data class SessionConfig(
     val binary: String,
     val workingDirectory: Path,
-    /** A new session: passed as `--session-id`, so its id is known before the CLI reports it. */
+    /** A new session, or with [forkSession] the fork: passed as `--session-id`, so its id is known before the CLI reports it. */
     val sessionId: String? = null,
     /** An existing session: passed as `--resume`. */
     val resumeSessionId: String? = null,
@@ -52,8 +56,9 @@ data class SessionConfig(
     val forkSession: Boolean = false,
 ) {
     init {
-        require((sessionId == null) != (resumeSessionId == null)) {
-            "Pass sessionId for a new session or resumeSessionId for an existing one, not both or neither."
+        require(!forkSession || resumeSessionId != null) { "A fork needs the resumeSessionId of the session it forks." }
+        require((sessionId == null) != (resumeSessionId == null) || (sessionId != null && forkSession)) {
+            "Pass sessionId for a new session or resumeSessionId for an existing one; both only for a fork, never neither."
         }
     }
 
@@ -67,11 +72,11 @@ data class SessionConfig(
         effort?.let { addAll(listOf("--effort", it)) }
         permissionMode?.let { addAll(listOf("--permission-mode", it.wire)) }
         addAll(listOf("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"))
-        sessionId?.let { addAll(listOf("--session-id", it)) }
         resumeSessionId?.let {
             addAll(listOf("--resume", it))
             if (forkSession) add("--fork-session")
         }
+        sessionId?.let { addAll(listOf("--session-id", it)) }
     }
 }
 
@@ -124,8 +129,16 @@ class ClaudeSession(
     )
     private val outbox = Channel<JsonObject>(Channel.UNLIMITED)
     private val nextId = AtomicLong()
+    private val _reportedSessionId = MutableStateFlow<String?>(null)
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
+
+    /**
+     * The `session_id` of the CLI's latest `system/init` in this process: null until the first, which the CLI sends with the first
+     * prompt (a turn's start), not when it starts. Unlike [ChatState.sessionId], a `result` never sets it: the `result` of a start
+     * that fails carries a session id as well.
+     */
+    val reportedSessionId: StateFlow<String?> = _reportedSessionId.asStateFlow()
 
     /** The running process, for tests and diagnostics. */
     @Volatile
@@ -189,6 +202,9 @@ class ClaudeSession(
     /** Asks the CLI to give the session a custom title (`rename_session`). */
     fun rename(title: String): Unit = send(HostMessages.renameSession(newRequestId(), title))
 
+    /** Shows [text] in this chat as a notice of [level]: something Tandem itself tells the user about this process. */
+    internal fun notice(level: NoticeLevel, text: String): Unit = dispatch(SessionEvent.HostNotice(level, text))
+
     fun allow(permission: PendingPermission, always: Boolean = false) {
         val updates = if (always) permission.suggestions.map(::forSession) else emptyList()
         send(HostMessages.allow(permission.requestId, permission.toolUseId, permission.input, updates))
@@ -244,6 +260,7 @@ class ClaudeSession(
                 else -> {}
             }
             dispatch(SessionEvent.Cli(message))
+            if (message is CliMessage.SystemInit && message.sessionId.isNotEmpty()) _reportedSessionId.value = message.sessionId
         }
     }
 

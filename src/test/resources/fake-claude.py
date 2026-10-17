@@ -14,8 +14,9 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
   TANDEM_FAKE_SESSION_ID  the session id to use, whatever the arguments say
   TANDEM_FAKE_DELAY_MS    sleep this long before emitting each control_request
 
-Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume,
-a fresh UUID with --fork-session (or when neither flag is given), or TANDEM_FAKE_SESSION_ID when that is set.
+Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
+with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
+flag is given; or TANDEM_FAKE_SESSION_ID when that is set.
 An unknown fixture name ends the process with exit code 2 and `no fixture <name>` on stderr.
 
 The fixture is replayed line by line, waiting for the host where the real CLI would:
@@ -51,7 +52,7 @@ def session_id():
     if os.environ.get("TANDEM_FAKE_SESSION_ID"):
         return os.environ["TANDEM_FAKE_SESSION_ID"]
     if "--fork-session" in args:
-        return str(uuid.uuid4())
+        return option("--session-id") or str(uuid.uuid4())
     return option("--session-id") or option("--resume") or str(uuid.uuid4())
 
 

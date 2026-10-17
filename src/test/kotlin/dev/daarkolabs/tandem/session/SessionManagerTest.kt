@@ -2,8 +2,8 @@ package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.PermissionMode
-import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
+import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.CoroutineScope
@@ -29,16 +29,21 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.AccessDeniedException
 import java.nio.file.Path
+import java.time.Instant
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlin.io.path.appendText
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.readLines
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -89,15 +94,19 @@ class SessionManagerTest {
         lookup: () -> String? = { binary },
         clock: () -> Long = System::currentTimeMillis,
         read: suspend (Path) -> LoadedTranscript = TranscriptReader::read,
+        maxLive: Int = 4,
+        /** More variables for every process, such as `TANDEM_FAKE_SESSION_ID`. */
+        environment: Map<String, String> = emptyMap(),
     ): SessionManager {
         val fake = buildMap {
             put("TANDEM_FAKE_LOG", log.toString())
             put("TANDEM_FAKE_FIXTURES", fixtures)
             delayMs?.let { put("TANDEM_FAKE_DELAY_MS", it.toString()) }
+            putAll(environment)
         }
         val launcher = DefaultProcessLauncher { System.getenv() + fake }
         val index = SessionIndex({ listOf(folder) }, "/project")
-        return SessionManager(scope, index, launcher, lookup, dir, maxLive = { 4 }, clock = clock, readTranscript = read)
+        return SessionManager(scope, index, launcher, lookup, dir, maxLive = { maxLive }, clock = clock, readTranscript = read)
     }
 
     private fun test(block: suspend CoroutineScope.() -> Unit): Unit = runBlocking { withTimeout(30_000, block) }
@@ -460,5 +469,280 @@ class SessionManagerTest {
         // From the folder's change, well before the 30 s poll that stands in where the folders cannot be watched.
         val listed = withTimeout(10_000) { manager.summaries.first { summaries -> summaries.any { it.id == other } } }
         assertEquals(setOf(seeded, other), listed.map { it.id }.toSet())
+    }
+
+    @Test
+    fun `a cancelled close still ends the process before the session can start again`() = test {
+        seed(seeded)
+        // While the fake waits before its permission request it reads no input, so closing it takes about 2 s.
+        val manager = manager(fixtures = "permission", delayMs = 5_000)
+        manager.open(seeded)
+        manager.send(seeded, "Create the fixture file")
+        awaitLog { prompts().isNotEmpty() }
+        val old = ownFakeProcesses().single()
+
+        val closing = launch(start = CoroutineStart.UNDISPATCHED) { manager.close(seeded) }
+        closing.cancel() // the caller gives up; the close goes on
+        val reopened = manager.open(seeded)
+        assertFalse(old.isAlive, "two processes on one transcript")
+        assertEquals(listOf(reopened), manager.sessions.value)
+    }
+
+    @Test
+    fun `the cap stops the least recently used idle session only`() = test {
+        // The spawn order picks the fixtures: b streams and then waits for an interrupt; a, c and d reply.
+        val manager = manager(fixtures = "plain-reply,interrupt,plain-reply", maxLive = 2)
+        val a = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        val b = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 2 }
+
+        val c = manager.create(NewSessionOptions()) // two run already: a, used least recently, stops
+        awaitLog { spawns().size == 3 }
+        a.status.await(SessionStatus.STOPPED)
+        assertEquals(2, ownFakeProcesses().size, "a's process ended before c's started")
+
+        manager.send(b.id, "Count to a hundred")
+        b.status.await(SessionStatus.RUNNING) // the fixture streams, then waits for an interrupt
+        val d = manager.create(NewSessionOptions()) // b is in a turn, so c, the only idle one, stops
+        awaitLog { spawns().size == 4 }
+        c.status.await(SessionStatus.STOPPED)
+        assertEquals(SessionStatus.RUNNING, b.status.value)
+        assertEquals(2, ownFakeProcesses().size, "b's and d's")
+        assertTrue(frames().none { it.subtype() == "interrupt" }, "b's turn was not interrupted")
+        assertEquals(listOf(a, b, c, d), manager.sessions.value, "a stopped session keeps its row")
+        assertTrue(d.state.value.entries.none { it is ChatEntry.Notice }, "there was room")
+    }
+
+    @Test
+    fun `the cap notice appears when nothing is idle`() = test {
+        val manager = manager(fixtures = "interrupt,plain-reply", maxLive = 1)
+        val busy = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.send(busy.id, "Count to a hundred")
+        busy.status.await(SessionStatus.RUNNING)
+
+        val extra = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 2 }
+        val notice = extra.state.value.entries.single() as ChatEntry.Notice
+        assertEquals(NoticeLevel.INFO, notice.level)
+        assertTrue("Max live sessions" in notice.text, notice.text)
+        assertEquals(SessionStatus.RUNNING, busy.status.value, "a session in a turn is never stopped")
+        assertEquals(2, ownFakeProcesses().size)
+    }
+
+    @Test
+    fun `rename sends rename_session when live and appends a custom-title line when stopped`() = test {
+        seed(seeded)
+        seed(other)
+        val liveTranscript = folder.resolve("$seeded.jsonl").readText()
+        val stoppedTranscript = folder.resolve("$other.jsonl")
+        val lines = stoppedTranscript.readLines().size
+        val manager = manager(clock = { Instant.parse("2026-10-16T12:34:56.789Z").toEpochMilli() })
+        val live = manager.open(seeded)
+        awaitLog { spawns().size == 1 }
+        manager.refreshIndex() // lists both, as "Pong"
+
+        manager.rename(seeded, "Alpha")
+        live.title.await("Alpha")
+        // The list shows it too, before the index does: here it never does, since the fake writes no custom-title line.
+        manager.summaries.first { summaries -> summaries.any { it.id == seeded && it.title == "Alpha" } }
+        awaitLog { frames().any { it.subtype() == "rename_session" } }
+        val request = frames().single { it.subtype() == "rename_session" }["request"]
+        assertEquals(Json.parseToJsonElement("""{"subtype":"rename_session","title":"Alpha","source":"host"}"""), request)
+        assertEquals(liveTranscript, folder.resolve("$seeded.jsonl").readText(), "the CLI writes a live session's title itself")
+
+        val stopped = manager.open(other, spawn = false)
+        manager.rename(other, " \t") // blank: ignored
+        manager.rename(other, "Beta")
+        val written = stoppedTranscript.readLines()
+        assertEquals(lines + 1, written.size, "one line, for the title that is not blank")
+        val line = Json.parseToJsonElement(written.last()).jsonObject
+        assertEquals(listOf("type", "customTitle", "sessionId", "uuid", "timestamp"), line.keys.toList())
+        assertEquals("custom-title", line["type"]!!.jsonPrimitive.content)
+        assertEquals("Beta", line["customTitle"]!!.jsonPrimitive.content)
+        assertEquals(other, line["sessionId"]!!.jsonPrimitive.content)
+        val uuid = line["uuid"]!!.jsonPrimitive.content
+        assertEquals(uuid, UUID.fromString(uuid).toString())
+        assertEquals("2026-10-16T12:34:56.789Z", line["timestamp"]!!.jsonPrimitive.content)
+        stopped.title.await("Beta")
+        assertEquals("Beta", stopped.title.value)
+        assertEquals(1, frames().count { it.subtype() == "rename_session" })
+        // rename had the index read the transcript again, so it lists "Beta" and its own title counts from then on: a later
+        // rename elsewhere, say in a terminal, shows. (Had the index not listed "Beta" first, "Beta" would stay.)
+        stoppedTranscript.appendText(written.last().replace("\"Beta\"", "\"Gamma\"") + "\n")
+        manager.refreshIndex()
+        stopped.title.await("Gamma")
+    }
+
+    @Test
+    fun `a stopped session without a transcript keeps a new title in memory only`() = test {
+        val manager = manager()
+        val created = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.stop(created.id) // before its first prompt, so the CLI has written no transcript
+
+        manager.rename(created.id, "Delta")
+        created.title.await("Delta")
+        assertFalse(folder.resolve("${created.id}.jsonl").exists(), "no transcript is made for the title")
+        assertEquals(0, frames().count { it.subtype() == "rename_session" })
+        manager.summaries.first { summaries -> summaries.any { it.id == created.id && it.title == "Delta" } }
+    }
+
+    @Test
+    fun `fork resumes with --fork-session under a new id and is named after the original`() = test {
+        seed(seeded)
+        val transcript = folder.resolve("$seeded.jsonl").readText()
+        val manager = manager()
+        val original = manager.open(seeded, spawn = false)
+        manager.refreshIndex()
+        original.title.await("Pong")
+        val history = original.state.value
+
+        val fork = assertNotNull(manager.fork(seeded))
+        assertNotEquals(seeded, fork.id)
+        assertEquals(fork.id, UUID.fromString(fork.id).toString(), "a fork's id is a new lower-case UUID")
+        assertEquals(listOf(original, fork), manager.sessions.value)
+        assertEquals(fork.id, manager.selected.value)
+        assertEquals("Pong (fork)", fork.title.value)
+        assertEquals(history.entries, fork.state.value.entries, "the fork starts from the original's history")
+        awaitLog { spawns().isNotEmpty() }
+        val argv = spawns().single()
+        val forked = listOf("--resume", seeded, "--fork-session", "--session-id", fork.id)
+        assertEquals(forked, argv.subList(argv.indexOf("--resume"), argv.size))
+
+        // A fork's first system/init comes with its first prompt, and the CLI is told the title then.
+        manager.send(fork.id, "Reply with the single word: pong")
+        awaitLog { frames().any { it.subtype() == "rename_session" } }
+        val sent = frames()
+        val rename = sent.indexOfFirst { it.subtype() == "rename_session" }
+        assertTrue(sent.indexOfFirst { it.type() == "user" } < rename, "renamed once the first prompt's init arrived")
+        val title = sent[rename]["request"]!!.jsonObject["title"]!!.jsonPrimitive.content
+        assertTrue(title.endsWith("(fork)"), title)
+        assertEquals("Pong (fork)", title)
+        val answered = fork.state.first { s -> !s.busy && s.entries.count { it is ChatEntry.Assistant } == 2 }
+        assertEquals(fork.id, answered.sessionId, "the CLI reports the id the fork was given")
+        assertEquals(listOf(original, fork), manager.sessions.value)
+        assertEquals(fork.id, manager.selected.value)
+
+        // The original is as it was: history, title, no process, transcript.
+        assertEquals(history, original.state.value)
+        assertEquals("Pong", original.title.value)
+        assertEquals(SessionStatus.STOPPED, original.status.value)
+        assertEquals(transcript, folder.resolve("$seeded.jsonl").readText())
+        assertEquals(1, spawns().size)
+    }
+
+    @Test
+    fun `a fork stopped before its first prompt forks again until it has a transcript`() = test {
+        seed(seeded)
+        val manager = manager()
+        val fork = assertNotNull(manager.fork(seeded)) // not open: the history and the title come from the transcript
+        assertEquals("Pong (fork)", fork.title.value)
+        awaitLog { spawns().size == 1 }
+        manager.stop(fork.id) // before a prompt: no system/init, and no transcript of its own
+
+        manager.send(fork.id, "Reply with the single word: pong")
+        awaitLog { frames().any { it.subtype() == "rename_session" } }
+        val forked = listOf("--resume", seeded, "--fork-session", "--session-id", fork.id)
+        assertEquals(listOf(forked, forked), spawns().map { it.subList(it.indexOf("--resume"), it.size) })
+        assertEquals(1, frames().count { it.subtype() == "rename_session" }, "told once, by the process that reported its init")
+
+        // Once the CLI has written the fork's transcript, the fork resumes as itself.
+        fork.state.first { s -> !s.busy && s.entries.count { it is ChatEntry.Assistant } == 2 }
+        seed(fork.id)
+        manager.stop(fork.id)
+        manager.send(fork.id, "And once more")
+        awaitLog { spawns().size == 3 }
+        val last = spawns().last()
+        assertEquals(fork.id, last.valueOf("--resume"))
+        assertFalse("--fork-session" in last)
+        assertFalse("--session-id" in last)
+    }
+
+    @Test
+    fun `fork gives null for a session without a transcript`() = test {
+        val manager = manager()
+        val created = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        assertNull(manager.fork(created.id), "no prompt yet, so nothing to fork")
+        assertNull(manager.fork("not-a-session-id"))
+        assertEquals(listOf(created), manager.sessions.value)
+        assertNull(manager.selected.value)
+        assertEquals(1, spawns().size)
+    }
+
+    @Test
+    fun `a resume that comes back with another id becomes a new row with a warning`() = test {
+        seed(seeded)
+        // Review Focus 5: the fake reports this id, whatever it was started with.
+        val manager = manager(environment = mapOf("TANDEM_FAKE_SESSION_ID" to other))
+        val resumed = manager.open(seeded, spawn = false)
+        val history = resumed.state.value
+        manager.select(seeded)
+        manager.send(seeded, "Reply with the single word: pong")
+
+        val taken = manager.sessions.first { it.size == 2 }.last()
+        assertEquals(other, taken.id)
+        manager.selected.await(other) // the old row was selected, so the new one is
+        val state = taken.state.first { s -> !s.busy && s.entries.count { it is ChatEntry.Assistant } == 2 }
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().single()
+        assertEquals(NoticeLevel.WARNING, notice.level)
+        assertEquals("Resumed as a new session $other", notice.text)
+        val pong = "Reply with the single word: pong"
+        assertEquals(listOf(pong, pong), state.prompts(), "the history, then the prompt the process took")
+        taken.status.await(SessionStatus.IDLE) // it has the process
+
+        // The old row is not relabelled: same id, its history without the prompt, no process.
+        resumed.status.await(SessionStatus.STOPPED)
+        assertEquals(seeded, resumed.id)
+        assertEquals(history.entries, resumed.state.value.entries)
+        assertEquals(listOf(resumed, taken), manager.sessions.value)
+        assertEquals(1, spawns().size, "the process was taken over, not started again")
+        assertEquals(1, ownFakeProcesses().size)
+    }
+
+    @Test
+    fun `a resume that comes back as a session open in another row stops that process`() = test {
+        seed(seeded)
+        seed(other)
+        val manager = manager(environment = mapOf("TANDEM_FAKE_SESSION_ID" to other))
+        val resumed = manager.open(seeded, spawn = false)
+        val open = manager.open(other, spawn = false)
+        manager.select(seeded)
+        manager.send(seeded, "Reply with the single word: pong")
+
+        // One session never has two rows or two processes: the process is stopped, and the row it was started for says why.
+        val notice = resumed.state.first { s -> s.entries.last() is ChatEntry.Notice }.entries.last() as ChatEntry.Notice
+        assertEquals(NoticeLevel.WARNING, notice.level)
+        assertEquals("Resumed as session $other, which is open already, so that process was stopped.", notice.text)
+        assertEquals(listOf(resumed, open), manager.sessions.value)
+        assertEquals(seeded, manager.selected.value)
+        resumed.status.await(SessionStatus.STOPPED)
+        assertEquals(SessionStatus.STOPPED, open.status.value, "it never had a process")
+        assertEquals(emptyList(), ownFakeProcesses())
+    }
+
+    @Test
+    fun `delete removes the transcript and its sidecar directory`() = test {
+        seed(seeded)
+        seed(other)
+        val sidecar = folder.resolve(seeded).resolve("subagents").createDirectories().resolve("agent-x.jsonl")
+        sidecar.writeText("{}\n")
+        val manager = manager()
+        manager.open(seeded) // with a process, which delete stops first
+        awaitLog { spawns().size == 1 }
+        val kept = manager.open(other, spawn = false)
+        manager.select(seeded)
+
+        manager.delete(seeded)
+        assertFalse(folder.resolve("$seeded.jsonl").exists())
+        assertFalse(sidecar.exists())
+        assertFalse(folder.resolve(seeded).exists())
+        assertTrue(folder.resolve("$other.jsonl").exists())
+        assertEquals(listOf(kept), manager.sessions.value)
+        assertEquals(other, manager.selected.value, "the deleted session was selected, so the next one is")
+        assertEquals(emptyList(), ownFakeProcesses(), "delete returns once the process is gone")
+        manager.summaries.first { summaries -> summaries.map { it.id } == listOf(other) }
     }
 }
