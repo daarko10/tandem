@@ -3,6 +3,8 @@ package dev.daarkolabs.tandem.ui
 import com.intellij.notification.Notification
 import com.intellij.notification.NotificationType
 import com.intellij.notification.Notifications
+import com.intellij.openapi.application.EDT
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.testFramework.common.timeoutRunBlocking
 import com.intellij.testFramework.junit5.TestApplication
 import com.intellij.testFramework.junit5.fixture.tempPathFixture
@@ -12,15 +14,17 @@ import dev.daarkolabs.tandem.TandemProjectScope
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.NewSessionOptions
-import dev.daarkolabs.tandem.session.SessionStatus
+import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.awt.datatransfer.DataFlavor
 import java.io.IOException
 import java.nio.file.AccessDeniedException
 import java.nio.file.Files
@@ -29,6 +33,9 @@ import kotlin.io.path.copyTo
 import kotlin.io.path.createDirectories
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
 /** [SessionActions] against a real (headless) project's sessions and the fake CLI. */
@@ -41,7 +48,14 @@ class SessionActionsTest {
         private const val SEEDED = "66666666-6666-4666-8666-666666666666"
     }
 
+    private val ownProcesses = OwnFakeCliProcesses()
+
     private lateinit var configDir: Path
+
+    /** Closing the project must end every process the test started; the timeout of the enclosing test bounds the wait. */
+    private suspend fun awaitNoOwnFakeCli() {
+        while (ownProcesses.list().isNotEmpty()) delay(20)
+    }
 
     @BeforeEach
     fun useOwnConfigDir() {
@@ -71,19 +85,19 @@ class SessionActionsTest {
             val manager = sessions.manager
             val actions = SessionActions(project, manager, TandemProjectScope.get(project).scope)
 
-            actions.show(SEEDED)
+            val opening = assertNotNull(actions.show(SEEDED), "a session that is not open is opened first")
             reading.await()
             val later = actions.create(NewSessionOptions())
             gate.complete(Unit)
-            val seeded = manager.sessions.first { open -> open.any { it.id == SEEDED } }.single { it.id == SEEDED }
-            seeded.status.first { it == SessionStatus.IDLE } // its process is up: the open is over
-            delay(500) // time for a selection that must not happen
+            opening.join() // the open, and the selection it may make, are over
+            assertTrue(manager.sessions.value.any { it.id == SEEDED }, "opened")
             assertEquals(later, manager.selected.value)
 
             // Shown again once it is open, it is selected at once.
-            actions.show(SEEDED)
+            assertNull(actions.show(SEEDED))
             assertEquals(SEEDED, manager.selected.value)
         }
+        awaitNoOwnFakeCli()
     }
 
     @Test
@@ -113,6 +127,7 @@ class SessionActionsTest {
             while (synchronized(notifications) { notifications.size } < 2) delay(20)
             synchronized(notifications) { notifications.map { Triple(it.type, it.title, it.content) }.sortedBy { it.second } }
         }
+        awaitNoOwnFakeCli()
         assertEquals(
             listOf(
                 Triple(NotificationType.ERROR, "Could not delete “Pong”", "AccessDeniedException: no &lt;way&gt;"),
@@ -120,6 +135,19 @@ class SessionActionsTest {
             ),
             shown,
         )
+    }
+
+    @Test
+    fun `Copy resume command puts the command that resumes the session in a terminal on the clipboard`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("copy").createDirectories()
+        val copied = openProjectAsync(dir).useProjectAsync { project ->
+            val actions = SessionActions(project, TandemSessions.get(project).manager, TandemProjectScope.get(project).scope)
+            withContext(Dispatchers.EDT) {
+                actions.copyResumeCommand(SEEDED)
+                CopyPasteManager.getInstance().getContents<String>(DataFlavor.stringFlavor)
+            }
+        }
+        assertEquals("claude --resume $SEEDED", copied)
     }
 
     /** Writes the `history-reply` transcript as session [SEEDED]'s, in the CLI's folder for the project in [dir]. */

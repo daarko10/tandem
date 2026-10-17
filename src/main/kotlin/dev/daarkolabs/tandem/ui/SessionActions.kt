@@ -11,6 +11,7 @@ import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.awt.datatransfer.StringSelection
 import java.io.IOException
@@ -30,14 +31,17 @@ internal class SessionActions(private val project: Project, private val manager:
     @Volatile
     private var requested: SessionId? = null
 
-    /** Selects session [id]; one that is not open is opened first, with its history and, if the cap allows, a process. */
-    fun show(id: SessionId) {
+    /**
+     * Selects session [id]; one that is not open is opened first, with its history and, if the cap allows, a process: the job that
+     * does it is returned, null for an open session, selected at once.
+     */
+    fun show(id: SessionId): Job? {
         requested = id
         if (manager.sessions.value.any { it.id == id }) {
             manager.select(id)
-            return
+            return null
         }
-        scope.launch {
+        return scope.launch {
             manager.open(id)
             if (requested == id) manager.select(id)
         }
