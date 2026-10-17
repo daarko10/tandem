@@ -39,7 +39,6 @@ enum class SessionStatus {
     STOPPED,
 }
 
-
 /**
  * A session the [SessionManager] has open: its chat, which outlives each process started for it, and that process while one runs.
  *
