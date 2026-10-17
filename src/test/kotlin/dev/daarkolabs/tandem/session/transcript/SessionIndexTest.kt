@@ -452,8 +452,13 @@ class SessionIndexTest {
 
     @Test
     fun `the watcher asks the JDK for its highest polling sensitivity`() {
-        // JDK 21, the toolchain's, has com.sun.nio.file.SensitivityWatchEventModifier. Its polling watch service (macOS) then looks
-        // every 2 s instead of every 10 s; the others accept the modifier and ignore it.
+        // The tests run on the IDE's runtime (JBR), which has com.sun.nio.file.SensitivityWatchEventModifier as of JBR 25; it is
+        // deprecated for removal. With it, a polling watch service (macOS) looks every 2 s instead of every 10 s; the others accept
+        // it and ignore it. A runtime without it registers no modifier, which the other watch tests then exercise.
+        assumeTrue(
+            runCatching { Class.forName("com.sun.nio.file.SensitivityWatchEventModifier") }.isSuccess,
+            "this runtime has no SensitivityWatchEventModifier",
+        )
         assertEquals(listOf("HIGH"), watchModifiers().map { it.name() })
     }
 
