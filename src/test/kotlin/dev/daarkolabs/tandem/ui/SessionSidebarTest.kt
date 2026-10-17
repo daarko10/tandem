@@ -182,4 +182,13 @@ class SessionSidebarTest {
         assertEquals("An open fork of it has no transcript of its own yet, and could not start again without this one.", forkWarning(1))
         assertEquals("2 open forks of it have no transcript of their own yet, and could not start again without this one.", forkWarning(2))
     }
+
+    @Test
+    fun `after a delete the focus goes to the next row, else the previous one, else nowhere in the list`() {
+        assertEquals("c", rowFocusedAfterDelete(listOf("a", "b", "c"), "b"))
+        assertEquals("b", rowFocusedAfterDelete(listOf("a", "b", "c"), "c"))
+        assertEquals("b", rowFocusedAfterDelete(listOf("a", "b"), "a"))
+        assertNull(rowFocusedAfterDelete(listOf("a"), "a"))
+        assertNull(rowFocusedAfterDelete(listOf("a", "b"), "gone"))
+    }
 }

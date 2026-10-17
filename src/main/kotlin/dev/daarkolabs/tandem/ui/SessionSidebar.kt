@@ -166,6 +166,8 @@ internal fun SessionSidebar(
     val query = filter.text.toString()
     val rows = remember(summaries, query) { summaries.filteredBy(query) }
     val listState = rememberLazyListState()
+    // The rows of the last composition, for what runs after it: a scroll, a delete.
+    val currentRows by rememberUpdatedState(rows)
     val rowFocus = remember { HashMap<SessionId, FocusRequester>() }
     // The row whose menu the context menu key asked for, once it is in view.
     var menuFor by remember { mutableStateOf<SessionId?>(null) }
@@ -183,7 +185,7 @@ internal fun SessionSidebar(
 
     /** Moves the focus to row [index], scrolled into view first if it is out of view: such a row has no focus target yet. */
     fun focusRow(index: Int) {
-        val id = rows.getOrNull(index)?.id ?: return
+        val id = currentRows.getOrNull(index)?.id ?: return
         scope.launch {
             if (listState.layoutInfo.visibleItemsInfo.none { it.key == id }) listState.scrollToItem(index)
             val laidOut = withTimeoutOrNull(SCROLL_WAIT_MILLIS) {
@@ -195,11 +197,31 @@ internal fun SessionSidebar(
 
     /** Opens the menu of row [id], scrolled into view first if any of it is out of view. */
     fun openMenu(id: SessionId) {
-        val index = rows.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: return
+        val index = currentRows.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: return
         scope.launch {
+            // Scrolled to, a row is at the top of the view: in view enough for its menu, even when it is taller than the view.
             if (!listState.fullyVisible(id)) listState.scrollToItem(index)
-            withTimeoutOrNull(SCROLL_WAIT_MILLIS) { snapshotFlow { listState.fullyVisible(id) }.first { it } } ?: return@launch
-            menuFor = id
+            val inView = withTimeoutOrNull(SCROLL_WAIT_MILLIS) {
+                snapshotFlow { listState.layoutInfo.visibleItemsInfo.any { it.key == id } }.first { it }
+            }
+            if (inView != null) menuFor = id
+        }
+    }
+
+    /**
+     * Deletes [summary]'s session, in the sidebar's scope so that it goes on when the row leaves. Then a row that [hadFocus] hands
+     * it on: to the next row, else the previous one ([rowFocusedAfterDelete]), else the filter. [onFailed] if it could not be.
+     */
+    fun delete(summary: SessionSummary, hadFocus: Boolean, onFailed: () -> Unit) {
+        val next = rowFocusedAfterDelete(currentRows.map { it.id }, summary.id)
+        scope.launch {
+            if (!actions.delete(summary.id, summary.title)) {
+                onFailed()
+                return@launch
+            }
+            if (!hadFocus) return@launch
+            val index = next?.let { id -> currentRows.indexOfFirst { it.id == id } } ?: -1
+            if (index >= 0) focusRow(index) else filterFocus.requestFocus()
         }
     }
     // The rows of the last composition, not those of the first.
@@ -264,6 +286,7 @@ internal fun SessionSidebar(
                     },
                     menuRequested = menuFor == summary.id,
                     onMenuRequestTaken = { menuFor = null },
+                    onDelete = { hadFocus, onFailed -> delete(summary, hadFocus, onFailed) },
                 )
             }
         }
@@ -307,6 +330,12 @@ internal fun relativeTime(then: Long, now: Long, zone: ZoneId = ZoneId.systemDef
         today.minusDays(1) -> "yesterday"
         else -> DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT).withLocale(locale).format(day)
     }
+}
+
+/** The row of [rows] that takes the focus once row [deleted] is gone: the next one, else the previous one; null for none. */
+internal fun rowFocusedAfterDelete(rows: List<SessionId>, deleted: SessionId): SessionId? {
+    val index = rows.indexOf(deleted).takeIf { it >= 0 } ?: return null
+    return rows.getOrNull(index + 1) ?: rows.getOrNull(index - 1)
 }
 
 /** A row: what it shows normally, while it asks whether to delete the session, and while the session is being deleted. */
@@ -378,6 +407,7 @@ private fun SessionRow(
     onFork: () -> Unit,
     onMoveFocus: (RowKey) -> Unit,
     onFocusWithin: (Boolean) -> Unit,
+    onDelete: (hadFocus: Boolean, onFailed: () -> Unit) -> Unit,
     menuRequested: Boolean,
     onMenuRequestTaken: () -> Unit,
 ) {
@@ -386,10 +416,18 @@ private fun SessionRow(
     var mode by remember { mutableStateOf(RowMode.NORMAL) }
     // Whether the question takes the focus when it shows: asked from the menu, whose "⋯" goes away with the question.
     var focusQuestion by remember { mutableStateOf(false) }
+    // Whether the row had the focus when its menu opened.
+    var menuFromFocus by remember { mutableStateOf(false) }
     var menuAt by remember { mutableStateOf<Offset?>(null) }
     var focusWithin by remember { mutableStateOf(false) }
     val places = remember { RowPlaces() }
-    val scope = rememberCoroutineScope()
+
+    /** Opens the row's menu at [position], in the row's coordinates. */
+    fun openMenu(position: Offset) {
+        menuFromFocus = focusWithin
+        menuAt = position
+    }
+
     val interactions = remember { MutableInteractionSource() }
     val hovered by interactions.collectIsHoveredAsState()
     val focused by interactions.collectIsFocusedAsState()
@@ -398,7 +436,7 @@ private fun SessionRow(
     val listStyle = JewelTheme.simpleListItemStyle
     LaunchedEffect(menuRequested) {
         if (!menuRequested) return@LaunchedEffect
-        if (mode == RowMode.NORMAL) menuAt = places.underMore()
+        if (mode == RowMode.NORMAL) openMenu(places.underMore())
         onMenuRequestTaken()
     }
 
@@ -425,7 +463,7 @@ private fun SessionRow(
                 .pointerInput(Unit) {
                     detectRowClicks(
                         onSelect = { if (currentMode == RowMode.NORMAL) currentShow() },
-                        onMenu = { position -> if (currentMode == RowMode.NORMAL) menuAt = position },
+                        onMenu = { position -> if (currentMode == RowMode.NORMAL) openMenu(position) },
                     )
                 }
                 .onFocusChanged {
@@ -475,10 +513,11 @@ private fun SessionRow(
                         deleteWarning,
                         focusCancel = focusQuestion,
                         onDelete = {
-                            // The buttons go away: the row keeps the focus they had.
-                            if (focusWithin) focusRequester.requestFocus()
+                            // The buttons go away: the row keeps the focus they had until it goes too.
+                            val hadFocus = focusWithin
+                            if (hadFocus) focusRequester.requestFocus()
                             mode = RowMode.DELETING
-                            scope.launch { if (!actions.delete(summary.id, summary.title)) mode = RowMode.NORMAL }
+                            onDelete(hadFocus) { mode = RowMode.NORMAL }
                         },
                         onCancel = ::cancelDelete,
                     )
@@ -489,10 +528,10 @@ private fun SessionRow(
             if (mode == RowMode.NORMAL && (hovered || focusWithin || menuAt != null)) {
                 WithTooltip("Session actions") {
                     IconButton(
-                        onClick = { menuAt = places.underMore() },
+                        onClick = { openMenu(places.underMore()) },
                         modifier = Modifier.onGloballyPositioned { places.more = it }.onPreviewKeyEvent { event ->
                             val opens = opensMenu(event.key, event.type)
-                            if (opens) menuAt = places.underMore()
+                            if (opens) openMenu(places.underMore())
                             opens
                         },
                     ) { Icon(AllIconsKeys.Actions.MoreHorizontal, contentDescription = "Session actions") }
@@ -528,7 +567,9 @@ private fun SessionRow(
                 item("Rename", action = onRename)
                 item("Fork", enabled = summary.file != null, action = onFork) // nothing to fork before the first prompt
                 item("Delete…") {
-                    focusQuestion = true
+                    // The "⋯" goes away with the question: Cancel takes the focus it had. A row whose menu opened while the focus was
+                    // elsewhere, as on a right click while typing a prompt, leaves the focus there.
+                    focusQuestion = menuFromFocus
                     mode = RowMode.CONFIRMING_DELETE
                 }
                 item("Copy resume command") { actions.copyResumeCommand(summary.id) }
