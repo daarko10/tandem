@@ -46,10 +46,10 @@ internal class SessionSpawner(
     private val sessions: () -> List<SessionHandle>,
     /**
      * Adds the row of a session that took over a process another one started ([takeOver]), and selects it if that one was
-     * selected; false, and nothing changes, if a session with its id is open already. Turns that end after `turnsEnded`, the count
-     * when the row was made, ask for attention: also one that ended before the row was added.
+     * selected; false, and nothing changes, if a session with its id is open already. A turn that ended after the row was made
+     * asks for attention, also one that ended before it was added ([SessionHandle.turnsEndedAtStart]).
      */
-    private val addTakenOver: (from: SessionHandle, handle: SessionHandle, turnsEnded: Int) -> Boolean,
+    private val addTakenOver: (from: SessionHandle, handle: SessionHandle) -> Boolean,
     /** Runs between the new row taking the process over and [addTakenOver]: tests let a turn end there. */
     private val beforeAddTakenOver: suspend (handle: SessionHandle) -> Unit = {},
 ) {
@@ -164,8 +164,7 @@ internal class SessionSpawner(
     private suspend fun takeOver(from: SessionHandle, session: ClaudeSession, id: SessionId) {
         val process = from.handOver(session) ?: return // stopped or ended meanwhile
         session.notice(NoticeLevel.WARNING, "Resumed as a new session $id")
-        val chat = session.state.value
-        val handle = SessionHandle(id, scope, chat, listing, clock())
+        val handle = SessionHandle(id, scope, session.state.value, listing, clock())
         // Nobody else knows the new handle yet, so it has no process of its own and takes this one.
         if (!handle.adopt(process) { adopted, reported -> firstInit(handle, adopted, reported) }) {
             // Cannot happen while the handle is new; should it, the process must not run on where no row shows it.
@@ -176,7 +175,7 @@ internal class SessionSpawner(
             return
         }
         beforeAddTakenOver(handle)
-        if (addTakenOver(from, handle, chat.turnsEnded)) {
+        if (addTakenOver(from, handle)) {
             LOG.warn("session ${from.id}: the CLI resumed it as session $id, which has a row of its own now")
             return
         }

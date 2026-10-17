@@ -421,21 +421,17 @@ class SessionManager internal constructor(
         return handle to true
     }
 
-    /**
-     * [SessionSpawner]'s `addTakenOver`: adds [handle], selected if [from] is, unless its id is open already. A turn that ended after
-     * [turnsEnded], while the process was being handed over, asks for attention.
-     */
-    private fun addTakenOver(from: SessionHandle, handle: SessionHandle, turnsEnded: Int): Boolean = synchronized(lock) {
+    /** [SessionSpawner]'s `addTakenOver`: adds [handle], selected if [from] is, unless its id is open already. */
+    private fun addTakenOver(from: SessionHandle, handle: SessionHandle): Boolean = synchronized(lock) {
         if (handle(handle.id) != null) return@synchronized false
-        addLocked(handle, turnsEnded)
+        addLocked(handle)
         if (mutableSelected.value == from.id) selectLocked(handle.id)
         true
     }
 
-    /** Adds [handle] and follows it; turns that end after [turnsEnded] ask for attention. */
-    private fun addLocked(handle: SessionHandle, turnsEnded: Int = handle.state.value.turnsEnded) {
+    private fun addLocked(handle: SessionHandle) {
         mutableSessions.value += handle
-        watch(handle, turnsEnded)
+        watch(handle)
     }
 
     /**
@@ -465,9 +461,10 @@ class SessionManager internal constructor(
     /**
      * Follows the session's status: every change counts as use, and a session that is not selected asks for attention when it
      * starts waiting for a permission, or when a turn ends ([ChatState.turnsEnded] grows: a count, which no conflation of the status
-     * hides, and which a permission answered outside a turn or a Stop leaves alone), from [turnsEnded] on.
+     * hides, and which a permission answered outside a turn or a Stop leaves alone), from [SessionHandle.turnsEndedAtStart] on: a
+     * turn that ended before this, as while a resumed-as-new session is taken over, still asks.
      */
-    private fun watch(handle: SessionHandle, turnsEnded: Int) {
+    private fun watch(handle: SessionHandle) {
         // Undispatched, so that it sees the status from the start: the session's process may start right away.
         handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
             var previous = handle.status.value
@@ -479,7 +476,7 @@ class SessionManager internal constructor(
             }
         }
         handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            var ended = turnsEnded
+            var ended = handle.turnsEndedAtStart
             handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
                 if (count > ended) raiseAttentionUnlessSelected(handle)
                 ended = count

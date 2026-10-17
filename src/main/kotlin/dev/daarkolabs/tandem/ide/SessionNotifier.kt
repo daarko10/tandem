@@ -102,11 +102,11 @@ class SessionNotifier(private val project: Project, private val manager: Session
                 if (event != null && manager.selected.value == handle.id) notify(handle) { event.takeIf { stillDue(handle, it) } }
             }
         }
-        // Undispatched, as is follow itself, so that the count is read as the session is first seen, not when this runs.
         launch(start = CoroutineStart.UNDISPATCHED) {
             // A turn ends when the count of ended turns grows, as the manager raises attention for it: a count, which no conflation
-            // of the status hides. Turns that ended before this follows the session are not news.
-            var ended = handle.state.value.turnsEnded
+            // of the status hides. Counted from the handle's start, so that a turn that ended before this first looks, as while a
+            // resumed-as-new session is taken over, is announced too.
+            var ended = handle.turnsEndedAtStart
             handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
                 if (count > ended && manager.selected.value == handle.id) notify(handle) { Event.FINISHED }
                 ended = count

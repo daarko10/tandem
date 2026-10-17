@@ -10,11 +10,14 @@ import com.intellij.testFramework.junit5.TestApplication
 import com.intellij.testFramework.junit5.fixture.tempPathFixture
 import com.intellij.testFramework.openProjectAsync
 import com.intellij.testFramework.useProjectAsync
+import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
+import dev.daarkolabs.tandem.session.ScriptedProcess
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.TurnEnd
+import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +33,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
 import java.nio.file.Path
 import java.util.Collections
+import java.util.UUID
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.readLines
@@ -220,7 +224,8 @@ class SessionNotifierTest {
             b.status.first { it == SessionStatus.RUNNING }
             manager.stop(b.id)
             b.status.first { it == SessionStatus.STOPPED }
-            delay(1_000) // time for a wrong notification
+            // A bounded wait for a wrong notification: no signal can say that nothing will be posted.
+            delay(1_000)
             posted.toList()
         }
         assertEquals(emptyList(), notifications.map { it.title })
@@ -437,5 +442,49 @@ class SessionNotifierTest {
         assertEquals(null, SessionNotifier.eventOf(SessionStatus.WAITING, SessionStatus.IDLE))
         assertEquals(null, SessionNotifier.eventOf(SessionStatus.RUNNING, SessionStatus.IDLE))
         assertEquals(null, SessionNotifier.eventOf(SessionStatus.RUNNING, SessionStatus.STOPPED))
+    }
+
+    @Test
+    fun `a turn that ends while a resumed-as-new selected session is taken over is announced`() = timeoutRunBlocking(60.seconds) {
+        val dir = tempDir.get().resolve("taken-over").createDirectories()
+        val process = ScriptedProcess.quiet()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val posted = Collections.synchronizedList(ArrayList<Notification>())
+            val listening = Disposer.newDisposable()
+            val context = currentCoroutineContext()
+            val scope = CoroutineScope(context + SupervisorJob(context.job))
+            try {
+                project.messageBus.connect(listening).subscribe(
+                    Notifications.TOPIC,
+                    object : Notifications {
+                        override fun notify(notification: Notification) {
+                            posted.add(notification)
+                        }
+                    },
+                )
+                val index = SessionIndex({ listOf(dir.resolve("transcripts")) }, dir.toString())
+                val manager = SessionManager(scope, index, { _, _ -> process }, { "claude" }, dir, maxLive = { 4 })
+                SessionNotifier(project, manager, scope).apply { toolWindowVisible = { false } }.start()
+                val from = manager.create(NewSessionOptions())
+                manager.select(from.id)
+                from.status.first { it == SessionStatus.IDLE }
+                val resumedAs = UUID.randomUUID().toString()
+                // Between the new row taking the process and its being added, so before the notifier can see it, the turn ends.
+                manager.beforeTakenOverAdded = { taken ->
+                    process.script.println(Fixtures.lines("plain-reply").first { "\"type\":\"result\"" in it })
+                    taken.state.first { it.turnsEnded == 1 }
+                }
+                process.script.println(
+                    Fixtures.lines("plain-reply").first { "\"subtype\":\"init\"" in it }.replace("<session_id-2>", resumedAs),
+                )
+                manager.selected.first { it == resumedAs } // the new row takes the selection over
+                withTimeoutOrNull(10_000) { while (posted.none { it.title.endsWith(" finished") }) delay(20) }
+                assertEquals(listOf("$resumedAs finished"), posted.map { it.title })
+                manager.sessions.value.forEach { manager.close(it.id) }
+            } finally {
+                scope.cancel()
+                Disposer.dispose(listening)
+            }
+        }
     }
 }

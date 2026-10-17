@@ -61,6 +61,12 @@ class SessionHandle internal constructor(
     /** A title the CLI is still to be told, such as a fork's: shown at once, and sent once a process reports its `system/init`. */
     pendingTitle: String? = null,
 ) {
+    /**
+     * How many turns had ended in the chat this handle was made with: who follows its turns counts from here, so that a turn that
+     * ends before they first look, as while a resumed-as-new session is taken over, is still one.
+     */
+    internal val turnsEndedAtStart: Int = initialState.turnsEnded
+
     /** A process attached to a session: its [session], the job that runs it, and the chat it started from. */
     internal class Attachment(val session: ClaudeSession, val running: Job, val startedFrom: ChatState)
 
