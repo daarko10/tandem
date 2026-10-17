@@ -372,7 +372,7 @@ class ClaudeSessionTest {
         assertEquals(emptyList(), run.uncaught.map { it.stackTraceToString().take(1500) }, "the process was killed: its output ending is no failure")
         // The session ends as for any process that ends: with its exit code in the chat.
         val notice = assertNotNull(run.session.state.value.entries.last() as? ChatEntry.Notice)
-        assertEquals("Claude Code exited with code 137.", notice.text)
+        assertEquals("The claude CLI exited with code 137.", notice.text)
         run.scope.coroutineContext.job.cancelAndJoin()
     }
 

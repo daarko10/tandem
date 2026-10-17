@@ -301,7 +301,7 @@ internal fun modelMatches(requested: String, reported: String): Boolean {
 private fun errorText(error: String, message: CliMessage.Assistant): String {
     val text = message.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
     return when (error) {
-        "authentication_failed" -> "Claude Code is not signed in. Run `claude` in a terminal to sign in, then retry."
+        "authentication_failed" -> "The claude CLI (Claude Code) is not signed in. Run `claude` in a terminal to sign in, then retry."
         "model_not_found" -> "The CLI rejected the model${message.model?.let { " $it" } ?: ""}. Pick another model."
         else -> text.ifEmpty { "The CLI reported an error: $error" }
     }

@@ -167,7 +167,8 @@ class ClaudeSession(
             // Not only an IOException: ProcessBuilder.start also throws for arguments it cannot pass, and a launcher can fail.
             LOG.warn("could not start claude", e)
             val reason = e.message ?: e.javaClass.simpleName
-            dispatch(SessionEvent.Ended("Could not start `${config.binary}`: $reason. Is Claude Code installed?", isError = true))
+            val text = "Could not start `${config.binary}`: $reason. Is the claude CLI (Claude Code) installed?"
+            dispatch(SessionEvent.Ended(text, isError = true))
             return
         }
         process = p
@@ -313,9 +314,9 @@ class ClaudeSession(
     }
 
     private fun exitEvent(code: Int): SessionEvent.Ended {
-        if (code == 0) return SessionEvent.Ended("Claude Code exited.", isError = false)
+        if (code == 0) return SessionEvent.Ended("The claude CLI exited.", isError = false)
         val tail = stderrTail.text()
-        return SessionEvent.Ended("Claude Code exited with code $code." + if (tail.isEmpty()) "" else "\n$tail", isError = true)
+        return SessionEvent.Ended("The claude CLI exited with code $code." + if (tail.isEmpty()) "" else "\n$tail", isError = true)
     }
 
     private fun terminate(p: Process) {

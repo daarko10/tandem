@@ -517,8 +517,8 @@ class SessionManager internal constructor(
     companion object {
         /** The chat's notice when no `claude` executable is found. */
         internal const val NO_CLI_TEXT: String =
-            "Claude Code was not found. Install it from https://code.claude.com, sign in once with `claude` in a terminal, " +
-                "then reopen this tool window."
+            "The claude CLI was not found. Tandem works with Claude Code: install it from https://code.claude.com, sign in once " +
+                "with `claude` in a terminal, then reopen this tool window."
 
         /**
          * The chat's notice when a fork without a transcript of its own is to start, and the transcript of the session it forks is

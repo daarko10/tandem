@@ -44,7 +44,12 @@ internal fun ChatPane(
     val state by handle.state.collectAsState()
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            ChatPanel(project, rows, emptyText = if (state.ended) "Claude Code is not running." else "Ask Claude anything about this project.")
+            val emptyText = if (state.ended) {
+                "This session's claude process has stopped. Send a prompt to start it again."
+            } else {
+                "Ask Claude anything about this project."
+            }
+            ChatPanel(project, rows, emptyText)
         }
         state.pendingPermissions.forEach { PermissionPrompt(it, handle, manager) }
         PromptBar(handle, manager, workspace, focusPrompt, onPromptFocused)

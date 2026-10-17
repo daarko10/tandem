@@ -223,10 +223,13 @@ class ReducerTest {
         var state = reduce(ChatState(), cli("""{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":4000,"error":"overloaded"}"""))
         assertEquals("API request failed (overloaded), retrying 2/10 in 4s.", (state.entries.last() as ChatEntry.Notice).text)
         state = reduce(state, cli("""{"type":"assistant","error":"authentication_failed","message":{"id":"m","content":[]}}"""))
-        assertTrue((state.entries.last() as ChatEntry.Notice).text.contains("not signed in"))
+        assertEquals(
+            "The claude CLI (Claude Code) is not signed in. Run `claude` in a terminal to sign in, then retry.",
+            (state.entries.last() as ChatEntry.Notice).text,
+        )
         state = reduce(state, cli("""{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"]}"""))
         assertEquals(NoticeLevel.ERROR, (state.entries.last() as ChatEntry.Notice).level)
-        state = reduce(state, SessionEvent.Ended("Claude Code exited with code 1.", isError = true))
+        state = reduce(state, SessionEvent.Ended("The claude CLI exited with code 1.", isError = true))
         assertTrue(state.ended)
     }
 

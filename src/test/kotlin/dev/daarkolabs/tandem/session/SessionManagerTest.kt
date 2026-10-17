@@ -1252,4 +1252,13 @@ class SessionManagerTest {
             other.close(second.id)
         }
     }
+
+    @Test
+    fun `the notice without a claude says it is the claude CLI that Tandem works with, not Tandem itself`() {
+        assertEquals(
+            "The claude CLI was not found. Tandem works with Claude Code: install it from https://code.claude.com, sign in once " +
+                "with `claude` in a terminal, then reopen this tool window.",
+            SessionManager.NO_CLI_TEXT,
+        )
+    }
 }

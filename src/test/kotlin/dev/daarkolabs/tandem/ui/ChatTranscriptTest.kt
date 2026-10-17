@@ -23,7 +23,7 @@ class ChatTranscriptTest {
 
     @Test
     fun `warnings and errors are marked`() {
-        val state = reduce(ChatState(), SessionEvent.Ended("Claude Code exited with code 2.", isError = true))
-        assertEquals("**Error:** Claude Code exited with code 2.", state.toTranscript().single().markdown)
+        val state = reduce(ChatState(), SessionEvent.Ended("The claude CLI exited with code 2.", isError = true))
+        assertEquals("**Error:** The claude CLI exited with code 2.", state.toTranscript().single().markdown)
     }
 }

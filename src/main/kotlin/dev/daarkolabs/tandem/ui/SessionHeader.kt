@@ -176,7 +176,7 @@ private fun StatusLine(state: ChatState) {
     val parts = listOfNotNull(
         state.activeModel ?: state.requestedModel ?: "default model",
         state.permissionMode?.wire?.let { "mode: $it" },
-        state.claudeCodeVersion?.let { "Claude Code $it" },
+        state.claudeCodeVersion?.let { "claude $it" },
         if (state.busy) "working…" else null,
     )
     Text(parts.joinToString("  ·  "), color = JewelTheme.globalColors.text.info, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
