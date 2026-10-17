@@ -276,7 +276,8 @@ class SessionManagerTest {
         val handle = manager.open(seeded, spawn = false)
         assertEquals(SessionStatus.STOPPED, handle.status.value)
         assertSame(handle, manager.open(seeded))
-        delay(300) // time for a wrong start to show in the log
+        // A bounded wait for a wrong start to show in the log: no signal can say that no process will start.
+        delay(300)
         assertEquals(emptyList(), spawns(), "an open session starts with its next prompt, not when it is opened again")
 
         manager.send(seeded, "Reply with the single word: pong")
@@ -371,6 +372,25 @@ class SessionManagerTest {
         // The picks made while stopped went into the flags, not to a process.
         assertEquals(1, frames().count { it.subtype() == "set_model" })
         assertEquals(0, frames().count { it.subtype() == "set_permission_mode" })
+    }
+
+    @Test
+    fun `a switch the CLI rejects goes back to the mode before it, as recorded`() = test {
+        // The fake answers the switch with the recorded rejection of bypassPermissions.
+        val manager = manager(fixtures = "permission-mode-rejected")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Reply with the single word: one")
+        handle.state.first { it.turnsEnded == 1 }
+        manager.setPermissionMode(handle.id, PermissionMode.BYPASS_PERMISSIONS)
+        val rejected = handle.state.first { s -> s.entries.any { it is ChatEntry.Notice && it.level == NoticeLevel.ERROR } }
+        assertEquals(PermissionMode.DEFAULT, rejected.permissionMode)
+        assertTrue(
+            rejected.entries.filterIsInstance<ChatEntry.Notice>().single { it.level == NoticeLevel.ERROR }.text
+                .startsWith("The CLI rejected the switch to permission mode bypassPermissions (Cannot set permission mode"),
+        )
+        manager.send(handle.id, "Reply with the single word: two")
+        handle.state.first { it.turnsEnded == 2 } // the session goes on
+        manager.close(handle.id)
     }
 
     @Test
@@ -1140,34 +1160,6 @@ class SessionManagerTest {
         release.countDown()
         opening.join()
         assertEquals(emptyList(), manager.sessions.value.single().state.value.entries, "the deleted history is not shown")
-    }
-
-    /** A real process for input and ending ([real]), whose output is what the test writes to [script], line by line. */
-    private class ScriptedProcess(private val real: Process) : Process() {
-        private val output = java.io.PipedInputStream(64 * 1024)
-        val script: java.io.PrintStream = java.io.PrintStream(java.io.PipedOutputStream(output), true, Charsets.UTF_8)
-
-        override fun getOutputStream(): java.io.OutputStream = real.outputStream
-        override fun getInputStream(): java.io.InputStream = output
-        override fun getErrorStream(): java.io.InputStream = real.errorStream
-        override fun waitFor(): Int = real.waitFor()
-        override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = real.waitFor(timeout, unit)
-        override fun exitValue(): Int = real.exitValue()
-        override fun isAlive(): Boolean = real.isAlive
-        override fun pid(): Long = real.pid()
-        override fun toHandle(): ProcessHandle = real.toHandle()
-        override fun descendants() = real.descendants()
-
-        override fun destroy() {
-            real.destroy()
-            script.close()
-        }
-
-        override fun destroyForcibly(): Process {
-            real.destroyForcibly()
-            script.close()
-            return this
-        }
     }
 
     @Test

@@ -9,6 +9,9 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
   model-switch     one turn, set_model to another model, a second turn
   permission-mode  one turn, set_permission_mode plan, a second turn, set_permission_mode acceptEdits, a third turn;
                    in plan mode the model sometimes drafts a plan instead of replying: the run then stops, record it again
+  permission-mode-rejected
+                   one turn, set_permission_mode bypassPermissions, which a CLI not launched with
+                   --dangerously-skip-permissions rejects, a second turn
   fork             one turn and a rename_session, then a second process resumes that session with --fork-session
                    for one more turn; its lines follow the first process's in the output
   settings         a probe, not a fixture: one turn, then update_settings and apply_flag_settings asking for effort
@@ -185,6 +188,16 @@ def permission_mode(cli: Cli) -> None:
     cli.until(is_result, replies_only)
 
 
+def permission_mode_rejected(cli: Cli) -> None:
+    cli.user("Reply with the single word: one")
+    cli.until(is_result)
+    response = cli.call({"subtype": "set_permission_mode", "mode": "bypassPermissions"}, allow_error=True)
+    if response.get("response", {}).get("subtype") != "error":
+        raise RuntimeError("claude accepted bypassPermissions; this scenario records its rejection")
+    cli.user("Reply with the single word: two")
+    cli.until(is_result)
+
+
 def fork(cli: Cli) -> None:
     cli.user("Reply with the single word: alpha")
     session_id = cli.until(is_init)["session_id"]
@@ -216,7 +229,8 @@ def settings(cli: Cli) -> None:
 
 
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
-             "permission-mode": permission_mode, "fork": fork, "settings": settings}
+             "permission-mode": permission_mode, "permission-mode-rejected": permission_mode_rejected, "fork": fork,
+             "settings": settings}
 
 # Flags a scenario adds to the caller's. The settings probe loads no user settings: 2.1.301 refuses an update_settings for
 # a source that --setting-sources leaves out, so even a CLI that took the user's settings as the default source would

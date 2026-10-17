@@ -364,6 +364,29 @@ class ReducerTest {
     }
 
     @Test
+    fun `a recorded rejection of bypassPermissions goes back to the mode before it`() {
+        // Recorded: set_permission_mode bypassPermissions to a CLI not launched with --dangerously-skip-permissions.
+        var state = ChatState()
+        for (line in Fixtures.lines("permission-mode-rejected")) {
+            val message = Ndjson.decode(line)
+            if (message is CliMessage.ControlResponse && !message.isSuccess) {
+                state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.BYPASS_PERMISSIONS, message.requestId))
+                assertEquals(PermissionMode.BYPASS_PERMISSIONS, state.permissionMode, "shown at once")
+            }
+            state = reduce(state, SessionEvent.Cli(message))
+        }
+        assertEquals(PermissionMode.DEFAULT, state.permissionMode)
+        assertEquals(emptyMap(), state.permissionModeChanges)
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().single { it.level == NoticeLevel.ERROR }
+        assertEquals(
+            "The CLI rejected the switch to permission mode bypassPermissions (Cannot set permission mode to bypassPermissions " +
+                "because the session was not launched with --dangerously-skip-permissions); it stays default.",
+            notice.text,
+        )
+        assertEquals(2, state.turnsEnded, "both turns ran")
+    }
+
+    @Test
     fun `a rejection after a later pick keeps the later pick`() {
         var state = ChatState(permissionMode = PermissionMode.DEFAULT)
         state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "tandem-7"))

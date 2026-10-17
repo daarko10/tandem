@@ -53,6 +53,17 @@ class CallTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             drive_cli.model_switch(FakeCli(error))
 
+    def test_the_rejected_mode_scenario_records_the_rejection_and_goes_on(self):
+        cli = FakeCli(error)
+        drive_cli.permission_mode_rejected(cli)
+        modes = [m["request"].get("mode") for m in cli.sent if m["type"] == "control_request"]
+        self.assertEqual(["bypassPermissions"], modes)
+        self.assertEqual(2, sum(m["type"] == "user" for m in cli.sent), "both turns ran")
+
+    def test_the_rejected_mode_scenario_fails_when_the_mode_is_accepted(self):
+        with self.assertRaisesRegex(RuntimeError, "accepted bypassPermissions"):
+            drive_cli.permission_mode_rejected(FakeCli(success))
+
     def test_the_settings_probe_records_rejected_requests_and_goes_on(self):
         cli = FakeCli(error)
         drive_cli.settings(cli)
