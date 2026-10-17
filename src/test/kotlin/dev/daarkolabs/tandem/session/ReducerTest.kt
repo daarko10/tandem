@@ -119,8 +119,11 @@ class ReducerTest {
         assertEquals(TurnEnd.FAILED, final.lastTurnEnd)
         assertEquals(1, final.turnsEnded)
         assertFalse(final.busy)
-        // Its subtype is "success", which says nothing here: the result's notice, after the API error's, names the terminal reason.
-        val notice = final.entries.filterIsInstance<ChatEntry.Notice>().last { it.level == NoticeLevel.ERROR }
+        val errors = final.entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == NoticeLevel.ERROR }
+        // First the API error, on a line the CLI wrote itself with the model <synthetic>: it names the model that was picked.
+        assertEquals("The CLI rejected the model claude-nonexistent-0. Pick another model.", errors.first().text)
+        // Its subtype is "success", which says nothing here: the result's notice names the terminal reason.
+        val notice = errors.last()
         assertEquals(
             "The turn failed (api_error): There's an issue with the selected model (claude-nonexistent-0). " +
                 "It may not exist or you may not have access to it.",

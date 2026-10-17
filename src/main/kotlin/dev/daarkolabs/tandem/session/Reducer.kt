@@ -151,7 +151,7 @@ private fun ChatState.rejectModeChange(requestId: String, change: PermissionMode
 private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant): ChatState {
     var next = state
     if (message.supersedes.isNotEmpty()) next = next.withoutAssistants(message.supersedes.toSet())
-    message.error?.let { return next.notice(NoticeLevel.ERROR, errorText(it, message)) }
+    message.error?.let { return next.notice(NoticeLevel.ERROR, errorText(it, message, next)) }
     if (message.parentToolUseId == null) next = next.checkModel(message.model, fromAssistant = true)
 
     val messageId = message.messageId ?: message.uuid ?: return next
@@ -305,11 +305,18 @@ internal fun modelMatches(requested: String, reported: String): Boolean {
     return wanted in setOf("opus", "sonnet", "haiku", "fable") && actual.startsWith("claude-$wanted")
 }
 
-private fun errorText(error: String, message: CliMessage.Assistant): String {
+/**
+ * What the chat says for an API error on [message]. A rejected model is named as the line names it, unless that is no model (the
+ * CLI's own line says `<synthetic>`): then as [state] has it, the model picked, else the one the CLI reported.
+ */
+private fun errorText(error: String, message: CliMessage.Assistant, state: ChatState): String {
     val text = message.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
     return when (error) {
         "authentication_failed" -> "The claude CLI (Claude Code) is not signed in. Run `claude` in a terminal to sign in, then retry."
-        "model_not_found" -> "The CLI rejected the model${message.model?.let { " $it" } ?: ""}. Pick another model."
+        "model_not_found" -> {
+            val model = message.model?.takeUnless { it.startsWith("<") } ?: state.requestedModel ?: state.activeModel
+            "The CLI rejected the model${model?.let { " $it" } ?: ""}. Pick another model."
+        }
         else -> text.ifEmpty { "The CLI reported an error: $error" }
     }
 }
