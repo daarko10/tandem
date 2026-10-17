@@ -34,10 +34,12 @@ import java.io.BufferedReader
 import java.io.IOException
 import java.io.StringReader
 import java.nio.file.AccessDeniedException
+import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.time.Instant
 import java.util.Collections
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.appendText
@@ -668,7 +670,9 @@ class SessionManagerTest {
         assertEquals("Beta", stopped.title.value)
         assertEquals(1, frames().count { it.subtype() == "rename_session" })
         // rename had the index read the transcript again, so it lists "Beta" and its own title counts from then on: a later
-        // rename elsewhere, say in a terminal, shows. (Had the index not listed "Beta" first, "Beta" would stay.)
+        // rename elsewhere, say in a terminal, shows. (Had the index not listed "Beta" first, "Beta" would stay.) The handle takes
+        // the listing in its own coroutine: wait until it has, so that the next listing is not taken in the same step.
+        awaitLog { !stopped.titleOverridden }
         stoppedTranscript.appendText(written.last().replace("\"Beta\"", "\"Gamma\"") + "\n")
         manager.refreshIndex()
         stopped.title.await("Gamma")
@@ -1033,5 +1037,92 @@ class SessionManagerTest {
         assertEquals(SessionManager.FORK_ORIGINAL_GONE_TEXT, notice.text)
         assertEquals(1, spawns().size, "no process is started to fail on the missing original")
         assertEquals(SessionStatus.STOPPED, fork.status.value)
+    }
+
+    @Test
+    fun `rename and delete of a session that has no row work on its files alone`() = test {
+        seed(seeded)
+        val transcript = folder.resolve("$seeded.jsonl")
+        val manager = manager()
+        manager.rename(seeded, "Omega")
+        assertEquals("Omega", Json.parseToJsonElement(transcript.readLines().last()).jsonObject["customTitle"]!!.jsonPrimitive.content)
+        manager.summaries.first { summaries -> summaries.any { it.id == seeded && it.title == "Omega" } }
+        manager.delete(seeded)
+        assertFalse(transcript.exists())
+        assertEquals(emptyList(), manager.sessions.value, "neither opened a row")
+        assertEquals(emptyList(), spawns(), "nor started a process")
+        manager.summaries.first { it.isEmpty() }
+    }
+
+    @Test
+    fun `delete of an open session without a transcript closes it`() = test {
+        val manager = manager()
+        val created = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 } // no prompt yet, so the CLI has written no transcript
+        manager.select(created.id)
+        manager.delete(created.id)
+        assertEquals(emptyList(), manager.sessions.value)
+        assertNull(manager.selected.value)
+        assertEquals(emptyList(), ownFakeProcesses(), "delete returns once the process is gone")
+    }
+
+    @Test
+    fun `stopping an idle session to make room gives up at once while its spawn lock is held`() = test {
+        val manager = manager()
+        val created = manager.create(NewSessionOptions())
+        created.status.await(SessionStatus.IDLE)
+        created.spawnLock.lock() // as a start or a stop of the session does
+        try {
+            assertFalse(created.stopIfIdle(), "does not wait for the lock")
+            assertNotNull(created.liveSession())
+        } finally {
+            created.spawnLock.unlock()
+        }
+        assertTrue(created.stopIfIdle())
+        created.status.await(SessionStatus.STOPPED)
+    }
+
+    @Test
+    fun `starts that compete for room under the cap take turns`() = test {
+        val manager = manager(maxLive = 2)
+        // Created in one go: their starts make room one after the other, so the third stops an idle one first.
+        val created = List(3) { manager.create(NewSessionOptions()) }
+        awaitLog { spawns().size == 3 }
+        manager.sessions.first { sessions -> sessions.count { it.status.value == SessionStatus.STOPPED } == 1 }
+        val deadline = System.nanoTime() + 10_000_000_000L
+        while (ownFakeProcesses().size > 2 && System.nanoTime() < deadline) delay(20)
+        assertEquals(2, ownFakeProcesses().size)
+        assertEquals(2, created.count { it.liveSession() != null })
+        assertTrue(created.all { handle -> handle.state.value.entries.none { it is ChatEntry.Notice } }, "there was room for each")
+    }
+
+    @Test
+    fun `deny answers the permission request the CLI is waiting on`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "permission")
+        val handle = manager.open(seeded)
+        handle.status.await(SessionStatus.IDLE)
+        manager.send(seeded, "Create the fixture file")
+        handle.status.await(SessionStatus.WAITING)
+        val request = handle.state.value.pendingPermissions.single().requestId
+        manager.deny(seeded, request)
+        awaitLog {
+            frames().any { frame ->
+                val response = frame["response"]?.jsonObject
+                frame.type() == "control_response" && response?.get("request_id")?.jsonPrimitive?.content == request &&
+                    response["response"]?.jsonObject?.get("behavior")?.jsonPrimitive?.content == "deny"
+            }
+        }
+        assertEquals(emptyList(), handle.state.value.pendingPermissions)
+    }
+
+    @Test
+    fun `where the folders cannot be watched the list is read anyway`() = test {
+        seed(seeded)
+        val calls = AtomicInteger()
+        // The watcher asks first, and gives up on a folder it cannot look up; every listing after that finds the folder.
+        val index = SessionIndex({ if (calls.getAndIncrement() == 0) throw InvalidPathException("", "not watched") else listOf(folder) }, "/project")
+        SessionManager(scope, index, DefaultProcessLauncher(), { fakeClaude }, dir, maxLive = { 4 })
+            .summaries.first { summaries -> summaries.map { it.id } == listOf(seeded) }
     }
 }

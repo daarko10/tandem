@@ -167,6 +167,10 @@ class SessionHandle internal constructor(
     var lastUsed: Long = createdAt
         internal set
 
+    /** Whether a title set in Tandem still wins over the index's ([title]): the index has not listed it yet. For tests. */
+    internal val titleOverridden: Boolean
+        get() = synchronized(lock) { titleOverride != null }
+
     /** Whether [close] was called: no process starts any more. */
     internal val isClosed: Boolean
         get() = synchronized(lock) { closed }
