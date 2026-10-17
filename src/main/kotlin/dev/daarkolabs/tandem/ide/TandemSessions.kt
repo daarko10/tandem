@@ -11,6 +11,7 @@ import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
+import dev.daarkolabs.tandem.session.transcript.TranscriptFiles
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.CancellationException
@@ -29,6 +30,7 @@ import kotlinx.coroutines.launch
 import org.jetbrains.annotations.TestOnly
 import java.io.IOException
 import java.nio.file.Path
+import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 
 private val LOG = logger<TandemSessions>()
@@ -73,6 +75,16 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     @set:TestOnly
     internal var readTranscript: suspend (Path) -> LoadedTranscript = TranscriptReader::read
 
+    /** Appends a rename's `custom-title` line to a transcript: tests make it fail. */
+    @Volatile
+    @set:TestOnly
+    internal var appendTitle: (transcript: Path, id: SessionId, title: String, time: Instant) -> Unit = TranscriptFiles::appendCustomTitle
+
+    /** Deletes a session's transcript and what goes with it: tests make it fail. */
+    @Volatile
+    @set:TestOnly
+    internal var deleteTranscript: (transcript: Path) -> Unit = TranscriptFiles::delete
+
     /** The project's sessions. */
     val manager: SessionManager = SessionManager(
         scope = scope,
@@ -89,6 +101,8 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         maxLive = { TandemSettings.getInstance().maxLiveSessions() },
         clock = System::currentTimeMillis,
         readTranscript = { readTranscript(it) },
+        appendTitle = { transcript, id, title, time -> appendTitle(transcript, id, title, time) },
+        deleteFiles = { deleteTranscript(it) },
     )
 
     private val started = AtomicBoolean(false)
