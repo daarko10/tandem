@@ -21,31 +21,36 @@ class ClaudeBinaryTest {
     private fun executable(dir: String, name: String = "claude"): String =
         File(tmp.toFile(), dir).apply { mkdirs() }.resolve(name).apply { writeText("#!/bin/sh\n"); setExecutable(true) }.path
 
+    /** Install locations under [tmp], standing in for the real ones, which a test must never find a `claude` in. */
+    private val locations: List<String> get() = listOf("$tmp/home/.local/bin", "$tmp/home/.claude/local")
+
     @Test
-    fun `nothing found when PATH and the usual locations are empty`() {
-        assertNull(ClaudeBinary.find(override = null, path = "$tmp/a:$tmp/b", home = "$tmp/home", windows = false))
+    fun `nothing found when PATH and the install locations are empty`() {
+        assertNull(ClaudeBinary.find(override = null, path = "$tmp/a:$tmp/b", locations = locations, windows = false))
     }
 
     @Test
-    fun `PATH order wins, then the install locations under home`() {
+    fun `PATH order wins, then the install locations in their order`() {
         val second = executable("b")
-        val home = executable("home/.local/bin")
-        assertEquals(second, ClaudeBinary.find(null, "$tmp/a:$tmp/b", "$tmp/home", windows = false))
-        assertEquals(home, ClaudeBinary.find(null, "$tmp/a", "$tmp/home", windows = false))
+        val claudeLocal = executable("home/.claude/local")
+        assertEquals(Found(second, Where.PATH), ClaudeBinary.find(null, "$tmp/a:$tmp/b", locations, windows = false))
+        assertEquals(Found(claudeLocal, Where.INSTALL_LOCATION), ClaudeBinary.find(null, "$tmp/a", locations, windows = false))
+        val localBin = executable("home/.local/bin")
+        assertEquals(Found(localBin, Where.INSTALL_LOCATION), ClaudeBinary.find(null, "$tmp/a", locations, windows = false))
     }
 
     @Test
     fun `an executable override wins and a missing one is ignored`() {
         val onPath = executable("a")
         val custom = executable("custom", "my-claude")
-        assertEquals(custom, ClaudeBinary.find(custom, "$tmp/a", "$tmp/home", windows = false))
-        assertEquals(onPath, ClaudeBinary.find("$tmp/missing", "$tmp/a", "$tmp/home", windows = false))
+        assertEquals(Found(custom, Where.OVERRIDE), ClaudeBinary.find(custom, "$tmp/a", locations, windows = false))
+        assertEquals(Found(onPath, Where.PATH), ClaudeBinary.find("$tmp/missing", "$tmp/a", locations, windows = false))
     }
 
     @Test
     fun `non-executable files are skipped`() {
         File(tmp.toFile(), "a").apply { mkdirs() }.resolve("claude").writeText("not executable")
-        assertNull(ClaudeBinary.find(null, "$tmp/a", "$tmp/home", windows = false))
+        assertNull(ClaudeBinary.find(null, "$tmp/a", locations, windows = false))
     }
 
     @Test
@@ -54,7 +59,49 @@ class ClaudeBinaryTest {
         assertTrue(dir.canExecute(), "the permission to search a directory is its execute bit")
         assertFalse(ClaudeBinary.isExecutable(dir.path))
         val onPath = executable("a")
-        assertEquals(onPath, ClaudeBinary.find(dir.path, "$tmp/a", "$tmp/home", windows = false), "a directory as the override is ignored")
+        val found = ClaudeBinary.find(dir.path, "$tmp/a", locations, windows = false)
+        assertEquals(Found(onPath, Where.PATH), found, "a directory as the override is ignored")
+    }
+
+    @Test
+    fun `the install locations are the CLI's own installers', then Homebrew's, then package managers' global bins`() {
+        assertEquals(
+            listOf(
+                "/u/.local/bin", "/u/.claude/local", "/opt/homebrew/bin", "/usr/local/bin", "/u/.npm-global/bin", "/u/.bun/bin",
+                "/u/.volta/bin",
+            ),
+            ClaudeBinary.installLocations(home = "/u", windows = false),
+        )
+        assertEquals(listOf("/u/.local/bin", "/u/.claude/local"), ClaudeBinary.installLocations(home = "/u", windows = true))
+    }
+
+    @Test
+    fun `detect searches the PATH of the environment it is given, not the IDE's own`() {
+        val shellBin = executable("shell-bin")
+        val shell = mapOf("PATH" to "$tmp/shell-bin")
+        val found = ClaudeBinary.detect(override = null, environment = shell, home = "$tmp/home", windows = false)
+        assertEquals(Found(shellBin, Where.PATH), found)
+    }
+
+    @Test
+    fun `detect without arguments searches the login shell's PATH`() {
+        val shellBin = executable("login-shell-bin")
+        val hook = System.getProperty("tandem.claudePath")
+        System.clearProperty("tandem.claudePath")
+        ShellEnvironment.source = { mapOf("PATH" to "$tmp/login-shell-bin") }
+        try {
+            assertEquals(Found(shellBin, Where.PATH), ClaudeBinary.detect())
+        } finally {
+            ShellEnvironment.reset()
+            if (hook != null) System.setProperty("tandem.claudePath", hook)
+        }
+    }
+
+    @Test
+    fun `where it was found reads as a phrase`() {
+        assertEquals("found on PATH", Where.PATH.description)
+        assertEquals("found in a usual install location, not on PATH", Where.INSTALL_LOCATION.description)
+        assertEquals("the tandem.claudePath system property", Where.OVERRIDE.description)
     }
 
     /** A shell script named [name] that runs [body]. */
@@ -66,6 +113,23 @@ class ClaudeBinaryTest {
         assertEquals("2.1.301 (Claude Code)", ClaudeBinary.version(script("claude", "echo; echo '2.1.301 (Claude Code)'; echo more")))
         // It runs as a session's CLI does, with Tandem's entrypoint.
         assertEquals("sdk-tandem", ClaudeBinary.version(script("env", "echo \"\$CLAUDE_CODE_ENTRYPOINT\"")))
+    }
+
+    @Test
+    fun `version runs in the environment it is given, as a session's CLI would get it`() = runBlocking {
+        val probe = script("probe", "echo \"\$TANDEM_PROBE \$CLAUDE_CODE_ENTRYPOINT \${CLAUDECODE:-none}\"")
+        val environment = mapOf("TANDEM_PROBE" to "from-shell", "CLAUDECODE" to "1")
+        assertEquals("from-shell sdk-tandem none", ClaudeBinary.version(probe, environment = environment))
+    }
+
+    @Test
+    fun `version runs in the login shell's environment by default`() = runBlocking {
+        ShellEnvironment.source = { mapOf("TANDEM_PROBE" to "login-shell") }
+        try {
+            assertEquals("login-shell", ClaudeBinary.version(script("probe", "echo \"\$TANDEM_PROBE\"")))
+        } finally {
+            ShellEnvironment.reset()
+        }
     }
 
     @Test

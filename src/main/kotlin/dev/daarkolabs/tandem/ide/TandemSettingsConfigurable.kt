@@ -31,7 +31,8 @@ private const val NOT_EXECUTABLE_TEXT: String = "Configured path is not executab
  * Settings | Tools | Tandem: the `claude` to run, and how many sessions may run a process at once ([TandemSettings]).
  *
  * The page never blocks the EDT. Once [ClaudeBinary.detect] has run on a background thread, it shows the executable Tandem finds by
- * itself ("Detecting…" until then), and says in its status line when the saved path cannot run; both are checked again after Apply.
+ * itself ("Detecting…" until then) and where it found it (on the login shell's `PATH`, or in a usual install location), and says
+ * in its status line when the saved path cannot run; both are checked again after Apply.
  * "Test" runs `<path> --version`, or the detected executable's when the field is empty, in the background as well, and shows the
  * answer in the status line. That work ends when the page closes.
  */
@@ -42,8 +43,9 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
     /** The last "Test" run; a new one replaces it, so that an older answer never shows over a newer one. */
     private var test: Job? = null
 
-    /** The open page's labels for the detected executable and for the status line. */
+    /** The open page's labels for the detected executable, where it was found, and for the status line. */
     private var detected: JLabel? = null
+    private var detectedWhere: JLabel? = null
     private var status: JLabel? = null
 
     override fun createPanel(): DialogPanel {
@@ -53,6 +55,7 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
         val page = panel {
             row("Detected:") {
                 detected = label("Detecting…").component
+                detectedWhere = label("").component
             }
             row("Path to claude:") {
                 path = textFieldWithBrowseButton(FileChooserDescriptorFactory.singleFile().withTitle("Select Claude Executable"))
@@ -89,6 +92,7 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
         pageScope = null
         test = null
         detected = null
+        detectedWhere = null
         status = null
         super.disposeUIResources()
     }
@@ -107,13 +111,15 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
     private fun check() {
         val scope = pageScope ?: return
         val detected = detected ?: return
+        val detectedWhere = detectedWhere ?: return
         val status = status ?: return
         scope.launch {
             val (found, runs) = withContext(Dispatchers.IO) {
                 ClaudeBinary.detect() to (ClaudeBinary.configured()?.let(ClaudeBinary::isExecutable) ?: true)
             }
             showOnEdt {
-                detected.text = found ?: "Not found"
+                detected.text = found?.path ?: "Not found"
+                detectedWhere.text = found?.where?.description.orEmpty()
                 status.text = if (runs) "" else NOT_EXECUTABLE_TEXT
             }
         }
@@ -130,7 +136,7 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
         test?.cancel()
         test = scope.launch {
             val answer = withContext(Dispatchers.IO) {
-                val binary = typed.trim().ifEmpty { null } ?: ClaudeBinary.detect()
+                val binary = typed.trim().ifEmpty { null } ?: ClaudeBinary.detect()?.path
                 if (binary == null) "No claude executable found" else ClaudeBinary.version(binary)
             }
             showOnEdt { status.text = answer }

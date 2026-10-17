@@ -122,6 +122,29 @@ class TandemSessionsTest {
     }
 
     @Test
+    fun `a session's CLI starts from the login shell's environment`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("shell-env").createDirectories()
+        val log = configDir.resolve("fake-cli.log")
+        // The fake logs the CLAUDE* variables it was given. The IDE's own environment has neither of these.
+        ShellEnvironment.source = { System.getenv() + mapOf("CLAUDE_TANDEM_SHELL_PROBE" to "from-shell", "CLAUDECODE" to "1") }
+        try {
+            openProjectAsync(dir).useProjectAsync { project ->
+                val sessions = TandemSessions.get(project)
+                sessions.extraEnvironment = mapOf("TANDEM_FAKE_LOG" to log.toString())
+                sessions.ensureStarted()
+                sessions.manager.create(NewSessionOptions())
+                while (!(log.exists() && log.readLines().any { "__spawn__" in it })) delay(20)
+            }
+        } finally {
+            ShellEnvironment.reset()
+        }
+        val spawn = log.readLines().first { "__spawn__" in it }
+        assertTrue("\"CLAUDE_TANDEM_SHELL_PROBE\":\"from-shell\"" in spawn, spawn)
+        assertFalse("\"CLAUDECODE\"" in spawn, "the parent-session variables are still dropped: $spawn")
+        awaitNoOwnFakeCli()
+    }
+
+    @Test
     fun `closing the project stops every live session`() = timeoutRunBlocking(60.seconds) {
         val dir = tempDir.get().resolve("close").createDirectories()
         val started = openProjectAsync(dir).useProjectAsync { project ->

@@ -17,6 +17,16 @@ private const val OUTPUT_LIMIT: Int = 64 * 1024
 /** How often [ClaudeBinary.version] looks for output while there is none. */
 private const val POLL_MILLIS: Long = 20
 
+/** A `claude` [ClaudeBinary.detect] found, and [where]. */
+internal data class Found(val path: String, val where: Where)
+
+/** Where [ClaudeBinary.detect] found `claude`; [description] completes "<path>, …" on the settings page. */
+internal enum class Where(val description: String) {
+    OVERRIDE("the tandem.claudePath system property"),
+    PATH("found on PATH"),
+    INSTALL_LOCATION("found in a usual install location, not on PATH"),
+}
+
 /**
  * Finds the user's `claude` executable, and asks one for its version. Call off the EDT: everything here except [configured] touches
  * the file system.
@@ -26,18 +36,19 @@ internal object ClaudeBinary {
     val VERSION_TIMEOUT: Duration = 5.seconds
 
     /** The `claude` sessions run: the path saved in Settings | Tools | Tandem when it can run, else the one Tandem [detect]s. */
-    fun find(): String? = configured()?.takeIf(::isExecutable) ?: detect()
+    fun find(): String? = configured()?.takeIf(::isExecutable) ?: detect()?.path
 
     /**
      * The `claude` Tandem finds by itself, whatever the settings say: the `tandem.claudePath` system property (a test hook) when it is
-     * executable, then each `PATH` entry, then the CLI's usual install locations.
+     * executable, then each entry of the login shell's `PATH` ([ShellEnvironment], which an IDE started from the Dock or Finder does
+     * not have), then the CLI's usual [installLocations]. Blocks while the platform is still loading the shell's environment.
      */
-    fun detect(): String? = find(
-        override = System.getProperty("tandem.claudePath"),
-        path = System.getenv("PATH").orEmpty(),
-        home = System.getProperty("user.home"),
-        windows = SystemInfo.isWindows,
-    )
+    fun detect(
+        override: String? = System.getProperty("tandem.claudePath"),
+        environment: Map<String, String> = ShellEnvironment.get(),
+        home: String = System.getProperty("user.home"),
+        windows: Boolean = SystemInfo.isWindows,
+    ): Found? = find(override, environment["PATH"].orEmpty(), installLocations(home, windows), windows)
 
     /** The path saved in Settings | Tools | Tandem, trimmed, or null when none is. Reads only the settings. */
     fun configured(): String? = TandemSettings.getInstance().state.claudePath?.trim()?.ifEmpty { null }
@@ -45,30 +56,47 @@ internal object ClaudeBinary {
     /** Whether [path] is a file that can be run. A directory is not, though its execute bit (the right to search it) may be set. */
     fun isExecutable(path: String): Boolean = File(path).let { it.isFile && it.canExecute() }
 
-    /** [override] wins when it is executable; then each `PATH` entry; then the CLI's usual install locations under [home]. */
-    fun find(override: String?, path: String, home: String, windows: Boolean): String? {
-        override?.takeIf(::isExecutable)?.let { return it }
+    /**
+     * Where `claude` is usually installed, for a `PATH` that lacks it: the CLI's own installers (the native one's `~/.local/bin`, the
+     * older local install's `~/.claude/local`), then, outside Windows, Homebrew's bin on Apple silicon and on Intel (also npm's global
+     * bin for a Node from Homebrew or nodejs.org), then the global bins of npm with the user prefix its documentation suggests, of Bun
+     * and of Volta.
+     */
+    fun installLocations(home: String, windows: Boolean): List<String> {
+        val installers = listOf("$home/.local/bin", "$home/.claude/local")
+        if (windows) return installers
+        return installers + listOf("/opt/homebrew/bin", "/usr/local/bin", "$home/.npm-global/bin", "$home/.bun/bin", "$home/.volta/bin")
+    }
+
+    /** [override] wins when it is executable; then each `PATH` entry; then the [locations], in their order. */
+    fun find(override: String?, path: String, locations: List<String>, windows: Boolean): Found? {
+        override?.takeIf(::isExecutable)?.let { return Found(it, Where.OVERRIDE) }
         val names = if (windows) listOf("claude.exe", "claude.cmd", "claude") else listOf("claude")
-        val dirs = path.split(File.pathSeparator).filter { it.isNotBlank() } + listOf("$home/.local/bin", "$home/.claude/local")
+        val dirs = path.split(File.pathSeparator).filter { it.isNotBlank() }.map { it to Where.PATH } +
+            locations.map { it to Where.INSTALL_LOCATION }
         return dirs.asSequence()
-            .flatMap { dir -> names.asSequence().map { File(dir, it) } }
-            .firstOrNull { it.isFile && it.canExecute() }
-            ?.path
+            .flatMap { (dir, where) -> names.asSequence().map { File(dir, it) to where } }
+            .firstOrNull { (file, _) -> file.isFile && file.canExecute() }
+            ?.let { (file, where) -> Found(file.path, where) }
     }
 
     /**
-     * Runs `[binary] --version` in the environment a session's CLI gets ([cliEnvironment]) and says what came of it: the first line
-     * it printed, or how it failed. Returns within about [timeout] whatever the process does: its output is polled, never waited on,
-     * so not even a child that keeps the output open after the process has exited holds it up. Never throws for the process (an I/O
-     * failure is an answer too). The process, and whatever it started, is gone when this returns, also when the caller is cancelled.
-     * Call on `Dispatchers.IO`.
+     * Runs `[binary] --version` in the environment a session's CLI gets ([cliEnvironment] of the login shell's [environment]) and
+     * says what came of it: the first line it printed, or how it failed. Returns within about [timeout] whatever the process does: its
+     * output is polled, never waited on, so not even a child that keeps the output open after the process has exited holds it up.
+     * Never throws for the process (an I/O failure is an answer too). The process, and whatever it started, is gone when this returns,
+     * also when the caller is cancelled. Call on `Dispatchers.IO`.
      */
-    suspend fun version(binary: String, timeout: Duration = VERSION_TIMEOUT): String {
+    suspend fun version(
+        binary: String,
+        timeout: Duration = VERSION_TIMEOUT,
+        environment: Map<String, String> = ShellEnvironment.get(),
+    ): String {
         val process = try {
             ProcessBuilder(binary, "--version").redirectErrorStream(true).apply {
                 environment().run {
                     clear()
-                    putAll(cliEnvironment(System.getenv()))
+                    putAll(cliEnvironment(environment))
                 }
             }.start()
         } catch (e: IOException) {

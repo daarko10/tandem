@@ -124,9 +124,12 @@ The SDK copies the host environment (or `options.env` if given) and then:
 
 Never set or read API keys (hard rule 3); the CLI resolves auth itself.
 
-What Tandem passes (`cliEnvironment` in `session/CliEnvironment.kt`): the IDE's environment without the variables that
-tie a process to a parent Claude Code session or hosted environment, without `NODE_OPTIONS`, and with
-`CLAUDE_CODE_ENTRYPOINT=sdk-tandem`. Everything else passes through unchanged, notably `CLAUDE_CONFIG_DIR` (where the
+What Tandem passes (`cliEnvironment` in `session/CliEnvironment.kt`): the login shell's environment, as the platform
+loads it (`EnvironmentUtil.getEnvironmentMap()`, read off the EDT by `ide/ShellEnvironment.kt`), without the variables
+that tie a process to a parent Claude Code session or hosted environment, without `NODE_OPTIONS`, and with
+`CLAUDE_CODE_ENTRYPOINT=sdk-tandem`. The shell's, not the IDE's own: an IDE started from the macOS Dock or Finder has
+launchd's minimal `PATH`, and the CLI should see the `PATH`, proxies and tool locations it sees in a terminal. Where the
+platform did not load the shell's environment (the IDE was started from a terminal), it is the IDE's own. Everything else passes through unchanged, notably `CLAUDE_CONFIG_DIR` (where the
 transcripts are, section 11) and provider settings such as the Bedrock and Vertex variables. Removed:
 
 - `CLAUDECODE`, `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ATTENDED`:
@@ -150,8 +153,12 @@ an inherited id was not measured.
 - `stdio: ["pipe","pipe","pipe"]`, `windowsHide: true`. stderr is buffered as a tail for error messages only, not parsed.
 - Binary: the SDK uses `pathToClaudeCodeExecutable` or its own bundled native package
   (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>[-musl]/claude[.exe]`). If the path ends in `.js/.mjs/.ts/...` it is run with node.
-  Tandem has no bundled binary: resolve `claude` from a user setting, else `PATH` (`where claude` on Windows, also try
-  `~/.claude/local/claude`, `~/.local/bin/claude`) (inferred locations). Spawn the native binary directly.
+  Tandem has no bundled binary. It runs, in this order: the path in Settings | Tools | Tandem when it can run; each entry
+  of the login shell's `PATH` (section 1.2); then the usual install locations `~/.local/bin` (the native installer),
+  `~/.claude/local` (the older local install), and outside Windows `/opt/homebrew/bin` and `/usr/local/bin` (Homebrew,
+  and npm's global bin for a Node from Homebrew or nodejs.org), `~/.npm-global/bin`, `~/.bun/bin` and `~/.volta/bin`
+  (inferred locations). On Windows it looks for `claude.exe`, `claude.cmd`, then `claude`. The settings page shows what
+  it found and where. Spawn the native binary directly.
 
 ### 1.4 Startup sequence
 

@@ -72,7 +72,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     val manager: SessionManager = SessionManager(
         scope = scope,
         index = index,
-        launcher = DefaultProcessLauncher { System.getenv() + extraEnvironment },
+        // The login shell's environment, not the IDE's: launched from the Dock or Finder, the IDE has launchd's minimal PATH. The
+        // launcher runs on a background thread, where waiting for the platform to load it is fine.
+        launcher = DefaultProcessLauncher { ShellEnvironment.get() + extraEnvironment },
         binary = ClaudeBinary::find,
         workingDirectory = directory,
         maxLive = { TandemSettings.getInstance().maxLiveSessions() },

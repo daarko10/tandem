@@ -96,15 +96,15 @@ class TandemSettingsTest {
         val saved = script("saved", "exit 0")
         TandemSettings.getInstance().loadState(TandemSettings.State().apply { claudePath = saved })
         assertEquals(saved, ClaudeBinary.find())
-        assertEquals(System.getProperty("tandem.claudePath"), ClaudeBinary.detect())
+        assertEquals(System.getProperty("tandem.claudePath"), ClaudeBinary.detect()?.path)
         // One that cannot run: sessions use the detected one.
         TandemSettings.getInstance().state.claudePath = tempDir.get().resolve("missing").toString()
-        assertEquals(ClaudeBinary.detect(), ClaudeBinary.find())
+        assertEquals(ClaudeBinary.detect()?.path, ClaudeBinary.find())
         // Nor can a directory, though its execute bit is set: the page says it is not executable, and no session starts it.
         val directory = tempDir.get().resolve("a-directory").createDirectories().toString()
         TandemSettings.getInstance().state.claudePath = directory
         assertFalse(ClaudeBinary.isExecutable(directory))
-        assertEquals(ClaudeBinary.detect(), ClaudeBinary.find())
+        assertEquals(ClaudeBinary.detect()?.path, ClaudeBinary.find())
     }
 
     @Test
@@ -190,6 +190,8 @@ class TandemSettingsTest {
             suspend fun shown(): Boolean =
                 withContext(Dispatchers.EDT) { UIUtil.findComponentsOfType(page, JLabel::class.java).any { it.text == fake } }
             while (!shown()) delay(20)
+            // And where it was found: here the test hook, on a Mac whose IDE was started from the Dock the login shell's PATH, say.
+            while (Where.OVERRIDE.description !in labels(page)) delay(20)
         } finally {
             withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
