@@ -5,7 +5,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Path
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -216,5 +219,38 @@ class ClaudeBinaryTest {
         } finally {
             sleepers().forEach { it.destroyForcibly() } // no longer the script's child, so version leaves it alone
         }
+    }
+
+    /** A process that has exited and printed [output], which a test reads without running anything. */
+    private class ExitedProcess(output: ByteArray) : Process() {
+        val stdout: ByteArrayInputStream = ByteArrayInputStream(output)
+
+        override fun getOutputStream(): OutputStream = OutputStream.nullOutputStream()
+
+        override fun getInputStream(): InputStream = stdout
+
+        override fun getErrorStream(): InputStream = InputStream.nullInputStream()
+
+        override fun waitFor(): Int = 0
+
+        override fun exitValue(): Int = 0
+
+        override fun isAlive(): Boolean = false
+
+        override fun destroy() {}
+    }
+
+    @Test
+    fun `the output read keeps the first bytes up to the limit and reads past them`() = runBlocking {
+        val output = ByteArray(3 * 8192 + 5) { i -> ('a' + i % 26).code.toByte() }
+        val process = ExitedProcess(output)
+        val kept = ClaudeBinary.outputOf(process, limit = 10_000)
+        assertEquals(String(output, 0, 10_000, Charsets.UTF_8), kept)
+        assertEquals(0, process.stdout.available(), "everything was read, so the process never stalls on a full pipe")
+    }
+
+    @Test
+    fun `the output read keeps all of an output shorter than the limit`() = runBlocking {
+        assertEquals("2.1.301 (Claude Code)\n", ClaudeBinary.outputOf(ExitedProcess("2.1.301 (Claude Code)\n".toByteArray())))
     }
 }

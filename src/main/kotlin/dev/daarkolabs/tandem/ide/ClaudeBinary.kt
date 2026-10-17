@@ -105,8 +105,10 @@ internal object ClaudeBinary {
      * [environmentFor]'s `PATH`) and
      * says what came of it: the first line it printed, or how it failed. Returns within about [timeout] whatever the process does: its
      * output is polled, never waited on, so not even a child that keeps the output open after the process has exited holds it up.
-     * Never throws for the process (an I/O failure is an answer too). The process, and whatever it started, is gone when this returns,
-     * also when the caller is cancelled. Call on `Dispatchers.IO`.
+     * Never throws for the process (an I/O failure is an answer too). When this returns, also when the caller is cancelled, the process
+     * and its descendants at that moment are destroyed. Not a child that outlived it: once the process has exited, the system gives
+     * its orphans another parent (init, or a subreaper), so they are no longer its descendants and keep running. Call on
+     * `Dispatchers.IO`.
      */
     suspend fun version(
         binary: String,
@@ -144,10 +146,9 @@ internal object ClaudeBinary {
     /**
      * Everything [process] printed, once it has exited: read as it comes, never by a call that blocks, so that cancelling stops this at
      * once. Only what [java.io.InputStream.available] says is there is read: a read blocked on a pipe could be neither cancelled nor
-     * woken by closing the stream. Keeps the first [OUTPUT_LIMIT] bytes and reads on past them, so the process never stalls on a full
-     * pipe.
+     * woken by closing the stream. Keeps the first [limit] bytes and reads on past them, so the process never stalls on a full pipe.
      */
-    private suspend fun outputOf(process: Process): String {
+    internal suspend fun outputOf(process: Process, limit: Int = OUTPUT_LIMIT): String {
         val input = process.inputStream
         val kept = ByteArrayOutputStream()
         val buffer = ByteArray(8192)
@@ -157,7 +158,7 @@ internal object ClaudeBinary {
             when {
                 available > 0 -> {
                     val read = input.read(buffer, 0, minOf(available, buffer.size))
-                    if (read > 0) kept.write(buffer, 0, minOf(read, OUTPUT_LIMIT - kept.size()).coerceAtLeast(0))
+                    if (read > 0) kept.write(buffer, 0, minOf(read, limit - kept.size()).coerceAtLeast(0))
                     yield() // a process that keeps printing must not keep the timeout from ending this
                 }
                 exited -> return kept.toString(Charsets.UTF_8)
