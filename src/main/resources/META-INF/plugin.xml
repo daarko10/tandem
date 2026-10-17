@@ -28,6 +28,10 @@
                     icon="AllIcons.Toolwindows.ToolWindowMessages"
                     factoryClass="dev.daarkolabs.tandem.ui.TandemToolWindowFactory"/>
         <notificationGroup id="Tandem" displayType="BALLOON"/>
+        <applicationConfigurable parentId="tools"
+                                 id="dev.daarkolabs.tandem.settings"
+                                 displayName="Tandem"
+                                 instance="dev.daarkolabs.tandem.ide.TandemSettingsConfigurable"/>
         <!-- Development-only: does nothing unless -Dtandem.spike or -Dtandem.autoPrompt is set. -->
         <postStartupActivity implementation="dev.daarkolabs.tandem.ui.dev.DevStartupActivity"/>
     </extensions>

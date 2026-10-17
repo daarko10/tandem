@@ -266,6 +266,27 @@ class SessionIndexTest {
     }
 
     @Test
+    fun `the project path is read when the folders are listed, not when the index is made`(@TempDir dir: Path) {
+        // A path the file system has to resolve can be passed as a function, so that an index can be made on the EDT.
+        write(dir, "$first.jsonl", mtime = 2_000)
+        write(dir, "$second.jsonl", mtime = 1_000)
+        val cwds = mapOf(first to longProject, second to "/other")
+        val reads = AtomicInteger()
+        val index = SessionIndex(
+            { listOf(dir) },
+            {
+                reads.incrementAndGet()
+                longProject
+            },
+            meta = { stubMeta(it, cwds.getValue(it.name.removeSuffix(".jsonl"))) },
+        )
+        assertEquals(0, reads.get())
+        assertEquals(listOf(first), index.list().map { it.id }, "the cwd filter compares with the path read")
+        index.list()
+        assertEquals(1, reads.get(), "read once")
+    }
+
+    @Test
     fun `the cwd filter starts where the CLI cuts the key`(@TempDir dir: Path) {
         write(dir, "$first.jsonl", mtime = 1_000)
         val foreign = { file: Path -> stubMeta(file, cwd = "/other") }

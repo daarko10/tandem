@@ -1,11 +1,16 @@
 package dev.daarkolabs.tandem.ide
 
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.nio.file.Path
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
 
 class ClaudeBinaryTest {
     @TempDir
@@ -39,5 +44,34 @@ class ClaudeBinaryTest {
     fun `non-executable files are skipped`() {
         File(tmp.toFile(), "a").apply { mkdirs() }.resolve("claude").writeText("not executable")
         assertNull(ClaudeBinary.find(null, "$tmp/a", "$tmp/home", windows = false))
+    }
+
+    /** A shell script named [name] that runs [body]. */
+    private fun script(name: String, body: String): String =
+        File(tmp.toFile(), name).apply { writeText("#!/bin/sh\n$body\n"); setExecutable(true) }.path
+
+    @Test
+    fun `version is the first line the executable prints`() = runBlocking {
+        assertEquals("2.1.301 (Claude Code)", ClaudeBinary.version(script("claude", "echo; echo '2.1.301 (Claude Code)'; echo more")))
+        // It runs as a session's CLI does, with Tandem's entrypoint.
+        assertEquals("sdk-tandem", ClaudeBinary.version(script("env", "echo \"\$CLAUDE_CODE_ENTRYPOINT\"")))
+    }
+
+    @Test
+    fun `version says how a run failed`() = runBlocking {
+        assertEquals("Exited with code 3: unknown option", ClaudeBinary.version(script("bad", "echo 'unknown option' >&2; exit 3")))
+        assertEquals("It printed nothing", ClaudeBinary.version(script("quiet", "exit 0")))
+        val missing = ClaudeBinary.version("$tmp/missing")
+        assertTrue(missing.startsWith("Could not run it: "), missing)
+    }
+
+    @Test
+    fun `version stops an executable that does not answer`() = runBlocking {
+        // The script's child sleeps with an argument no other process has, so that it can be found.
+        val hanging = script("hanging", "sleep 41.25")
+        assertEquals("No answer within 500ms", ClaudeBinary.version(hanging, timeout = 500.milliseconds))
+        fun sleepers(): List<ProcessHandle> =
+            ProcessHandle.allProcesses().filter { it.isAlive && "41.25" in it.info().arguments().orElse(emptyArray()) }.toList()
+        withTimeout(10_000) { while (sleepers().isNotEmpty()) delay(20) }
     }
 }

@@ -724,6 +724,21 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `killAllNow kills every process at once`() = test {
+        val manager = manager()
+        val handles = List(2) { manager.create(NewSessionOptions()) }
+        // Both processes are up and known to their sessions.
+        while (handles.any { it.liveSession()?.process == null }) delay(20)
+        val processes = handles.map { it.liveSession()!!.process!! }
+
+        // What a JVM shutdown hook does: it cannot wait for coroutines, so the processes go while the manager's scope still runs.
+        manager.killAllNow()
+        while (processes.any { it.isAlive }) delay(20)
+        handles.forEach { it.status.await(SessionStatus.STOPPED) }
+        manager.killAllNow() // once more: nothing left to kill, and no failure
+    }
+
+    @Test
     fun `delete removes the transcript and its sidecar directory`() = test {
         seed(seeded)
         seed(other)

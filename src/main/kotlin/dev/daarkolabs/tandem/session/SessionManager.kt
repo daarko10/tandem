@@ -304,6 +304,14 @@ class SessionManager internal constructor(
         refreshLock.withLock { listing.value = withContext(Dispatchers.IO) { index.list() } }
     }
 
+    /**
+     * Kills each open session's process, and what that process started, at once ([ClaudeSession.killNow]): the last resort of a JVM
+     * shutdown hook, which cannot wait for coroutines to end them. Never waits; safe to call from any thread, and more than once.
+     */
+    fun killAllNow() {
+        mutableSessions.value.forEach { it.liveSession()?.killNow() }
+    }
+
     private fun handle(id: SessionId): SessionHandle? = mutableSessions.value.firstOrNull { it.id == id }
 
     /**

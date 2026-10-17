@@ -98,19 +98,32 @@ data class SessionSummary(
  * time changed, or after [invalidate]. When the file system fails on a folder or a transcript (an I/O error, a refused access), that
  * one is left out of the listing and a warning goes to the log; [list] does not throw for it. [list] and [invalidate] may be called
  * from several threads; [list] blocks on file I/O, so call it off the EDT.
+ *
+ * The project's path is read on first use, by [list], and never by the constructor: a caller that has to ask the file system for it
+ * (to resolve links) passes a function that does, and can make the index on the EDT. It is read once.
  */
 class SessionIndex(
     private val folders: () -> List<Path>,
-    private val projectPath: String,
+    projectPath: () -> String,
     private val meta: (Path) -> TranscriptMeta = TranscriptReader::meta,
 ) {
+    /** An index for a project path known up front. */
+    constructor(
+        folders: () -> List<Path>,
+        projectPath: String,
+        meta: (Path) -> TranscriptMeta = TranscriptReader::meta,
+    ) : this(folders, { projectPath }, meta)
+
     /** What [list] knows about a transcript, and the size and modification time it knew it at. */
     private class Entry(val size: Long, val modified: FileTime, val cwd: String?, val summary: SessionSummary)
 
     private val cache = ConcurrentHashMap<Path, Entry>()
 
+    /** The project's path, read from the constructor's function on first use. */
+    private val projectPath: String by lazy(projectPath)
+
     /** Whether other projects' sessions can be in the folders: the key is cut at the CLI's limit, see [TranscriptFolder.candidates]. */
-    private val sharesFolders: Boolean = TranscriptFolder.key(projectPath).length >= TranscriptFolder.MAX_KEY_LENGTH
+    private val sharesFolders: Boolean by lazy { TranscriptFolder.key(this.projectPath).length >= TranscriptFolder.MAX_KEY_LENGTH }
 
     /**
      * Every session in the folders, newest first, ties by id. A folder that does not exist has none: a project's first session
