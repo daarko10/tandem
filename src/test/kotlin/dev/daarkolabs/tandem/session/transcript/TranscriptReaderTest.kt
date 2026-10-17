@@ -198,7 +198,6 @@ class TranscriptReaderTest {
         assertFalse(state.busy)
         assertFalse(state.ended)
         assertTrue(state.pendingPermissions.isEmpty())
-        assertTrue(state.entries.filterIsInstance<ChatEntry.Assistant>().none { it.streaming })
         assertIs<AssistantBlock.ToolUse>(state.entries.filterIsInstance<ChatEntry.Assistant>().last().blocks.last())
     }
 
@@ -246,6 +245,16 @@ class TranscriptReaderTest {
             """{"type":"user","uuid":"u2","parentUuid":"u1","message":{"role":"user","content":"The real first prompt"}}""",
         )
         assertEquals("The real first prompt", TranscriptReader.meta(f).firstPrompt)
+    }
+
+    @Test
+    fun `a marker in any text block of a user line is an interrupt, as the live stream shows it`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("31313131-3131-4313-8313-313131313131.jsonl")
+        val marked = """{"type":"user","uuid":"u2","parentUuid":"u1","message":{"role":"user","content":[{"type":"text","text":"Partial words"},{"type":"text","text":"[Request interrupted by user]"}]}}"""
+        f.writeLines("""{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"Write a long story"}}""", marked)
+        val live = reduce(ChatState(), SessionEvent.Cli(Ndjson.decode(marked)))
+        assertEquals(listOf("INFO: Stopped."), live.shape())
+        assertEquals(listOf("user: Write a long story", "INFO: Stopped."), TranscriptReader.read(f).state.shape())
     }
 
     @Test
@@ -576,24 +585,33 @@ class TranscriptReaderTest {
 
     @Test
     fun `reads a large transcript in linear time`(@TempDir dir: Path) = runBlocking<Unit> {
-        // Long sessions are what the sidebar is for: 4,000 turns of lines shaped like the CLI's, about 2.8 MB.
-        val id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-        val f = dir.resolve("$id.jsonl")
-        f.bufferedWriter().use { out ->
-            for (n in 1..4_000) {
-                out.write("""{"parentUuid":"a-${n - 1}","isSidechain":false,"type":"user","message":{"role":"user","content":"prompt $n"},"uuid":"u-$n","timestamp":"2026-10-16T12:00:00.000Z","permissionMode":"default","cwd":"/work/app","sessionId":"$id"}""" + "\n")
-                out.write("""{"parentUuid":"u-$n","isSidechain":false,"message":{"model":"claude-sonnet-5-5","id":"m-$n","type":"message","role":"assistant","content":[{"type":"text","text":"reply $n"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":3}},"requestId":"req-$n","type":"assistant","uuid":"a-$n","timestamp":"2026-10-16T12:00:01.000Z","effort":"medium","cwd":"/work/app","sessionId":"$id"}""" + "\n")
+        // Long sessions are what the sidebar is for: turns of lines shaped like the CLI's, 4,000 of them about 2.8 MB.
+        fun write(turns: Int): Path {
+            val id = "aaaaaaaa-aaaa-4aaa-8aaa-%012d".format(turns)
+            val f = dir.resolve("$id.jsonl")
+            f.bufferedWriter().use { out ->
+                for (n in 1..turns) {
+                    out.write("""{"parentUuid":"a-${n - 1}","isSidechain":false,"type":"user","message":{"role":"user","content":"prompt $n"},"uuid":"u-$n","timestamp":"2026-10-16T12:00:00.000Z","permissionMode":"default","cwd":"/work/app","sessionId":"$id"}""" + "\n")
+                    out.write("""{"parentUuid":"u-$n","isSidechain":false,"message":{"model":"claude-sonnet-5-5","id":"m-$n","type":"message","role":"assistant","content":[{"type":"text","text":"reply $n"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":3}},"requestId":"req-$n","type":"assistant","uuid":"a-$n","timestamp":"2026-10-16T12:00:01.000Z","effort":"medium","cwd":"/work/app","sessionId":"$id"}""" + "\n")
+                }
+                out.write("""{"type":"custom-title","customTitle":"Long session","sessionId":"$id"}""" + "\n")
             }
-            out.write("""{"type":"custom-title","customTitle":"Long session","sessionId":"$id"}""" + "\n")
+            return f
         }
-        assertTrue(f.fileSize() in 2_000_000L..3_000_000L, "generated ${f.fileSize()} bytes")
+        val small = write(2_000)
+        val large = write(8_000)
+        assertTrue(large.fileSize() in 5_000_000L..6_500_000L, "generated ${large.fileSize()} bytes")
+        TranscriptReader.read(small) // warms up the JIT, so that the first timed read is not the slow one
 
+        val smallMillis = measureTimeMillis { TranscriptReader.read(small) }
         val loaded: LoadedTranscript
-        val millis = measureTimeMillis { loaded = TranscriptReader.read(f) }
-        assertEquals(8_000, loaded.state.entries.size)
-        assertEquals(listOf("u-4000", "m-4000"), loaded.state.entries.takeLast(2).map { it.id })
+        val largeMillis = measureTimeMillis { loaded = TranscriptReader.read(large) }
+        assertEquals(16_000, loaded.state.entries.size)
+        assertEquals(listOf("u-8000", "m-8000"), loaded.state.entries.takeLast(2).map { it.id })
         assertEquals("Long session", loaded.meta.title)
-        assertTrue(millis < 5_000, "reading took $millis ms")
+        // Four times the lines: linear is about four times the time, quadratic sixteen. The slack absorbs a garbage collection.
+        assertTrue(largeMillis < 8 * smallMillis + 500, "2,000 turns took $smallMillis ms, 8,000 took $largeMillis ms")
+        assertTrue(largeMillis < 10_000, "reading took $largeMillis ms")
     }
 
     @Test

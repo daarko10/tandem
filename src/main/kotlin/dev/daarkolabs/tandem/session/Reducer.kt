@@ -165,6 +165,12 @@ private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant): Ch
     return next.upsert(updated).let { if (message.aborted) it.finishStreaming() else it }
 }
 
+/** Whether [text], a text block of a user line, is the CLI's interrupt marker ("[Request interrupted by user]" and the like). */
+internal fun isInterruptMarker(text: String): Boolean = text.startsWith("[Request interrupted")
+
+/** Whether a text block of this user line is the interrupt marker, which [reduce] shows as "Stopped.". */
+internal fun CliMessage.User.isInterrupt(): Boolean = content.any { it is ContentBlock.Text && isInterruptMarker(it.text) }
+
 private fun reduceUser(state: ChatState, message: CliMessage.User): ChatState {
     if (message.isReplay) return state
     var next = state
@@ -172,8 +178,7 @@ private fun reduceUser(state: ChatState, message: CliMessage.User): ChatState {
         next = when (block) {
             is ContentBlock.ToolResult ->
                 next.append(ChatEntry.ToolResult("result-${block.toolUseId}", block.toolUseId, toolResultText(block), block.isError))
-            is ContentBlock.Text ->
-                if (block.text.startsWith("[Request interrupted")) next.notice(NoticeLevel.INFO, "Stopped.") else next
+            is ContentBlock.Text -> if (isInterruptMarker(block.text)) next.notice(NoticeLevel.INFO, "Stopped.") else next
             is ContentBlock.Thinking, is ContentBlock.ToolUse, is ContentBlock.Other -> next
         }
     }

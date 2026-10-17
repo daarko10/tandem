@@ -9,6 +9,7 @@ import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.isInterrupt
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
 import kotlinx.coroutines.Dispatchers
@@ -31,9 +32,6 @@ private val LOG = logger<TranscriptReader>()
 
 /** A first prompt that stands in for the title is cut to this many characters. */
 private const val PROMPT_TITLE_LENGTH: Int = 80
-
-/** How the CLI's interrupt marker starts. The reducer shows a user line that starts with it as "Stopped.". */
-private const val INTERRUPT_MARKER: String = "[Request interrupted"
 
 // The CLI wraps the user lines it writes itself in these tags and, like Tandem, tells them apart by how the text starts.
 private const val COMMAND_NAME_TAG: String = "<command-name>"
@@ -329,7 +327,8 @@ private class UserLine(val interrupted: Boolean, val typed: Typed?)
 
 private fun userLineOf(user: CliMessage.User): UserLine {
     val text = user.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
-    val interrupted = text.startsWith(INTERRUPT_MARKER)
+    // The reducer's own test, so that a loaded line shows as the live one did.
+    val interrupted = user.isInterrupt()
     return UserLine(interrupted, if (interrupted) null else typedText(text))
 }
 
