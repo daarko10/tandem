@@ -126,6 +126,10 @@ class ClaudeSession(
     )
     private val outbox = Channel<JsonObject>(Channel.UNLIMITED)
     private val nextId = AtomicLong()
+
+    /** Set once Tandem ends the process ([terminate], [killNow]): from then on, its output failing under a read is no failure. */
+    @Volatile
+    private var stopping = false
     private val _reportedSessionId = MutableStateFlow<String?>(null)
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
@@ -173,7 +177,7 @@ class ClaudeSession(
                 try { awaitCancellation() } finally { withContext(NonCancellable) { terminate(p) } }
             }
             val writer = launch { writeLoop(p) }
-            val stderr = launch { runInterruptible { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } } }
+            val stderr = launch { readOutput(p) { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } } }
             readLoop(p)
             val code = runInterruptible { p.waitFor() }
             stderr.join()
@@ -232,6 +236,7 @@ class ClaudeSession(
      */
     fun killNow() {
         val p = process ?: return
+        stopping = true
         val children = p.descendants().toList()
         p.destroyForcibly()
         children.forEach { it.destroyForcibly() }
@@ -253,7 +258,7 @@ class ClaudeSession(
     private suspend fun readLoop(p: Process) {
         val reader = p.inputStream.bufferedReader(Charsets.UTF_8)
         while (true) {
-            val line = runInterruptible { reader.readLine() } ?: return
+            val line = readOutput(p) { reader.readLine() } ?: return
             if (line.isBlank()) continue
             val message = Ndjson.decode(line)
             when (message) {
@@ -268,6 +273,18 @@ class ClaudeSession(
             if (message is CliMessage.SystemInit && message.sessionId.isNotEmpty()) _reportedSessionId.value = message.sessionId
         }
     }
+
+    /**
+     * [read], a blocking read of [p]'s stdout or stderr; null if the output failed because the process is over. The JDK can close
+     * the pipe of a process that exits under a waiting read: when Tandem ended the process, or it ended by itself, its output is
+     * over and the exit code tells the rest. A failure while it runs on, and Tandem did not end it, is one, and is thrown.
+     */
+    private suspend fun <T> readOutput(p: Process, read: () -> T): T? =
+        try {
+            runInterruptible(block = read)
+        } catch (e: IOException) {
+            if (stopping || !p.isAlive) null else throw e
+        }
 
     private suspend fun writeLoop(p: Process) {
         val writer = p.outputStream.bufferedWriter(Charsets.UTF_8)
@@ -291,6 +308,7 @@ class ClaudeSession(
     }
 
     private fun terminate(p: Process) {
+        stopping = true
         val children = p.descendants().toList()
         if (p.isAlive) {
             runCatching { p.outputStream.close() } // end of input: the CLI shuts down on its own

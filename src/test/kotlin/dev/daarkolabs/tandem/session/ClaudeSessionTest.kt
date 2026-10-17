@@ -2,6 +2,7 @@ package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,7 +20,12 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 import java.io.File
+import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Path
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -302,6 +308,88 @@ class ClaudeSessionTest {
         val argv = spawn["argv"]!!.jsonArray.map { it.jsonPrimitive.content }
         assertEquals(newSessionId, argv[argv.indexOf("--session-id") + 1])
         scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    /** A process's output that gives nothing until [cutOff], then fails every read as a pipe closed under it does. */
+    private class CutOffOutput : InputStream() {
+        private val cut = CountDownLatch(1)
+
+        fun cutOff() = cut.countDown()
+
+        override fun read(): Int {
+            cut.await()
+            throw IOException("Stream closed")
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int = read()
+    }
+
+    /**
+     * [real], whose output is [output] in place of its own. With [cutOnKill], ending it cuts that output off at once, as the JDK
+     * closes the pipe of a process that has exited while a read waits on it.
+     */
+    private class CutOffProcess(private val real: Process, val output: CutOffOutput, private val cutOnKill: Boolean) : Process() {
+        override fun getOutputStream() = real.outputStream
+        override fun getInputStream(): InputStream = output
+        override fun getErrorStream(): InputStream = real.errorStream
+        override fun waitFor(): Int = real.waitFor()
+        override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = real.waitFor(timeout, unit)
+        override fun exitValue(): Int = real.exitValue()
+        override fun isAlive(): Boolean = real.isAlive
+        override fun pid(): Long = real.pid()
+        override fun toHandle(): ProcessHandle = real.toHandle()
+        override fun descendants() = real.descendants()
+
+        override fun destroy() {
+            real.destroy()
+            if (cutOnKill) output.cutOff()
+        }
+
+        override fun destroyForcibly(): Process {
+            real.destroyForcibly()
+            if (cutOnKill) output.cutOff()
+            return this
+        }
+    }
+
+    /** A scope whose uncaught exceptions are kept in [uncaught], and a session in it whose process is [process]. */
+    private class CutOffSession(process: CutOffProcess, tmp: Path, sessionId: String) {
+        val uncaught: MutableList<Throwable> = Collections.synchronizedList(ArrayList())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> uncaught.add(e) })
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = sessionId), ProcessLauncher { _, _ -> process })
+    }
+
+    @Test
+    fun `a read cut off by killing the process ends the session quietly`() = runBlocking {
+        val output = CutOffOutput()
+        val process = CutOffProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start(), output, cutOnKill = true)
+        val run = CutOffSession(process, tmp, newSessionId)
+        run.session.start()
+        withTimeout(5_000) { while (run.session.process == null) delay(20) }
+
+        run.session.killNow() // as the JVM shutdown hook does: the read waiting on the output fails
+        withTimeout(10_000) { while (run.uncaught.isEmpty() && !run.session.state.value.ended) delay(20) }
+        assertEquals(emptyList(), run.uncaught.map { it.stackTraceToString().take(1500) }, "the process was killed: its output ending is no failure")
+        // The session ends as for any process that ends: with its exit code in the chat.
+        val notice = assertNotNull(run.session.state.value.entries.last() as? ChatEntry.Notice)
+        assertEquals("Claude Code exited with code 137.", notice.text)
+        run.scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `a read that fails while the process runs on is not swallowed`() = runBlocking {
+        val output = CutOffOutput()
+        val real = ProcessBuilder("sh", "-c", "cat > /dev/null").start()
+        val run = CutOffSession(CutOffProcess(real, output, cutOnKill = false), tmp, newSessionId)
+        run.session.start()
+        withTimeout(5_000) { while (run.session.process == null) delay(20) }
+
+        output.cutOff() // nobody stopped the process, which still runs
+        withTimeout(10_000) { while (run.uncaught.isEmpty()) delay(20) }
+        assertEquals("Stream closed", (run.uncaught.single() as IOException).message)
+        // The failure ends the session, and with it the process.
+        withTimeout(10_000) { while (real.isAlive) delay(20) }
+        run.scope.coroutineContext.job.cancelAndJoin()
     }
 
     private fun assertNull(value: Any?) = kotlin.test.assertNull(value)
