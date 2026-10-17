@@ -89,7 +89,7 @@ claude --output-format stream-json --verbose --input-format stream-json \
 | fork of `<id>`, until the fork's own transcript exists | `--resume <id> --fork-session --session-id <new uuid>` |
 
 Measured with CLI 2.1.301, sending only `initialize` (conditions in Sources item 2; these facts also sit on
-`SessionManager.configFor`):
+`SessionSpawner.configFor`):
 - `--session-id X` without a prompt writes no transcript, not even the project folder: the CLI writes `X.jsonl` with
   the session's first prompt.
 - `--resume X` before that fails: exit code 1, a `result` with subtype `error_during_execution`, and on stderr
@@ -603,6 +603,13 @@ Success only: `result`, `ttft_ms`, `ttft_stream_ms`, `time_to_request_ms`, `stru
 Error only: `errors: string[]`, `startup_failure_reason?`.
 The fixture also has `api_error_status`, `subagent_stats`, `safety_stops`, `turn_start_resume_kind`, many `process_*` timing fields: ignore.
 
+API error (fixture `invalid-model`, 2.1.302, run with `--model claude-nonexistent-0`): no stream frames; the CLI writes an
+`assistant` line itself, `message.model:"<synthetic>"`, with `error:"model_not_found"`, `is_api_error_message:true`,
+`api_error_status:404` and the error text as its one text block, then
+`result{subtype:"success", is_error:true, terminal_reason:"api_error", stop_reason:"stop_sequence", result:<that text>}`.
+The subtype says nothing here: Tandem names the failure by `terminal_reason`, and the rejected model by the model picked
+or reported, never `<synthetic>`.
+
 Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session_state_changed{state:"idle"}` when available.
 
 ---
@@ -617,7 +624,7 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 | Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, and no `system/init` reports it before the fork's first prompt (only undocumented lines do, section 1.1) |
 | Resume at a point | `--resume <id> --resume-session-at <message uuid>` (not used) |
 | Switch model mid-session | `control_request{set_model, model}`; next turn's `system/init.model` must equal it. `--model` on resume also works |
-| Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`). Tandem shows the new mode at once; an `error` response to that request (envelope 4.1; no rejection has been recorded) puts back the mode shown before it, unless a later pick replaced it, with an error notice naming the rejected mode |
+| Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`). Tandem shows the new mode at once; an `error` response to that request (envelope 4.1; fixture `permission-mode-rejected`, 2.1.302: `bypassPermissions` to a process not launched with `--dangerously-skip-permissions` gets `{"subtype":"error","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions","error_code":"bypass_not_launched"}`, and the session goes on) puts back the mode shown before it, unless a later pick replaced it, with an error notice naming the rejected mode |
 | Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4); Tandem picks effort only when a session is created |
 | Rename | a live process that has reported its first `system/init`: `control_request{rename_session}` (section 4.4); otherwise append a `custom-title` line (section 11.5) if the transcript exists. A live process that has not reported it yet also gets `rename_session` with that init, and so does the next process of a session renamed without a transcript or while an earlier title still waited for an init; only the last title is sent |
 | Delete | remove `<id>.jsonl` and `<id>/` (section 11.5) |
@@ -639,7 +646,7 @@ Resume-id mismatch: the `session_id` of a process's first `system/init` must be 
 (`--session-id`, `--resume`, or a fork's own id). If it is another id, Tandem never relabels the session: the process and
 its chat move to a new row for the reported id with the warning "Resumed as a new session <id>", and the original row
 goes back to its chat from before that start and shows stopped. If the reported id is already open in another row, the
-process is stopped instead (`SessionManager.takeOver`).
+process is stopped instead (`SessionSpawner.takeOver`).
 
 Fork title: the CLI writes no "(fork)" title. A fork's transcript only inherits the original's `custom-title` and
 `ai-title` lines (fixture `fork`, and the measurement above). Tandem shows "<original title> (fork)" at once and sends
@@ -653,6 +660,7 @@ Fork title: the CLI writes no "(fork)" title. A fork's transcript only inherits 
 |---|---|
 | Version gating | Use `init.capabilities` first, `claude_code_version` second. `pending_permission_requests` on initialize from 2.1.268; `interrupt_receipt_v1` for `still_queued`; `scope` on refusal fallback is new (absent = `session`). Refuse to start below a minimum tested version and say so. |
 | Interrupt | Fixture `interrupt`: the receipt `{still_queued:[]}` arrives, then the partial `assistant`, a synthetic `user` text `[Request interrupted by user]`, the remaining stream frames, and `result{subtype:"error_during_execution", is_error:true, terminal_reason:"aborted_streaming", stop_reason:null}`. Treat that result as "stopped", not as a failure. Recorded again with 2.1.301 as `history-interrupt`, with its transcript (section 11): the same order; closing stdin afterwards ended the process with exit code 1. |
+| API error | Fixture `invalid-model`: a synthetic `assistant` line (`model:"<synthetic>"`, `error:"model_not_found"`, `api_error_status:404`), then `result{subtype:"success", is_error:true, terminal_reason:"api_error"}` (section 7). A failed turn, named by `terminal_reason`, not by the subtype. |
 | Undocumented stdout types | See section 10. The SDK passes them through untouched. |
 | Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init`. Do not assume `init` is first. |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
