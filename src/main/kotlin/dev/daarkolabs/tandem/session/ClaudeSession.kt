@@ -132,6 +132,11 @@ class ClaudeSession(
     /** Set once Tandem ends the process ([terminate], [killNow]): from then on, its output failing under a read is no failure. */
     @Volatile
     private var stopping = false
+
+    /** Set by [killNow]: Tandem ended the process at once, as when the IDE exits, so the turn in progress did not fail. */
+    @Volatile
+    private var killed = false
+
     private val _reportedSessionId = MutableStateFlow<String?>(null)
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
@@ -244,6 +249,7 @@ class ClaudeSession(
     fun killNow() {
         val p = process ?: return
         stopping = true
+        killed = true
         val children = p.descendants().toList()
         p.destroyForcibly()
         children.forEach { it.destroyForcibly() }
@@ -313,10 +319,16 @@ class ClaudeSession(
         }
     }
 
+    /** How the process ended with [code]; ended by the host when Tandem killed it at once ([killNow]), as when the IDE exits. */
     private fun exitEvent(code: Int): SessionEvent.Ended {
-        if (code == 0) return SessionEvent.Ended("The claude CLI exited.", isError = false)
+        val byHost = killed
+        if (code == 0) return SessionEvent.Ended("The claude CLI exited.", isError = false, endedByHost = byHost)
         val tail = stderrTail.text()
-        return SessionEvent.Ended("The claude CLI exited with code $code." + if (tail.isEmpty()) "" else "\n$tail", isError = true)
+        return SessionEvent.Ended(
+            "The claude CLI exited with code $code." + if (tail.isEmpty()) "" else "\n$tail",
+            isError = true,
+            endedByHost = byHost,
+        )
     }
 
     private fun terminate(p: Process) {

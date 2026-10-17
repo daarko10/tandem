@@ -157,10 +157,27 @@ class ReducerTest {
         val crashed = reduce(reduce(one, SessionEvent.UserSent("u2", "more")), SessionEvent.Ended("exited with code 137", isError = true))
         assertEquals(2, crashed.turnsEnded)
         assertEquals(TurnEnd.FAILED, crashed.lastTurnEnd)
-        // A clean exit during a turn ends it too, without its result: it failed.
-        val exited = reduce(reduce(one, SessionEvent.UserSent("u2", "more")), SessionEvent.Ended("exited", isError = false))
+        // A clean exit during a turn ends it too, without its result: it failed, and the chat says so as an error.
+        val exited = reduce(reduce(one, SessionEvent.UserSent("u2", "more")), SessionEvent.Ended("The claude CLI exited.", isError = false))
         assertEquals(2, exited.turnsEnded)
         assertEquals(TurnEnd.FAILED, exited.lastTurnEnd)
+        val said = exited.entries.last() as ChatEntry.Notice
+        assertEquals(NoticeLevel.ERROR, said.level)
+        assertEquals("The claude CLI exited. The turn ended without its result.", said.text)
+        // A crash says so before the CLI's last words.
+        val crashedSaid = reduce(
+            reduce(one, SessionEvent.UserSent("u2", "more")),
+            SessionEvent.Ended("The claude CLI exited with code 3.\nboom", isError = true),
+        ).entries.last() as ChatEntry.Notice
+        assertEquals("The claude CLI exited with code 3. The turn ended without its result.\nboom", crashedSaid.text)
+        // A process Tandem itself ended (killed as the IDE exits) ends no turn: nobody is to be told of one.
+        val killed = reduce(
+            reduce(one, SessionEvent.UserSent("u2", "more")),
+            SessionEvent.Ended("The claude CLI exited with code 137.", isError = true, endedByHost = true),
+        )
+        assertEquals(1, killed.turnsEnded)
+        assertEquals(TurnEnd.COMPLETED, killed.lastTurnEnd)
+        assertEquals("The claude CLI exited with code 137.", (killed.entries.last() as ChatEntry.Notice).text)
         // Between turns, an exit ends no turn, error or not.
         assertEquals(1, reduce(one, SessionEvent.Ended("exited with code 1", isError = true)).turnsEnded)
         assertEquals(1, reduce(one, SessionEvent.Ended("exited", isError = false)).turnsEnded)

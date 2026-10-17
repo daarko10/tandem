@@ -39,8 +39,11 @@ sealed interface SessionEvent {
     /** Something Tandem itself must tell the user, such as a pick it could not pass on to the CLI. Shown as a notice of [level]. */
     data class HostNotice(val level: NoticeLevel, val text: String) : SessionEvent
 
-    /** The CLI process could not be started or exited. [detail] is shown to the user. */
-    data class Ended(val detail: String, val isError: Boolean) : SessionEvent
+    /**
+     * The CLI process could not be started or exited. [detail] is shown to the user. [endedByHost]: Tandem itself ended it at once,
+     * as when the IDE exits, so a turn in progress did not fail.
+     */
+    data class Ended(val detail: String, val isError: Boolean, val endedByHost: Boolean = false) : SessionEvent
 }
 
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
@@ -58,9 +61,17 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
     is SessionEvent.HostNotice -> state.notice(event.level, event.text)
     is SessionEvent.Ended -> {
-        // A process that exits during a turn ends that turn without its result: a failure, whatever its exit code. One that exits
-        // between turns ends none; a Stop, close or eviction lets the process go before it ends, so this never sees it.
-        val failedTurn = state.busy
+        // A process that exits during a turn ends that turn without its result: a failure, whatever its exit code, and the chat
+        // says so as an error. One that exits between turns ends none, nor one Tandem itself ended at once (the IDE exits); a Stop,
+        // close or eviction lets the process go before it ends, so this never sees it.
+        val failedTurn = state.busy && !event.endedByHost
+        val said = if (failedTurn) {
+            val first = event.detail.substringBefore('\n')
+            val rest = event.detail.substringAfter('\n', missingDelimiterValue = "")
+            "$first The turn ended without its result." + if (rest.isEmpty()) "" else "\n$rest"
+        } else {
+            event.detail
+        }
         state.finishStreaming().copy(
             busy = false,
             ended = true,
@@ -69,7 +80,7 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
             lastTurnEnd = if (failedTurn) TurnEnd.FAILED else state.lastTurnEnd,
             turnsEnded = if (failedTurn) state.turnsEnded + 1 else state.turnsEnded,
             turnInterrupted = false,
-        ).notice(if (event.isError) NoticeLevel.ERROR else NoticeLevel.INFO, event.detail)
+        ).notice(if (event.isError || failedTurn) NoticeLevel.ERROR else NoticeLevel.INFO, said)
     }
 }
 

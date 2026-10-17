@@ -377,6 +377,24 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `a process killed at once during a turn ends no turn`() = runBlocking {
+        // As the JVM shutdown hook kills it when the IDE exits: the turn in progress is not one that failed.
+        val output = CutOffOutput()
+        val process = CutOffProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start(), output, cutOnKill = true)
+        val run = CutOffSession(process, tmp, newSessionId)
+        run.session.start()
+        withTimeout(5_000) { while (run.session.process == null) delay(20) }
+        run.session.sendUserMessage("Count to a hundred")
+        withTimeout(5_000) { run.session.state.first { it.busy } }
+
+        run.session.killNow()
+        val ended = withTimeout(10_000) { run.session.state.first { it.ended } }
+        assertEquals(0, ended.turnsEnded)
+        assertNull(ended.lastTurnEnd)
+        run.scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
     fun `a read that fails while the process runs on is not swallowed`() = runBlocking {
         val output = CutOffOutput()
         val real = ProcessBuilder("sh", "-c", "cat > /dev/null").start()

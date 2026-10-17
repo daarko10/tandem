@@ -3,6 +3,7 @@ package dev.daarkolabs.tandem.ide
 import com.intellij.notification.NotificationAction
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
@@ -124,7 +125,9 @@ class SessionNotifier(private val project: Project, private val manager: Session
     private suspend fun notify(handle: SessionHandle, due: () -> Event?): Boolean {
         beforePosting()
         val posted = withContext(Dispatchers.EDT) {
-            if (project.isDisposed || (manager.selected.value == handle.id && toolWindowVisible())) return@withContext null
+            // Nothing while the IDE exits or the project closes: the processes it kills then end no turn worth telling.
+            if (project.isDisposed || ApplicationManager.getApplication().isExitInProgress) return@withContext null
+            if (manager.selected.value == handle.id && toolWindowVisible()) return@withContext null
             val event = due() ?: return@withContext null
             NotificationGroupManager.getInstance().getNotificationGroup(GROUP_ID)
                 // Notifications render HTML; a title is the user's or the model's text, so it is escaped.
