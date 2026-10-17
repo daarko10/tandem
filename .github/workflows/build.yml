@@ -14,6 +14,12 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
     steps:
+      # The platform tests need room for the IDE, its caches and their VFS: a full runner fails them with "No space left on device".
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v2.0.0
+        with:
+          tool-cache: false
+          large-packages: false
       - uses: actions/checkout@v7
       # The recording scripts' own tests: plain Python, no Gradle and no real claude.
       - name: Script tests
@@ -39,6 +45,12 @@ jobs:
             | grep -E '^e: |FAILED|What went wrong|> ' \
             | sort -u | head -n 40 \
             | while IFS= read -r line; do echo "::error title=Build::${line}"; done
+      - name: Report disk space
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          df -h
+          du -sh ~/.gradle .intellijPlatform build 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         with:
           name: plugin-distribution
