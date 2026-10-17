@@ -95,6 +95,8 @@ kover {
         // Measures the test task only: the IDE Starter tests run the plugin in another JVM, and reports must never start them.
         instrumentation {
             disabledForTestTasks.add("integrationTest")
+            // Only Tandem's classes: by default the agent instruments every class the test JVM loads, the whole IntelliJ Platform.
+            includedClasses.add("dev.daarkolabs.tandem.*")
         }
     }
     reports {
