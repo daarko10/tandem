@@ -111,21 +111,30 @@ private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (
         when {
             message.isSuccess -> answered.withModels(message.payload)
             change == null -> answered.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
-            else -> answered.rejectModeChange(change, message.error)
+            else -> state.rejectModeChange(message.requestId, change, message.error)
         }
     }
     is CliMessage.KeepAlive, is CliMessage.Unknown -> state
 }
 
 /**
- * The CLI rejected [change]: the mode shown before it comes back, unless another pick replaced it meanwhile, and the chat says which
- * switch was rejected.
+ * The CLI rejected [change], request [requestId], and stayed in the mode it was in before it. The CLI takes the requests in the
+ * order they were sent, so the next change still waiting now starts from that mode. If no later change waits, the mode shown
+ * before [change] comes back, unless something else (the CLI's own report) replaced it meanwhile. The chat says which switch was
+ * rejected.
  */
-private fun ChatState.rejectModeChange(change: PermissionModeChange, error: String?): ChatState {
-    val mode = if (permissionMode == change.requested) change.previous else permissionMode
+private fun ChatState.rejectModeChange(requestId: String, change: PermissionModeChange, error: String?): ChatState {
+    // In the order the requests were sent: the reducer adds each to the end of this map.
+    val ids = permissionModeChanges.keys.toList()
+    val next = ids.getOrNull(ids.indexOf(requestId) + 1)
+    var pending = permissionModeChanges - requestId
+    if (next != null) pending = pending + (next to pending.getValue(next).copy(previous = change.previous))
+    val mode = if (next == null && permissionMode == change.requested) change.previous else permissionMode
     val reason = error?.let { " ($it)" }.orEmpty()
-    val now = mode?.let { "; it stays ${it.wire}." } ?: "."
-    return copy(permissionMode = mode).notice(NoticeLevel.ERROR, "The CLI rejected the switch to permission mode ${change.requested.wire}$reason$now")
+    // What the CLI is in now: with a later change still waiting, that change shows, but the CLI stays where it was.
+    val now = (if (next == null) mode else change.previous)?.let { "; it stays ${it.wire}." } ?: "."
+    return copy(permissionMode = mode, permissionModeChanges = pending)
+        .notice(NoticeLevel.ERROR, "The CLI rejected the switch to permission mode ${change.requested.wire}$reason$now")
 }
 
 private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant): ChatState {

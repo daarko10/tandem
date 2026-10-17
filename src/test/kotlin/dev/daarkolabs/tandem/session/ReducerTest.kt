@@ -292,6 +292,32 @@ class ReducerTest {
     }
 
     @Test
+    fun `two picks both rejected go back to the mode the CLI kept, in either order`() {
+        for (order in listOf(listOf("tandem-1", "tandem-2"), listOf("tandem-2", "tandem-1"))) {
+            var state = ChatState(permissionMode = PermissionMode.DEFAULT)
+            state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "tandem-1"))
+            state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.ACCEPT_EDITS, "tandem-2"))
+            for (id in order) state = reduce(state, rejection(id, "busy"))
+            assertEquals(PermissionMode.DEFAULT, state.permissionMode, "rejected in the order $order")
+            assertEquals(emptyMap(), state.permissionModeChanges)
+        }
+    }
+
+    @Test
+    fun `an early rejection keeps a later pick still waiting for its answer, and that one's rejection goes back to the kept mode`() {
+        var state = ChatState(permissionMode = PermissionMode.DEFAULT)
+        state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "tandem-1"))
+        state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.ACCEPT_EDITS, "tandem-2"))
+        state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "tandem-3"))
+        state = reduce(state, rejection("tandem-1", "busy"))
+        assertEquals(PermissionMode.PLAN, state.permissionMode, "tandem-3 still waits")
+        assertTrue((state.entries.last() as ChatEntry.Notice).text.endsWith("; it stays default."), "what the CLI is in")
+        state = reduce(state, cli("""{"type":"control_response","response":{"subtype":"success","request_id":"tandem-2","response":{"mode":"acceptEdits"}}}"""))
+        state = reduce(state, rejection("tandem-3", "busy"))
+        assertEquals(PermissionMode.ACCEPT_EDITS, state.permissionMode, "the CLI took tandem-2 and kept it")
+    }
+
+    @Test
     fun `a rejected request that is no mode change keeps the general notice`() {
         val state = reduce(ChatState(permissionMode = PermissionMode.PLAN), rejection("tandem-9", "Unknown subtype"))
         assertEquals(PermissionMode.PLAN, state.permissionMode)
