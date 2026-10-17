@@ -169,8 +169,10 @@ internal fun <T> Picker(
 
     LaunchedEffect(shown) { list = list.settled() }
     // Jewel's open list keeps its highlight where it was when what the picker shows changes under it (the CLI reports another mode,
-    // the models arrive): move it to the entry the picker shows now.
-    val listState = rememberSelectableLazyListState(list.position(keys, shown).coerceIn(0, (keys.size - 1).coerceAtLeast(0)))
+    // the models arrive): move it to the entry the picker shows now. The argument is the list's first visible item, not its
+    // selection: the entry shown, at the top, as ListComboBox's own default state has it (rememberSelectableLazyListState(
+    // selectedIndex.takeIfInBoundsOrZero(items.indices)) in Jewel 261). It is read once, when the state is made.
+    val listState = rememberSelectableLazyListState(shown.coerceIn(0, (keys.size - 1).coerceAtLeast(0)))
     LaunchedEffect(keys, shown) {
         if (!list.open) return@LaunchedEffect
         val key = list.highlighted(keys, shown) ?: return@LaunchedEffect
