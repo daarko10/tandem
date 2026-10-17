@@ -11,7 +11,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -73,9 +72,9 @@ class SessionHandle internal constructor(
     internal val spawnLock: Mutex = Mutex()
 
     /**
-     * Guards [attachment], [mirror], [queued], [closed], [renameOnInit] and [replaced], and makes each change of the chat
-     * ([publishLocked]) one step with them: a pick or a prompt is either in the state a process starts from, or goes to that
-     * process. Only held for steps that never wait.
+     * Guards [attachment], [mirror], [queued], [closed], [renameOnInit], [replaced] and what the [title] is worked out from, and
+     * makes each change of the chat ([publishLocked]) one step with them: a pick or a prompt is either in the state a process
+     * starts from, or goes to that process. Only held for steps that never wait.
      */
     private val lock = Any()
 
@@ -120,7 +119,16 @@ class SessionHandle internal constructor(
     private val mutableAttention = MutableStateFlow(false)
 
     /** A title set in Tandem ([rename], or a fork's) that the index does not list yet: it wins until the index lists the same. */
-    private val titleOverride = MutableStateFlow(pendingTitle)
+    private var titleOverride: String? = pendingTitle
+
+    /** The index's title for this session, from its last listing. */
+    private var indexedTitle: String? = listing.value.titleOf(id)
+
+    /** The chat's first prompt, and its title: worked out again only when that prompt changes, not on every streamed word. */
+    private var firstUser: ChatEntry.User? = initialState.firstUser()
+    private var promptTitle: String? = firstUser?.asTitle()
+
+    private val mutableTitle = MutableStateFlow(titleOverride ?: indexedTitle ?: promptTitle ?: id)
 
     /** The chat: the running process's state, else what the last process left (settled once it was stopped), else the loaded history. */
     val state: StateFlow<ChatState> = mutableState.asStateFlow()
@@ -132,22 +140,26 @@ class SessionHandle internal constructor(
     /**
      * A title set in Tandem until the index lists it ([rename]), else the index's title for this session, else its first prompt
      * (the first line, cut to 80 characters), else the [id].
+     *
+     * Worked out in the same step as the chat changes, ahead of [status], which follows the chat a step later: whoever sees a
+     * session ask for permission after its first prompt also sees that prompt's title, never the [id] it had before.
      */
-    val title: StateFlow<String> =
-        combine(
-            titleOverride,
-            listing.map { it.titleOf(id) },
-            // The first prompt rarely changes, so its title is worked out only when it does, not on every streamed word.
-            mutableState.map { it.firstUser() }.distinctUntilChanged().map { it?.asTitle() },
-        ) { override, indexed, prompt ->
-            // The index lists the title set in Tandem: its title counts again, so that a later rename elsewhere shows. Cleared here,
-            // with the listing this title is worked out from, so that the title never goes back to the index's older one meanwhile.
-            if (override != null && override == indexed) titleOverride.compareAndSet(override, null)
-            override ?: indexed ?: prompt ?: id
-        }.stateIn(scope, SharingStarted.Eagerly, pendingTitle ?: listing.value.titleOf(id) ?: initialState.firstPrompt() ?: id)
+    val title: StateFlow<String> = mutableTitle.asStateFlow()
 
     /** Whether the user should look at this session: it asked for permission or finished a turn while another one was selected. */
     val attention: StateFlow<Boolean> = mutableAttention.asStateFlow()
+
+    init {
+        // The index's listing comes from the manager's scope; its title counts from the next step on.
+        scope.launch {
+            listing.map { it.titleOf(id) }.distinctUntilChanged().collect { indexed ->
+                synchronized(lock) {
+                    indexedTitle = indexed
+                    updateTitleLocked()
+                }
+            }
+        }
+    }
 
     /** When the session was last selected, sent a prompt or changed its [status], by the manager's clock. */
     @Volatile
@@ -243,8 +255,9 @@ class SessionHandle internal constructor(
      * without writing it (docs/protocol.md 4.4).
      */
     internal fun rename(title: String): Boolean = synchronized(lock) {
-        replaced = titleOverride.value to renameOnInit
-        titleOverride.value = title
+        replaced = titleOverride to renameOnInit
+        titleOverride = title
+        updateTitleLocked()
         val live = liveLocked() ?: return false
         if (live.reportedSessionId.value == null) {
             renameOnInit = title
@@ -261,9 +274,10 @@ class SessionHandle internal constructor(
     internal fun revertRename(title: String) {
         synchronized(lock) {
             val (override, onInit) = replaced ?: return
-            if (titleOverride.value != title) return
+            if (titleOverride != title) return
             replaced = null
-            titleOverride.value = override
+            titleOverride = override
+            updateTitleLocked()
             if (renameOnInit == title) renameOnInit = onInit
         }
     }
@@ -406,6 +420,16 @@ class SessionHandle internal constructor(
         publishLocked(if (settle) last.settled() else last, attached = false)
     }
 
+    /**
+     * Works the [title] out again. The index lists the title set in Tandem: its title counts again, so that a later rename elsewhere
+     * shows. Cleared here, with the listing this title is worked out from, so that the title never goes back to the index's older
+     * one meanwhile.
+     */
+    private fun updateTitleLocked() {
+        if (titleOverride != null && titleOverride == indexedTitle) titleOverride = null
+        mutableTitle.value = titleOverride ?: indexedTitle ?: promptTitle ?: id
+    }
+
     /** Stops following the attached process, which runs on until someone ends it. */
     private fun detachLocked() {
         attachment = null
@@ -413,8 +437,14 @@ class SessionHandle internal constructor(
         mirror = null
     }
 
-    /** The chat, and whether a process is [attached], as one step: see [snapshot]. */
+    /** The chat, and whether a process is [attached], as one step: see [snapshot]. The [title] follows a new first prompt first. */
     private fun publishLocked(chat: ChatState, attached: Boolean) {
+        val user = chat.firstUser()
+        if (user != firstUser) {
+            firstUser = user
+            promptTitle = user?.asTitle()
+            updateTitleLocked()
+        }
         mutableState.value = chat
         snapshot.value = Snapshot(chat, attached)
     }
