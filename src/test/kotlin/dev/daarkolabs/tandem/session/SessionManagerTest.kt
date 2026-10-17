@@ -1088,7 +1088,7 @@ class SessionManagerTest {
         // Created in one go: their starts make room one after the other, so the third stops an idle one first.
         val created = List(3) { manager.create(NewSessionOptions()) }
         awaitLog { spawns().size == 3 }
-        manager.sessions.first { sessions -> sessions.count { it.status.value == SessionStatus.STOPPED } == 1 }
+        awaitLog { created.count { it.status.value == SessionStatus.STOPPED } == 1 } // polled: a status change alone re-checks it
         val deadline = System.nanoTime() + 10_000_000_000L
         while (ownFakeProcesses().size > 2 && System.nanoTime() < deadline) delay(20)
         assertEquals(2, ownFakeProcesses().size)
