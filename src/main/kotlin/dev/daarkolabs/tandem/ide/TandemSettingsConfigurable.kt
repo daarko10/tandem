@@ -10,8 +10,8 @@ import com.intellij.openapi.options.BoundConfigurable
 import com.intellij.openapi.ui.DialogPanel
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.intellij.ui.dsl.builder.AlignX
+import com.intellij.ui.dsl.builder.MutableProperty
 import com.intellij.ui.dsl.builder.bindIntText
-import com.intellij.ui.dsl.builder.bindText
 import com.intellij.ui.dsl.builder.panel
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -24,11 +24,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.swing.JLabel
 
+/** The status line's text when the saved path cannot run. */
+private const val NOT_EXECUTABLE_TEXT: String = "Configured path is not executable"
+
 /**
  * Settings | Tools | Tandem: the `claude` to run, and how many sessions may run a process at once ([TandemSettings]).
  *
- * The page never blocks the EDT: it shows the executable [ClaudeBinary.find] finds once that has run on a background thread
- * ("Detecting…" until then), and "Test" runs `<path> --version` in the background as well. That work ends when the page closes.
+ * The page never blocks the EDT. Once [ClaudeBinary.detect] has run on a background thread, it shows the executable Tandem finds by
+ * itself ("Detecting…" until then), and says in its status line when the saved path cannot run; both are checked again after Apply.
+ * "Test" runs `<path> --version`, or the detected executable's when the field is empty, in the background as well, and shows the
+ * answer in the status line. That work ends when the page closes.
  */
 class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
     /** The open page's background work, cancelled when the page closes ([disposeUIResources]). */
@@ -37,12 +42,14 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
     /** The last "Test" run; a new one replaces it, so that an older answer never shows over a newer one. */
     private var test: Job? = null
 
+    /** The open page's labels for the detected executable and for the status line. */
+    private var detected: JLabel? = null
+    private var status: JLabel? = null
+
     override fun createPanel(): DialogPanel {
         val settings = TandemSettings.getInstance()
-        val scope = newPageScope()
-        lateinit var detected: JLabel
+        newPageScope()
         lateinit var path: TextFieldWithBrowseButton
-        lateinit var outcome: JLabel
         val page = panel {
             row("Detected:") {
                 detected = label("Detecting…").component
@@ -51,52 +58,82 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
                 path = textFieldWithBrowseButton(FileChooserDescriptorFactory.singleFile().withTitle("Select Claude Executable"))
                     .align(AlignX.FILL)
                     .resizableColumn()
-                    .bindText({ settings.state.claudePath.orEmpty() }, { settings.state.claudePath = it.trim().ifEmpty { null } })
+                    // Trimmed both ways, so that a path pasted with spaces around it is not still "modified" once applied.
+                    .bind(
+                        { it.text.trim() },
+                        { field, text -> field.text = text },
+                        MutableProperty({ settings.state.claudePath.orEmpty() }, { settings.state.claudePath = it.ifEmpty { null } }),
+                    )
                     .component
-                button("Test") { runTest(scope, path.text, outcome) }
+                button("Test") { runTest(path.text) }
             }.rowComment("Leave empty to use the detected one.")
             row("") {
-                outcome = label("").component
+                status = label("").component
             }
             row("Max live sessions:") {
                 intTextField(TandemSettings.MAX_LIVE_SESSIONS)
                     .bindIntText({ settings.state.maxLiveSessions }, { settings.state.maxLiveSessions = it })
             }.rowComment("Beyond this, opening a session stops the process of the least recently used idle one.")
         }
-        scope.launch {
-            val found = withContext(Dispatchers.IO) { ClaudeBinary.find() }
-            showOnEdt { detected.text = found ?: "Not found" }
-        }
+        check()
         return page
+    }
+
+    override fun apply() {
+        super.apply()
+        check() // the saved path may have changed
     }
 
     override fun disposeUIResources() {
         pageScope?.cancel()
         pageScope = null
         test = null
+        detected = null
+        status = null
         super.disposeUIResources()
     }
 
-    /** A scope for the page being created, a child of the application's ([TandemSettingsScope]); one an earlier page left is cancelled. */
-    private fun newPageScope(): CoroutineScope {
+    /** Makes [pageScope] for the page being created, a child of the application's scope ([TandemSettingsScope]); cancels the last one. */
+    private fun newPageScope() {
         pageScope?.cancel()
         val parent = service<TandemSettingsScope>().scope.coroutineContext
-        return CoroutineScope(parent + SupervisorJob(parent.job) + CoroutineName("TandemSettingsConfigurable")).also { pageScope = it }
+        pageScope = CoroutineScope(parent + SupervisorJob(parent.job) + CoroutineName("TandemSettingsConfigurable"))
+    }
+
+    /**
+     * Shows the executable Tandem detects by itself, and in the status line whether the saved path can run, once both are known: they
+     * are worked out on a background thread. Called on the EDT.
+     */
+    private fun check() {
+        val scope = pageScope ?: return
+        val detected = detected ?: return
+        val status = status ?: return
+        scope.launch {
+            val (found, runs) = withContext(Dispatchers.IO) {
+                ClaudeBinary.detect() to (ClaudeBinary.configured()?.let(ClaudeBinary::isExecutable) ?: true)
+            }
+            showOnEdt {
+                detected.text = found ?: "Not found"
+                status.text = if (runs) "" else NOT_EXECUTABLE_TEXT
+            }
+        }
     }
 
     /**
      * Runs `<[typed] path> --version`, or the detected executable's when [typed] is blank, on a background thread, and shows what came
-     * of it in [outcome]. Called on the EDT, by the "Test" button.
+     * of it in the status line. Called on the EDT, by the "Test" button.
      */
-    private fun runTest(scope: CoroutineScope, typed: String, outcome: JLabel) {
-        outcome.text = "Testing…"
+    private fun runTest(typed: String) {
+        val scope = pageScope ?: return
+        val status = status ?: return
+        status.text = "Testing…"
         test?.cancel()
         test = scope.launch {
             val answer = withContext(Dispatchers.IO) {
-                val binary = typed.trim().ifEmpty { null } ?: ClaudeBinary.find()
+                val binary = typed.trim().ifEmpty { null } ?: ClaudeBinary.detect()
                 if (binary == null) "No claude executable found" else ClaudeBinary.version(binary)
             }
-            showOnEdt { outcome.text = answer }
+            showOnEdt { status.text = answer }
         }
     }
 }

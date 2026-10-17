@@ -12,8 +12,14 @@ import com.intellij.testFramework.useProjectAsync
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.SessionStatus
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -24,6 +30,7 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.readLines
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -75,13 +82,23 @@ class SessionNotifierTest {
     /**
      * Opens a project whose processes replay [fixtures], starts its sessions and runs [block] while the project's notifications are
      * collected; returns once the project is closed and every process it started has ended.
+     *
+     * With [hold], the notifier is not the one [TandemSessions.ensureStarted] starts but one of the test's own, which runs [hold]
+     * before each post, ahead of its check on the EDT.
      */
-    private suspend fun <T> withSessions(name: String, fixtures: String, block: suspend Run.() -> T): T {
+    private suspend fun <T> withSessions(
+        name: String,
+        fixtures: String,
+        hold: (suspend () -> Unit)? = null,
+        block: suspend Run.() -> T,
+    ): T {
         val dir = tempDir.get().resolve(name).createDirectories()
         val log = configDir.resolve("fake-cli.log")
         val result = openProjectAsync(dir).useProjectAsync { project ->
             val posted = Collections.synchronizedList(ArrayList<Notification>())
             val listening = Disposer.newDisposable()
+            val context = currentCoroutineContext()
+            val notifying = CoroutineScope(context + SupervisorJob(context.job))
             try {
                 project.messageBus.connect(listening).subscribe(
                     Notifications.TOPIC,
@@ -93,10 +110,15 @@ class SessionNotifierTest {
                 )
                 val sessions = TandemSessions.get(project)
                 sessions.extraEnvironment = mapOf("TANDEM_FAKE_LOG" to log.toString(), "TANDEM_FAKE_FIXTURES" to fixtures)
-                sessions.ensureStarted()
-                sessions.ensureStarted() // once is enough: a second call starts nothing, so nothing is notified twice
+                if (hold == null) {
+                    sessions.ensureStarted()
+                    sessions.ensureStarted() // once is enough: a second call starts nothing, so nothing is notified twice
+                } else {
+                    SessionNotifier(project, sessions.manager, notifying).apply { beforePosting = hold }.start()
+                }
                 Run(sessions.manager, posted, log).block()
             } finally {
+                notifying.cancel()
                 Disposer.dispose(listening)
             }
         }
@@ -156,5 +178,59 @@ class SessionNotifierTest {
         val warning = notifications.single()
         assertEquals(NotificationType.WARNING, warning.type)
         assertEquals("$title needs your permission", warning.title)
+    }
+
+    @Test
+    fun `a permission request answered before its notification is posted is not announced`() = timeoutRunBlocking(60.seconds) {
+        val held = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val hold: suspend () -> Unit = {
+            held.complete(Unit)
+            release.await()
+        }
+        val notifications = withSessions("answered-meanwhile", fixtures = "plain-reply,permission", hold) {
+            val a = manager.create(NewSessionOptions())
+            manager.select(a.id)
+            awaitSpawns(1)
+            val b = manager.create(NewSessionOptions())
+            awaitSpawns(2)
+            manager.send(b.id, "Create the fixture file")
+            held.await() // the notifier saw B ask, and is about to post, as after waiting for a modal dialog
+            manager.allow(b.id, b.state.value.pendingPermissions.single().requestId, always = false)
+            b.status.first { it != SessionStatus.WAITING }
+            release.complete(Unit)
+            b.status.first { it == SessionStatus.IDLE } // the turn goes on to its end
+            delay(300) // time for a wrong notification
+            posted.toList()
+        }
+        // The request was answered: announcing it would be wrong. That the turn finished may be announced.
+        assertTrue(notifications.none { it.type == NotificationType.WARNING }, notifications.joinToString { it.title })
+    }
+
+    @Test
+    fun `a request the user has looked at before its notification is posted is not announced`() = timeoutRunBlocking(60.seconds) {
+        val held = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val hold: suspend () -> Unit = {
+            held.complete(Unit)
+            release.await()
+        }
+        val notifications = withSessions("looked-meanwhile", fixtures = "plain-reply,permission", hold) {
+            val a = manager.create(NewSessionOptions())
+            manager.select(a.id)
+            awaitSpawns(1)
+            val b = manager.create(NewSessionOptions())
+            awaitSpawns(2)
+            manager.send(b.id, "Create the fixture file")
+            held.await()
+            // The user looks at B, which clears its attention, and goes back to A: headless the tool window is never visible, so B
+            // staying selected would make it a selected session asking with the window hidden, which is announced.
+            manager.select(b.id)
+            manager.select(a.id)
+            release.complete(Unit)
+            delay(300) // time for a wrong notification
+            posted.toList()
+        }
+        assertEquals(emptyList(), notifications.map { it.title })
     }
 }

@@ -22,9 +22,11 @@ import java.nio.file.Path
 import kotlin.io.path.copyTo
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.readLines
 import kotlin.io.path.readText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -42,6 +44,9 @@ class TandemSessionsTest {
 
         /** A session the workspace remembers, whose transcript is gone. */
         private const val GONE = "77777777-7777-4777-8777-777777777777"
+
+        /** Another session with a recorded transcript. */
+        private const val OTHER = "88888888-8888-4888-8888-888888888888"
     }
 
     /** Fake CLI processes that were already running before this test; another test's leftovers are not this test's to judge. */
@@ -172,5 +177,53 @@ class TandemSessionsTest {
         assertEquals(listOf(SEEDED), open)
         assertEquals(SEEDED, selected)
         assertEquals(emptyList(), ownFakeProcesses().map { it.pid() })
+    }
+
+    @Test
+    fun `restored sessions keep their saved order and selection`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("order").createDirectories()
+        seed(dir, SEEDED)
+        seed(dir, OTHER)
+        val (open, selected) = openProjectAsync(dir).useProjectAsync { project ->
+            TandemWorkspaceState.getInstance(project).state.apply {
+                openSessionIds = mutableListOf(OTHER, SEEDED) // not in the order of their ids
+                selectedSessionId = SEEDED // the second one
+            }
+            val sessions = TandemSessions.get(project)
+            sessions.ensureStarted()
+            sessions.manager.selected.first { it == SEEDED } // the last step of restoring
+            sessions.manager.sessions.value.map { it.id } to sessions.manager.selected.value
+        }
+        assertEquals(listOf(OTHER, SEEDED), open)
+        assertEquals(SEEDED, selected)
+        assertEquals(emptyList(), ownFakeProcesses().map { it.pid() })
+    }
+
+    @Test
+    fun `the shutdown hook stays until every session's process has ended`() = timeoutRunBlocking(60.seconds) {
+        val dir = tempDir.get().resolve("hook").createDirectories()
+        val log = configDir.resolve("fake-cli.log")
+        val (sessions, process) = openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            // The fake sleeps this long before its permission request and reads nothing meanwhile, so once its input is closed,
+            // ending it takes about 2 s: ClaudeSession waits that long before it terminates the process.
+            sessions.extraEnvironment = mapOf(
+                "TANDEM_FAKE_LOG" to log.toString(),
+                "TANDEM_FAKE_FIXTURES" to "permission",
+                "TANDEM_FAKE_DELAY_MS" to "30000",
+            )
+            sessions.ensureStarted()
+            assertTrue(sessions.shutdownHookRegistered)
+            val handle = sessions.manager.create(NewSessionOptions())
+            sessions.manager.send(handle.id, "Create the fixture file")
+            while (!(log.exists() && log.readLines().any { "\"type\":\"user\"" in it })) delay(20) // it has the prompt, and sleeps
+            sessions to ownFakeProcesses().single()
+        }
+        // The project is closed and the service's scope cancelled, but the platform does not wait for the process to end.
+        assertTrue(process.isAlive, "the process is still being ended")
+        assertTrue(sessions.shutdownHookRegistered, "the hook must stay while a process is still being ended")
+        while (process.isAlive) delay(20)
+        // Once the last process has ended, the scope completes, and the hook goes.
+        while (sessions.shutdownHookRegistered) delay(20)
     }
 }

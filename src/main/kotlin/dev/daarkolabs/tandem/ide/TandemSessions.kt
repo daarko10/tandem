@@ -12,12 +12,11 @@ import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import org.jetbrains.annotations.TestOnly
 import java.io.IOException
@@ -73,10 +72,20 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
 
     private val started = AtomicBoolean(false)
 
+    /** The JVM shutdown hook [ensureStarted] added, until it is removed. */
+    @Volatile
+    private var shutdownHook: Thread? = null
+
+    /** Whether the JVM shutdown hook for this project's sessions is registered. */
+    @get:TestOnly
+    internal val shutdownHookRegistered: Boolean
+        get() = shutdownHook != null
+
     /**
-     * Starts what the project's sessions need, once; later calls do nothing. Safe to call on the EDT: it only launches coroutines.
-     * - Until the project closes, a JVM shutdown hook kills every session's process ([SessionManager.killAllNow]): when the IDE exits,
-     *   the JVM can stop before the sessions' coroutines have ended their processes.
+     * Starts what the project's sessions need, once; later calls do nothing. Safe to call on the EDT: it adds a shutdown hook and
+     * launches coroutines, and waits for nothing.
+     * - Until every session's process has ended, a JVM shutdown hook kills them ([SessionManager.killAllNow]): when the IDE exits, the
+     *   JVM can stop before the sessions' coroutines have ended their processes.
      * - The [SessionNotifier] starts.
      * - The sessions that were open when the project was last closed open again, in their order, without a process; one whose
      *   transcript is gone is left out. The one that was selected is selected again, or, if it was left out, the first one opened, as
@@ -86,8 +95,7 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
      */
     fun ensureStarted() {
         if (!started.compareAndSet(false, true)) return
-        // Undispatched, so that the hook is added before this returns, and removed again even if the project is closing already.
-        scope.launch(CoroutineName("TandemSessions.shutdownHook"), start = CoroutineStart.UNDISPATCHED) { killOnJvmExit() }
+        killOnJvmExit()
         scope.launch(Dispatchers.IO + CoroutineName("TandemSessions.start")) {
             SessionNotifier(project, manager, scope).start()
             restore()
@@ -96,18 +104,19 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         }
     }
 
-    /** Adds a JVM shutdown hook that kills every session's process, and removes it when this service's scope ends. */
-    private suspend fun killOnJvmExit() {
+    /**
+     * Adds a JVM shutdown hook that kills every session's process, and removes it once this service's scope has completed: not when
+     * it is cancelled, since the sessions end their processes after that, which takes up to a few seconds
+     * ([dev.daarkolabs.tandem.session.ClaudeSession.close]), and closing the project does not wait for them. The scope completes only
+     * once the last of them has ended.
+     */
+    private fun killOnJvmExit() {
         val hook = Thread(manager::killAllNow, "Tandem CLI shutdown")
         Runtime.getRuntime().addShutdownHook(hook)
-        try {
-            awaitCancellation()
-        } finally {
-            try {
-                Runtime.getRuntime().removeShutdownHook(hook)
-            } catch (_: IllegalStateException) {
-                // The JVM is shutting down already, and runs the hook anyway.
-            }
+        shutdownHook = hook
+        scope.coroutineContext.job.invokeOnCompletion {
+            runCatching { Runtime.getRuntime().removeShutdownHook(hook) } // it throws once the JVM shuts down, and the hook runs then
+            shutdownHook = null
         }
     }
 

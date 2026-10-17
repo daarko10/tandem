@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -736,6 +737,23 @@ class SessionManagerTest {
         while (processes.any { it.isAlive }) delay(20)
         handles.forEach { it.status.await(SessionStatus.STOPPED) }
         manager.killAllNow() // once more: nothing left to kill, and no failure
+    }
+
+    @Test
+    fun `killAllNow also kills the process of a session being closed`() = test {
+        // The fake sleeps this long before its permission request and reads nothing meanwhile: closing it takes about 2 s, since
+        // ClaudeSession waits that long for it to end by itself before it terminates it (SIGTERM, exit code 143).
+        val manager = manager(fixtures = "permission", delayMs = 30_000)
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Create the fixture file")
+        awaitLog { prompts().isNotEmpty() } // it has the prompt, and sleeps
+        val process = handle.liveSession()!!.process!!
+        val closing = launch { manager.close(handle.id) }
+        manager.sessions.first { it.isEmpty() } // only the close still knows the session now
+
+        manager.killAllNow()
+        assertEquals(137, runInterruptible(Dispatchers.IO) { process.waitFor() }, "killed (SIGKILL), not ended by the close")
+        closing.join()
     }
 
     @Test

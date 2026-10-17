@@ -11,6 +11,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 class ClaudeBinaryTest {
     @TempDir
@@ -73,5 +74,19 @@ class ClaudeBinaryTest {
         fun sleepers(): List<ProcessHandle> =
             ProcessHandle.allProcesses().filter { it.isAlive && "41.25" in it.info().arguments().orElse(emptyArray()) }.toList()
         withTimeout(10_000) { while (sleepers().isNotEmpty()) delay(20) }
+    }
+
+    @Test
+    fun `version does not wait for output that something else keeps open`() = runBlocking {
+        // It exits at once, but leaves a child behind that holds its output open: the output never ends while that child lives.
+        val leaky = script("leaky", "sleep 42.75 &\nexit 0")
+        fun sleepers(): List<ProcessHandle> =
+            ProcessHandle.allProcesses().filter { it.isAlive && "42.75" in it.info().arguments().orElse(emptyArray()) }.toList()
+        try {
+            val answer = withTimeout(3_000) { ClaudeBinary.version(leaky, timeout = 10.seconds) }
+            assertEquals("It printed nothing", answer)
+        } finally {
+            sleepers().forEach { it.destroyForcibly() } // no longer the script's child, so version leaves it alone
+        }
     }
 }

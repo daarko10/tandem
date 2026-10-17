@@ -12,10 +12,13 @@ import com.intellij.testFramework.useProjectAsync
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.UIUtil
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
+import javax.swing.JButton
+import javax.swing.JComponent
 import javax.swing.JLabel
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
@@ -40,6 +43,17 @@ class TandemSettingsTest {
     fun restoreDefaults() {
         TandemSettings.getInstance().loadState(TandemSettings.State())
     }
+
+    /** A shell script named [name] in a directory of its own, running [body]. */
+    private fun script(name: String, body: String): String =
+        tempDir.get().resolve(name).createDirectories().resolve("claude").also {
+            it.writeText("#!/bin/sh\n$body\n")
+            it.toFile().setExecutable(true)
+        }.toString()
+
+    /** The text of every label on [page], read on the EDT. */
+    private suspend fun labels(page: JComponent): List<String> =
+        withContext(Dispatchers.EDT) { UIUtil.findComponentsOfType(page, JLabel::class.java).map { it.text } }
 
     @Test
     fun `settings round-trip and the path override wins`() {
@@ -78,6 +92,54 @@ class TandemSettingsTest {
     }
 
     @Test
+    fun `detect ignores the saved path, which find tries first`() {
+        val saved = script("saved", "exit 0")
+        TandemSettings.getInstance().loadState(TandemSettings.State().apply { claudePath = saved })
+        assertEquals(saved, ClaudeBinary.find())
+        assertEquals(System.getProperty("tandem.claudePath"), ClaudeBinary.detect())
+        // One that cannot run: sessions use the detected one.
+        TandemSettings.getInstance().state.claudePath = tempDir.get().resolve("missing").toString()
+        assertEquals(ClaudeBinary.detect(), ClaudeBinary.find())
+    }
+
+    @Test
+    fun `the page shows what Tandem detects, warns about a saved path that cannot run and tests the detected one`() =
+        timeoutRunBlocking(30.seconds) {
+            val detected = script("detected", "echo 'detected 2.0'")
+            val saved = script("saved", "echo 'saved 1.0'")
+            val notExecutable = tempDir.get().resolve("plain").createDirectories().resolve("claude").also { it.writeText("") }
+            TandemSettings.getInstance().loadState(TandemSettings.State().apply { claudePath = notExecutable.toString() })
+            val hook = System.getProperty("tandem.claudePath")
+            System.setProperty("tandem.claudePath", detected) // what Tandem detects, in place of the fake CLI
+            val configurable = TandemSettingsConfigurable()
+            try {
+                val page = withContext(Dispatchers.EDT) {
+                    configurable.createComponent().also { configurable.reset() }
+                }
+                while (labels(page).let { detected !in it || "Configured path is not executable" !in it }) delay(20)
+
+                // A path that runs, applied: the warning goes.
+                withContext(Dispatchers.EDT) {
+                    assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = saved
+                    configurable.apply()
+                }
+                while ("Configured path is not executable" in labels(page)) delay(20)
+                assertTrue(detected in labels(page))
+
+                // Test with an empty field runs the detected executable, not the saved one.
+                withContext(Dispatchers.EDT) {
+                    assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = ""
+                    UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+                }
+                while ("detected 2.0" !in labels(page)) delay(20)
+            } finally {
+                // First, and without suspending: a test that timed out is cancelled, and every other test needs the fake CLI back.
+                if (hook == null) System.clearProperty("tandem.claudePath") else System.setProperty("tandem.claudePath", hook)
+                withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+            }
+        }
+
+    @Test
     fun `the page is registered under Tools`() {
         val pages = Configurable.APPLICATION_CONFIGURABLE.extensionList
         val page = assertNotNull(pages.singleOrNull { it.id == "dev.daarkolabs.tandem.settings" })
@@ -89,26 +151,27 @@ class TandemSettingsTest {
     fun `the settings page writes the path and cap`() = timeoutRunBlocking {
         val configurable = TandemSettingsConfigurable()
         try {
-            val (before, after) = withContext(Dispatchers.EDT) {
+            val (before, after, applied) = withContext(Dispatchers.EDT) {
                 val page = configurable.createComponent()
                 configurable.reset()
                 val unchanged = configurable.isModified
                 val path = assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java))
                 val cap = UIUtil.findComponentsOfType(page, JBTextField::class.java).single { it !== path.textField }
-                path.text = "/opt/claude/bin/claude"
+                path.text = "  /opt/claude/bin/claude " // as pasted, with spaces around it
                 // A 1 typed in front of the 4: replacing the text would empty the field for a moment, which headless mode logs as invalid.
                 cap.document.insertString(0, "1", null)
                 val changed = configurable.isModified
                 configurable.apply()
-                unchanged to changed
+                Triple(unchanged, changed, configurable.isModified)
             }
             assertFalse(before, "nothing to apply right after reset")
             assertTrue(after)
+            assertFalse(applied, "nothing left to apply once applied")
             val state = TandemSettings.getInstance().state
             assertEquals("/opt/claude/bin/claude", state.claudePath)
             assertEquals(14, state.maxLiveSessions)
         } finally {
-            withContext(Dispatchers.EDT) { configurable.disposeUIResources() }
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
     }
 
@@ -123,7 +186,7 @@ class TandemSettingsTest {
                 withContext(Dispatchers.EDT) { UIUtil.findComponentsOfType(page, JLabel::class.java).any { it.text == fake } }
             while (!shown()) delay(20)
         } finally {
-            withContext(Dispatchers.EDT) { configurable.disposeUIResources() }
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
     }
 

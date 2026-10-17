@@ -34,6 +34,7 @@ import java.io.IOException
 import java.nio.file.Path
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 private val LOG = logger<SessionManager>()
 
@@ -114,6 +115,12 @@ class SessionManager internal constructor(
 
     /** One start at a time makes room under the cap and attaches its process, so that two starts never count the same room. */
     private val admission = Mutex()
+
+    /**
+     * Every process started and not yet ended, whether a session runs it, is stopping it or hands it over: a session lets go of its
+     * process before ending it, which takes up to a few seconds ([ClaudeSession.close]). What [killAllNow] kills.
+     */
+    private val processes: MutableSet<ClaudeSession> = ConcurrentHashMap.newKeySet()
 
     /** The open sessions, in the order they were opened. */
     val sessions: StateFlow<List<SessionHandle>> = mutableSessions.asStateFlow()
@@ -305,11 +312,12 @@ class SessionManager internal constructor(
     }
 
     /**
-     * Kills each open session's process, and what that process started, at once ([ClaudeSession.killNow]): the last resort of a JVM
-     * shutdown hook, which cannot wait for coroutines to end them. Never waits; safe to call from any thread, and more than once.
+     * Kills every process this manager started that has not ended yet, and what it started, at once ([ClaudeSession.killNow]): those
+     * of open sessions, and those still being ended, such as a closed or stopped session's. The last resort of a JVM shutdown hook,
+     * which cannot wait for coroutines to end them. Never waits; safe to call from any thread, and more than once.
      */
     fun killAllNow() {
-        mutableSessions.value.forEach { it.liveSession()?.killNow() }
+        processes.forEach { it.killNow() }
     }
 
     private fun handle(id: SessionId): SessionHandle? = mutableSessions.value.firstOrNull { it.id == id }
@@ -594,7 +602,10 @@ class SessionManager internal constructor(
             initial = reduce(initial, SessionEvent.HostNotice(NoticeLevel.INFO, notice))
         }
         if (overCap) initial = reduce(initial, SessionEvent.HostNotice(NoticeLevel.INFO, CAP_EXCEEDED_TEXT))
-        return ClaudeSession(scope, config, launcher, initial)
+        val session = ClaudeSession(scope, config, launcher, initial)
+        processes.add(session)
+        session.job.invokeOnCompletion { processes.remove(session) }
+        return session
     }
 
     companion object {

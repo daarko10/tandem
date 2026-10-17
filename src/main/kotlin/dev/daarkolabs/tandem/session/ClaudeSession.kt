@@ -133,6 +133,10 @@ class ClaudeSession(
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
+    /** Completes once this session is over and its process gone: after [close], or after its parent scope was cancelled. */
+    internal val job: Job
+        get() = scope.coroutineContext.job
+
     /**
      * The `session_id` of the CLI's latest `system/init` in this process: null until the first, which the CLI sends with the first
      * prompt (a turn's start), not when it starts. Unlike [ChatState.sessionId], a `result` never sets it: the `result` of a start

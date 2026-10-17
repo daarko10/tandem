@@ -19,6 +19,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.jetbrains.annotations.TestOnly
 
 private val LOG = logger<SessionNotifier>()
 
@@ -36,11 +37,18 @@ private const val GROUP_ID: String = "Tandem"
  *
  * A session that is not selected is followed through its [SessionHandle.attention], which the manager raises for exactly these events
  * and clears when the session is selected: one notification until the user has looked. The selected session raises no attention, so
- * its status is followed instead.
+ * its status is followed instead. What a notification says is decided on the EDT just before it is posted, so that one that had to
+ * wait (for a modal dialog, say) never announces what no longer stands: a permission request already answered, or one the user has
+ * looked at.
  *
  * Runs in [scope], from [start] until the scope ends.
  */
 class SessionNotifier(private val project: Project, private val manager: SessionManager, private val scope: CoroutineScope) {
+    /** Runs before each post, ahead of the EDT check: tests hold a post here to change the session meanwhile. */
+    @Volatile
+    @set:TestOnly
+    internal var beforePosting: suspend () -> Unit = {}
+
     /** Follows every session that is open or opened later. Call once. */
     fun start() {
         scope.launch(CoroutineName("SessionNotifier")) {
@@ -58,10 +66,7 @@ class SessionNotifier(private val project: Project, private val manager: Session
         launch {
             var raised = false
             handle.attention.collect { attention ->
-                if (attention && !raised) {
-                    // The manager raises it for a permission request, or for a turn that ended.
-                    notify(handle, if (handle.status.value == SessionStatus.WAITING) Event.PERMISSION else Event.FINISHED)
-                }
+                if (attention && !raised) notify(handle) { dueForAttention(handle) }
                 raised = attention
             }
         }
@@ -70,29 +75,52 @@ class SessionNotifier(private val project: Project, private val manager: Session
             handle.status.collect { status ->
                 val event = eventOf(previous, status)
                 previous = status
-                if (event != null && manager.selected.value == handle.id) notify(handle, event)
+                if (event != null && manager.selected.value == handle.id) notify(handle) { event.takeIf { stillDue(handle, it) } }
             }
         }
     }
 
     /**
-     * Posts [event] for [handle], unless the user is looking at it: it is selected and the tool window is visible.
+     * Posts the event [due] gives for [handle], if it gives one, unless the user is looking at the session: it is selected and the
+     * tool window is visible. [due] runs on the EDT, right before the post.
      *
      * On the EDT, where the platform also closes the project, after cancelling this scope: so nothing is ever posted to a project
      * being closed. Like a notification the platform delivers from another thread, it waits until no modal dialog is open.
      */
-    private suspend fun notify(handle: SessionHandle, event: Event) {
+    private suspend fun notify(handle: SessionHandle, due: () -> Event?) {
+        beforePosting()
         val posted = withContext(Dispatchers.EDT) {
-            if (project.isDisposed || (manager.selected.value == handle.id && toolWindowVisible())) return@withContext false
+            if (project.isDisposed || (manager.selected.value == handle.id && toolWindowVisible())) return@withContext null
+            val event = due() ?: return@withContext null
             NotificationGroupManager.getInstance().getNotificationGroup(GROUP_ID)
                 // Notifications render HTML; a title is the user's or the model's text, so it is escaped.
                 .createNotification(StringUtil.escapeXmlEntities(event.title(handle.title.value)), "", event.type)
                 .addAction(NotificationAction.createSimpleExpiring("Open") { open(handle.id) })
                 .notify(project)
-            true
+            event
         }
-        if (posted) LOG.info("session ${handle.id}: notified, ${event.name.lowercase()}")
+        if (posted != null) LOG.info("session ${handle.id}: notified, ${posted.name.lowercase()}")
     }
+
+    /**
+     * What to announce for [handle], which asks for attention: the permission request it still waits on, or the turn that ended. Null
+     * once the user has looked at it, and while a turn runs (the request was answered meanwhile, or a new turn began).
+     */
+    private fun dueForAttention(handle: SessionHandle): Event? {
+        if (!handle.attention.value) return null
+        return when (handle.status.value) {
+            SessionStatus.WAITING -> Event.PERMISSION
+            SessionStatus.IDLE, SessionStatus.STOPPED -> Event.FINISHED
+            SessionStatus.RUNNING -> null
+        }
+    }
+
+    /** Whether [event] of the selected [handle] still stands: a permission request only while it is not answered. */
+    private fun stillDue(handle: SessionHandle, event: Event): Boolean =
+        when (event) {
+            Event.PERMISSION -> handle.status.value == SessionStatus.WAITING
+            Event.FINISHED -> true
+        }
 
     /** Whether the Tandem tool window shows. On the EDT. */
     private fun toolWindowVisible(): Boolean = ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.isVisible == true
