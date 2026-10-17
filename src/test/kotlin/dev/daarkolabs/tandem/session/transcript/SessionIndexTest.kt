@@ -381,6 +381,17 @@ class SessionIndexTest {
     }
 
     @Test
+    fun `with a long project path, a cwd spelt with a trailing slash or dot segments is ours though it does not exist`(@TempDir dir: Path) {
+        write(dir, "$first.jsonl", mtime = 3_000)
+        write(dir, "$second.jsonl", mtime = 2_000)
+        write(dir, "$third.jsonl", mtime = 1_000)
+        // longProject does not exist here, so the file system cannot say these are the same directory.
+        val cwds = mapOf(first to "$longProject/", second to "/x/..$longProject/./", third to "$longProject-other")
+        val meta = { file: Path -> stubMeta(file, cwds.getValue(file.name.removeSuffix(".jsonl"))) }
+        assertEquals(listOf(first, second), SessionIndex({ listOf(dir) }, longProject, meta).list().map { it.id })
+    }
+
+    @Test
     fun `with a long project path, the only folder of a sibling project does not make its sessions ours`(@TempDir root: Path) {
         // This project has no folder yet. The one directory that shares its key prefix is another project's.
         val sibling = root.resolve("sibling").createDirectories()

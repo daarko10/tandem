@@ -172,12 +172,17 @@ class SessionIndex(
     }
 
     /**
-     * Whether [cwd], a transcript's working directory, is [projectPath]: the same string, or the same directory as the file system
-     * says, such as a path that differs in case only on a case-insensitive volume (macOS by default). One that cannot be looked up
-     * (it was deleted, say) is not.
+     * Whether [cwd], a transcript's working directory, is [projectPath]: the same string; the same path once both are normalized
+     * (a trailing slash, `.` and `..` segments), which needs no file system; or the same directory as the file system says, such
+     * as a path that differs in case only on a case-insensitive volume (macOS by default). One that cannot be looked up (it was
+     * deleted, say) is not.
      */
     private fun isProjectPath(cwd: String): Boolean =
-        cwd == projectPath || tryFileSystem(onFailure = { false }) { Files.isSameFile(Path.of(cwd), Path.of(projectPath)) }
+        cwd == projectPath || tryFileSystem(onFailure = { false }) {
+            val path = Path.of(cwd)
+            val project = Path.of(projectPath)
+            path.normalize() == project.normalize() || Files.isSameFile(path, project)
+        }
 
     /** Forgets session [id], so that the next [list] reads its transcript again, even one a [list] in flight is reading now. */
     fun invalidate(id: String) {
