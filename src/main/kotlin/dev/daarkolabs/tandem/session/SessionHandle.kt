@@ -90,7 +90,8 @@ class SessionHandle internal constructor(
 
     /**
      * A title the CLI is still to be told (`rename_session`) once a process reports its first `system/init`: a fork's, or one set
-     * ([rename]) while the process had not reported it yet. Kept apart from [titleOverride], which the index's listing clears.
+     * ([rename]) while the process had not reported it yet, or without a process while a title was still to be told or there was no
+     * transcript. Only the last counts. Kept apart from [titleOverride], which the index's listing clears.
      */
     private var renameOnInit: String? = pendingTitle
 
@@ -250,21 +251,24 @@ class SessionHandle internal constructor(
     /**
      * Shows [title] as this session's at once, until the index lists it. A running process that has reported its first
      * `system/init` is asked to rename the session (`rename_session`), which makes the CLI append the `custom-title` line, and true
-     * is returned. Otherwise false, and the caller writes the line if the session has a transcript. A process that has not reported
-     * its `system/init` yet is told with it, as a fork is its title ([sendPendingTitle]): before then the CLI may keep a title
-     * without writing it (docs/protocol.md 4.4).
+     * is returned: no older title is to be told at the init any more. Otherwise false, and the caller writes the line if the
+     * session has a transcript. [title] is then told with the next first `system/init` ([sendPendingTitle]), in place of a title
+     * still to be told (a fork's, or one set before that init): when a process runs that has not reported it yet (before then the
+     * CLI may keep a title without writing it, docs/protocol.md 4.4), when a title is still to be told, and when [noTranscript]:
+     * nothing else would bring the title to the CLI.
      */
-    internal fun rename(title: String): Boolean = synchronized(lock) {
+    internal fun rename(title: String, noTranscript: Boolean = false): Boolean = synchronized(lock) {
         replaced = titleOverride to renameOnInit
         titleOverride = title
         updateTitleLocked()
-        val live = liveLocked() ?: return false
-        if (live.reportedSessionId.value == null) {
-            renameOnInit = title
-            return false
+        val live = liveLocked()
+        if (live != null && live.reportedSessionId.value != null) {
+            renameOnInit = null
+            live.rename(title)
+            return true
         }
-        live.rename(title)
-        true
+        if (live != null || renameOnInit != null || noTranscript) renameOnInit = title
+        false
     }
 
     /**
@@ -283,7 +287,7 @@ class SessionHandle internal constructor(
     }
 
     /**
-     * Tells [session] the title the CLI is still to be told ([renameOnInit]), a fork's or one set before the process reported its
+     * Tells [session] the title the CLI is still to be told ([renameOnInit]), a fork's or one set before a process reported its
      * first `system/init`: from that init on, the CLI has a transcript to write it to. Nothing if [session] is no longer attached.
      */
     internal fun sendPendingTitle(session: ClaudeSession) {

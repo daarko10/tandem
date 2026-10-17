@@ -718,7 +718,7 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `a stopped session without a transcript keeps a new title in memory only`() = test {
+    fun `a stopped session without a transcript keeps a new title until its next process reports its init`() = test {
         val manager = manager()
         val created = manager.create(NewSessionOptions())
         awaitLog { spawns().size == 1 }
@@ -729,6 +729,63 @@ class SessionManagerTest {
         assertFalse(folder.resolve("${created.id}.jsonl").exists(), "no transcript is made for the title")
         assertEquals(0, frames().count { it.subtype() == "rename_session" })
         manager.summaries.first { summaries -> summaries.any { it.id == created.id && it.title == "Delta" } }
+
+        // The next process is told with its first system/init, as for a rename before that init: the title is not lost.
+        manager.send(created.id, "Reply with the single word: pong")
+        created.state.first { s -> !s.busy && s.entries.any { it is ChatEntry.Assistant } }
+        awaitLog { frames().any { it.subtype() == "rename_session" } }
+        assertEquals(listOf("Delta"), renameTitles())
+    }
+
+    /** The titles of the `rename_session` requests the host wrote, in order. */
+    private fun renameTitles(): List<String> =
+        frames().filter { it.subtype() == "rename_session" }.map { it["request"]!!.jsonObject["title"]!!.jsonPrimitive.content }
+
+    @Test
+    fun `a fork renamed while stopped before its first prompt tells the CLI the new title, not the fork's`() = test {
+        seed(seeded)
+        val manager = manager()
+        val fork = assertNotNull(manager.fork(seeded))
+        assertEquals("Pong (fork)", fork.title.value)
+        awaitLog { spawns().size == 1 }
+        manager.stop(fork.id) // before a prompt: no system/init (as when the cap stops an idle fork)
+        manager.rename(fork.id, "Mine")
+        fork.title.await("Mine")
+        manager.send(fork.id, "Reply with the single word: pong")
+        fork.state.first { s -> !s.busy && s.entries.count { it is ChatEntry.Assistant } == 2 }
+        awaitLog { frames().any { it.subtype() == "rename_session" } }
+        assertEquals(listOf("Mine"), renameTitles())
+    }
+
+    @Test
+    fun `a resumed session renamed before its init, stopped and renamed again tells the CLI the last title`() = test {
+        seed(seeded)
+        val manager = manager()
+        val live = manager.open(seeded)
+        awaitLog { spawns().size == 1 }
+        manager.rename(seeded, "Zeta") // deferred: Tandem appends Zeta, the CLI is to be told with the init
+        manager.stop(seeded)
+        manager.rename(seeded, "Eta") // no process: Tandem appends Eta
+        live.title.await("Eta")
+        manager.send(seeded, "Reply with the single word: pong")
+        live.state.first { s -> !s.busy && s.entries.count { it is ChatEntry.Assistant } == 2 }
+        awaitLog { frames().any { it.subtype() == "rename_session" } }
+        assertEquals(listOf("Eta"), renameTitles())
+    }
+
+    @Test
+    fun `a new session renamed before its init, stopped and renamed again tells the CLI the last title`() = test {
+        val manager = manager()
+        val created = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.rename(created.id, "Alpha") // deferred
+        manager.stop(created.id)
+        manager.rename(created.id, "Beta") // no process, no transcript
+        created.title.await("Beta")
+        manager.send(created.id, "Reply with the single word: pong")
+        created.state.first { s -> !s.busy && s.entries.any { it is ChatEntry.Assistant } }
+        awaitLog { frames().any { it.subtype() == "rename_session" } }
+        assertEquals(listOf("Beta"), renameTitles())
     }
 
     @Test

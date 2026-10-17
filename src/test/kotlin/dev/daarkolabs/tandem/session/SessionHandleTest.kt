@@ -9,18 +9,37 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executor
+import kotlin.io.path.createTempFile
+import kotlin.io.path.readLines
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /** [SessionHandle] on its own, in a scope whose coroutines run only when the test lets them. */
 class SessionHandleTest {
-    /** Coroutines of the handle's scope wait here until [runQueued]. */
-    private val queued = ArrayDeque<Runnable>()
-    private val scope = CoroutineScope(SupervisorJob() + Executor { queued.addLast(it) }.asCoroutineDispatcher())
+    @TempDir
+    lateinit var tmp: Path
+
+    /** Coroutines of the handle's scope wait here until [runQueued]; a process's threads may queue them too. */
+    private val queued = ConcurrentLinkedQueue<Runnable>()
+    private val scope = CoroutineScope(SupervisorJob() + Executor { queued.add(it) }.asCoroutineDispatcher())
 
     private fun runQueued() {
-        while (queued.isNotEmpty()) queued.removeFirst().run()
+        while (true) (queued.poll() ?: return).run()
     }
 
     @Test
@@ -57,6 +76,44 @@ class SessionHandleTest {
             assertEquals(listOf(id to null, "Write a haiku" to "Write a haiku"), seen)
         } finally {
             following.cancel()
+            scope.cancel()
+            runQueued()
+        }
+    }
+
+    @Test
+    fun `a rename between the process's first init and the handle seeing it is the only title the CLI is told`() = runBlocking {
+        val id = "33333333-3333-4333-8333-333333333333"
+        val stdin = createTempFile(tmp, "stdin", ".ndjson")
+        val init = """{"type":"system","subtype":"init","session_id":"$id","model":"claude-test"}"""
+        // A CLI that reports its init at once, then records every frame the host writes.
+        val launcher = ProcessLauncher { _, dir ->
+            ProcessBuilder("sh", "-c", "printf '%s\\n' '$init'; cat > '$stdin'").directory(dir.toFile()).start()
+        }
+        val processes = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val handle = SessionHandle(id, scope, ChatState(), MutableStateFlow(emptyList()), createdAt = 0, forkOf = "original", pendingTitle = "Pong (fork)")
+        runQueued()
+        try {
+            var started: ClaudeSession? = null
+            handle.attach(
+                create = { chat -> ClaudeSession(processes, SessionConfig("claude", tmp, sessionId = id), launcher, chat).also { started = it } },
+                onFirstInit = { session, _ -> handle.sendPendingTitle(session) },
+            )
+            val session = started!!
+            withTimeout(10_000) { session.reportedSessionId.filterNotNull().first() }
+            // The handle's coroutines have not run, so it has not seen the init yet: the fork's title is still pending.
+            assertTrue(handle.rename("Mine"), "the process reported its init: told at once")
+            runQueued() // the handle sees the init now
+            session.interrupt() // a last frame, after anything the handle sent
+            val frames = withTimeout(10_000) {
+                while (stdin.readLines().none { "interrupt" in it }) delay(20)
+                stdin.readLines().map { Json.parseToJsonElement(it).jsonObject }
+            }
+            val titles = frames.mapNotNull { it["request"]?.jsonObject }.filter { it["subtype"]?.jsonPrimitive?.content == "rename_session" }
+                .map { it["title"]!!.jsonPrimitive.content }
+            assertEquals(listOf("Mine"), titles)
+        } finally {
+            processes.coroutineContext.job.cancelAndJoin()
             scope.cancel()
             runQueued()
         }

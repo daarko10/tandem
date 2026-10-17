@@ -267,22 +267,22 @@ class SessionManager internal constructor(
      * Renames session [id] to [title], trimmed; a blank title is ignored. An open session shows the new title at once
      * ([SessionHandle.title]). A running process that has reported its first `system/init` is asked to rename the session
      * (`rename_session`), and the CLI appends the `custom-title` line to the transcript itself. Otherwise Tandem appends the line the
-     * SDK's `renameSession` appends ([TranscriptFiles.appendCustomTitle]); a session without a transcript yet keeps the title in
-     * memory only. A process that has not reported its first `system/init` yet is also told, with that init, as a fork is its title
-     * ([SessionHandle.rename]). Either way the index then reads the transcript again. Throws the [IOException] of a line that
-     * cannot be appended, and the title shown before the rename comes back.
+     * SDK's `renameSession` appends ([TranscriptFiles.appendCustomTitle]); an open session without a transcript yet keeps the
+     * title until its next process reports its first `system/init`, and the CLI is told then. A process that has not reported its
+     * first `system/init` yet is also told, with that init, as a fork is its title, and so is a session whose earlier title is still
+     * to be told: the last title wins ([SessionHandle.rename]). Either way the index then reads the transcript again. Throws the
+     * [IOException] of a line that cannot be appended, and the title shown before the rename comes back.
      */
     suspend fun rename(id: SessionId, title: String) {
         val name = title.trim()
         if (name.isEmpty()) return
         val handle = handle(id)
-        val sent = handle?.rename(name) ?: false
+        val transcript = withContext(Dispatchers.IO) { index.transcript(id) }
+        val sent = handle?.rename(name, noTranscript = transcript == null) ?: false
         try {
-            if (!sent) {
+            if (!sent && transcript != null) {
                 try {
-                    withContext(Dispatchers.IO) {
-                        index.transcript(id)?.let { appendTitle(it, id, name, Instant.ofEpochMilli(clock())) }
-                    }
+                    withContext(Dispatchers.IO) { appendTitle(transcript, id, name, Instant.ofEpochMilli(clock())) }
                 } catch (e: IOException) {
                     handle?.revertRename(name)
                     throw e
