@@ -33,6 +33,7 @@ import java.util.concurrent.CountDownLatch
 import kotlin.io.path.appendText
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createDirectory
+import kotlin.io.path.createSymbolicLinkPointingTo
 import kotlin.io.path.deleteExisting
 import kotlin.io.path.name
 import kotlin.io.path.writeText
@@ -381,14 +382,29 @@ class SessionIndexTest {
     }
 
     @Test
-    fun `with a long project path, a cwd spelt with a trailing slash or dot segments is ours though it does not exist`(@TempDir dir: Path) {
+    fun `with a long project path, a cwd spelt with a trailing slash or single-dot segments is ours though it does not exist`(@TempDir dir: Path) {
         write(dir, "$first.jsonl", mtime = 3_000)
         write(dir, "$second.jsonl", mtime = 2_000)
         write(dir, "$third.jsonl", mtime = 1_000)
         // longProject does not exist here, so the file system cannot say these are the same directory.
-        val cwds = mapOf(first to "$longProject/", second to "/x/..$longProject/./", third to "$longProject-other")
+        val cwds = mapOf(first to "$longProject/", second to "/.$longProject/./", third to "$longProject-other")
         val meta = { file: Path -> stubMeta(file, cwds.getValue(file.name.removeSuffix(".jsonl"))) }
         assertEquals(listOf(first, second), SessionIndex({ listOf(dir) }, longProject, meta).list().map { it.id })
+    }
+
+    @Test
+    fun `with a long project path, a cwd whose dot-dot passes a link is ours only if the file system says so`(@TempDir root: Path) {
+        val name = "p" + "a".repeat(220)
+        val project = root.resolve(name).createDirectories()
+        val elsewhere = root.resolve("real").resolve("x").createDirectories()
+        root.resolve("link").createSymbolicLinkPointingTo(elsewhere)
+        val folder = root.resolve("transcripts").createDirectories()
+        write(folder, "$first.jsonl", mtime = 3_000)
+        write(folder, "$second.jsonl", mtime = 2_000)
+        // link/.. is root/real on the file system, not root: lexically the first cwd would be the project.
+        val cwds = mapOf(first to "$root/link/../$name", second to "$root/./$name/.")
+        val meta = { file: Path -> stubMeta(file, cwds.getValue(file.name.removeSuffix(".jsonl"))) }
+        assertEquals(listOf(second), SessionIndex({ listOf(folder) }, project.toString(), meta).list().map { it.id })
     }
 
     @Test
