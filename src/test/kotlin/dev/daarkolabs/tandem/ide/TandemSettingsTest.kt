@@ -17,6 +17,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JLabel
@@ -143,6 +145,41 @@ class TandemSettingsTest {
                 withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
             }
         }
+
+    @Test
+    fun `a check that answers after a later Test does not overwrite the Test's answer`() = timeoutRunBlocking(30.seconds) {
+        val answering = script("answering", "echo 'answer 1.0'")
+        val fake = System.getProperty("tandem.claudePath")
+        // The page's first look at the login shell's environment, the detection that check() runs, waits until released.
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val first = AtomicBoolean(true)
+        ShellEnvironment.source = {
+            if (first.getAndSet(false)) {
+                entered.countDown()
+                release.await()
+            }
+            System.getenv()
+        }
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val page = withContext(Dispatchers.EDT) { configurable.createComponent() }
+            while (entered.count > 0) delay(20) // the check is under way
+            withContext(Dispatchers.EDT) {
+                assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = answering
+                UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+            }
+            while ("answer 1.0" !in labels(page)) delay(20)
+            release.countDown()
+            // The check shows what it detected and, in the same step, its status, which is older than the Test's.
+            while (fake !in labels(page)) delay(20)
+            assertTrue("answer 1.0" in labels(page), labels(page).toString())
+        } finally {
+            release.countDown()
+            ShellEnvironment.reset()
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+    }
 
     @Test
     fun `the page is registered under Tools`() {

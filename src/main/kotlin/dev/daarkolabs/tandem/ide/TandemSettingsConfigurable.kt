@@ -43,6 +43,15 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
     /** The last "Test" run; a new one replaces it, so that an older answer never shows over a newer one. */
     private var test: Job? = null
 
+    /** The last [check]; a new one replaces it, so that an older detection never shows over a newer one. */
+    private var checking: Job? = null
+
+    /**
+     * Counts what was asked to fill the status line, a [check] or a "Test", on the EDT: each answer shows only if nothing was asked
+     * after it, so that a slow check never overwrites a later Test's answer, nor a slow Test a later check's.
+     */
+    private var statusRequests: Int = 0
+
     /** The open page's labels for the detected executable, where it was found, and for the status line. */
     private var detected: JLabel? = null
     private var detectedWhere: JLabel? = null
@@ -91,6 +100,7 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
         pageScope?.cancel()
         pageScope = null
         test = null
+        checking = null
         detected = null
         detectedWhere = null
         status = null
@@ -106,21 +116,23 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
 
     /**
      * Shows the executable Tandem detects by itself, and in the status line whether the saved path can run, once both are known: they
-     * are worked out on a background thread. Called on the EDT.
+     * are worked out on a background thread. The status line keeps a "Test" answer asked for after this. Called on the EDT.
      */
     private fun check() {
         val scope = pageScope ?: return
         val detected = detected ?: return
         val detectedWhere = detectedWhere ?: return
         val status = status ?: return
-        scope.launch {
+        val request = ++statusRequests
+        checking?.cancel()
+        checking = scope.launch {
             val (found, runs) = withContext(Dispatchers.IO) {
                 ClaudeBinary.detect() to (ClaudeBinary.configured()?.let(ClaudeBinary::isExecutable) ?: true)
             }
             showOnEdt {
                 detected.text = found?.path ?: "Not found"
                 detectedWhere.text = found?.where?.description.orEmpty()
-                status.text = if (runs) "" else NOT_EXECUTABLE_TEXT
+                if (request == statusRequests) status.text = if (runs) "" else NOT_EXECUTABLE_TEXT
             }
         }
     }
@@ -133,13 +145,14 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
         val scope = pageScope ?: return
         val status = status ?: return
         status.text = "Testing…"
+        val request = ++statusRequests
         test?.cancel()
         test = scope.launch {
             val answer = withContext(Dispatchers.IO) {
                 val binary = typed.trim().ifEmpty { null } ?: ClaudeBinary.detect()?.path
                 if (binary == null) "No claude executable found" else ClaudeBinary.version(binary)
             }
-            showOnEdt { status.text = answer }
+            showOnEdt { if (request == statusRequests) status.text = answer }
         }
     }
 }
