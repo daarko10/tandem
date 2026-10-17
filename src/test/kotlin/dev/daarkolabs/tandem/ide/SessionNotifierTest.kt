@@ -65,8 +65,16 @@ class SessionNotifierTest {
             handle.isAlive && handle.info().arguments().orElse(emptyArray()).any { it.endsWith("fake-claude.py") }
         }.toList()
 
-    /** What a test sees: the sessions, the notifications posted to the project so far, and how many processes have started. */
-    private class Run(val manager: SessionManager, val posted: List<Notification>, private val log: Path) {
+    /**
+     * What a test sees: the sessions, the notifications posted to the project so far, and how many processes have started. With a
+     * late notifier, [startNotifier] starts it.
+     */
+    private class Run(
+        val manager: SessionManager,
+        val posted: List<Notification>,
+        private val log: Path,
+        val startNotifier: () -> Unit = {},
+    ) {
         /** Waits until the [count]th process has started, so that the next one replays the next fixture. */
         suspend fun awaitSpawns(count: Int) {
             while ((if (log.exists()) log.readLines().count { it.startsWith("{\"type\":\"__spawn__\"") } else 0) < count) delay(20)
@@ -85,12 +93,14 @@ class SessionNotifierTest {
      * collected; returns once the project is closed and every process it started has ended.
      *
      * With [hold], the notifier is not the one [TandemSessions.ensureStarted] starts but one of the test's own, which runs [hold]
-     * before each post, ahead of its check on the EDT.
+     * before each post, ahead of its check on the EDT. With [lateNotifier], nothing is started: the test's own notifier starts
+     * when the test calls [Run.startNotifier].
      */
     private suspend fun <T> withSessions(
         name: String,
         fixtures: String,
         hold: (suspend () -> Unit)? = null,
+        lateNotifier: Boolean = false,
         block: suspend Run.() -> T,
     ): T {
         val dir = tempDir.get().resolve(name).createDirectories()
@@ -111,13 +121,15 @@ class SessionNotifierTest {
                 )
                 val sessions = TandemSessions.get(project)
                 sessions.extraEnvironment = mapOf("TANDEM_FAKE_LOG" to log.toString(), "TANDEM_FAKE_FIXTURES" to fixtures)
-                if (hold == null) {
-                    sessions.ensureStarted()
-                    sessions.ensureStarted() // once is enough: a second call starts nothing, so nothing is notified twice
-                } else {
-                    SessionNotifier(project, sessions.manager, notifying).apply { beforePosting = hold }.start()
+                when {
+                    lateNotifier -> {}
+                    hold == null -> {
+                        sessions.ensureStarted()
+                        sessions.ensureStarted() // once is enough: a second call starts nothing, so nothing is notified twice
+                    }
+                    else -> SessionNotifier(project, sessions.manager, notifying).apply { beforePosting = hold }.start()
                 }
-                Run(sessions.manager, posted, log).block()
+                Run(sessions.manager, posted, log) { SessionNotifier(project, sessions.manager, notifying).start() }.block()
             } finally {
                 notifying.cancel()
                 Disposer.dispose(listening)
@@ -180,6 +192,42 @@ class SessionNotifierTest {
         assertEquals(NotificationType.WARNING, warning.type)
         assertEquals("$title needs your permission", warning.title)
     }
+
+    @Test
+    fun `a selected session that already waits when the notifier starts is announced once`() = timeoutRunBlocking(60.seconds) {
+        val notifications = withSessions("waiting-before-start", fixtures = "permission", lateNotifier = true) {
+            val b = manager.create(NewSessionOptions())
+            manager.select(b.id)
+            awaitSpawns(1)
+            manager.send(b.id, "Create the fixture file")
+            b.status.first { it == SessionStatus.WAITING }
+            // The notifier starts following B only now, as when it is slow to start: B's request is not news to it, but it stands.
+            startNotifier()
+            withTimeoutOrNull(10_000) { notifications() } ?: posted.toList()
+        }
+        val warning = notifications.single()
+        assertEquals(NotificationType.WARNING, warning.type)
+        assertEquals("Create the fixture file needs your permission", warning.title)
+    }
+
+    @Test
+    fun `a background session that already asks for attention when the notifier starts is announced once`() =
+        timeoutRunBlocking(60.seconds) {
+            val notifications = withSessions("attention-before-start", fixtures = "plain-reply,permission", lateNotifier = true) {
+                val a = manager.create(NewSessionOptions())
+                manager.select(a.id)
+                awaitSpawns(1)
+                val b = manager.create(NewSessionOptions())
+                awaitSpawns(2)
+                manager.send(b.id, "Create the fixture file")
+                b.attention.first { it }
+                startNotifier()
+                withTimeoutOrNull(10_000) { notifications() } ?: posted.toList()
+            }
+            val warning = notifications.single()
+            assertEquals(NotificationType.WARNING, warning.type)
+            assertEquals("Create the fixture file needs your permission", warning.title)
+        }
 
     @Test
     fun `a permission request answered before its notification is posted is not announced`() = timeoutRunBlocking(60.seconds) {

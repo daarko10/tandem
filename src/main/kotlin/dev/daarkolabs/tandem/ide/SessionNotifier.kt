@@ -77,7 +77,9 @@ class SessionNotifier(private val project: Project, private val manager: Session
             }
         }
         launch {
-            var previous = handle.status.value
+            // Null until the first status: the one the session has when it is followed counts as a change, so that a request it
+            // already waits on is announced, whenever this starts following it.
+            var previous: SessionStatus? = null
             handle.status.collect { status ->
                 val event = eventOf(previous, status)
                 previous = status
@@ -148,8 +150,11 @@ class SessionNotifier(private val project: Project, private val manager: Session
         fun title(session: String): String = "$session $what"
     }
 
-    /** The event a change of status from [previous] to [status] is, as the manager raises attention for it; null for none. */
-    private fun eventOf(previous: SessionStatus, status: SessionStatus): Event? = when {
+    /**
+     * The event a change of status from [previous] to [status] is, as the manager raises attention for it; null for none. From no
+     * [previous] status (the session is followed from now on), only a permission request it waits on is one.
+     */
+    private fun eventOf(previous: SessionStatus?, status: SessionStatus): Event? = when {
         status == previous -> null
         status == SessionStatus.WAITING -> Event.PERMISSION
         previous == SessionStatus.RUNNING && status == SessionStatus.IDLE -> Event.FINISHED
