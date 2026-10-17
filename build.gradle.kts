@@ -1,3 +1,6 @@
+import kotlinx.kover.gradle.plugin.dsl.AggregationType
+import kotlinx.kover.gradle.plugin.dsl.CoverageUnit
+import kotlinx.kover.gradle.plugin.dsl.GroupingEntityType
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.models.ProductRelease
@@ -6,6 +9,8 @@ plugins {
     id("org.jetbrains.kotlin.jvm")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.intellij.platform")
+    // Coverage of the unit, fixture and platform tests; build-time only, nothing of it goes into the plugin.
+    id("org.jetbrains.kotlinx.kover")
 }
 
 kotlin {
@@ -77,6 +82,44 @@ intellijPlatform {
                 types = listOf(IntelliJPlatformType.IntellijIdea)
                 channels = listOf(ProductRelease.Channel.RELEASE)
                 sinceBuild = providers.gradleProperty("pluginSinceBuild")
+            }
+        }
+    }
+}
+
+// Coverage of protocol/ and session/ (with session/transcript), whose target is 90% of lines (CLAUDE.md):
+// ./gradlew koverLog prints it per package; koverHtmlReport and koverXmlReport write build/reports/kover/; koverVerify, part of check,
+// holds each package to it.
+kover {
+    currentProject {
+        // Measures the test task only: the IDE Starter tests run the plugin in another JVM, and reports must never start them.
+        instrumentation {
+            disabledForTestTasks.add("integrationTest")
+        }
+    }
+    reports {
+        filters {
+            includes {
+                packages("dev.daarkolabs.tandem.protocol", "dev.daarkolabs.tandem.session")
+            }
+        }
+        total {
+            // Part of check: fails the build when a package falls below 90% of lines.
+            verify {
+                rule("90% of lines in each package of protocol/ and session/") {
+                    groupBy = GroupingEntityType.PACKAGE
+                    bound {
+                        minValue = 90
+                        coverageUnits = CoverageUnit.LINE
+                        aggregationForGroup = AggregationType.COVERED_PERCENTAGE
+                    }
+                }
+            }
+            log {
+                groupBy = GroupingEntityType.PACKAGE
+                coverageUnits = CoverageUnit.LINE
+                aggregationForGroup = AggregationType.COVERED_PERCENTAGE
+                format = "<entity> line coverage: <value>%"
             }
         }
     }
