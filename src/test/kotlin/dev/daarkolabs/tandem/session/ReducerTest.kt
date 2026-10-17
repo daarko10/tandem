@@ -96,6 +96,19 @@ class ReducerTest {
     }
 
     @Test
+    fun `the last result says how the turn ended`() {
+        assertNull(ChatState().lastTurnEnd, "no turn yet")
+        assertEquals(TurnEnd.COMPLETED, replay("plain-reply").last().lastTurnEnd)
+        // The recorded interrupt: an error_during_execution result whose terminal_reason is aborted_streaming.
+        assertEquals(TurnEnd.INTERRUPTED, replay("interrupt").last().lastTurnEnd)
+        val failed = reduce(
+            ChatState(busy = true),
+            cli("""{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"s","errors":["max turns"]}"""),
+        )
+        assertEquals(TurnEnd.FAILED, failed.lastTurnEnd)
+    }
+
+    @Test
     fun `a model the user did not pick is never silent`() {
         // The user picked Opus, but the recorded session ran Sonnet then Haiku.
         val final = replay("model-switch", ChatState(requestedModel = "claude-opus-5-5")).last()

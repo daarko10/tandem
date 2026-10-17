@@ -27,6 +27,8 @@ data class ChatState(
     val claudeCodeVersion: String? = null,
     val busy: Boolean = false,
     val pendingPermissions: List<PendingPermission> = emptyList(),
+    /** How the last turn ended, from its `result` line; null before the first. */
+    val lastTurnEnd: TurnEnd? = null,
     val ended: Boolean = false,
     /** Monotonic id source for notices; entry ids must stay unique even after retractions shrink [entries]. */
     val noticeCount: Int = 0,
@@ -42,6 +44,18 @@ data class ChatState(
      */
     val entryIndex: Map<String, Int> = emptyMap(),
 )
+
+/** How a turn ended, as its `result` line says. */
+enum class TurnEnd {
+    /** It ran to its end. */
+    COMPLETED,
+
+    /** It was interrupted (Stop): the result's terminal reason is `aborted_streaming`. */
+    INTERRUPTED,
+
+    /** It failed: any other result that is an error. */
+    FAILED,
+}
 
 /** A `set_permission_mode` request still to be answered: the mode it asks for, and the mode shown before it. */
 data class PermissionModeChange(val requested: PermissionMode, val previous: PermissionMode?)

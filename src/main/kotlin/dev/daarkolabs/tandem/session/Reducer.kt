@@ -238,7 +238,17 @@ private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent): Cha
 }
 
 private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState {
-    val next = state.finishStreaming().copy(busy = false, sessionId = result.sessionId ?: state.sessionId, pendingPermissions = emptyList())
+    val end = when {
+        result.terminalReason == "aborted_streaming" -> TurnEnd.INTERRUPTED
+        result.isError -> TurnEnd.FAILED
+        else -> TurnEnd.COMPLETED
+    }
+    val next = state.finishStreaming().copy(
+        busy = false,
+        sessionId = result.sessionId ?: state.sessionId,
+        pendingPermissions = emptyList(),
+        lastTurnEnd = end,
+    )
     return when {
         result.terminalReason == "aborted_streaming" -> next // the interrupt already showed "Stopped."
         result.isError -> next.notice(

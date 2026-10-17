@@ -14,6 +14,7 @@ import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.SessionStatus
+import dev.daarkolabs.tandem.session.TurnEnd
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -166,9 +167,35 @@ class SessionNotifierTest {
             b.status.first { it == SessionStatus.IDLE }
             notifications() to b.title.value
         }
+        val stopped = notifications.single()
+        assertEquals(NotificationType.INFORMATION, stopped.type)
+        assertEquals("$title stopped", stopped.title, "the turn was interrupted")
+    }
+
+    @Test
+    fun `a background turn that completes is announced as finished`() = timeoutRunBlocking(60.seconds) {
+        val (notifications, title) = withSessions("background-completed", fixtures = "plain-reply,plain-reply") {
+            val a = manager.create(NewSessionOptions())
+            manager.select(a.id)
+            awaitSpawns(1)
+            val b = manager.create(NewSessionOptions())
+            awaitSpawns(2)
+            manager.send(b.id, "Reply with the single word: pong")
+            notifications() to b.title.value
+        }
         val finished = notifications.single()
         assertEquals(NotificationType.INFORMATION, finished.type)
         assertEquals("$title finished", finished.title)
+    }
+
+    @Test
+    fun `a finished turn is told by how it ended`() {
+        val finished = SessionNotifier.Event.FINISHED
+        assertEquals("Pong finished", finished.title("Pong", TurnEnd.COMPLETED))
+        assertEquals("Pong stopped", finished.title("Pong", TurnEnd.INTERRUPTED))
+        assertEquals("Pong ended with an error", finished.title("Pong", TurnEnd.FAILED))
+        assertEquals("Pong finished", finished.title("Pong", null), "no result kept: a turn that ended")
+        assertEquals("Pong needs your permission", SessionNotifier.Event.PERMISSION.title("Pong", TurnEnd.FAILED))
     }
 
     @Test
@@ -280,9 +307,9 @@ class SessionNotifierTest {
             delay(300) // time for a wrong second notification
             posted.toList()
         }
-        val finished = notifications.single()
-        assertEquals(NotificationType.INFORMATION, finished.type)
-        assertTrue(finished.title.endsWith(" finished"), finished.title)
+        val stopped = notifications.single()
+        assertEquals(NotificationType.INFORMATION, stopped.type)
+        assertTrue(stopped.title.endsWith(" stopped"), stopped.title) // the turn was interrupted
     }
 
     @Test

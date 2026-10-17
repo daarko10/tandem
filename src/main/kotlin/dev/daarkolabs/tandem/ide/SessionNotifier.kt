@@ -12,6 +12,7 @@ import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.SessionStatus
+import dev.daarkolabs.tandem.session.TurnEnd
 import dev.daarkolabs.tandem.session.turnEnded
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -34,7 +35,9 @@ private const val GROUP_ID: String = "Tandem"
 /**
  * Posts an IDE notification, in the "Tandem" group, when a session asks for permission or finishes a turn while the user does not see
  * it: the session is not the selected one, or the Tandem tool window is hidden. A permission request is a warning, "<title> needs your
- * permission"; a finished turn is information, "<title> finished". Its "Open" action selects the session and shows the tool window.
+ * permission"; a finished turn is information, "<title> finished", "<title> stopped" when it was interrupted, or "<title> ended with an
+ * error" when its result is an error ([dev.daarkolabs.tandem.session.ChatState.lastTurnEnd]). Its "Open" action selects the session and
+ * shows the tool window.
  * The selected session never gets one while the tool window is visible. Titles are shown as plain text.
  *
  * A session that is not selected is followed through its [SessionHandle.attention], which the manager raises for exactly these events
@@ -110,7 +113,11 @@ class SessionNotifier(private val project: Project, private val manager: Session
             val event = due() ?: return@withContext null
             NotificationGroupManager.getInstance().getNotificationGroup(GROUP_ID)
                 // Notifications render HTML; a title is the user's or the model's text, so it is escaped.
-                .createNotification(StringUtil.escapeXmlEntities(event.title(handle.title.value)), "", event.type)
+                .createNotification(
+                    StringUtil.escapeXmlEntities(event.title(handle.title.value, handle.state.value.lastTurnEnd)),
+                    "",
+                    event.type,
+                )
                 .addAction(NotificationAction.createSimpleExpiring("Open") { open(handle.id) })
                 .notify(project)
             event
@@ -152,7 +159,19 @@ class SessionNotifier(private val project: Project, private val manager: Session
         FINISHED(NotificationType.INFORMATION, "finished"),
         ;
 
-        fun title(session: String): String = "$session $what"
+        /**
+         * The notification's title for [session]: a finished turn says how it ended, from [lastTurnEnd] ("finished" when the chat
+         * keeps no result).
+         */
+        fun title(session: String, lastTurnEnd: TurnEnd?): String {
+            val told = when {
+                this != FINISHED -> what
+                lastTurnEnd == TurnEnd.INTERRUPTED -> "stopped"
+                lastTurnEnd == TurnEnd.FAILED -> "ended with an error"
+                else -> what
+            }
+            return "$session $told"
+        }
     }
 
     internal companion object {
