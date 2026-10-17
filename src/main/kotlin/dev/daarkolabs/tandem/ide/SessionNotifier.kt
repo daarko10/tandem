@@ -15,6 +15,7 @@ import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.TurnEnd
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -70,7 +71,10 @@ class SessionNotifier(private val project: Project, private val manager: Session
             val followed = HashMap<SessionHandle, Job>()
             manager.sessions.collect { open ->
                 followed.keys.filter { it !in open }.forEach { followed.remove(it)?.cancel() }
-                open.filter { it !in followed }.forEach { handle -> followed[handle] = launch { follow(handle) } }
+                // Undispatched: follow reads what it compares with as the session is first seen.
+                open.filter { it !in followed }.forEach { handle ->
+                    followed[handle] = launch(start = CoroutineStart.UNDISPATCHED) { follow(handle) }
+                }
             }
         }
     }
@@ -98,7 +102,8 @@ class SessionNotifier(private val project: Project, private val manager: Session
                 if (event != null && manager.selected.value == handle.id) notify(handle) { event.takeIf { stillDue(handle, it) } }
             }
         }
-        launch {
+        // Undispatched, as is follow itself, so that the count is read as the session is first seen, not when this runs.
+        launch(start = CoroutineStart.UNDISPATCHED) {
             // A turn ends when the count of ended turns grows, as the manager raises attention for it: a count, which no conflation
             // of the status hides. Turns that ended before this follows the session are not news.
             var ended = handle.state.value.turnsEnded
