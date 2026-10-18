@@ -21,3 +21,6 @@ allure-results/
 
 # superpowers SDD workspace (ledger, briefs, review packages)
 .superpowers/
+
+# research media captured from public videos/screenshots: local copies only, URLs are in the research docs
+docs/superpowers/research/assets/
