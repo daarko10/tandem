@@ -28,6 +28,10 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error title=CLI contract::No ANTHROPIC_API_KEY repository secret: add one (a low-budget key) under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
           mkdir -p build/contract
           ./scripts/record-fixture.sh contract-hello "Reply with the single word: pong" build/contract
       # Tandem names every new session with --session-id and drops inherited session variables (docs/protocol.md 1.2).
