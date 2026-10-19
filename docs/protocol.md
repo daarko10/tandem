@@ -343,8 +343,10 @@ Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_u
 - `PermissionUpdate` variants: `addRules|replaceRules|removeRules {rules:[{toolName,ruleContent?}], behavior:"allow"|"deny"|"ask", destination}`, `setMode {mode, destination}`, `addDirectories|removeDirectories {directories, destination}`; destination `userSettings|projectSettings|localSettings|session|cliArg`.
 - Fixture order (`permission`, 2.1.300): `assistant` with the `tool_use` block, then `content_block_stop`, then the
   `can_use_tool` request (its `tool_use_id` equals the block's `id`), then `message_delta`/`message_stop`. In the
-  2.1.302 recordings the request comes right after the `assistant` line, before `content_block_stop`
-  (`ask-single.ndjson:21-23`, 6 of 6 runs), and when the host answers at once the `user` line with the tool result
+  2.1.302 recordings the request arrives in either order relative to `content_block_stop`: before it for
+  AskUserQuestion, ExitPlanMode and WebSearch (`ask-single.ndjson:21-23`, `plan-approve.ndjson:87-89`,
+  `misc-web.ndjson:73-74`), after it for Bash and WebFetch (`tools-bash.ndjson:18-20`, `misc-web.ndjson:29-31`), so
+  a decoder must not key on either. When the host answers at once the `user` line with the tool result
   precedes `message_delta`/`message_stop` (`ask-deny.ndjson:24,25`): accept a tool result for a message that is not
   closed yet. After the answer, a `user` line carries the `tool_result` (`is_error:true` with the deny message on deny)
   plus `tool_result_meta[{id, permission_decision:{decision:"accept"|"reject", source, reason_type?}}]` (section 6.2).
@@ -596,7 +598,7 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
   file's Write in plan mode (`plan-approve.ndjson:73`), and no `reason_type` for ToolSearch and Agent;
   `source:"user_temporary"` after a host allow (`tools-bash.ndjson:23`); `{decision:"reject", source:"user_reject"}`
   with `non_execution_kind:"permission-rule"` after a host deny (`ask-deny.ndjson:24`). Missing on an unknown-tool
-  error (`tools-read-unavailable.ndjson:49`) and on a subagent's successful results.
+  error (`tools-read-unavailable.ndjson:49`).
 - Subagent lines, `user` and `assistant`, carry `parent_tool_use_id` (the `Agent` block's id), `agent_id` (the task's
   `task_id`, section 5.2), `subagent_type` and `task_description` (`agent-sync.ndjson:38,47`); the first is a `user`
   text line echoing the subagent's prompt (`:38`). No `stream_event` frames come from a subagent.
@@ -629,7 +631,7 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
 | `api_message_id` | fixture-only field: the API message id; matches `message_start.message.id` and `assistant.message.id` in real runs (inferred; redacted in the fixture) |
 | `ttft_ms` | on `message_start` |
 | `user_message_uuid(s)` | on the turn's first non-ping event: which client send this turn answers |
-| `thinking_display` | wrapper-level `"updates"\|"summarized"\|"highlights"` on `message_start` and on every frame of a thinking block (`think-default.ndjson:7,10`; `think-display-summarized.ndjson:8,11`), and on the `assistant` line that completes the block, with `thinking_duration_ms` (`think-default.ndjson:16`: 2143 ms). The SDK types it only on `set_max_thinking_tokens`; `"full"` never appears over stdio (section 4.4) |
+| `thinking_display` | wrapper-level `"updates"\|"summarized"\|"highlights"` on `message_start`, the block's `content_block_start` and every `thinking_delta` frame (`think-default.ndjson:7,8,10`; `think-display-summarized.ndjson:8,11`), not on `signature_delta` or `content_block_stop` (`think-default.ndjson:15,17`; `think-display-highlights.ndjson:11`), so no decoder keys block membership on its presence; and on the `assistant` line that completes the block, with `thinking_duration_ms` (`think-default.ndjson:16`: 2143 ms). The SDK types it only on `set_max_thinking_tokens`; `"full"` never appears over stdio (section 4.4) |
 
 Thinking blocks (2.1.302, fixtures `think-*`; probes doc 2.3). In the default display, `updates` (Tandem's argv; Opus
 the same, `think-opus`), every `thinking_delta` has `thinking:""` and a non-standard sibling `estimated_tokens`, an
