@@ -16,8 +16,9 @@ Sources, in order of authority:
    checks of `--session-id X` and `--resume X` on their own (1.1) ran signed in, with the usual config directory. Those
    of forks, of `--session-id` together with `--resume`, of the failed starts' `result` ids and of an early
    `rename_session` (1.1, 4.4) ran without sign-in: a scratch `CLAUDE_CONFIG_DIR` and no variable whose name contains
-   `TOKEN`, `API_KEY` or `OAUTH`. Such a run writes nothing before its `initialize` response, where a signed-in run first
-   writes a `system/ui_invalidate` line with the session id (1.1). The fork probe without sign-in forked a session that
+   `TOKEN`, `API_KEY` or `OAUTH`. Such a run writes nothing before its `initialize` response, where a signed-in run
+   usually first writes a `system/ui_invalidate` line with the session id (1.1; three 2.1.302 probe recordings lack it,
+   5.2, so it is no sign-in signal). The fork probe without sign-in forked a session that
    had no title line, so its missing `system/session_title_changed` (1.1) says nothing about sign-in.
 3. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads).
 4. `claude --help` output.
@@ -104,7 +105,8 @@ Measured with CLI 2.1.301, sending only `initialize` (conditions in Sources item
   --continue or --resume if --fork-session is also specified." (`sdk.d.ts` documents the same for `sessionId`.)
 - `--resume X` and `--resume X --fork-session` answer `initialize` but emit no `system/init` until the first prompt.
   A signed-in run names the session's id before that all the same, in lines the SDK does not document:
-  `system/ui_invalidate` at start (in every recording, and in a run with `--session-id` and no prompt), and
+  `system/ui_invalidate` at start (in 26 of the 29 probe recordings, in every older signed-in fixture and in a run with
+  `--session-id` and no prompt; `think-default`, `think-adaptive` and `think-opus` have none, 5.2), and
   `system/session_title_changed` when the original has a title (fixture `fork`: started without `--session-id`, the
   fork names its new id in both before its `initialize` response). The run without sign-in wrote neither. Tandem
   passes `--session-id`, a fork's too, so it never relies on those lines.
@@ -513,7 +515,7 @@ disk is the last `assistant` line's `effort` in its transcript (section 11).
 | `task_notification` | `task_id, run_id, tool_use_id, status:"completed", output_file, summary, usage` (`agent-sync.ndjson:49`; `summary` is the subagent's final text, which is not streamed as an `assistant` line unless `initialize` had `forwardSubagentText:true`, `agent-forwarded.ndjson:38`). A Bash task gets one too, with `output_file:""`, `summary` = its description and no `usage` (`agent-bash-task.ndjson:22`) | task list |
 | `background_tasks_changed` | background tasks; not recorded | task list |
 | `thinking_tokens` | `estimated_tokens, estimated_tokens_delta, user_message_uuid` (`think-default.ndjson:11`): a running estimate while a thinking block streams, interleaved with its `thinking_delta` frames in the `updates` and `summarized` displays, none in `highlights` (section 6.3). It overshoots the final `message_delta.usage.output_tokens_details.thinking_tokens` | token counter |
-| `ui_invalidate` | `event:"ui.render"`; the first line of a signed-in run, before `init` (`tools-bash.ndjson:1`; section 10) | ignore |
+| `ui_invalidate` | `event:"ui.render"`; usually the first line of a signed-in run, before `init` (26 of the 29 probe recordings, e.g. `tools-bash.ndjson:1`; section 10). Absent from `think-default`, `think-adaptive` and `think-opus` (2.1.302), which start with the `initialize` response, so key nothing on it | ignore |
 | `commands_changed` | `commands` | refresh palette |
 | `files_persisted`, `memory_recall`, `elicitation_complete`, `control_request_progress`, `plugin_install`, `mirror_error`, `worker_shutting_down` | | ignore or log type |
 
