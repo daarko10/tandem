@@ -30,7 +30,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import java.io.IOException
 import java.nio.file.Path
 import java.util.UUID
@@ -226,8 +225,13 @@ class ClaudeSession(
     /** Shows [text] in this chat as a notice of [level]: something Tandem itself tells the user about this process. */
     internal fun notice(level: NoticeLevel, text: String): Unit = dispatch(SessionEvent.HostNotice(level, text))
 
+    /**
+     * Allows [permission]. With [always], echoes only the `addRules` suggestions, for this session
+     * ([sessionPermissionUpdates]); when there are none, the allow goes out with empty `updatedPermissions`, without
+     * an error or a notice.
+     */
     fun allow(permission: PendingPermission, always: Boolean = false) {
-        val updates = if (always) permission.suggestions.map(::forSession) else emptyList()
+        val updates = if (always) sessionPermissionUpdates(permission.suggestions) else emptyList()
         send(HostMessages.allow(permission.requestId, permission.toolUseId, permission.input, updates))
         dispatch(SessionEvent.PermissionAnswered(permission.requestId))
     }
@@ -352,7 +356,4 @@ class ClaudeSession(
     }
 
     private fun newRequestId(): String = "tandem-${nextId.incrementAndGet()}"
-
-    /** "Always allow" lasts for this session only; persisting rules to settings is a separate, explicit choice. */
-    private fun forSession(suggestion: JsonObject): JsonObject = JsonObject(suggestion.toMutableMap().apply { put("destination", JsonPrimitive("session")) })
 }
