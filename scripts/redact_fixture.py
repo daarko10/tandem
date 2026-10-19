@@ -3,8 +3,11 @@
 
 Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
 
-- Replaces ids (session_id, uuid, request_id, message ids, tool_use ids, also when used as object keys)
-  with stable placeholders.
+- Replaces ids (session_id, uuid, request_id, message ids, tool_use ids, task and agent ids, also when used as
+  object keys) with stable placeholders. One value gets one placeholder wherever it appears, so a task's `task_id`,
+  the `agent_id` of the lines it produces and the `parent_tool_use_id` pointing at its tool_use stay correlated.
+- Replaces long base64 payloads (the `data` of a base64 source and the `base64` of an image tool_use_result) with
+  "<base64>". Only a `data` or `base64` value of at least 256 base64 characters counts, so short strings are never touched.
 - Replaces absolute paths with <path>, e-mail addresses with <email>, git branch names with <branch> and the
   entrypoint (how the recording was started) with <entrypoint>.
 - Empties environment-specific lists in system/init and in the initialize control_response
@@ -24,7 +27,8 @@ import re
 import sys
 
 ID_KEYS = {
-    "session_id", "uuid", "request_id", "parent_uuid", "tool_use_id", "id",
+    "session_id", "uuid", "request_id", "parent_uuid", "tool_use_id", "parent_tool_use_id", "id",
+    "task_id", "agent_id",
     "api_message_id", "summarizes_uuid", "user_message_uuid", "refused_user_message_uuid", "new_conversation_id",
     "command_uuid",
     # Transcript lines
@@ -39,6 +43,9 @@ API_ID_RE = re.compile(r"^(?:toolu|srvtoolu|msg|req)_[A-Za-z0-9]+$")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PLACEHOLDER_RE = re.compile(r"<[A-Za-z_]\w*-\d+>")
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+BASE64_KEYS = {"data", "base64"}
+BASE64_MIN_LENGTH = 256
+BASE64_RE = re.compile(r"[A-Za-z0-9+/=]+")
 
 ids: dict[str, str] = {}
 leaked: dict[str, str] = {}
@@ -65,6 +72,8 @@ def scrub(node, key=None):
             return "<branch>"
         if key == "entrypoint":
             return "<entrypoint>"
+        if key in BASE64_KEYS and len(node) >= BASE64_MIN_LENGTH and BASE64_RE.fullmatch(node):
+            return "<base64>"
         node = PATH_RE.sub("<path>", node)
         return EMAIL_RE.sub("<email>", node)
     return node

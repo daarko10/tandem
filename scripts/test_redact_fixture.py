@@ -62,6 +62,71 @@ class RedactTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual("", err)
 
+    def test_task_and_agent_ids_get_placeholders_correlated_across_lines(self):
+        out, err = self.redact(
+            {"type": "system", "subtype": "task_started", "task_id": "a1b2c3d4e5f6a7b8c", "tool_use_id": "toolu_01Spawn"},
+            {"type": "user", "parent_tool_use_id": "toolu_01Spawn", "agent_id": "a1b2c3d4e5f6a7b8c"},
+            {"type": "control_request", "request": {"tool_use_id": "toolu_01Inner", "agent_id": "a1b2c3d4e5f6a7b8c"}})
+        self.assertEqual("<task_id-1>", out[0]["task_id"])
+        self.assertEqual("<tool_use_id-2>", out[0]["tool_use_id"])
+        self.assertEqual("<tool_use_id-2>", out[1]["parent_tool_use_id"])  # the same value as the tool_use it points at
+        self.assertEqual("<task_id-1>", out[1]["agent_id"])  # the same value as the task
+        self.assertEqual("<task_id-1>", out[2]["request"]["agent_id"])
+        self.assertEqual("<tool_use_id-3>", out[2]["request"]["tool_use_id"])
+        self.assertNotIn("a1b2c3d4e5f6a7b8c", json.dumps(out))
+        self.assertEqual("", err)
+
+    def test_long_base64_payloads_are_replaced(self):
+        payload = "iVBORw0KGgo=" * 30  # 360 base64 characters
+        (out,), err = self.redact({
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": [
+                {"type": "image", "source": {"type": "base64", "data": payload, "media_type": "image/png"}}]}]},
+            "tool_use_result": {"type": "image", "file": {"base64": payload, "type": "image/png", "originalSize": 80}}})
+        self.assertEqual("<base64>", out["message"]["content"][0]["content"][0]["source"]["data"])
+        self.assertEqual("<base64>", out["tool_use_result"]["file"]["base64"])
+        self.assertEqual("image/png", out["message"]["content"][0]["content"][0]["source"]["media_type"])
+        self.assertEqual(80, out["tool_use_result"]["file"]["originalSize"])
+        self.assertNotIn(payload, json.dumps(out))
+        self.assertEqual("", err)
+
+    def test_short_or_non_base64_data_strings_are_untouched(self):
+        long_but_not_base64 = "a few words " * 30  # spaces: not a base64 payload
+        long_under_another_key = "QUJD" * 100
+        (out,), err = self.redact({"data": "hello", "base64": "QUJD", "note": {"data": long_but_not_base64},
+                                   "blob": long_under_another_key, "n": 1})
+        self.assertEqual("hello", out["data"])
+        self.assertEqual("QUJD", out["base64"])
+        self.assertEqual(long_but_not_base64, out["note"]["data"])
+        self.assertEqual(long_under_another_key, out["blob"])
+        self.assertEqual("", err)
+
+    def test_a_second_run_over_ids_and_base64_is_byte_identical(self):
+        src = os.path.join(self.dir.name, "sample.ndjson")
+        first = os.path.join(self.dir.name, "first.ndjson")
+        second = os.path.join(self.dir.name, "second.ndjson")
+        with open(src, "w", encoding="utf-8") as f:
+            for line in (
+                {"type": "system", "subtype": "task_started", "task_id": "a1b2c3d4e5f6a7b8c", "tool_use_id": "toolu_01Spawn",
+                 "uuid": "11111111-2222-4333-8444-555555555555"},
+                {"type": "user", "parent_tool_use_id": "toolu_01Spawn", "agent_id": "a1b2c3d4e5f6a7b8c",
+                 "message": {"content": [{"type": "image", "source": {"type": "base64", "data": "QUJD" * 100}}]},
+                 "tool_use_result": {"file": {"base64": "QUJD" * 100}}, "cwd": "/home/someone/project"},
+            ):
+                f.write(json.dumps(line) + "\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            redact_fixture.redact(src, first)
+            importlib.reload(redact_fixture)  # a fresh run, as a later recording session would be
+            redact_fixture.redact(first, second)
+        with open(first, "rb") as a, open(second, "rb") as b:
+            self.assertEqual(a.read(), b.read())
+        self.assertEqual("", err.getvalue())
+        with open(second, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn('"<base64>"', text)
+        self.assertIn('"<task_id-1>"', text)
+
     def test_a_line_that_is_not_a_json_object_is_dropped_with_a_warning(self):
         out, err = self.redact("[1, 2]", "not json", {"type": "kept"})
         self.assertEqual([{"type": "kept"}], out)
