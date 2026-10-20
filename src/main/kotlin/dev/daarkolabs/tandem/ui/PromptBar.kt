@@ -30,9 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
-import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
@@ -167,8 +165,8 @@ private fun PromptBox(ui: ChatUiState, composer: ComposerModel, focus: Boolean, 
         // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
         val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
         if (composer.busy) {
-            IconButton(onClick = { onAction(ComposerAction.Stop) }, modifier = buttonModifier) {
-                Icon(AllIconsKeys.Actions.Suspend, contentDescription = "Stop", tint = colors.text.info)
+            IconButton(onClick = { onAction(ComposerAction.Stop) }, modifier = buttonModifier.semantics { contentDescription = "Stop" }) {
+                Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
             }
         } else {
             IconButton(onClick = { onAction(ComposerAction.Send) }, modifier = buttonModifier.semantics { contentDescription = "Send" }) {
@@ -179,9 +177,8 @@ private fun PromptBox(ui: ChatUiState, composer: ComposerModel, focus: Boolean, 
 }
 
 /**
- * Hands [event] to [composerKey] and runs what it returns. Shift+Enter puts a newline in [draft] ([insertNewline]), which the text
- * area would not; a plain Enter while a turn runs is swallowed, so that it does nothing at all (spec 4.15). Every other key it does
- * not map goes to the text area.
+ * Hands [event] to [composerKey] and runs what it returns, else to [composerFallback]: a newline in [draft] ([insertNewline]),
+ * which the text area would not type, or nothing at all (spec 4.15). Every other key goes to the text area.
  */
 private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, draft: TextFieldState, onAction: (ComposerAction) -> Unit): Boolean {
     val ctrlOrMeta = event.isCtrlPressed || event.isMetaPressed
@@ -198,13 +195,14 @@ private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, draft: Te
         onAction(action)
         return true
     }
-    val enter = event.key == Key.Enter || event.key == Key.NumPadEnter
-    if (!enter || event.type != KeyEventType.KeyDown || event.isAltPressed || ctrlOrMeta) return false
-    if (event.isShiftPressed) {
-        insertNewline(draft)
-        return true
+    return when (composerFallback(event.key, event.type, event.isShiftPressed, event.isAltPressed, ctrlOrMeta, busy = composer.busy)) {
+        ComposerFallback.Newline -> {
+            insertNewline(draft)
+            true
+        }
+        ComposerFallback.Swallow -> true
+        null -> false
     }
-    return composer.busy
 }
 
 /** The effort the session started with, capitalised. It cannot change while the session runs, so it is shown and not picked. */

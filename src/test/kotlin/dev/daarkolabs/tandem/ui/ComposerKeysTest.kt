@@ -52,6 +52,23 @@ class ComposerKeysTest {
     }
 
     @Test
+    fun `the composer types Shift+Enter as a newline and swallows Enter while busy`() {
+        assertEquals(ComposerFallback.Newline, fallback(enter, shift = true))
+        assertEquals(ComposerFallback.Newline, fallback(enter, shift = true, busy = true))
+        assertEquals(ComposerFallback.Newline, fallback(key(AwtKeyEvent.VK_ENTER, numPad = true), shift = true))
+        assertEquals(ComposerFallback.Swallow, fallback(enter, busy = true))
+        assertEquals(ComposerFallback.Swallow, fallback(key(AwtKeyEvent.VK_ENTER, numPad = true), busy = true))
+        // A plain Enter while idle sends (composerKey); Alt or Ctrl/Cmd held, a key release and other keys go to the text area.
+        assertNull(fallback(enter))
+        assertNull(fallback(enter, alt = true, busy = true))
+        assertNull(fallback(enter, ctrlOrMeta = true, busy = true))
+        assertNull(fallback(enter, shift = true, ctrlOrMeta = true))
+        assertNull(fallback(enter, type = KeyEventType.KeyUp, shift = true))
+        assertNull(fallback(enter, type = KeyEventType.KeyUp, busy = true))
+        assertNull(fallback(escape, shift = true, busy = true))
+    }
+
+    @Test
     fun `the newline replaces the selection and the cursor follows it`() {
         val atCursor = TextFieldState("ab", TextRange(1))
         insertNewline(atCursor)
@@ -76,6 +93,15 @@ class ComposerKeysTest {
         assertEquals(ComposerAction.CardEscape, composer(escape, busy = true, cardOpen = true))
         assertEquals(ComposerAction.CardEscape, composer(escape, busy = false, cardOpen = true))
     }
+
+    private fun fallback(
+        key: Key,
+        type: KeyEventType = KeyEventType.KeyDown,
+        shift: Boolean = false,
+        alt: Boolean = false,
+        ctrlOrMeta: Boolean = false,
+        busy: Boolean = false,
+    ): ComposerFallback? = composerFallback(key, type, shift, alt, ctrlOrMeta, busy)
 
     private fun key(code: Int, numPad: Boolean = false): Key =
         Key(code, if (numPad) AwtKeyEvent.KEY_LOCATION_NUMPAD else AwtKeyEvent.KEY_LOCATION_STANDARD)
