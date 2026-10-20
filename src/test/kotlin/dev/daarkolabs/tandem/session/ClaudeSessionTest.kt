@@ -207,8 +207,29 @@ class ClaudeSessionTest {
         assertEquals(2, times.size, frames.toString())
         assertTrue(times[1] > times[0], times.toString())
         val between = frames.subList(frames.indexOf(times[0]) + 1, frames.indexOf(times[1]))
-        assertEquals(emptyList(), between, "a keep_alive or an unknown line changes no state")
+        assertEquals(emptyList(), between, "a keep_alive line changes no state")
+        // The unknown line set times[1] before its dispatch: a state it caused would come after it. Only the end may.
+        val after = frames.drop(frames.indexOf(times[1]) + 1).filterIsInstance<ChatState>()
+        assertTrue(after.isNotEmpty() && after.all { it.ended }, "an unknown line changes no state: $after")
         assertEquals(1, frames.subList(0, frames.indexOf(times[0])).count { it is ChatState }, "only the initial state before")
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `the injected clock stamps the prompt, the turn and every line`() = runBlocking {
+        // Waits for initialize and the prompt before it answers, so the turn has started when its lines come.
+        val launcher = fakeCli("read a; read b; cat '${File(fixtures, "plain-reply.ndjson").path}'; cat > /dev/null")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher, clock = { 1_000L })
+        session.start()
+        session.sendUserMessage("Reply with the single word: pong")
+        val sent = session.state.value
+        assertEquals(1_000L, sent.turn?.startedAtMillis)
+        assertEquals(1_000L, sent.entries.filterIsInstance<ChatEntry.User>().single().sentAtMillis)
+
+        withTimeout(10_000) { session.state.first { it.turnsEnded == 1 } }
+        assertEquals(1_000L, session.lastFrameAtMillis.value)
+        session.close()
         scope.coroutineContext.job.cancelAndJoin()
     }
 

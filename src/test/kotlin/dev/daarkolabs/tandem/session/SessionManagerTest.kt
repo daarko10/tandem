@@ -1465,4 +1465,20 @@ class SessionManagerTest {
 
         assertEquals(1, answers().count { it["request_id"]?.jsonPrimitive?.content == p.requestId })
     }
+
+    @Test
+    fun `allowing for the session writes only addRules`() = test {
+        val manager = manager(fixtures = "permission")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Create the fixture file")
+        val p = handle.awaitRequest("<request_id-26>")
+        manager.allow(handle.id, p.requestId, always = true)
+        assertEquals(TurnEnd.COMPLETED, handle.awaitTurns(1).lastTurnEnd)
+
+        val response = answerTo("<request_id-26>")
+        assertEquals("allow", response.string("behavior"))
+        val updated = response["updatedPermissions"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("addRules"), updated.map { it.string("type") })
+        assertEquals("session", updated.single().string("destination"))
+    }
 }
