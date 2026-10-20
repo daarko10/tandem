@@ -61,8 +61,8 @@ private val SIDEBAR_WIDTH: Dp = 220.dp
  * the dimmed chat. The header's "+" starts a session at any width. A session picked in the sidebar or created gets the focus in its
  * prompt box.
  *
- * Every open session keeps a [ChatRowsPresenter] from the first time it is shown until it is closed, so that switching back to it
- * does not parse its transcript again.
+ * Every open session keeps a [ChatPresenter] and a [ChatUiState] from the first time it is shown until it is closed, so that
+ * switching back to it does not parse its transcript again and finds its rows opened and scrolled as it left them.
  */
 @Composable
 internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
@@ -73,7 +73,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val open by manager.sessions.collectAsState()
     val selectedId by manager.selected.collectAsState()
     val selected = open.firstOrNull { it.id == selectedId }
-    val presenters = rememberChatRowsPresenters(open)
+    val presenters = rememberChatPresenters(open, sessions.rowOptions)
     var collapsed by remember { mutableStateOf(workspace.state.sidebarCollapsed) }
     // The sidebar over the chat, in a window too narrow to dock it.
     var drawerOpen by remember { mutableStateOf(false) }
@@ -177,14 +177,16 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     } else {
                         // Composed afresh for each session, so that what is typed in one session's prompt box never shows in another's.
                         key(selected.id) {
-                            val rows = remember(selected) { presenters.rows(selected) }
+                            val presenter = remember(selected) { presenters.presenter(selected) }
+                            val ui = remember(selected.id) { presenters.ui(selected.id) }
                             Box(chatFocus) {
                                 ChatPane(
                                     project,
                                     selected,
                                     manager,
                                     workspace,
-                                    rows,
+                                    presenter,
+                                    ui,
                                     focusPrompt = promptFocusFor == selected.id,
                                     onPromptFocused = { promptFocusFor = null },
                                 )

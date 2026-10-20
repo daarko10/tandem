@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -19,17 +20,18 @@ import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.PendingPermission
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
-import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.DefaultButton
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 
 /**
- * One session's chat: its transcript ([rows], rendered by [ChatRowsPresenter]), the permission requests it waits on, and the prompt
- * bar ([PromptBar]) with the session's pickers, whose picks are also the project's last ones in [workspace]. Everything goes to
- * [manager] for [handle]'s session; none of it waits: a prompt to a stopped session starts its process. With [focusPrompt] the
- * prompt box takes the focus, and then [onPromptFocused] is called.
+ * One session's chat: its transcript ([ChatPanel], drawn from [presenter] with what the chat remembers on screen in [ui]), the
+ * permission requests it waits on, and the prompt bar ([PromptBar]) with the session's pickers, whose picks are also the project's
+ * last ones in [workspace]. Everything goes to [manager] for [handle]'s session; none of it waits: a prompt to a stopped session
+ * starts its process. With [focusPrompt] the prompt box takes the focus, and then [onPromptFocused] is called.
  */
 @Composable
 internal fun ChatPane(
@@ -37,21 +39,24 @@ internal fun ChatPane(
     handle: SessionHandle,
     manager: SessionManager,
     workspace: TandemWorkspaceState,
-    rows: StateFlow<List<ChatRow>>,
+    presenter: ChatPresenter,
+    ui: ChatUiState,
     focusPrompt: Boolean = false,
     onPromptFocused: () -> Unit = {},
 ) {
-    val state by handle.state.collectAsState()
+    val composer by presenter.composer.collectAsState()
+    val pendingFlow = remember(handle) { handle.state.map { it.pendingPermissions }.distinctUntilChanged() }
+    val pending by pendingFlow.collectAsState(handle.state.value.pendingPermissions)
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            val emptyText = if (state.ended) {
+            val emptyText = if (composer.ended) {
                 "This session's claude process has stopped. Send a prompt to start it again."
             } else {
                 "Ask Claude anything about this project."
             }
-            ChatPanel(project, rows, emptyText)
+            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis)
         }
-        state.pendingPermissions.forEach { PermissionPrompt(it, handle, manager) }
+        pending.forEach { PermissionPrompt(it, handle, manager) }
         PromptBar(handle, manager, workspace, focusPrompt, onPromptFocused)
     }
 }

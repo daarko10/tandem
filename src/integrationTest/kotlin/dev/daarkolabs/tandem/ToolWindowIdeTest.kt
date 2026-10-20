@@ -73,6 +73,7 @@ class ToolWindowIdeTest {
             typePrompt("Reply with the single word: pong")
             waitForText("Reply with the single word: pong")
             waitForText("pong")
+            waitFor("turn footer", 1.minutes) { ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'Worked for')]").present() }
             waitFor("model shown in the status line", 1.minutes) {
                 ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'claude-sonnet-5-5')]").present()
             }
@@ -89,11 +90,13 @@ class ToolWindowIdeTest {
             typePrompt("Create the fixture file")
             waitForText("Allow Bash?")
             clickButton("Allow once")
+            waitFor("tool row", 2.minutes) { toolRow("Ran Create empty fixture file").present() }
             waitForText("done.")
 
             typePrompt("Now remove it")
             waitForText("Allow Bash?")
             clickButton("Deny")
+            waitFor("tool row", 2.minutes) { toolRow("Remove fixture file · Denied").present() }
             waitForText("denied.")
         }
         val answers = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
@@ -109,7 +112,7 @@ class ToolWindowIdeTest {
             typePrompt("Count from 1 to 300")
             waitFor("Stop offered while the turn runs", 1.minutes) { button("Stop").present() }
             clickButton("Stop")
-            waitForText("Stopped.")
+            waitForText("Interrupted · What should Claude do instead?")
             waitFor("Send is offered again", 1.minutes) { button("Send").present() }
         }
         val requests = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject["subtype"]!!.jsonPrimitive.content }
@@ -560,6 +563,9 @@ class ToolWindowIdeTest {
     /** An icon button, found by what it says to assistive technology. */
     private fun Driver.iconButton(description: String): UiComponent =
         ui.x("//div[@class='ComposeNode' and @role='Button' and @contentdescription='$description']")
+
+    /** A tool row (a lone call, a group or a group's sub-row), found by its label, which is what it says to assistive technology. */
+    private fun Driver.toolRow(label: String): UiComponent = ui.x("//div[@class='ComposeNode' and @contentdescription='$label']")
 
     /** The editable text (a text field or area) that has the keyboard focus, if it holds [text]. */
     private fun Driver.focusedEditable(text: String): UiComponent = ui.x("$EDITABLE[@focused='true' and @editabletext='$text']")

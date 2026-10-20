@@ -4,6 +4,7 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
+import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.session.DefaultProcessLauncher
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.ProcessLauncher
@@ -19,6 +20,9 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -104,6 +108,11 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         appendTitle = { transcript, id, title, time -> appendTitle(transcript, id, title, time) },
         deleteFiles = { deleteTranscript(it) },
     )
+
+    private val _rowOptions = MutableStateFlow(RowOptions(showThinking = true))
+
+    /** What the chat rows show beyond the session's state: the `Show thinking` setting. */
+    val rowOptions: StateFlow<RowOptions> = _rowOptions.asStateFlow()
 
     private val started = AtomicBoolean(false)
 

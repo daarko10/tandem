@@ -16,7 +16,8 @@ import kotlinx.coroutines.withContext
 /**
  * Development-only Jewel rendering spike. Enabled with `-Dtandem.spike=true`
  * (`./gradlew runIde -Ptandem.spike=true`): streams [FakeTranscript] into the tool window while
- * [EdtStallMonitor] measures EDT stalls. Progress goes to idea.log as `TANDEM-SPIKE` lines.
+ * [EdtStallMonitor] measures EDT stalls and [RecompositionCounter] counts row recompositions. Progress goes to idea.log as
+ * `TANDEM-SPIKE` lines.
  */
 internal object RenderingSpike {
     val enabled: Boolean get() = System.getProperty("tandem.spike") == "true"

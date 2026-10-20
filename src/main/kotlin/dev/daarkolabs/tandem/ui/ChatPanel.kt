@@ -2,77 +2,99 @@
 
 package dev.daarkolabs.tandem.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.intellij.openapi.project.Project
+import dev.daarkolabs.tandem.chat.NoticeRow
+import dev.daarkolabs.tandem.chat.TextRow
+import dev.daarkolabs.tandem.chat.ThinkingRow
+import dev.daarkolabs.tandem.chat.ToolRow
+import dev.daarkolabs.tandem.chat.TurnEndRow
+import dev.daarkolabs.tandem.chat.UserRow
+import dev.daarkolabs.tandem.chat.WorkingRow
+import dev.daarkolabs.tandem.ui.dev.RecompositionCounter
+import dev.daarkolabs.tandem.ui.dev.RenderingSpike
+import dev.daarkolabs.tandem.ui.rows.NoticeItem
+import dev.daarkolabs.tandem.ui.rows.TextRowItem
+import dev.daarkolabs.tandem.ui.rows.ToolRowItem
+import dev.daarkolabs.tandem.ui.rows.TurnEndItem
+import dev.daarkolabs.tandem.ui.rows.UserBubble
 import kotlinx.coroutines.flow.StateFlow
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.intui.markdown.bridge.ProvideMarkdownStyling
-import org.jetbrains.jewel.markdown.Markdown
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.VerticallyScrollableContainer
 
-/** The chat transcript. Renders ready [ChatRow]s only; parsing happens in [ChatRowsPresenter]. */
+/**
+ * The chat transcript (spec 4.1, 6.0): the presenter's rows in a list keyed by row key, inside the IDE's scrollbar, each row capped
+ * to the chat column. Draws ready rows only: building and parsing happen in [ChatPresenter]; what a row remembers on screen is in
+ * [ui]. [lastFrameAt] is when the session's process last wrote a line, for the working row.
+ */
 @Composable
-internal fun ChatPanel(project: Project, rows: StateFlow<List<ChatRow>>, emptyText: String) {
-    val items by rows.collectAsState()
-    val listState = rememberLazyListState()
+internal fun ChatPanel(project: Project, presenter: ChatPresenter, ui: ChatUiState, emptyText: String, lastFrameAt: StateFlow<Long>) {
+    val chat by presenter.chat.collectAsState()
+    val rows = chat.rows
 
-    // Follow the tail while it grows.
-    val tail = items.lastOrNull()
-    LaunchedEffect(items.size, tail?.markdown?.length) {
-        if (items.isNotEmpty()) listState.scrollToItem(items.lastIndex, Int.MAX_VALUE)
+    // Follows the tail on every change, as before the redesign, until the intent-based autoscroll (spec 4.16) replaces it.
+    LaunchedEffect(chat) {
+        if (rows.isNotEmpty()) ui.listState.scrollToItem(rows.lastIndex, Int.MAX_VALUE)
     }
 
-    if (items.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(emptyText) }
+    if (rows.isEmpty()) {
+        Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+            Text(emptyText, color = JewelTheme.globalColors.text.info)
+        }
         return
     }
     ProvideMarkdownStyling(project) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            items(items, key = { it.id }, contentType = { it.role }) { row -> MessageRow(row) }
+        VerticallyScrollableContainer(ui.listState, Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = ui.listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            ) {
+                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt) }
+            }
         }
     }
 }
 
+/** One row of the list, by its kind. [lastFrameAt] is for the working row only. */
 @Composable
-private fun MessageRow(row: ChatRow) {
-    val shape = RoundedCornerShape(6.dp)
-    val modifier = when (row.role) {
-        ChatRole.USER -> Modifier.background(JewelTheme.globalColors.borders.disabled, shape).padding(8.dp)
-        ChatRole.ASSISTANT, ChatRole.TOOL, ChatRole.NOTICE -> Modifier
+internal fun RowItem(rendered: RenderedRow, ui: ChatUiState, lastFrameAt: StateFlow<Long>) {
+    if (RenderingSpike.enabled) SideEffect { RecompositionCounter.hit(rendered.row.key) }
+    when (val row = rendered.row) {
+        is UserRow -> UserBubble(row)
+        is TextRow -> TextRowItem(rendered)
+        is ToolRow -> ToolRowItem(rendered, ui)
+        is NoticeRow -> NoticeItem(row)
+        is TurnEndRow -> TurnEndItem(row)
+        // The thinking and working rows get their own items next (spec 4.5, 4.9); until then, their line.
+        is ThinkingRow -> SecondaryLine(row.label, row.gap.dp)
+        is WorkingRow -> SecondaryLine(row.step, row.gap.dp, small = true)
     }
-    Column(Modifier.fillMaxWidth().then(modifier)) {
-        val label = when (row.role) {
-            ChatRole.USER -> "You"
-            ChatRole.ASSISTANT -> if (row.streaming) "Claude ▍" else "Claude"
-            ChatRole.TOOL -> "Tool result"
-            ChatRole.NOTICE -> "Tandem"
+}
+
+@Composable
+private fun SecondaryLine(text: String, gap: Int, small: Boolean = false) {
+    Box(Modifier.chatColumn().padding(top = gap.dp)) {
+        if (small) {
+            Text(text, style = smallTextStyle(), color = JewelTheme.globalColors.text.info)
+        } else {
+            Text(text, color = JewelTheme.globalColors.text.info)
         }
-        Text(label, fontWeight = FontWeight.Bold, color = JewelTheme.globalColors.text.info)
-        Markdown(row.blocks, row.markdown, modifier = Modifier.fillMaxWidth(), selectable = true)
     }
 }

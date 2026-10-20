@@ -159,8 +159,9 @@ private fun TitleField(title: String, onConfirm: (String) -> Unit, onCancel: () 
 }
 
 /**
- * What the session runs: the model the CLI reports (else the one picked, else its default), the permission mode, the CLI's version
- * and whether a turn is in progress. Above it, while the CLI does not run the model that was picked, a warning saying so.
+ * What the session runs: the model the CLI reports (else the one picked, else its default), the permission mode and the CLI's
+ * version; the chat's working row shows whether a turn is in progress. Above it, while the CLI does not run the model that was
+ * picked, a warning saying so.
  */
 @Composable
 private fun StatusLine(state: ChatState) {
@@ -177,7 +178,6 @@ private fun StatusLine(state: ChatState) {
         state.activeModel ?: state.requestedModel ?: "default model",
         state.permissionMode?.wire?.let { "mode: $it" },
         state.claudeCodeVersion?.let { "claude $it" },
-        if (state.busy) "working…" else null,
     )
     Text(parts.joinToString("  ·  "), color = JewelTheme.globalColors.text.info, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
 }
