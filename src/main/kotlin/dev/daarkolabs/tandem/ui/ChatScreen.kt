@@ -31,7 +31,8 @@ import org.jetbrains.jewel.ui.component.Text
  * One session's chat: its transcript ([ChatPanel], drawn from [presenter] with what the chat remembers on screen in [ui]), the
  * permission requests it waits on, and the prompt bar ([PromptBar]) with the session's pickers, whose picks are also the project's
  * last ones in [workspace]. Everything goes to [manager] for [handle]'s session; none of it waits: a prompt to a stopped session
- * starts its process. With [focusPrompt] the prompt box takes the focus, and then [onPromptFocused] is called.
+ * starts its process. With [focusPrompt] the prompt box takes the focus, and then [onPromptFocused] is called. Esc in the
+ * transcript asks for the prompt box's focus with [onFocusComposer]; Esc in the prompt box while a request waits denies it.
  */
 @Composable
 internal fun ChatPane(
@@ -43,6 +44,7 @@ internal fun ChatPane(
     ui: ChatUiState,
     focusPrompt: Boolean = false,
     onPromptFocused: () -> Unit = {},
+    onFocusComposer: () -> Unit = {},
 ) {
     val composer by presenter.composer.collectAsState()
     val pendingFlow = remember(handle) { handle.state.map { it.pendingPermissions }.distinctUntilChanged() }
@@ -54,10 +56,20 @@ internal fun ChatPane(
             } else {
                 "Ask Claude anything about this project."
             }
-            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis)
+            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis, onFocusComposer)
         }
         pending.forEach { PermissionPrompt(it, handle, manager) }
-        PromptBar(handle, manager, workspace, focusPrompt, onPromptFocused)
+        PromptBar(
+            handle,
+            manager,
+            workspace,
+            presenter,
+            ui,
+            focusPrompt,
+            onPromptFocused,
+            // Until the permission card (slice B), Esc in the prompt box answers the first waiting request as its Deny does.
+            onCardEscape = { pending.firstOrNull()?.let { manager.deny(handle.id, it.requestId) } },
+        )
     }
 }
 

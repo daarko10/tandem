@@ -7,6 +7,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.jupiter.api.Test
 import kotlin.test.assertFalse
+import kotlin.test.assertEquals
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -25,6 +26,25 @@ class ChatUiStateTest {
             assertSame(first, again)
             assertTrue(again.value)
             assertFalse(presenters.ui("b").expanded("tool:1").value)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun draftIsKeptPerSessionKey() {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)))
+            val first = presenters.ui("a").draft
+            first.edit { append("hello") }
+
+            presenters.ui("b")
+            val again = presenters.ui("a").draft
+
+            assertSame(first, again)
+            assertEquals("hello", again.text.toString())
+            assertEquals("", presenters.ui("b").draft.text.toString())
         } finally {
             scope.cancel()
         }

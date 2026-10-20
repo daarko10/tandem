@@ -24,7 +24,7 @@ internal class TandemToolWindowFactory : ToolWindowFactory, DumbAware {
             )
             val ui = ChatUiState().also { it.onExpand = presenter::expandBody }
             toolWindow.addComposeTab("Chat", focusOnClickInside = true) {
-                ChatPanel(project, presenter, ui, emptyText = "Rendering spike starting.", lastFrameAt = MutableStateFlow(0L))
+                ChatPanel(project, presenter, ui, emptyText = "Rendering spike starting.", lastFrameAt = MutableStateFlow(0L), onFocusComposer = {})
             }
             return
         }

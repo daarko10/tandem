@@ -140,6 +140,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 SessionHeader(
                     selected,
+                    composer = remember(selected, presenters) { selected?.let { presenters.presenter(it).composer } },
                     sidebarShown = docked || drawerShown,
                     onToggleSidebar = {
                         if (wide) {
@@ -189,6 +190,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                     ui,
                                     focusPrompt = promptFocusFor == selected.id,
                                     onPromptFocused = { promptFocusFor = null },
+                                    onFocusComposer = { promptFocusFor = selected.id },
                                 )
                             }
                         }

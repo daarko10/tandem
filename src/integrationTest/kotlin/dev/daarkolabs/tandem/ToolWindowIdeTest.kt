@@ -69,15 +69,13 @@ class ToolWindowIdeTest {
         val sent = runChat("typedPrompt", fixtures = listOf("plain-reply")) {
             newSession()
             // Send with nothing typed sends nothing: the one prompt the CLI gets is the typed one (asserted below).
-            clickButton("Send")
+            iconButton("Send").click(Point(10, 10))
             typePrompt("Reply with the single word: pong")
             waitForText("Reply with the single word: pong")
             waitForText("pong")
             waitFor("turn footer", 1.minutes) { ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'Worked for')]").present() }
-            waitFor("model shown in the status line", 1.minutes) {
-                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'claude-sonnet-5-5')]").present()
-            }
-            waitFor("Send is offered again", 1.minutes) { button("Send").present() }
+            waitFor("model shown in the model picker", 1.minutes) { picker("Model", "Default model").present() }
+            waitFor("Send is offered again", 1.minutes) { iconButton("Send").present() }
         }
         val prompt = sent.single { it.type == "user" }
         assertTrue("Reply with the single word: pong" in prompt.toString(), prompt.toString())
@@ -110,10 +108,10 @@ class ToolWindowIdeTest {
         val sent = runChat("stop", fixtures = listOf("interrupt")) {
             newSession()
             typePrompt("Count from 1 to 300")
-            waitFor("Stop offered while the turn runs", 1.minutes) { button("Stop").present() }
-            clickButton("Stop")
+            waitFor("Stop offered while the turn runs", 1.minutes) { iconButton("Stop").present() }
+            iconButton("Stop").click(Point(10, 10))
             waitForText("Interrupted · What should Claude do instead?")
-            waitFor("Send is offered again", 1.minutes) { button("Send").present() }
+            waitFor("Send is offered again", 1.minutes) { iconButton("Send").present() }
         }
         val requests = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject["subtype"]!!.jsonPrimitive.content }
         assertEquals(listOf("initialize", "interrupt"), requests)
@@ -147,9 +145,7 @@ class ToolWindowIdeTest {
             }
             typePrompt("Reply with the single word: two")
             waitForText("two")
-            waitFor("status shows plan", 1.minutes) {
-                ui.x("//div[@class='ComposeNode' and contains(@visible_text, 'mode: plan')]").present()
-            }
+            waitFor("the picker shows plan", 1.minutes) { picker("Permission mode", "Plan").present() }
             // A pick in the prompt bar is the project's last one: the new-session popup starts from it. Escape closes the popup
             // and creates nothing.
             newSessionButton().click(Point(10, 10))
@@ -613,7 +609,7 @@ class ToolWindowIdeTest {
         waitFor("prompt box focused", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
         promptBox().keyboard { typeText(text, 20) }
         waitFor("prompt box holds '$text'", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='$text']").present() }
-        clickButton("Send")
+        iconButton("Send").click(Point(10, 10))
         waitFor("prompt box cleared after Send", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
     }
 
