@@ -2,6 +2,8 @@
 
 package dev.daarkolabs.tandem.ui
 
+import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.chat.ChatRow
 import dev.daarkolabs.tandem.chat.ChatRowsBuilder
 import dev.daarkolabs.tandem.chat.ComposerModel
@@ -15,13 +17,13 @@ import dev.daarkolabs.tandem.chat.composerModel
 import dev.daarkolabs.tandem.session.ChatState
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.ImmutableMap
-import kotlinx.collections.immutable.PersistentSet
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentMapOf
-import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -31,9 +33,10 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.produceIn
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.jetbrains.jewel.markdown.extensions.autolink.AutolinkProcessorExtension
@@ -62,7 +65,9 @@ internal data class RenderedChat(
  * Turns a session's [state] into [chat], ready to draw, and into the composer's model, off the EDT (spec 5.6, 9): rows come from a
  * [ChatRowsBuilder] on [Dispatchers.Default], intermediate states are dropped when building falls behind, and Markdown is parsed
  * there too, once per row key and text, then kept until the row goes away. A tool body's Markdown is parsed only once the row is
- * opened, on [expandBody]. A new [options] value takes a new builder and keeps the parsed Markdown.
+ * opened, on [expandBody]: one collector merges those requests with the states, so none is dropped. A new [options] value takes a
+ * new builder and keeps the parsed Markdown. A state that fails to render is logged (its exception's class, never row text) and
+ * leaves the last rows on screen; the next state renders again.
  *
  * [parse] replaces the Markdown parser: tests watch where and how often it runs.
  */
@@ -76,8 +81,8 @@ internal class ChatPresenter(
     private val processor = MarkdownProcessor(listOf(AutolinkProcessorExtension))
     private val parseMarkdown: (String) -> ImmutableList<MarkdownBlock> = parse ?: { processor.processMarkdownDocument(it).toImmutableList() }
 
-    /** The keys of the bodies opened so far: their Markdown is parsed while their row exists. */
-    private val requested = MutableStateFlow<PersistentSet<String>>(persistentSetOf())
+    /** Body keys from [expandBody], read by the rendering coroutine only. */
+    private val expandRequests = Channel<String>(Channel.UNLIMITED)
 
     private val rendered = MutableStateFlow(RenderedChat(persistentListOf(), null, 0, null))
 
@@ -88,18 +93,34 @@ internal class ChatPresenter(
         .stateIn(scope, SharingStarted.Eagerly, composerModel(state.value))
 
     // Touched by the rendering coroutine only.
+    /** The keys of the bodies opened so far: their Markdown is parsed while their row exists, and they go with it. */
+    private val requested = HashSet<String>()
     private var builder: ChatRowsBuilder? = null
     private var builderOptions: RowOptions? = null
     private val parsed = HashMap<String, Parsed>()
     private var previous: Map<String, RenderedRow> = emptyMap()
+    private var failed = false
 
     private class Parsed(val markdown: String, val blocks: ImmutableList<MarkdownBlock>)
 
-    private class Input(val state: ChatState, val options: RowOptions, val requested: Set<String>)
+    private class Input(val state: ChatState, val options: RowOptions)
 
     init {
         scope.launch(Dispatchers.Default) {
-            combine(state, options, requested, ::Input).conflate().collect { rendered.value = render(it) }
+            // 5.6's merge of the states and the requests, as a select: states are conflated while a render runs, requests are not.
+            val inputs = combine(state, options, ::Input).conflate().produceIn(this)
+            var input = inputs.receive()
+            var stale = true
+            while (true) {
+                if (stale) renderSafely(input)
+                stale = select {
+                    inputs.onReceive {
+                        input = it
+                        true
+                    }
+                    expandRequests.onReceive { key -> requested.add(key) }
+                }
+            }
         }
     }
 
@@ -108,7 +129,20 @@ internal class ChatPresenter(
      * row's [RenderedRow.bodies]. Never waits and never parses on the calling thread; asking again for an opened body does nothing.
      */
     fun expandBody(key: String) {
-        requested.update { it.add(key) }
+        expandRequests.trySend(key)
+    }
+
+    /** [render] into [chat]; a failure keeps the last rows and is logged once until a render succeeds again. */
+    private fun renderSafely(input: Input) {
+        try {
+            rendered.value = render(input)
+            failed = false
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!failed) LOG.error(RenderFailure(e, input.state.entries.size))
+            failed = true
+        }
     }
 
     private fun render(input: Input): RenderedChat {
@@ -117,7 +151,9 @@ internal class ChatPresenter(
             builderOptions = input.options
         }).build(input.state)
         val used = HashSet<String>()
-        val out = rows.rows.map { renderRow(it, input.requested, used) }.toImmutableList()
+        val live = HashSet<String>()
+        val out = rows.rows.map { renderRow(it, live, used) }.toImmutableList()
+        requested.retainAll(live)
         val card = rows.card
         val planBlocks = (card as? PlanCard)?.plan?.let { blocks("plan:${card.requestId}", it, used) }
         parsed.keys.retainAll(used)
@@ -126,7 +162,7 @@ internal class ChatPresenter(
     }
 
     /** [row] with its Markdown; the previous instance when nothing it shows changed, so that its item is skipped. */
-    private fun renderRow(row: ChatRow, requested: Set<String>, used: MutableSet<String>): RenderedRow {
+    private fun renderRow(row: ChatRow, live: MutableSet<String>, used: MutableSet<String>): RenderedRow {
         val old = previous[row.key]
         return when (row) {
             is TextRow -> {
@@ -138,19 +174,23 @@ internal class ChatPresenter(
                 }
             }
             is ToolRow -> {
-                val bodies = bodies(row, requested, used)
+                val bodies = bodies(row, live, used)
                 if (old != null && old.row == row && old.bodies == bodies) old else RenderedRow(row, null, bodies)
             }
             else -> if (old != null && old.row == row) old else RenderedRow(row, null)
         }
     }
 
-    /** The parsed bodies of [row]'s opened calls: the row's own for a lone call, each call's `c:<call id>` in a group. */
-    private fun bodies(row: ToolRow, requested: Set<String>, used: MutableSet<String>): ImmutableMap<String, ImmutableList<MarkdownBlock>> {
+    /**
+     * The parsed bodies of [row]'s opened calls: the row's own for a lone call, each call's `c:<call id>` in a group. Adds each body
+     * key to [live] while any body is open.
+     */
+    private fun bodies(row: ToolRow, live: MutableSet<String>, used: MutableSet<String>): ImmutableMap<String, ImmutableList<MarkdownBlock>> {
         if (requested.isEmpty()) return persistentMapOf()
         var bodies = persistentMapOf<String, ImmutableList<MarkdownBlock>>()
         row.calls.forEach { call ->
             val key = if (row.calls.size == 1) row.key else "c:${call.id}"
+            live += key
             val markdown = markdownOf(call.body)
             if (markdown != null && key in requested) bodies = bodies.put(key, blocks(key, markdown, used))
         }
@@ -171,4 +211,20 @@ internal class ChatPresenter(
         is ToolBody.Links -> body.markdown
         else -> null
     }
+
+    private companion object {
+        val LOG: Logger = logger<ChatPresenter>()
+    }
 }
+
+/**
+ * A render failure as logged: [cause]'s class and stack, never its message, which may quote row text (CLAUDE.md conventions), and
+ * how many entries the session had.
+ */
+private class RenderFailure(cause: Throwable, entries: Int) :
+    RuntimeException("Chat rows failed to render: ${cause.javaClass.name} (entries=$entries)") {
+    init {
+        stackTrace = cause.stackTrace
+    }
+}
+
