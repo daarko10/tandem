@@ -4,6 +4,7 @@ import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -12,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -162,7 +164,7 @@ class ClaudeSessionTest {
     fun `argv for a new session and for a resumed fork`() {
         val base = listOf(
             "claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
-            "--include-partial-messages", "--permission-prompt-tool=stdio",
+            "--include-partial-messages", "--thinking-display", "summarized", "--permission-prompt-tool=stdio",
         )
         assertEquals(
             base + listOf(
@@ -186,6 +188,28 @@ class ClaudeSessionTest {
         assertFailsWith<IllegalArgumentException> { SessionConfig("claude", tmp, sessionId = "a", resumeSessionId = "b") }
         // A fork without the session it forks would silently start a new session.
         assertFailsWith<IllegalArgumentException> { SessionConfig("claude", tmp, sessionId = "a", forkSession = true) }
+    }
+
+    @Test
+    fun `keep_alive and unknown lines advance lastFrameAt without a state emission`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val launcher = fakeCli("echo '{\"type\":\"keep_alive\"}'; sleep 0.2; echo '{\"type\":\"no_such_type\"}'; sleep 0.2")
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        // One log of both flows, in the order they changed: a frame time, or a new chat state.
+        val log = Collections.synchronizedList(mutableListOf<Any>())
+        scope.launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) { session.lastFrameAtMillis.collect { log.add(it) } }
+        scope.launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) { session.state.collect { log.add(it) } }
+        session.start()
+        withTimeout(10_000) { session.state.first { it.ended } }
+
+        val frames = synchronized(log) { log.toList() }
+        val times = frames.filterIsInstance<Long>().filter { it != 0L }
+        assertEquals(2, times.size, frames.toString())
+        assertTrue(times[1] > times[0], times.toString())
+        val between = frames.subList(frames.indexOf(times[0]) + 1, frames.indexOf(times[1]))
+        assertEquals(emptyList(), between, "a keep_alive or an unknown line changes no state")
+        assertEquals(1, frames.subList(0, frames.indexOf(times[0])).count { it is ChatState }, "only the initial state before")
+        scope.coroutineContext.job.cancelAndJoin()
     }
 
     @Test

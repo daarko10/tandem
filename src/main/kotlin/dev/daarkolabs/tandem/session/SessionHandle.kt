@@ -124,6 +124,7 @@ class SessionHandle internal constructor(
     /** [Snapshot.chat], written in the same step as [snapshot] and just before it, so that [status] never runs ahead of [state]. */
     private val mutableState = MutableStateFlow(initialState)
     private val mutableAttention = MutableStateFlow(false)
+    private val mutableLastFrameAt = MutableStateFlow(0L)
 
     /** A title set in Tandem ([rename], or a fork's) that the index does not list yet: it wins until the index lists the same. */
     private var titleOverride: String? = pendingTitle
@@ -155,6 +156,12 @@ class SessionHandle internal constructor(
 
     /** Whether the user should look at this session: it asked for permission or finished a turn while another one was selected. */
     val attention: StateFlow<Boolean> = mutableAttention.asStateFlow()
+
+    /**
+     * The attached process's [ClaudeSession.lastFrameAtMillis]: when it last wrote a line, 0 until it wrote one. Keeps the last
+     * value once the process is let go, until the next one is attached.
+     */
+    val lastFrameAtMillis: StateFlow<Long> = mutableLastFrameAt.asStateFlow()
 
     init {
         // The index's listing comes from the manager's scope; its title counts from the next step on.
@@ -410,6 +417,11 @@ class SessionHandle internal constructor(
         mirror = scope.launch {
             // A child of the mirror, so that it ends when the process is let go or handed over before its first system/init.
             launch { onFirstInit(session, session.reportedSessionId.filterNotNull().first()) }
+            launch {
+                session.lastFrameAtMillis.collect { at ->
+                    synchronized(lock) { if (attachment?.session === session) mutableLastFrameAt.value = at }
+                }
+            }
             session.state.collect { chat ->
                 synchronized(lock) { if (attachment?.session === session) publishLocked(chat, attached = true) }
             }

@@ -69,6 +69,8 @@ data class SessionConfig(
         add(binary)
         addAll(listOf("--output-format", "stream-json", "--verbose", "--input-format", "stream-json"))
         add("--include-partial-messages")
+        // Thinking text as the CLI summarizes it, streamed as thinking_delta (hidden flag; docs/protocol.md 1.1).
+        addAll(listOf("--thinking-display", "summarized"))
         add("--permission-prompt-tool=stdio")
         model?.let { addAll(listOf("--model", it)) }
         effort?.let { addAll(listOf("--effort", it)) }
@@ -109,13 +111,15 @@ class DefaultProcessLauncher(private val parentEnvironment: () -> Map<String, St
  *
  * All methods are safe to call from any thread, including the EDT: they only enqueue work.
  *
- * [initialState] is the chat so far when a transcript is resumed; the picks in [config] win over what it recorded.
+ * [initialState] is the chat so far when a transcript is resumed; the picks in [config] win over what it recorded. [clock] stamps
+ * every line, prompt and end ([SessionEvent.Cli], [SessionEvent.UserSent], [SessionEvent.Ended]) and [lastFrameAtMillis].
  */
 class ClaudeSession(
     parentScope: CoroutineScope,
     private val config: SessionConfig,
     private val launcher: ProcessLauncher = DefaultProcessLauncher(),
     initialState: ChatState = ChatState(),
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext.job) + CoroutineName("ClaudeSession"))
     private val _state = MutableStateFlow(
@@ -137,6 +141,7 @@ class ClaudeSession(
     private var killed = false
 
     private val _reportedSessionId = MutableStateFlow<String?>(null)
+    private val _lastFrameAtMillis = MutableStateFlow(0L)
 
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
@@ -150,6 +155,12 @@ class ClaudeSession(
      * that fails carries a session id as well.
      */
     val reportedSessionId: StateFlow<String?> = _reportedSessionId.asStateFlow()
+
+    /**
+     * When the process last wrote a line to stdout, by [clock]; 0 before the first. Every line counts, `keep_alive` and unknown types
+     * included, though those change no [state]: the chat tells a CLI that is still working from one that stopped responding by it.
+     */
+    val lastFrameAtMillis: StateFlow<Long> = _lastFrameAtMillis.asStateFlow()
 
     /** The running process, for tests and diagnostics. */
     @Volatile
@@ -172,7 +183,7 @@ class ClaudeSession(
             LOG.warn("could not start claude", e)
             val reason = e.message ?: e.javaClass.simpleName
             val text = "Could not start `${config.binary}`: $reason. Is the claude CLI (Claude Code) installed?"
-            dispatch(SessionEvent.Ended(text, isError = true))
+            dispatch(SessionEvent.Ended(text, isError = true, atMillis = clock()))
             return
         }
         process = p
@@ -197,7 +208,7 @@ class ClaudeSession(
 
     fun sendUserMessage(text: String) {
         val uuid = UUID.randomUUID().toString()
-        dispatch(SessionEvent.UserSent(uuid, text))
+        dispatch(SessionEvent.UserSent(uuid, text, clock()))
         send(HostMessages.userText(text, uuid))
     }
 
@@ -226,18 +237,16 @@ class ClaudeSession(
     internal fun notice(level: NoticeLevel, text: String): Unit = dispatch(SessionEvent.HostNotice(level, text))
 
     /**
-     * Allows [permission]. With [always], echoes only the `addRules` suggestions, for this session
-     * ([sessionPermissionUpdates]); when there are none, the allow goes out with empty `updatedPermissions`, without
-     * an error or a notice.
+     * Answers [permission] with [answer] ([PermissionAnswers] makes them): the `control_response` goes to stdin, and the request is
+     * no longer pending. Only enqueues, so safe on the EDT. An allow without `updatedPermissions` sends none.
      */
-    fun allow(permission: PendingPermission, always: Boolean = false) {
-        val updates = if (always) sessionPermissionUpdates(permission.suggestions) else emptyList()
-        send(HostMessages.allow(permission.requestId, permission.toolUseId, permission.input, updates))
-        dispatch(SessionEvent.PermissionAnswered(permission.requestId))
-    }
-
-    fun deny(permission: PendingPermission, message: String = "The user denied this request.") {
-        send(HostMessages.deny(permission.requestId, permission.toolUseId, message))
+    fun answer(permission: PendingPermission, answer: PermissionAnswer) {
+        val frame = when (answer) {
+            is PermissionAnswer.Allow ->
+                HostMessages.allow(permission.requestId, permission.toolUseId, answer.updatedInput, answer.updatedPermissions)
+            is PermissionAnswer.Deny -> HostMessages.deny(permission.requestId, permission.toolUseId, answer.message)
+        }
+        send(frame)
         dispatch(SessionEvent.PermissionAnswered(permission.requestId))
     }
 
@@ -276,6 +285,8 @@ class ClaudeSession(
         val reader = p.inputStream.bufferedReader(Charsets.UTF_8)
         while (true) {
             val line = readOutput(p) { reader.readLine() } ?: return
+            val at = clock()
+            _lastFrameAtMillis.value = at
             if (line.isBlank()) continue
             val message = Ndjson.decode(line)
             when (message) {
@@ -286,7 +297,7 @@ class ClaudeSession(
                 }
                 else -> {}
             }
-            dispatch(SessionEvent.Cli(message))
+            dispatch(SessionEvent.Cli(message, at))
             if (message is CliMessage.SystemInit && message.sessionId.isNotEmpty()) _reportedSessionId.value = message.sessionId
         }
     }
@@ -326,12 +337,14 @@ class ClaudeSession(
     /** How the process ended with [code]; ended by the host when Tandem killed it at once ([killNow]), as when the IDE exits. */
     private fun exitEvent(code: Int): SessionEvent.Ended {
         val byHost = killed
-        if (code == 0) return SessionEvent.Ended("The claude CLI exited.", isError = false, endedByHost = byHost)
+        val at = clock()
+        if (code == 0) return SessionEvent.Ended("The claude CLI exited.", isError = false, endedByHost = byHost, atMillis = at)
         val tail = stderrTail.text()
         return SessionEvent.Ended(
             "The claude CLI exited with code $code." + if (tail.isEmpty()) "" else "\n$tail",
             isError = true,
             endedByHost = byHost,
+            atMillis = at,
         )
     }
 

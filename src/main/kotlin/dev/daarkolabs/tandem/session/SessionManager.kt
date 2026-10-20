@@ -249,16 +249,28 @@ class SessionManager internal constructor(
         handle(id)?.liveSession()?.interrupt()
     }
 
+    /**
+     * Answers the pending permission request [requestId] with [answer] ([PermissionAnswers]). Nothing happens when no process runs
+     * or the request is no longer pending (answered already, cancelled, or its turn ended), so a second click writes no frame.
+     */
+    fun answer(id: SessionId, requestId: String, answer: PermissionAnswer) {
+        answerPending(id, requestId) { answer }
+    }
+
     /** Allows the pending permission request [requestId]; [always] allows the same again for the rest of the session. */
     fun allow(id: SessionId, requestId: String, always: Boolean) {
-        val session = handle(id)?.liveSession() ?: return
-        session.state.value.pendingPermissions.firstOrNull { it.requestId == requestId }?.let { session.allow(it, always) }
+        answerPending(id, requestId) { if (always) PermissionAnswers.allowForSession(it) else PermissionAnswers.allowOnce(it) }
     }
 
     /** Denies the pending permission request [requestId]. */
     fun deny(id: SessionId, requestId: String) {
+        answerPending(id, requestId) { PermissionAnswers.deny() }
+    }
+
+    private inline fun answerPending(id: SessionId, requestId: String, answer: (PendingPermission) -> PermissionAnswer) {
         val session = handle(id)?.liveSession() ?: return
-        session.state.value.pendingPermissions.firstOrNull { it.requestId == requestId }?.let { session.deny(it) }
+        val pending = session.state.value.pendingPermissions.firstOrNull { it.requestId == requestId } ?: return
+        session.answer(pending, answer(pending))
     }
 
     /** Picks a model (null: the CLI's default). A running process switches (`set_model`); a stopped session starts with it. */

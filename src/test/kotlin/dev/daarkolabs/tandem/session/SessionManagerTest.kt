@@ -23,9 +23,12 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -1272,5 +1275,194 @@ class SessionManagerTest {
         } finally {
             manager.sessions.value.forEach { manager.close(it.id) }
         }
+    }
+
+    /** The `response` object of each `control_response` the host wrote, in order. */
+    private fun answers(): List<JsonObject> = frames().filter { it.type() == "control_response" }.map { it["response"]!!.jsonObject }
+
+    /** The host's answer to request [requestId]: the inner `response` of its single `control_response`. */
+    private fun answerTo(requestId: String): JsonObject =
+        answers().single { it["request_id"]?.jsonPrimitive?.content == requestId }["response"]!!.jsonObject
+
+    /** Waits until the fake asks permission request [requestId], and returns it. */
+    private suspend fun SessionHandle.awaitRequest(requestId: String): PendingPermission =
+        state.first { s -> s.pendingPermissions.any { it.requestId == requestId } }.pendingPermissions.single { it.requestId == requestId }
+
+    private suspend fun SessionHandle.awaitTurns(count: Int): ChatState = state.first { it.turnsEnded == count }
+
+    private fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.content
+
+    @Test
+    fun `spawn passes thinking display summarized and initialize forwards subagent text`() = test {
+        val manager = manager()
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Reply with the single word: pong")
+        assertEquals(TurnEnd.COMPLETED, handle.awaitTurns(1).lastTurnEnd)
+
+        val argv = spawns().single()
+        val flag = argv.indexOf("--thinking-display")
+        assertTrue(flag > 0, argv.toString())
+        assertEquals("summarized", argv[flag + 1])
+        assertEquals("--include-partial-messages", argv[flag - 1])
+        val requests = frames().filter { it.type() == "control_request" }
+        // No set_max_thinking_tokens: the fake answers the host's requests in recorded order.
+        assertEquals(listOf("initialize"), requests.map { it.subtype() })
+        assertEquals(true, requests.single()["request"]!!.jsonObject["forwardSubagentText"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `answering a question sends the picked label`() = test {
+        val manager = manager(fixtures = "ask-single")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Ask me which colour I like")
+        val p = handle.awaitRequest("<request_id-27>")
+        manager.answer(handle.id, p.requestId, PermissionAnswers.questionAnswers(p, mapOf("Which colour?" to "Blue")))
+        assertEquals(TurnEnd.COMPLETED, handle.awaitTurns(1).lastTurnEnd)
+
+        val response = answerTo("<request_id-27>")
+        assertEquals("allow", response.string("behavior"))
+        assertEquals("Blue", response["updatedInput"]!!.jsonObject["answers"]!!.jsonObject.string("Which colour?"))
+        assertEquals(p.input["questions"], response["updatedInput"]!!.jsonObject["questions"])
+        assertEquals("<id-12>", response.string("toolUseID"))
+    }
+
+    @Test
+    fun `answering a multi-select joins the labels`() = test {
+        val manager = manager(fixtures = "ask-multi")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Ask me which toppings I like")
+        val p = handle.awaitRequest("<request_id-32>")
+        val question = "Which toppings would you like?"
+        manager.answer(handle.id, p.requestId, PermissionAnswers.questionAnswers(p, mapOf(question to "Cheese, Ham")))
+        assertEquals(TurnEnd.COMPLETED, handle.awaitTurns(1).lastTurnEnd)
+
+        val answers = answerTo("<request_id-32>")["updatedInput"]!!.jsonObject["answers"]!!.jsonObject
+        assertEquals("Cheese, Ham", answers.string(question))
+    }
+
+    @Test
+    fun `cancelling a question denies with cancelled and the turn goes on`() = test {
+        val manager = manager(fixtures = "ask-deny")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Ask me which colour I like")
+        val p = handle.awaitRequest("<request_id-27>")
+        manager.answer(handle.id, p.requestId, PermissionAnswers.cancelQuestion())
+        assertEquals(TurnEnd.COMPLETED, handle.awaitTurns(1).lastTurnEnd)
+
+        val response = answerTo("<request_id-27>")
+        assertEquals("deny", response.string("behavior"))
+        assertEquals("cancelled", response.string("message"))
+        assertEquals("<id-12>", response.string("toolUseID"))
+    }
+
+    @Test
+    fun `approving a plan to start coding sends setMode and the mode follows the status line`() = test {
+        val manager = manager(fixtures = "plan-approve")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Plan a changelog")
+        val p = handle.awaitRequest("<request_id-97>")
+        manager.answer(handle.id, p.requestId, PermissionAnswers.approvePlan(p, startCoding = true))
+        val first = handle.awaitTurns(1)
+        assertEquals(TurnEnd.COMPLETED, first.lastTurnEnd)
+        assertEquals(PermissionMode.ACCEPT_EDITS, first.permissionMode)
+
+        val response = answerTo("<request_id-97>")
+        assertEquals("allow", response.string("behavior"))
+        val setMode = buildJsonObject {
+            put("type", "setMode")
+            put("mode", "acceptEdits")
+            put("destination", "session")
+        }
+        assertEquals(setMode, response["updatedPermissions"]!!.jsonArray[0])
+        assertEquals(p.input, response["updatedInput"])
+        assertEquals("<id-92>", response.string("toolUseID"))
+
+        // The fixture's second turn starts in the mode the approval switched to.
+        manager.send(handle.id, "Go on")
+        val second = handle.awaitTurns(2)
+        assertEquals(TurnEnd.COMPLETED, second.lastTurnEnd)
+        assertEquals(PermissionMode.ACCEPT_EDITS, second.permissionMode)
+    }
+
+    @Test
+    fun `approving a plan keeps the mode without permissions`() = test {
+        val manager = manager(fixtures = "plan-disallowed")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Plan a changelog")
+        val plan = handle.awaitRequest("<request_id-182>")
+        assertEquals("ExitPlanMode", plan.toolName)
+        manager.answer(handle.id, plan.requestId, PermissionAnswers.approvePlan(plan, startCoding = false))
+        // The next request (Bash, line 213) comes after the status line at 177.
+        val bash = handle.awaitRequest("<request_id-225>")
+        assertEquals(PermissionMode.DEFAULT, handle.state.value.permissionMode)
+
+        val response = answerTo("<request_id-182>")
+        assertEquals("allow", response.string("behavior"))
+        assertFalse("updatedPermissions" in response, response.toString())
+        assertEquals(JsonObject(emptyMap()), response["updatedInput"])
+        assertEquals("<id-178>", response.string("toolUseID"))
+
+        manager.answer(handle.id, bash.requestId, PermissionAnswers.allowOnce(bash))
+        val end = handle.awaitTurns(1)
+        assertEquals(TurnEnd.COMPLETED, end.lastTurnEnd)
+        assertEquals(PermissionMode.DEFAULT, end.permissionMode)
+    }
+
+    @Test
+    fun `keeping planning denies with the feedback`() = test {
+        val manager = manager(fixtures = "plan-deny")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Plan a changelog")
+        val first = handle.awaitRequest("<request_id-88>")
+        manager.answer(handle.id, first.requestId, PermissionAnswers.keepPlanning("also add a date"))
+        // A second pending permission arrives: the plan, asked again.
+        val second = handle.awaitRequest("<request_id-156>")
+        assertEquals("ExitPlanMode", second.toolName)
+        manager.answer(handle.id, second.requestId, PermissionAnswers.approvePlan(second, startCoding = false))
+        val write = handle.awaitRequest("<request_id-191>")
+        manager.answer(handle.id, write.requestId, PermissionAnswers.allowOnce(write))
+        assertEquals(TurnEnd.COMPLETED, handle.awaitTurns(1).lastTurnEnd)
+
+        val response = answerTo("<request_id-88>")
+        assertEquals("deny", response.string("behavior"))
+        assertEquals("also add a date", response.string("message"))
+        assertEquals("<id-83>", response.string("toolUseID"))
+    }
+
+    @Test
+    fun `lastFrameAt advances on every line`() = test {
+        val manager = manager()
+        val handle = manager.create(NewSessionOptions())
+        // The fixture's first lines come as the process starts, before any prompt.
+        val atStart = handle.lastFrameAtMillis.first { it > 0L }
+        val seen = Collections.synchronizedList(mutableListOf<Long>())
+        val collector = launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) { handle.lastFrameAtMillis.collect { seen.add(it) } }
+        while (System.currentTimeMillis() <= atStart) delay(1)
+        val beforePrompt = System.currentTimeMillis()
+        manager.send(handle.id, "Reply with the single word: pong")
+        handle.awaitTurns(1)
+        val process = handle.liveSession()!!
+        // The handle follows the process's own value, which its last line set.
+        val last = handle.lastFrameAtMillis.first { it == process.lastFrameAtMillis.value }
+        collector.cancel()
+
+        val values = synchronized(seen) { seen.toList() }
+        assertEquals(values.sorted(), values, "never goes back")
+        assertTrue(values.distinct().size > 1, values.toString())
+        assertTrue(last >= beforePrompt, "$last < $beforePrompt")
+    }
+
+    @Test
+    fun `answering a permission that is no longer pending writes no frame`() = test {
+        val manager = manager(fixtures = "permission")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Create the fixture file")
+        val p = handle.awaitRequest("<request_id-26>")
+        manager.answer(handle.id, p.requestId, PermissionAnswers.allowOnce(p))
+        manager.answer(handle.id, p.requestId, PermissionAnswers.allowOnce(p))
+        assertEquals(TurnEnd.COMPLETED, handle.awaitTurns(1).lastTurnEnd)
+        manager.stop(handle.id) // once the process is gone, the log holds every frame the host wrote to it
+
+        assertEquals(1, answers().count { it["request_id"]?.jsonPrimitive?.content == p.requestId })
     }
 }
