@@ -13,10 +13,10 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -152,25 +152,15 @@ internal fun ChatPanel(
     }
 
     // Pins the bottom while following, on every emission (a streamed delta grows the last row without adding one) and on every
-    // change of the list's height (a card docking, the composer growing). While paused it counts the rows added since, by key, so
-    // grouping (a lone call joining a group shrinks the list) never miscounts. The first emission the panel sees only records the
-    // keys: a session shown again while paused has nothing new.
-    val previousKeys = remember(ui) { HashSet<String>() }
-    var previousLast by remember(ui) { mutableStateOf<RenderedRow?>(null) }
-    var seen by remember(ui) { mutableStateOf(false) }
+    // change of the list's height (a card docking, the composer growing). While paused it counts the rows added since the session's
+    // list last saw them ([ChatUiState.appendedSinceSeen], by key), including those added while another session was shown.
     var viewportHeight by remember { mutableIntStateOf(0) }
     LaunchedEffect(chat, viewportHeight) {
-        val added = chat.rows.count { it.row.key !in previousKeys }
-        val tailChanged = chat.rows.lastOrNull() !== previousLast
-        previousKeys.clear()
-        chat.rows.forEach { previousKeys += it.row.key }
-        previousLast = chat.rows.lastOrNull()
-        val first = !seen
-        seen = true
+        val appended = ui.appendedSinceSeen(chat.rows)
         if (ui.follow.value.following) {
             if (chat.rows.isNotEmpty()) listState.requestScrollToItem(chat.rows.lastIndex, Int.MAX_VALUE)
-        } else if (!first && (added > 0 || tailChanged)) {
-            ui.follow.value = ui.follow.value.on(ScrollEvent.Appended(added))
+        } else if (appended != null) {
+            ui.follow.value = ui.follow.value.on(ScrollEvent.Appended(appended))
         }
     }
 

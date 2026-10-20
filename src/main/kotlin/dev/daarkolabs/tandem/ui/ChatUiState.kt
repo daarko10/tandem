@@ -8,8 +8,9 @@ import dev.daarkolabs.tandem.chat.FollowState
 
 /**
  * What one session's chat remembers on screen (spec 5.6): which rows are open, whether the list follows its bottom, the prompt
- * being typed and the list's state. One per session, kept by [ChatPresenters] until the session closes, so switching sessions and
- * scrolling rows out of view lose none of the open rows, the prompt or the scroll position. Used on the EDT only.
+ * being typed, the list's state and the rows it last saw. One per session, kept by [ChatPresenters] until the session closes, so
+ * switching sessions and scrolling rows out of view lose none of the open rows, the prompt or the scroll position. Used on the EDT
+ * only.
  */
 internal class ChatUiState {
     // One snapshot state per key, so that opening a row recomposes that row only (a SnapshotStateMap records reads against the map).
@@ -28,4 +29,23 @@ internal class ChatUiState {
     val draft: TextFieldState = TextFieldState()
 
     val listState: LazyListState = LazyListState()
+
+    // The row keys and the last row the list saw at its last emission; null until the first. Kept here, not in the panel, so that
+    // rows added while another session is shown count when this one is shown again (spec 4.16, 7.8).
+    private var seenKeys: HashSet<String>? = null
+    private var seenLast: RenderedRow? = null
+
+    /**
+     * Records [rows] as the rows the list has seen and returns how many of them were added since the last call, counted by key so
+     * that grouping (a lone call joining a group shrinks the list) never miscounts, or 0 when only the last row changed (a streamed
+     * delta grows it). Null when nothing changed, and on the first call, which only records.
+     */
+    fun appendedSinceSeen(rows: List<RenderedRow>): Int? {
+        val keys = seenKeys
+        val added = if (keys == null) 0 else rows.count { it.row.key !in keys }
+        val tailChanged = rows.lastOrNull() !== seenLast
+        seenKeys = rows.mapTo(HashSet(rows.size)) { it.row.key }
+        seenLast = rows.lastOrNull()
+        return if (keys != null && (added > 0 || tailChanged)) added else null
+    }
 }
