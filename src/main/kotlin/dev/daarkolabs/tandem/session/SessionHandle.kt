@@ -414,6 +414,7 @@ class SessionHandle internal constructor(
         val session = process.session
         attachment = process
         publishLocked(session.state.value, attached = true)
+        mutableLastFrameAt.value = session.lastFrameAtMillis.value // in the same step, so state and frame time are one process's
         mirror = scope.launch {
             // A child of the mirror, so that it ends when the process is let go or handed over before its first system/init.
             launch { onFirstInit(session, session.reportedSessionId.filterNotNull().first()) }
