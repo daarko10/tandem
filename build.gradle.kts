@@ -87,7 +87,7 @@ intellijPlatform {
     }
 }
 
-// Coverage of protocol/ and session/ (with session/transcript), whose target is 90% of lines (CLAUDE.md):
+// Coverage of protocol/, session/ (with session/transcript) and chat/, whose target is 90% of lines (CLAUDE.md):
 // ./gradlew koverLog prints it per package; koverHtmlReport and koverXmlReport write build/reports/kover/; koverVerify, part of check,
 // holds each package to it.
 kover {
@@ -102,13 +102,13 @@ kover {
     reports {
         filters {
             includes {
-                packages("dev.daarkolabs.tandem.protocol", "dev.daarkolabs.tandem.session")
+                packages("dev.daarkolabs.tandem.protocol", "dev.daarkolabs.tandem.session", "dev.daarkolabs.tandem.chat")
             }
         }
         total {
             // Part of check: fails the build when a package falls below 90% of lines.
             verify {
-                rule("90% of lines in each package of protocol/ and session/") {
+                rule("90% of lines in each package of protocol/, session/ and chat/") {
                     groupBy = GroupingEntityType.PACKAGE
                     bound {
                         minValue = 90

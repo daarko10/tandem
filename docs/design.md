@@ -49,6 +49,7 @@ The existing options were studied in October 2026:
              • TranscriptReader  a transcript → settled ChatState + TranscriptMeta; TranscriptChain picks the current history
         ▼
  protocol/  pure Kotlin. Json tree → sealed CliMessage; unknown types → Unknown(raw)
+ chat/      pure Kotlin. ChatState → chat rows (ChatRowsBuilder): tool labels, states, bodies; no Compose, no IntelliJ
         ▲
  ide/ (Milestone 2)  Tandem MCP server (edit tools via WriteCommandAction), diff preview, file/selection context
 ```
