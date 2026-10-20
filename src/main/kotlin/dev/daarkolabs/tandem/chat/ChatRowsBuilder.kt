@@ -23,8 +23,9 @@ data class RowOptions(val showThinking: Boolean)
 data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, val moreWaiting: Int)
 
 /**
- * Builds the chat rows from a [ChatState] (spec 5.3, 5.4): one row per user message, text block, thinking block, notice and tool
- * call, each with its key and its gap. A subagent's entries (`parentToolUseId` naming an Agent call) become that call's children.
+ * Builds the chat rows from a [ChatState] (spec 5.3, 5.4): one row per user message, text block, thinking block and notice, and one
+ * per lone tool call or group of consecutive calls ([Grouping], spec 4.6.4), each with its key and its gap. A subagent's entries
+ * (`parentToolUseId` naming an Agent call) become that call's children, one row per call.
  *
  * Rows are cached per turn (a turn runs from one user message to the next): a closed turn is built once more when it closes and then
  * kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the last entry it holds
@@ -77,17 +78,14 @@ class ChatRowsBuilder(private val options: RowOptions) {
         var previous = frozenRows.lastOrNull()
         val turnRows = region.turns.mapIndexed { t, turn ->
             val turnOpen = state.turn != null && t == region.turns.lastIndex && entries[turn.first] is ChatEntry.User
-            val rows = ArrayList<ChatRow>()
+            val rows = Rows(previous, grouped = true) { reuse(withUniqueKey(it, keys)) }
             for (index in turn) {
-                val entry = entries[index]
                 if (index in region.childEntries) continue
-                for (row in entryRows(entry, turnOpen, region, nextBodies, previous)) {
-                    val unique = reuse(withUniqueKey(row, keys))
-                    rows += unique
-                    previous = unique
-                }
+                entryRows(entries[index], turnOpen, region, nextBodies, rows)
             }
-            rows
+            rows.flush()
+            previous = rows.previous
+            rows.rows
         }
         bodies = nextBodies
         live = turnRows.flatten().associateBy { it.key }
@@ -188,65 +186,100 @@ class ChatRowsBuilder(private val options: RowOptions) {
     /** The previous build's instance of [row] when it is equal. */
     private fun reuse(row: ChatRow): ChatRow = live[row.key]?.takeIf { it == row } ?: row
 
-    /** The top-level rows of [entry], each with its gap after [before] and the rows before it. */
+    /**
+     * Collects rows in order, each with its gap after the row before it. With [grouped] (the main thread), visible tool calls wait in a
+     * run that every other row, a thinking block (shown or not) and a notice close (spec 4.6.4 rule 1); [flush] folds the run into
+     * rows ([Grouping.fold]). Without it (a subagent's rows), each call is its own row. [finish] gives each row its final key.
+     */
+    private inner class Rows(var previous: ChatRow?, private val grouped: Boolean, private val finish: (ChatRow) -> ChatRow) {
+        val rows = ArrayList<ChatRow>()
+        private val run = ArrayList<ToolCall>()
+
+        /** Closes the run, then adds the row [make] builds after the previous one, if it builds one. */
+        fun add(make: (previous: ChatRow?) -> ChatRow?) {
+            flush()
+            make(previous)?.let(::emit)
+        }
+
+        fun call(call: ToolCall) {
+            if (grouped) run += call else emit(toolRow(listOf(call), gap(Kind.TOOL, previous)))
+        }
+
+        /** Closes the run: one row per lone call or group. */
+        fun flush() {
+            if (run.isEmpty()) return
+            for (calls in Grouping.fold(run)) emit(toolRow(calls, gap(Kind.TOOL, previous)))
+            run.clear()
+        }
+
+        private fun emit(row: ChatRow) {
+            val done = finish(row)
+            rows += done
+            previous = done
+        }
+    }
+
+    /** A lone call's row with its own label, or a group's (spec 4.6.4) with its sentence, stats and state; keyed by the first call. */
+    private fun toolRow(calls: List<ToolCall>, gap: RowGap): ToolRow {
+        val first = calls.first()
+        return if (calls.size == 1) {
+            ToolRow("tool:${first.id}", persistentListOf(first), first.label, first.state, first.stats, gap)
+        } else {
+            ToolRow("tool:${first.id}", calls.toImmutableList(), Grouping.sentence(calls), Grouping.state(calls), Grouping.stats(calls), gap)
+        }
+    }
+
+    /** Adds the top-level rows of [entry] to [rows]. */
     private fun entryRows(
         entry: ChatEntry,
         turnOpen: Boolean,
         region: Region,
         nextBodies: IdentityHashMap<ChatEntry.ToolResult, Body>,
-        before: ChatRow?,
-    ): List<ChatRow> {
-        val rows = ArrayList<ChatRow>()
-        var previous = before
-        fun add(row: ChatRow) {
-            rows += row
-            previous = row
-        }
+        rows: Rows,
+    ) {
         when (entry) {
-            is ChatEntry.User -> add(UserRow("u:${entry.id}", entry.text, entry.text.startsWith("/") || entry.text.startsWith("!"), gap(Kind.USER, previous)))
+            is ChatEntry.User -> rows.add {
+                UserRow("u:${entry.id}", entry.text, entry.text.startsWith("/") || entry.text.startsWith("!"), gap(Kind.USER, it))
+            }
             // Thinking rows are the main thread's; a subagent message of an unknown agent shows its text and calls only.
-            is ChatEntry.Assistant -> assistantRows(entry, turnOpen, region, nextBodies, previous, thinking = entry.parentToolUseId == null).forEach(::add)
-            is ChatEntry.ToolResult -> if (entry.toolUseId !in region.calls) add(orphan(entry, gap(Kind.TOOL, previous)))
-            is ChatEntry.Notice -> if (entry.kind != NoticeKind.INTERRUPTED) add(NoticeRow("n:${entry.id}", entry.level, entry.text, gap(Kind.NOTICE, previous)))
+            is ChatEntry.Assistant -> assistantRows(entry, turnOpen, region, nextBodies, rows, thinking = entry.parentToolUseId == null)
+            is ChatEntry.ToolResult -> if (entry.toolUseId !in region.calls) rows.add { orphan(entry, gap(Kind.TOOL, it)) }
+            // The interrupt marker shows as the turn's end, not as a row; it still closes a group.
+            is ChatEntry.Notice -> if (entry.kind == NoticeKind.INTERRUPTED) {
+                rows.flush()
+            } else {
+                rows.add { NoticeRow("n:${entry.id}", entry.level, entry.text, gap(Kind.NOTICE, it)) }
+            }
             is ChatEntry.TurnEnded -> Unit
         }
-        return rows
     }
 
-    /** The rows of an assistant message: its non-blank text blocks, its thinking blocks (main thread only) and its visible tool calls. */
+    /**
+     * Adds the rows of an assistant message to [rows]: its non-blank text blocks, its thinking blocks (main thread only) and its
+     * visible tool calls. A thinking block closes a group whether or not it is shown, so the setting never changes grouping.
+     */
     private fun assistantRows(
         entry: ChatEntry.Assistant,
         turnOpen: Boolean,
         region: Region,
         nextBodies: IdentityHashMap<ChatEntry.ToolResult, Body>,
-        before: ChatRow?,
+        rows: Rows,
         thinking: Boolean,
-    ): List<ChatRow> {
-        val rows = ArrayList<ChatRow>()
-        var previous = before
+    ) {
         entry.blocks.forEachIndexed { index, block ->
-            val row: ChatRow? = when (block) {
-                is AssistantBlock.Text -> block.text.takeIf { it.isNotBlank() }?.let {
-                    TextRow("t:${entry.id}:$index", it, entry.streaming && index >= entry.completedBlocks, gap(Kind.TEXT, previous))
+            when (block) {
+                is AssistantBlock.Text -> if (block.text.isNotBlank()) {
+                    rows.add { TextRow("t:${entry.id}:$index", block.text, entry.streaming && index >= entry.completedBlocks, gap(Kind.TEXT, it)) }
                 }
-                is AssistantBlock.Thinking -> if (thinking) thinkingRow(entry, index, block, previous) else null
+                is AssistantBlock.Thinking -> rows.add { if (thinking) thinkingRow(entry, index, block, it) else null }
                 is AssistantBlock.ToolUse -> {
                     val call = call(block, turnOpen, region, nextBodies)
-                    // ToolSearch loads a deferred tool: hidden unless it failed (spec 4.6.2).
-                    if (call.kind == ToolKind.TOOL_SEARCH && call.state != ToolState.FAILED) {
-                        null
-                    } else {
-                        ToolRow("tool:${call.id}", persistentListOf(call), call.label, call.state, call.stats, gap(Kind.TOOL, previous))
-                    }
+                    // ToolSearch loads a deferred tool: hidden unless it failed (spec 4.6.2), and not counted in a group.
+                    if (call.kind != ToolKind.TOOL_SEARCH || call.state == ToolState.FAILED) rows.call(call)
                 }
-                is AssistantBlock.Other -> null
-            }
-            if (row != null) {
-                rows += row
-                previous = row
+                is AssistantBlock.Other -> Unit
             }
         }
-        return rows
     }
 
     /** A thinking block's row (spec 4.5); none when thinking is hidden, or for a finished block that shows nothing. */
@@ -318,26 +351,22 @@ class ChatRowsBuilder(private val options: RowOptions) {
     /** The rows of the subagent of Agent call [agentId]: its text and its tool calls, ungrouped; its thinking is not shown. */
     private fun childRows(agentId: String, turnOpen: Boolean, region: Region, nextBodies: IdentityHashMap<ChatEntry.ToolResult, Body>): ImmutableList<ChatRow> {
         val entries = region.children[agentId] ?: return persistentListOf()
-        val rows = ArrayList<ChatRow>()
         val keys = HashSet<String>()
-        var previous: ChatRow? = null
+        val rows = Rows(null, grouped = false) { row ->
+            var key = row.key
+            var n = 1
+            while (key in keys) key = "${row.key}#${++n}"
+            keys += key
+            if (key == row.key) row else row.withKey(key)
+        }
         for (entry in entries) {
-            val built = when (entry) {
-                is ChatEntry.Assistant -> assistantRows(entry, turnOpen, region, nextBodies, previous, thinking = false)
-                is ChatEntry.ToolResult -> if (entry.toolUseId !in region.calls) listOf(orphan(entry, gap(Kind.TOOL, previous))) else emptyList()
-                else -> emptyList()
-            }
-            for (row in built) {
-                var key = row.key
-                var n = 1
-                while (key in keys) key = "${row.key}#${++n}"
-                keys += key
-                val unique = if (key == row.key) row else row.withKey(key)
-                rows += unique
-                previous = unique
+            when (entry) {
+                is ChatEntry.Assistant -> assistantRows(entry, turnOpen, region, nextBodies, rows, thinking = false)
+                is ChatEntry.ToolResult -> if (entry.toolUseId !in region.calls) rows.add { orphan(entry, gap(Kind.TOOL, it)) }
+                else -> Unit
             }
         }
-        return rows.toImmutableList()
+        return rows.rows.toImmutableList()
     }
 
     /** A result whose call is nowhere in the state: a `Used a tool` row with the result as its body, so nothing is dropped. */

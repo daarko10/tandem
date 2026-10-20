@@ -14,7 +14,7 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /** The one-line labels of tool rows (spec 4.6.2): pure string rules over a call's name, input, state and result. */
 object ToolLabels {
-    private const val NAME_MAX = 48
+    internal const val NAME_MAX = 48
     private const val COMMAND_MAX = 60
 
     /** A call's labels in each tense; [denied] replaces `<base> · Denied` where a tool has its own wording. */

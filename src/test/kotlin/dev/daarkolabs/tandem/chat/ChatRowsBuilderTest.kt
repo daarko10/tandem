@@ -21,6 +21,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -81,19 +82,46 @@ class ChatRowsBuilderTest {
     @Test
     fun `tools-read`() {
         val read = replay("tools-read").second.content()
+        assertEquals(3, read.size, read.toString())
+        assertIs<UserRow>(read[0])
+        val group = assertIs<ToolRow>(read[1])
+        assertEquals("Read a file, found files, searched for a pattern" to ToolState.DONE, group.label.text to group.state)
         assertEquals(
             listOf("Read <path>", "Read <path>:10-14", "Found 1 file", "Searched for seven · 1 match"),
-            read.toolRows().map { it.label.text },
+            group.calls.map { it.label.text },
         )
+        assertEquals("tool:${group.calls.first().id}", group.key)
+        assertNull(group.stats)
+        assertEquals("done.", assertIs<TextRow>(read[2]).markdown)
     }
 
     @Test
     fun `tools-edit`() {
-        val edit = replay("tools-edit").second.content().toolRows()
-        assertEquals(listOf("Read <path>", "Edited <path>", "Created <path>"), edit.map { it.label.text })
-        assertEquals(listOf(null, DiffStats(1, 1), DiffStats(2, 0)), edit.map { it.stats })
-        assertEquals(listOf(ToolKind.READ, ToolKind.EDIT, ToolKind.CREATE), edit.map { it.calls.single().kind })
-        assertEquals(listOf("<path>", "<path>", "<path>"), edit.map { it.calls.single().subject })
+        val group = replay("tools-edit").second.content().toolRows().single()
+        assertEquals("Read a file, edited a file, created <path>" to ToolState.DONE, group.label.text to group.state)
+        assertEquals(DiffStats(3, 1), group.stats)
+        assertEquals(listOf("Read <path>", "Edited <path>", "Created <path>"), group.calls.map { it.label.text })
+        assertEquals(listOf(null, DiffStats(1, 1), DiffStats(2, 0)), group.calls.map { it.stats })
+        assertEquals(listOf(ToolKind.READ, ToolKind.EDIT, ToolKind.CREATE), group.calls.map { it.kind })
+        assertEquals(listOf("<path>", "<path>", "<path>"), group.calls.map { it.subject })
+    }
+
+    @Test
+    fun `tools-read-unavailable`() {
+        val content = replay("tools-read-unavailable").second.content()
+        assertEquals(6, content.size, content.toString())
+        assertIs<UserRow>(content[0])
+        val reads = assertIs<ToolRow>(content[1])
+        assertEquals("Read <path>" to ToolState.DONE, reads.label.text to reads.state)
+        assertEquals(listOf("<id-280>", "<id-299>"), reads.calls.map { it.id })
+        val glob = assertIs<ToolRow>(content[2])
+        assertEquals("Failed to use Glob" to ToolState.FAILED, glob.label.text to glob.state)
+        assertEquals(1, glob.calls.size)
+        assertIs<ThinkingRow>(content[3])
+        val bash = assertIs<ToolRow>(content[4])
+        assertEquals("Found files, searched for a pattern" to ToolState.DONE, bash.label.text to bash.state)
+        assertEquals(2, bash.calls.size)
+        assertEquals("done.", assertIs<TextRow>(content[5]).markdown)
     }
 
     @Test
@@ -371,6 +399,7 @@ class ChatRowsBuilderTest {
         val hidden = replay("tools-read-unavailable", options = RowOptions(showThinking = false)).second.content()
         assertTrue(shown.any { it is ThinkingRow })
         assertTrue(hidden.none { it is ThinkingRow })
+        assertEquals(3, hidden.toolRows().size)
         assertEquals(shown.toolRows().map { it.key to it.label }, hidden.toolRows().map { it.key to it.label })
     }
 
