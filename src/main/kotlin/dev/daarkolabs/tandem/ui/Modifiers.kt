@@ -1,12 +1,10 @@
 package dev.daarkolabs.tandem.ui
 
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -27,15 +25,14 @@ internal fun Modifier.chatColumn(): Modifier =
     fillMaxWidth().wrapContentWidth(Alignment.CenterHorizontally).widthIn(max = COLUMN_MAX).fillMaxWidth()
 
 /**
- * Clamps the content at [height] and fades its bottom out (spec 4.3, 4.7): the last 30 % of the clipped box goes from opaque to
- * transparent. The offscreen layer is required: `DstIn` drawn into the shared surface would multiply the alpha of everything already
- * painted there.
+ * Fades the bottom [height] of the box out (spec 4.3, 4.7): opaque down to [height] above its bottom edge, transparent at it. It
+ * only fades: callers clamp and clip first, so it applies to the clipped box (`heightIn(max = 160.dp).bottomFade(60.dp)`). The
+ * offscreen layer is required: `DstIn` drawn into the shared surface would multiply the alpha of everything already painted there.
  */
 internal fun Modifier.bottomFade(height: Dp): Modifier =
-    heightIn(max = height)
-        .clipToBounds()
-        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
         .drawWithContent {
             drawContent()
-            drawRect(Brush.verticalGradient(0.7f to Color.Black, 1f to Color.Transparent), blendMode = BlendMode.DstIn)
+            val start = if (size.height > 0f) (1f - height.toPx() / size.height).coerceIn(0f, 1f) else 0f
+            drawRect(Brush.verticalGradient(start to Color.Black, 1f to Color.Transparent), blendMode = BlendMode.DstIn)
         }
