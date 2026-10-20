@@ -47,5 +47,17 @@ internal fun cardKey(key: Key, type: KeyEventType, shift: Boolean, cmdOrCtrl: Bo
     }
 }
 
+/**
+ * Whether a card's button takes [key] for itself, so that the button's own key click (Enter and Space click a focused button) never
+ * runs: Enter in any form, since the card root maps Enter to the card's default answer and Shift+Enter does nothing (spec 4.18); and
+ * Space on the card's default button ([primary]), whose key is Enter, so that a space typed just as the card took the focus does
+ * not answer it. Space still clicks the other buttons, which Tab reaches.
+ */
+internal fun cardButtonSwallows(key: Key, primary: Boolean): Boolean = when (key) {
+    Key.Enter, Key.NumPadEnter -> true
+    Key.Spacebar -> primary
+    else -> false
+}
+
 /** The key cap of a card's Cmd/Ctrl+Enter answer: `⌘↩` on macOS ([mac]), `Ctrl↩` elsewhere (spec 4.12, 4.20). */
 internal fun cmdEnterCap(mac: Boolean = SystemInfo.isMac): String = if (mac) "⌘↩" else "Ctrl↩"

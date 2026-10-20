@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -81,11 +82,12 @@ internal fun CardFrame(
 
 /**
  * A card's button: [label], then its key [cap] in the secondary colour, a [primary] one filled ([DefaultButton]), else outlined.
- * It is known to assistive technology, and to the IDE tests, by [label] alone (spec 4.19).
+ * It is known to assistive technology, and to the IDE tests, by [label] alone (spec 4.19). It never clicks on Enter, which the card
+ * maps, and the [primary] one never on Space either ([cardButtonSwallows]); a click or Space on a Tab-focused other button does.
  */
 @Composable
 internal fun CardButton(label: String, cap: String?, primary: Boolean, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    val described = modifier.semantics { contentDescription = label }
+    val described = modifier.semantics { contentDescription = label }.onPreviewKeyEvent { cardButtonSwallows(it.key, primary) }
     val content: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(label)
