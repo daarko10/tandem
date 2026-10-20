@@ -8,6 +8,7 @@ import dev.daarkolabs.tandem.ui.cards.cardButtonSwallows
 import dev.daarkolabs.tandem.ui.cards.cardKey
 import dev.daarkolabs.tandem.ui.cards.cmdEnterCap
 import dev.daarkolabs.tandem.ui.cards.questionKey
+import dev.daarkolabs.tandem.ui.cards.questionSwallows
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -97,5 +98,21 @@ class CardKeysTest {
         assertEquals(QuestionKey.NextTab, q(AwtKeyEvent.VK_RIGHT, strip = true))
         assertNull(q(AwtKeyEvent.VK_LEFT))
         assertNull(q(AwtKeyEvent.VK_RIGHT, other = true))
+    }
+
+    @Test
+    fun `the card swallows a picked digit's character and an arrow's release on the tabs`() {
+        // The character typed by the key that picked a row (the Other row's digit would land in the field it focused); only that one.
+        assertTrue(questionSwallows(Key.Unknown, KeyEventType.Unknown, afterPick = true, stripFocused = false))
+        assertFalse(questionSwallows(Key.Unknown, KeyEventType.Unknown, afterPick = false, stripFocused = false))
+        assertFalse(questionSwallows(key(AwtKeyEvent.VK_3), KeyEventType.KeyDown, afterPick = true, stripFocused = false))
+        assertFalse(questionSwallows(key(AwtKeyEvent.VK_3), KeyEventType.KeyUp, afterPick = true, stripFocused = false))
+        // Jewel's tabs step on an arrow's release, after the press switched the question: one tab per press (4.13, 4.18).
+        assertTrue(questionSwallows(key(AwtKeyEvent.VK_LEFT), KeyEventType.KeyUp, afterPick = false, stripFocused = true))
+        assertTrue(questionSwallows(key(AwtKeyEvent.VK_RIGHT), KeyEventType.KeyUp, afterPick = false, stripFocused = true))
+        assertFalse(questionSwallows(key(AwtKeyEvent.VK_RIGHT), KeyEventType.KeyUp, afterPick = false, stripFocused = false))
+        assertFalse(questionSwallows(key(AwtKeyEvent.VK_UP), KeyEventType.KeyUp, afterPick = false, stripFocused = true))
+        // The press is questionKey's to map.
+        assertFalse(questionSwallows(key(AwtKeyEvent.VK_LEFT), KeyEventType.KeyDown, afterPick = false, stripFocused = true))
     }
 }

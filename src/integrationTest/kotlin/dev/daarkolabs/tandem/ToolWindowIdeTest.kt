@@ -121,6 +121,20 @@ class ToolWindowIdeTest {
             newSession()
             typePrompt("Ask me a colour")
             waitForText("Which colour?")
+            // The card took the focus on its first option. `3`, the Other row's key, focuses the Other field and types nothing into
+            // it; Shift+Enter there types a newline (spec 4.13): 'a', Shift+Enter, 'b' leaves exactly three characters, so a stray
+            // '3' fails too.
+            waitFor("first option focused", 30.seconds) { ui.x(FOCUSED_OPTION_RED).present() }
+            ui.keyboard { key(KeyEvent.VK_3) }
+            waitFor("Other field focused", 30.seconds) {
+                ui.x("$EDITABLE[@focused='true']").present() && !ui.x("$PROMPT_BOX[@focused='true']").present()
+            }
+            ui.keyboard { typeText("a", 20) }
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_ENTER) }
+            ui.keyboard { typeText("b", 20) }
+            val aNewlineB = "string-length(@editabletext)=3 and starts-with(@editabletext, 'a') and substring(@editabletext, 3)='b'"
+            waitFor("Other holds a, a newline and b", 30.seconds) { ui.x("$EDITABLE[@focused='true' and $aNewlineB]").present() }
+            // Picking an option of a one-answer question clears Other, so the answer is the option.
             option("Blue").click(Point(10, 10))
             iconButton("Submit answers").click(Point(10, 10))
             // The card's own option is a "Blue" text node too.
@@ -701,6 +715,10 @@ class ToolWindowIdeTest {
          */
         const val FOCUSED_IN_CARD = "//div[@class='ComposeNode' and @role='Button' and @focused='true' and " +
             "(@contentdescription='Deny' or @contentdescription='Always allow for session' or @contentdescription='Allow once')]"
+
+        /** The `Red` option of ask-single's question card, when it has the keyboard focus. */
+        const val FOCUSED_OPTION_RED = "//div[@class='ComposeNode' and @contentdescription='Red' and @focused='true' and " +
+            "(@role='RadioButton' or @role='Checkbox')]"
     }
 }
 

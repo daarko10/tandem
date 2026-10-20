@@ -38,7 +38,10 @@ class QuestionCardTest {
             Cards.answers(two, picksOf(two, mapOf(0 to setOf(1), 1 to setOf(2, 0)), emptyMap())!!),
         )
         // Other wins over a pick.
-        assertEquals(mapOf("Which colour?" to "Green"), Cards.answers(single, picksOf(single, mapOf(0 to setOf(0)), mapOf(0 to " Green "))!!))
+        assertEquals(
+            mapOf("Which colour?" to "Green"),
+            Cards.answers(single, picksOf(single, mapOf(0 to setOf(0)), mapOf(0 to " Green "))!!),
+        )
     }
 
     @Test

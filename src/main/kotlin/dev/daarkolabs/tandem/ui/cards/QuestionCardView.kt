@@ -25,7 +25,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -34,6 +40,9 @@ import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.chat.Pick
 import dev.daarkolabs.tandem.chat.Question
 import dev.daarkolabs.tandem.chat.QuestionCard
+import dev.daarkolabs.tandem.ui.ComposerFallback
+import dev.daarkolabs.tandem.ui.composerFallback
+import dev.daarkolabs.tandem.ui.insertNewline
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.CheckboxRow
 import org.jetbrains.jewel.ui.component.HorizontallyScrollableContainer
@@ -53,8 +62,8 @@ private const val DIGIT_ROWS = 9
  * marked ` ·`), the active question, its options as radio buttons (one answer) or checkboxes (several), each with its number key and
  * description, then `Other` and its field, then `Cancel` (Esc) and `Submit answers` (Enter, enabled once every question has an
  * answer), and how many more requests wait behind it ([moreWaiting]). `1`–`9` pick the active question's options outside the `Other`
- * field, `←`/`→` switch questions while the tabs have the focus, Enter in the field submits ([questionKey]). The first option takes
- * the focus when the card opens if [takeFocus] says so then ([CardFrame]).
+ * field, `←`/`→` switch questions while the tabs have the focus, Enter in the field submits ([questionKey]) and Shift+Enter types a
+ * newline there. The first option takes the focus when the card opens if [takeFocus] says so then ([CardFrame]).
  */
 @Composable
 internal fun QuestionCardView(
@@ -72,6 +81,9 @@ internal fun QuestionCardView(
     val defaultFocus = remember(card.requestId) { FocusRequester() }
     var otherFocused by remember(card.requestId) { mutableStateOf(false) }
     var stripFocused by remember(card.requestId) { mutableStateOf(false) }
+    // The previous key event was a pick's press, so this one may be the character it types ([questionSwallows]). Read in no
+    // composition.
+    var afterPick by remember(card.requestId) { mutableStateOf(false) }
 
     fun othersNow(): Map<Int, String> = otherStates.withIndex().associate { (i, state) -> i to state.text.toString() }
     // Read in composition, so that typing in a field recomposes the card (Submit's state, the radio of Other, the tab marker).
@@ -98,9 +110,24 @@ internal fun QuestionCardView(
     // Before CardFrame's own keys, so that digits, arrows and Enter in `Other` never reach it.
     Box(
         Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
+            val echo = afterPick
+            afterPick = false
+            if (questionSwallows(event.key, event.type, echo, stripFocused)) return@onPreviewKeyEvent true
+            // The field would drop Shift+Enter (Compose types a newline only for Enter alone), so the card types it, as the composer.
+            val ctrlOrMeta = event.isCtrlPressed || event.isMetaPressed
+            if (otherFocused &&
+                composerFallback(event.key, event.type, event.isShiftPressed, event.isAltPressed, ctrlOrMeta, busy = false) ==
+                ComposerFallback.Newline
+            ) {
+                insertNewline(otherStates[active])
+                return@onPreviewKeyEvent true
+            }
             val key = questionKey(event, otherFocused, stripFocused) ?: return@onPreviewKeyEvent false
             when (key) {
-                is QuestionKey.Pick -> pick(key.index)
+                is QuestionKey.Pick -> {
+                    pick(key.index)
+                    afterPick = true
+                }
                 QuestionKey.PrevTab -> tab = (active - 1).coerceAtLeast(0)
                 QuestionKey.NextTab -> tab = (active + 1).coerceAtMost(questions.lastIndex)
                 QuestionKey.Submit -> submit()
@@ -206,9 +233,21 @@ private fun ChoiceRow(
         if (cap != null) Text(cap, color = secondary)
     }
     if (multiSelect) {
-        CheckboxRow(checked = selected, onCheckedChange = { onPick() }, modifier = rowModifier, verticalAlignment = Alignment.Top, content = content)
+        CheckboxRow(
+            checked = selected,
+            onCheckedChange = { onPick() },
+            modifier = rowModifier,
+            verticalAlignment = Alignment.Top,
+            content = content,
+        )
     } else {
-        RadioButtonRow(selected = selected, onClick = onPick, modifier = rowModifier, verticalAlignment = Alignment.Top, content = content)
+        RadioButtonRow(
+            selected = selected,
+            onClick = onPick,
+            modifier = rowModifier,
+            verticalAlignment = Alignment.Top,
+            content = content,
+        )
     }
 }
 

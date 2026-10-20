@@ -95,7 +95,8 @@ fun questionKey(event: KeyEvent, otherFieldFocused: Boolean, stripFocused: Boole
  * What [key] going [type] does on the question card (spec 4.13, 4.18); null leaves it to [cardKey] and what has the focus. Only a
  * key press counts. `1`–`9`, on the main row or the number pad, pick option `n - 1` unless the `Other` field has the focus
  * ([otherFieldFocused]), where they are typed. `←`/`→` switch questions only while the tabs have the focus ([stripFocused]). Enter
- * in the `Other` field, without [shift] or [ctrlOrMeta], submits (the field's own Shift+Enter stays a newline).
+ * in the `Other` field, without [shift] or [ctrlOrMeta], submits; Shift+Enter there is a newline, which the card types itself as the
+ * composer does ([dev.daarkolabs.tandem.ui.composerFallback]), since the field drops it.
  */
 internal fun questionKey(
     key: Key,
@@ -113,6 +114,20 @@ internal fun questionKey(
         Key.Enter, Key.NumPadEnter -> QuestionKey.Submit.takeIf { otherFieldFocused && !shift && !ctrlOrMeta }
         else -> null
     }
+}
+
+/**
+ * Whether the question card swallows [key] going [type], which [questionKey] leaves unmapped, so that what has the focus never sees
+ * it (spec 4.13, 4.18). A key's press and the character it types arrive as separate events, the character as a [KeyEventType.Unknown]
+ * event right after its press: the character of a key that picked a row ([afterPick]: the event before this one was a
+ * [QuestionKey.Pick]'s press) is swallowed, since the `Other` row's digit focuses the field, which would type the digit. The release
+ * of `←`/`→` while the tabs have the focus ([stripFocused]) is swallowed too, since Jewel's `SegmentedControl` steps on a release
+ * and the press already switched the question.
+ */
+internal fun questionSwallows(key: Key, type: KeyEventType, afterPick: Boolean, stripFocused: Boolean): Boolean = when (type) {
+    KeyEventType.KeyDown -> false
+    KeyEventType.KeyUp -> stripFocused && (key == Key.DirectionLeft || key == Key.DirectionRight)
+    else -> afterPick
 }
 
 private val digitKeys: List<Key> = listOf(
