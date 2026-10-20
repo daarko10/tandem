@@ -2,6 +2,7 @@
 
 package dev.daarkolabs.tandem.ui
 
+import com.intellij.openapi.diagnostic.ControlFlowException
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.chat.ChatRow
@@ -108,17 +109,19 @@ internal class ChatPresenter(
     init {
         scope.launch(Dispatchers.Default) {
             // 5.6's merge of the states and the requests, as a select: states are conflated while a render runs, requests are not.
+            // `select` prefers its first clause, so the requests come first: they are rare and each is taken once, so they never
+            // starve the states, while a stream that always has a new state ready would starve a request placed second.
             val inputs = combine(state, options, ::Input).conflate().produceIn(this)
             var input = inputs.receive()
             var stale = true
             while (true) {
                 if (stale) renderSafely(input)
                 stale = select {
+                    expandRequests.onReceive { key -> requested.add(key) }
                     inputs.onReceive {
                         input = it
                         true
                     }
-                    expandRequests.onReceive { key -> requested.add(key) }
                 }
             }
         }
@@ -137,9 +140,10 @@ internal class ChatPresenter(
         try {
             rendered.value = render(input)
             failed = false
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // An Error is caught too (a StackOverflowError from the recursive Markdown parser on deeply nested input), so one bad
+            // state cannot end the collector; cancellation, the platform's control flow and the VM's own failures pass through.
+            if (e is CancellationException || e is ControlFlowException || (e is VirtualMachineError && e !is StackOverflowError)) throw e
             if (!failed) LOG.error(RenderFailure(e, input.state.entries.size))
             failed = true
         }
@@ -227,4 +231,3 @@ private class RenderFailure(cause: Throwable, entries: Int) :
         stackTrace = cause.stackTrace
     }
 }
-
