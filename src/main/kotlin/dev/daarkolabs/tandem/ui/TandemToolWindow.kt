@@ -40,6 +40,8 @@ import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.Orientation
 import org.jetbrains.jewel.ui.component.Divider
@@ -181,6 +183,15 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                         key(selected.id) {
                             val presenter = remember(selected) { presenters.presenter(selected) }
                             val ui = remember(selected.id) { presenters.ui(selected.id) }
+                            // When the session's card closes (answered, cancelled, the turn ended), the focus goes back to the
+                            // composer (spec 4.12); a card that follows another keeps it on the card.
+                            LaunchedEffect(presenter) {
+                                var open = false
+                                presenter.chat.map { it.card != null }.distinctUntilChanged().collect { now ->
+                                    if (open && !now) promptFocusFor = selected.id
+                                    open = now
+                                }
+                            }
                             Box(chatFocus) {
                                 ChatPane(
                                     project,

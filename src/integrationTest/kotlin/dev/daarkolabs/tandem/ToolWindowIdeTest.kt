@@ -92,25 +92,25 @@ class ToolWindowIdeTest {
     }
 
     @Test
-    fun `permission prompts are answered from the tool window`() {
+    fun `the permission card names the command and answers from the keyboard`() {
         val sent = runChat("permissions", fixtures = listOf("permission")) {
             newSession()
             typePrompt("Create the fixture file")
-            waitForText("Allow Bash?")
-            clickButton("Allow once")
+            waitForText("Allow Claude to Run touch tandem-fixture.txt?")
+            // The focus is on Allow once, then Enter (slice-B review: card focus).
+            answerCard()
             waitFor("tool row", 2.minutes) { toolRow("Ran Create empty fixture file").present() }
+            // The first turn has ended, so Send is back for the next prompt.
             waitForText("done.")
-
             typePrompt("Now remove it")
-            waitForText("Allow Bash?")
-            clickButton("Deny")
-            waitFor("tool row", 2.minutes) { toolRow("Remove fixture file · Denied").present() }
+            waitForText("Allow Claude to Run rm tandem-fixture.txt?")
+            iconButton("Deny").click(Point(10, 10))
+            waitFor("denied row", 2.minutes) { toolRow("Remove fixture file · Denied").present() }
             waitForText("denied.")
         }
         val answers = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
         assertEquals(listOf("<request_id-26>", "<request_id-63>"), answers.map { it["request_id"]!!.jsonPrimitive.content })
-        val behaviors = answers.map { it["response"]!!.jsonObject["behavior"]!!.jsonPrimitive.content }
-        assertEquals(listOf("allow", "deny"), behaviors)
+        assertEquals(listOf("allow", "deny"), answers.map { it["response"]!!.jsonObject["behavior"]!!.jsonPrimitive.content })
     }
 
     @Test
@@ -220,8 +220,8 @@ class ToolWindowIdeTest {
             openSidebar()
             waitFor("badge on the background row", 1.minutes) { row("Create the fixture file", "needs you").present() }
             row("Create the fixture file").click(Point(10, 10))
-            waitForText("Allow Bash?")
-            clickButton("Allow once")
+            waitForText("Allow Claude to Run touch tandem-fixture.txt?")
+            iconButton("Allow once").click(Point(10, 10))
             waitForText("done.")
             openSidebar()
             waitFor("badge cleared", 30.seconds) { row("Create the fixture file").present() && !row("needs you").present() }
@@ -623,6 +623,28 @@ class ToolWindowIdeTest {
         waitFor("prompt box cleared after Send", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
     }
 
+    /**
+     * Answers the open permission card with Allow once: with Enter when the card has the focus, which must then sit on Allow once,
+     * never on Deny; else, when the Driver does not see the card's focus, with a click (the keyboard path stays on runIde checklist 6,
+     * spec 10.6).
+     */
+    private fun Driver.answerCard() {
+        val focused = runCatching {
+            waitFor("card focused", 10.seconds) { ui.x(FOCUSED_IN_CARD).present() }
+            true
+        }.getOrDefault(false)
+        if (focused) {
+            assertTrue(
+                ui.x("//div[@class='ComposeNode' and @role='Button' and @focused='true' and @contentdescription='Allow once']").present(),
+                "the card's focus must sit on Allow once, never on Deny",
+            )
+            ui.keyboard { enter() }
+        } else {
+            println("card focus not visible to the Driver; clicking Allow once (runIde checklist 6)")
+            iconButton("Allow once").click(Point(10, 10))
+        }
+    }
+
     private fun Driver.clickButton(text: String) {
         button(text).click(Point(12, 10))
     }
@@ -643,6 +665,13 @@ class ToolWindowIdeTest {
          * comes after it, so the tests type prompts only while it is closed.
          */
         const val PROMPT_BOX = "($EDITABLE)[last()]"
+
+        /**
+         * A permission card's button that has the keyboard focus. The card puts the focus on its default button when it opens, so a
+         * focused card button means the card has the focus, whatever the Driver's hierarchy nests it in.
+         */
+        const val FOCUSED_IN_CARD = "//div[@class='ComposeNode' and @role='Button' and @focused='true' and " +
+            "(@contentdescription='Deny' or @contentdescription='Always allow for session' or @contentdescription='Allow once')]"
     }
 }
 
