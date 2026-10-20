@@ -25,9 +25,11 @@ internal fun Modifier.chatColumn(): Modifier =
     fillMaxWidth().wrapContentWidth(Alignment.CenterHorizontally).widthIn(max = COLUMN_MAX).fillMaxWidth()
 
 /**
- * Fades the bottom [height] of the box out (spec 4.3, 4.7): opaque down to [height] above its bottom edge, transparent at it. It
- * only fades: callers clamp and clip first, so it applies to the clipped box (`heightIn(max = 160.dp).bottomFade(60.dp)`). The
- * offscreen layer is required: `DstIn` drawn into the shared surface would multiply the alpha of everything already painted there.
+ * Fades the bottom [height] of the box out (spec 4.3, 4.7): opaque down to [height] above its bottom edge, transparent at it, so
+ * the opaque stop is `1 - height / boxHeight` rather than 4.3's fixed `0.7f` (a recorded deviation: 4.7 asks for a 3-line fade).
+ * It only fades: callers clamp and clip first, so it applies to the clipped box
+ * (`heightIn(max = 160.dp).clipToBounds().bottomFade(60.dp)`). The offscreen layer is required: `DstIn` drawn into the shared
+ * surface would multiply the alpha of everything already painted there.
  */
 internal fun Modifier.bottomFade(height: Dp): Modifier =
     graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
