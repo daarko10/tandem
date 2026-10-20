@@ -60,13 +60,14 @@ private val CLAMP_HEIGHT = 160.dp
 /**
  * The permission card (spec 4.12): a warning dot and `Allow Claude to <verb> <object>?`, the subagent that asks, the request's
  * description, what the call would do in a mono box (clamped at 8 lines with `Show more`), then `Deny` (Esc), `Always allow for
- * session` (Cmd/Ctrl+Enter, only when the request offers it) and `Allow once` (Enter, the default, which takes the focus), and how
- * many more requests wait behind it ([moreWaiting]).
+ * session` (Cmd/Ctrl+Enter, only when the request offers it) and `Allow once` (Enter, the default, which takes the focus when
+ * [takeFocus] says so), and how many more requests wait behind it ([moreWaiting]).
  */
 @Composable
 internal fun PermissionCardView(
     card: PermissionCard,
     moreWaiting: Int,
+    takeFocus: () -> Boolean,
     onAllowOnce: () -> Unit,
     onAllowForSession: () -> Unit,
     onDeny: () -> Unit,
@@ -79,6 +80,7 @@ internal fun PermissionCardView(
         "Permission request",
         textFieldFocused = false,
         defaultFocus = defaultFocus,
+        takeFocus = takeFocus,
         onEnter = onAllowOnce,
         onCmdEnter = onAllowForSession.takeIf { card.canAlwaysAllow },
         onEscape = onDeny,
@@ -92,7 +94,11 @@ internal fun PermissionCardView(
         agentLine(card)?.let { Text(it, color = colors.info) }
         card.description?.takeIf { it != card.objectText }?.let { Text(it, color = colors.info) }
         PayloadView(card)
-        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             CardButton("Deny", "Esc", primary = false, onClick = onDeny)
             Spacer(Modifier.weight(1f))
             if (card.canAlwaysAllow) CardButton("Always allow for session", cmdEnterCap(), primary = false, onClick = onAllowForSession)
@@ -135,14 +141,7 @@ internal fun agentLine(card: PendingCard): String? = card.agentDescription?.let 
 private fun PayloadView(card: PermissionCard) {
     val payload = card.payload
     if (payload is Payload.None) return
-    val lines = remember(payload) {
-        when (payload) {
-            is Payload.Mono -> payload.text.lines().size
-            is Payload.Json -> payload.text.lines().size
-            is Payload.OldNew -> 1 + payload.old.lines().size + payload.new.lines().size
-            Payload.None -> 0
-        }
-    }
+    val lines = remember(payload) { payloadLineCount(payload) }
     var expanded by remember(card.requestId) { mutableStateOf(false) }
     val clamped = lines > CLAMP_LINES && !expanded
     val mono = monoTextStyle()
@@ -159,8 +158,8 @@ private fun PayloadView(card: PermissionCard) {
                     PayloadBox { Text(payload.path, style = mono, color = textColor) }
                     val palette = chatPalette()
                     PayloadBox(padded = false) {
-                        payload.old.lines().forEach { DiffLine("- $it", palette.deletedFill) }
-                        payload.new.lines().forEach { DiffLine("+ $it", palette.insertedFill) }
+                        editLines(payload.old).forEach { DiffLine("- $it", palette.deletedFill) }
+                        editLines(payload.new).forEach { DiffLine("+ $it", palette.insertedFill) }
                     }
                 }
                 Payload.None -> Unit
@@ -171,6 +170,17 @@ private fun PayloadView(card: PermissionCard) {
         Link(if (expanded) "Show less" else "Show more", onClick = { expanded = !expanded })
     }
 }
+
+/** How many lines [payload] shows: an edit's path, then its old and new lines ([editLines]). */
+internal fun payloadLineCount(payload: Payload): Int = when (payload) {
+    is Payload.Mono -> payload.text.lines().size
+    is Payload.Json -> payload.text.lines().size
+    is Payload.OldNew -> 1 + editLines(payload.old).size + editLines(payload.new).size
+    Payload.None -> 0
+}
+
+/** The lines of one side of an edit: none when [text] is empty (an insertion has no old lines, a deletion no new ones). */
+internal fun editLines(text: String): List<String> = if (text.isEmpty()) emptyList() else text.lines()
 
 /** One line of an edit, on its [fill], across the whole box. */
 @Composable

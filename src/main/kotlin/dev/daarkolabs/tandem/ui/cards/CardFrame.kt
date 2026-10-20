@@ -36,7 +36,8 @@ import org.jetbrains.jewel.ui.component.Text
 /**
  * The chrome every card shares (spec 4.12–4.14, 6): the chat column's width, a hairline border (the focus colour while the card
  * holds the focus) round 16 dp of padding on the page colour, known to assistive technology as [description] and to tests as [tag].
- * When a request ([requestId]) shows, the focus goes to the card's default button ([defaultFocus]); Tab cycles inside the card.
+ * When a request ([requestId]) shows, the focus goes to the card's default button ([defaultFocus]) if [takeFocus] says so then (the
+ * chat holds the focus, not the editor, the title field, the filter or the sidebar); Tab cycles inside the card.
  * Keys go through [cardKey] before the focused control sees them: Enter is [onEnter] (unless a text field has the focus,
  * [textFieldFocused]), Cmd/Ctrl+Enter is [onCmdEnter] when the card offers one, Esc is [onEscape].
  */
@@ -47,12 +48,13 @@ internal fun CardFrame(
     description: String,
     textFieldFocused: Boolean,
     defaultFocus: FocusRequester,
+    takeFocus: () -> Boolean,
     onEnter: () -> Unit,
     onCmdEnter: (() -> Unit)?,
     onEscape: () -> Unit,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    LaunchedEffect(requestId) { defaultFocus.requestFocus() }
+    LaunchedEffect(requestId) { if (takeFocus()) defaultFocus.requestFocus() }
     var focused by remember { mutableStateOf(false) }
     val colors = JewelTheme.globalColors
     val shape = RoundedCornerShape(8.dp)
@@ -67,7 +69,8 @@ internal fun CardFrame(
             .testTag(tag)
             .semantics { contentDescription = description }
             .onPreviewKeyEvent { event ->
-                val key = cardKey(event, hasCmdEnter = onCmdEnter != null, textFieldFocused = textFieldFocused) ?: return@onPreviewKeyEvent false
+                val key = cardKey(event, hasCmdEnter = onCmdEnter != null, textFieldFocused = textFieldFocused)
+                    ?: return@onPreviewKeyEvent false
                 when (key) {
                     CardKey.ENTER -> onEnter()
                     CardKey.CMD_ENTER -> onCmdEnter?.invoke()
@@ -86,7 +89,14 @@ internal fun CardFrame(
  * maps, and the [primary] one never on Space either ([cardButtonSwallows]); a click or Space on a Tab-focused other button does.
  */
 @Composable
-internal fun CardButton(label: String, cap: String?, primary: Boolean, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit) {
+internal fun CardButton(
+    label: String,
+    cap: String?,
+    primary: Boolean,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
     val described = modifier.semantics { contentDescription = label }.onPreviewKeyEvent { cardButtonSwallows(it.key, primary) }
     val content: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {

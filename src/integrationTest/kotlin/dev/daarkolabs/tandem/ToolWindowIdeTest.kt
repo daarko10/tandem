@@ -99,6 +99,8 @@ class ToolWindowIdeTest {
             waitForText("Allow Claude to Run touch tandem-fixture.txt?")
             // The focus is on Allow once, then Enter (slice-B review: card focus).
             answerCard()
+            // The card held the focus, so it gives it back to the composer when it closes (spec 4.12).
+            waitFor("focus back in the prompt box", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
             waitFor("tool row", 2.minutes) { toolRow("Ran Create empty fixture file").present() }
             // The first turn has ended, so Send is back for the next prompt.
             waitForText("done.")

@@ -34,7 +34,14 @@ fun cardKey(event: KeyEvent, hasCmdEnter: Boolean, textFieldFocused: Boolean): C
  * the focus ([textFieldFocused]), which takes it itself; Shift+Enter does nothing. Cmd/Ctrl+Enter is [CardKey.CMD_ENTER] when the
  * card offers it ([hasCmdEnter]), a text field focused or not. Esc is [CardKey.ESCAPE].
  */
-internal fun cardKey(key: Key, type: KeyEventType, shift: Boolean, cmdOrCtrl: Boolean, hasCmdEnter: Boolean, textFieldFocused: Boolean): CardKey? {
+internal fun cardKey(
+    key: Key,
+    type: KeyEventType,
+    shift: Boolean,
+    cmdOrCtrl: Boolean,
+    hasCmdEnter: Boolean,
+    textFieldFocused: Boolean,
+): CardKey? {
     if (type != KeyEventType.KeyDown) return null
     return when (key) {
         Key.Enter, Key.NumPadEnter -> when {

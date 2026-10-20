@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalJewelApi::class)
+
 package dev.daarkolabs.tandem.ui
 
 import androidx.compose.foundation.background
@@ -43,10 +45,14 @@ import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import org.jetbrains.jewel.foundation.ExperimentalJewelApi
+import org.jetbrains.jewel.foundation.LocalComponent
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.Orientation
 import org.jetbrains.jewel.ui.component.Divider
 import org.jetbrains.jewel.ui.component.Text
+import java.awt.Component
+import javax.swing.SwingUtilities
 
 /** The sidebar shows only in a tool window at least this wide. */
 private val MIN_WIDTH_FOR_SIDEBAR: Dp = 500.dp
@@ -66,6 +72,10 @@ private val SIDEBAR_WIDTH: Dp = 220.dp
  *
  * Every open session keeps a [ChatPresenter] and a [ChatUiState] from the first time it is shown until it is closed, so that
  * switching back to it does not parse its transcript again and finds its rows opened as it left them.
+ *
+ * A card (spec 4.12) takes the focus when it opens, and gives it back to the composer when it closes, only while the chat holds the
+ * focus ([focusInChat]): a request that arrives or ends while the user is in the editor, the title field, the filter or the
+ * sidebar leaves the focus there, so that an Enter meant for them never answers it.
  */
 @Composable
 internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
@@ -90,9 +100,11 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     // The session whose prompt box takes the focus when it shows: the one last picked or created. One still being opened when
     // another is selected (a fork, say) does not take it any more, nor once the user has moved to the filter or the title field.
     var promptFocusFor by remember { mutableStateOf<SessionId?>(null) }
-    // The user has moved the focus out of the chat, to the title field or the sidebar's filter, and not back since: a card that
-    // closes then leaves the focus where it is.
-    var focusLeftChat by remember { mutableStateOf(false) }
+    // Something in the tool window has the focus (rootFocused), something in the selected session's chat has it (chatFocused).
+    var rootFocused by remember { mutableStateOf(false) }
+    var chatFocused by remember { mutableStateOf(false) }
+    val panel = LocalComponent.current
+    val chatHoldsFocus: () -> Boolean = remember(panel) { { focusInChat(awtFocusIn(panel), rootFocused, chatFocused) } }
     LaunchedEffect(selectedId) {
         if (renaming != selectedId) renaming = null
         if (promptFocusFor != selectedId) promptFocusFor = null
@@ -104,6 +116,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
 
     BoxWithConstraints(
         Modifier.fillMaxSize()
+            .onFocusChanged { rootFocused = it.hasFocus }
             // The context menu key opens the focused row's menu, and does nothing elsewhere.
             .pointerInput(rowMenus) { interceptContextClicks(rowMenus::contextMenuKey) }
             .onKeyEvent { event ->
@@ -128,16 +141,12 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     actions.show(id)
                     renaming = id
                     promptFocusFor = null
-                    focusLeftChat = true
                 },
                 modifier = modifier,
                 onPicked = { drawerOpen = false },
                 onSessionShown = sessionShown,
                 focusFilter = overChat,
-                onFilterFocused = {
-                    promptFocusFor = null
-                    focusLeftChat = true
-                },
+                onFilterFocused = { promptFocusFor = null },
                 rowMenus = rowMenus,
                 newSessionFocus = if (overChat) drawerEntryFocus else null,
             )
@@ -165,10 +174,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     renaming = selected != null && renaming == selected.id,
                     onRenamingChange = { editing ->
                         renaming = if (editing) selected?.id else null
-                        if (editing) {
-                            promptFocusFor = null
-                            focusLeftChat = true
-                        }
+                        if (editing) promptFocusFor = null
                     },
                     onRename = { title -> selected?.let { actions.rename(it.id, title) } },
                     toggleFocus = toggleFocus,
@@ -195,16 +201,15 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                             val presenter = remember(selected) { presenters.presenter(selected) }
                             val ui = remember(selected.id) { presenters.ui(selected.id) }
                             // When the session's card closes (answered, cancelled, the turn ended), the focus goes back to the
-                            // composer (spec 4.12), unless the user has since moved it to the title field or the filter; a card
-                            // that follows another keeps it on the card.
+                            // composer (spec 4.12) while the chat holds it; a card that follows another keeps it on the card.
                             LaunchedEffect(presenter) {
                                 var open = false
                                 presenter.chat.map { it.card != null }.distinctUntilChanged().collect { now ->
-                                    if (open && !now && !focusLeftChat) promptFocusFor = selected.id
+                                    if (open && !now && chatHoldsFocus()) promptFocusFor = selected.id
                                     open = now
                                 }
                             }
-                            Box(Modifier.onFocusChanged { if (it.hasFocus) focusLeftChat = false }.then(chatFocus)) {
+                            Box(Modifier.onFocusChanged { chatFocused = it.hasFocus }.then(chatFocus)) {
                                 ChatPane(
                                     project,
                                     selected,
@@ -215,6 +220,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                     focusPrompt = promptFocusFor == selected.id,
                                     onPromptFocused = { promptFocusFor = null },
                                     onFocusComposer = { promptFocusFor = selected.id },
+                                    cardTakesFocus = chatHoldsFocus,
                                 )
                             }
                         }
@@ -242,6 +248,23 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
             }
         }
     }
+}
+
+/**
+ * Whether the chat holds the focus, for a card that opens or closes (spec 4.12): the AWT focus is in the tool window ([inPanel]),
+ * and in it the chat has the focus ([chatFocused]) or nothing has ([rootFocused] false: a card that has just closed took the focus
+ * with it). False while the user is in the editor or another tool window, or on the header or the sidebar.
+ */
+internal fun focusInChat(inPanel: Boolean, rootFocused: Boolean, chatFocused: Boolean): Boolean =
+    inPanel && (chatFocused || !rootFocused)
+
+/**
+ * Whether the AWT focus is in [panel], or returns there when its window is next focused ([java.awt.Window.getMostRecentFocusOwner]),
+ * so that a window in the background still counts.
+ */
+private fun awtFocusIn(panel: Component): Boolean {
+    val owner = SwingUtilities.getWindowAncestor(panel)?.mostRecentFocusOwner ?: return false
+    return SwingUtilities.isDescendingFrom(owner, panel)
 }
 
 /**

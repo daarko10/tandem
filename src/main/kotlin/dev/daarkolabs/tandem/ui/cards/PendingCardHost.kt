@@ -30,10 +30,18 @@ internal fun RenderedChat.pendingCard(): PendingCardModel = PendingCardModel(car
 /**
  * The card of the request [model] holds, docked above the composer (spec 4.12–4.14), answered through [manager] for [handle]'s
  * session. A click reads the request from the session's state as it is then ([answerFor]): one that is no longer pending (answered,
- * cancelled, its turn ended) is not answered. [feedback] is the plan card's feedback, which Esc in the composer sends too.
+ * cancelled, its turn ended) is not answered. [feedback] is the plan card's feedback, which Esc in the composer sends too. The card
+ * takes the focus when it opens only if [takeFocus] says so then ([CardFrame]).
  */
 @Composable
-internal fun PendingCardHost(project: Project, handle: SessionHandle, manager: SessionManager, model: PendingCardModel, feedback: TextFieldState) {
+internal fun PendingCardHost(
+    project: Project,
+    handle: SessionHandle,
+    manager: SessionManager,
+    model: PendingCardModel,
+    feedback: TextFieldState,
+    takeFocus: () -> Boolean,
+) {
     val card = model.card ?: return
     val answer: ((PendingPermission) -> PermissionAnswer) -> Unit = { build ->
         answerFor(handle.state.value, card.requestId, build)?.let { manager.answer(handle.id, card.requestId, it) }
@@ -42,6 +50,7 @@ internal fun PendingCardHost(project: Project, handle: SessionHandle, manager: S
         is PermissionCard -> PermissionCardView(
             card,
             model.moreWaiting,
+            takeFocus,
             onAllowOnce = { answer(PermissionAnswers::allowOnce) },
             onAllowForSession = { answer(PermissionAnswers::allowForSession) },
             onDeny = { answer { PermissionAnswers.deny() } },
@@ -50,6 +59,7 @@ internal fun PendingCardHost(project: Project, handle: SessionHandle, manager: S
         else -> PermissionCardView(
             genericCard(card),
             model.moreWaiting,
+            takeFocus,
             onAllowOnce = { answer(PermissionAnswers::allowOnce) },
             onAllowForSession = {},
             onDeny = { answer(escapeAnswer(card, feedback.text.toString())) },

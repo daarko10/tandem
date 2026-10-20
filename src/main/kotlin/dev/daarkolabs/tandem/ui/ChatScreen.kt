@@ -31,7 +31,8 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
  * pickers, whose picks are also the project's last ones in [workspace]. Everything goes to [manager] for [handle]'s session; none of
  * it waits: a prompt to a stopped session starts its process. While a permission card is open the transcript is dimmed. With
  * [focusPrompt] the prompt box takes the focus, and then [onPromptFocused] is called. Esc in the transcript asks for the prompt box's
- * focus with [onFocusComposer]; Esc in the prompt box while a card is open gives the card's Esc answer (spec 4.18).
+ * focus with [onFocusComposer]; Esc in the prompt box while a card is open gives the card's Esc answer (spec 4.18). A card that opens
+ * takes the focus only when [cardTakesFocus] says so then.
  */
 @Composable
 internal fun ChatPane(
@@ -44,6 +45,7 @@ internal fun ChatPane(
     focusPrompt: Boolean = false,
     onPromptFocused: () -> Unit = {},
     onFocusComposer: () -> Unit = {},
+    cardTakesFocus: () -> Boolean = { false },
 ) {
     val composer by presenter.composer.collectAsState()
     val pendingFlow = remember(presenter) { presenter.chat.map { it.pendingCard() }.distinctUntilChanged() }
@@ -69,7 +71,7 @@ internal fun ChatPane(
             }
             ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis, onFocusComposer)
         }
-        pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback) }
+        pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) }
         PromptBar(
             handle,
             manager,
