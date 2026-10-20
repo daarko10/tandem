@@ -5,6 +5,7 @@ package dev.daarkolabs.tandem.ui.cards
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
 import com.intellij.openapi.project.Project
+import dev.daarkolabs.tandem.chat.Cards
 import dev.daarkolabs.tandem.chat.Payload
 import dev.daarkolabs.tandem.chat.PendingCard
 import dev.daarkolabs.tandem.chat.PermissionCard
@@ -55,7 +56,14 @@ internal fun PendingCardHost(
             onAllowForSession = { answer(PermissionAnswers::allowForSession) },
             onDeny = { answer { PermissionAnswers.deny() } },
         )
-        // Until the question and plan cards: the generic card, whose Deny and Esc send what Esc in the composer sends.
+        is QuestionCard -> QuestionCardView(
+            card,
+            model.moreWaiting,
+            takeFocus,
+            onSubmit = { picks -> answer { PermissionAnswers.questionAnswers(it, Cards.answers(card, picks)) } },
+            onCancel = { answer { PermissionAnswers.cancelQuestion() } },
+        )
+        // Until the plan card: the generic card, whose Deny and Esc send what Esc in the composer sends.
         else -> PermissionCardView(
             genericCard(card),
             model.moreWaiting,

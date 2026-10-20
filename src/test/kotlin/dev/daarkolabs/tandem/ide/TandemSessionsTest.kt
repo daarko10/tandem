@@ -5,6 +5,7 @@ import com.intellij.testFramework.junit5.TestApplication
 import com.intellij.testFramework.junit5.fixture.tempPathFixture
 import com.intellij.testFramework.openProjectAsync
 import com.intellij.testFramework.useProjectAsync
+import dev.daarkolabs.tandem.chat.Cards
 import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ThinkingRow
 import dev.daarkolabs.tandem.chat.ToolRow
@@ -14,11 +15,13 @@ import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
+import dev.daarkolabs.tandem.session.PermissionAnswers
 import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import dev.daarkolabs.tandem.ui.ChatPresenter
 import dev.daarkolabs.tandem.ui.RenderedChat
+import dev.daarkolabs.tandem.ui.cards.picksOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,6 +29,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
@@ -117,6 +123,34 @@ class TandemSessionsTest {
         assertEquals("claude-sonnet-5-5", state.activeModel)
         assertEquals(remembered, state.sessionId)
         awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun aQuestionAnsweredFromTheServiceReachesTheFake() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("question").createDirectories()
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "ask-single", "TANDEM_FAKE_LOG" to log.toString())
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            sessions.manager.send(handle.id, "Ask me a colour")
+            val p = handle.state.first { it.pendingPermissions.isNotEmpty() }.pendingPermissions.single()
+            val card = Cards.question(p)!!
+            val answers = Cards.answers(card, picksOf(card, mapOf(0 to setOf(1)), emptyMap())!!)
+            sessions.manager.answer(handle.id, p.requestId, PermissionAnswers.questionAnswers(p, answers))
+            handle.state.first { !it.busy }
+        }
+        // As the other tests of the class: no fake CLI outlives the project.
+        awaitNoOwnFakeCli()
+        // As SessionManagerTest.frames: the last piece is empty, or a line the fake is still writing.
+        val frames = log.readText().split('\n').dropLast(1).filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+        val answer = frames.single { it["type"]?.jsonPrimitive?.content == "control_response" }["response"]!!.jsonObject
+        assertEquals("<request_id-27>", answer["request_id"]!!.jsonPrimitive.content)
+        val response = answer["response"]!!.jsonObject
+        assertEquals("allow", response["behavior"]!!.jsonPrimitive.content)
+        assertEquals("<id-12>", response["toolUseID"]!!.jsonPrimitive.content)
+        assertEquals("Blue", response["updatedInput"]!!.jsonObject["answers"]!!.jsonObject["Which colour?"]!!.jsonPrimitive.content)
     }
 
     @Test

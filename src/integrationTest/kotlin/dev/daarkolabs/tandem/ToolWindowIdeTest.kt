@@ -116,6 +116,28 @@ class ToolWindowIdeTest {
     }
 
     @Test
+    fun `a question card answers with the picked option`() {
+        val sent = runChat("question", fixtures = listOf("ask-single")) {
+            newSession()
+            typePrompt("Ask me a colour")
+            waitForText("Which colour?")
+            option("Blue").click(Point(10, 10))
+            iconButton("Submit answers").click(Point(10, 10))
+            // The card's own option is a "Blue" text node too.
+            waitFor("question card closed", 2.minutes) {
+                !ui.x("//div[@class='ComposeNode' and @contentdescription='Question from Claude']").present()
+            }
+            // The model's reply, ask-single:31.
+            waitForText("Blue")
+            waitFor("Questions row", 2.minutes) { toolRow("Questions").present() }
+        }
+        val answer = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
+            .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-27>" }["response"]!!.jsonObject
+        assertEquals("allow", answer["behavior"]!!.jsonPrimitive.content)
+        assertEquals("Blue", answer["updatedInput"]!!.jsonObject["answers"]!!.jsonObject["Which colour?"]!!.jsonPrimitive.content)
+    }
+
+    @Test
     fun `Stop interrupts a running turn`() {
         val sent = runChat("stop", fixtures = listOf("interrupt")) {
             newSession()
@@ -571,6 +593,11 @@ class ToolWindowIdeTest {
     /** An icon button, found by what it says to assistive technology. */
     private fun Driver.iconButton(description: String): UiComponent =
         ui.x("//div[@class='ComposeNode' and @role='Button' and @contentdescription='$description']")
+
+    /** A question card's option (a radio button or a checkbox), found by its label, which is what it says to assistive technology. */
+    private fun Driver.option(label: String): UiComponent = ui.x(
+        "//div[@class='ComposeNode' and @contentdescription='$label' and (@role='RadioButton' or @role='Checkbox')]",
+    )
 
     /** A tool row (a lone call, a group or a group's sub-row), found by its label, which is what it says to assistive technology. */
     private fun Driver.toolRow(label: String): UiComponent = ui.x("//div[@class='ComposeNode' and @contentdescription='$label']")

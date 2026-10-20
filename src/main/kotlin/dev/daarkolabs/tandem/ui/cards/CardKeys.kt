@@ -68,3 +68,60 @@ internal fun cardButtonSwallows(key: Key, primary: Boolean): Boolean = when (key
 
 /** The key cap of a card's Cmd/Ctrl+Enter answer: `⌘↩` on macOS ([mac]), `Ctrl↩` elsewhere (spec 4.12, 4.20). */
 internal fun cmdEnterCap(mac: Boolean = SystemInfo.isMac): String = if (mac) "⌘↩" else "Ctrl↩"
+
+/** What a key typed on the question card does (spec 4.13, 4.18), before [cardKey] sees it. */
+sealed interface QuestionKey {
+    /** Picks or toggles the option at [index] of the active question (the `Other` row is the index after the last option). */
+    data class Pick(val index: Int) : QuestionKey
+
+    /** Shows the previous question. */
+    data object PrevTab : QuestionKey
+
+    /** Shows the next question. */
+    data object NextTab : QuestionKey
+
+    /** Submits the answers (Enter in the `Other` field). */
+    data object Submit : QuestionKey
+}
+
+/**
+ * What [event] does on the question card ([questionKey] with its modifiers read from the event): Cmd and Ctrl count as one.
+ * [otherFieldFocused]: the `Other` field has the focus. [stripFocused]: the question tabs have it.
+ */
+fun questionKey(event: KeyEvent, otherFieldFocused: Boolean, stripFocused: Boolean): QuestionKey? =
+    questionKey(event.key, event.type, event.isShiftPressed, event.isMetaPressed || event.isCtrlPressed, otherFieldFocused, stripFocused)
+
+/**
+ * What [key] going [type] does on the question card (spec 4.13, 4.18); null leaves it to [cardKey] and what has the focus. Only a
+ * key press counts. `1`–`9`, on the main row or the number pad, pick option `n - 1` unless the `Other` field has the focus
+ * ([otherFieldFocused]), where they are typed. `←`/`→` switch questions only while the tabs have the focus ([stripFocused]). Enter
+ * in the `Other` field, without [shift] or [ctrlOrMeta], submits (the field's own Shift+Enter stays a newline).
+ */
+internal fun questionKey(
+    key: Key,
+    type: KeyEventType,
+    shift: Boolean,
+    ctrlOrMeta: Boolean,
+    otherFieldFocused: Boolean,
+    stripFocused: Boolean,
+): QuestionKey? {
+    if (type != KeyEventType.KeyDown) return null
+    digit(key)?.let { n -> return if (otherFieldFocused || n == 0) null else QuestionKey.Pick(n - 1) }
+    return when (key) {
+        Key.DirectionLeft -> QuestionKey.PrevTab.takeIf { stripFocused }
+        Key.DirectionRight -> QuestionKey.NextTab.takeIf { stripFocused }
+        Key.Enter, Key.NumPadEnter -> QuestionKey.Submit.takeIf { otherFieldFocused && !shift && !ctrlOrMeta }
+        else -> null
+    }
+}
+
+private val digitKeys: List<Key> = listOf(
+    Key.Zero, Key.One, Key.Two, Key.Three, Key.Four, Key.Five, Key.Six, Key.Seven, Key.Eight, Key.Nine,
+)
+
+private val numPadKeys: List<Key> = listOf(
+    Key.NumPad0, Key.NumPad1, Key.NumPad2, Key.NumPad3, Key.NumPad4, Key.NumPad5, Key.NumPad6, Key.NumPad7, Key.NumPad8, Key.NumPad9,
+)
+
+/** The digit [key] types, on the main row or the number pad; null for any other key. */
+private fun digit(key: Key): Int? = digitKeys.indexOf(key).takeIf { it >= 0 } ?: numPadKeys.indexOf(key).takeIf { it >= 0 }

@@ -3,9 +3,11 @@ package dev.daarkolabs.tandem.ui
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import dev.daarkolabs.tandem.ui.cards.CardKey
+import dev.daarkolabs.tandem.ui.cards.QuestionKey
 import dev.daarkolabs.tandem.ui.cards.cardButtonSwallows
 import dev.daarkolabs.tandem.ui.cards.cardKey
 import dev.daarkolabs.tandem.ui.cards.cmdEnterCap
+import dev.daarkolabs.tandem.ui.cards.questionKey
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -26,6 +28,15 @@ class CardKeysTest {
         textField: Boolean = false,
         numPad: Boolean = false,
     ): CardKey? = cardKey(key(code, numPad), KeyEventType.KeyDown, shift, cmd, hasCmdEnter, textField)
+
+    private fun q(
+        code: Int,
+        other: Boolean = false,
+        strip: Boolean = false,
+        shift: Boolean = false,
+        cmd: Boolean = false,
+        numPad: Boolean = false,
+    ): QuestionKey? = questionKey(key(code, numPad), KeyEventType.KeyDown, shift, cmd, other, strip)
 
     @Test
     fun `Enter, Cmd-Enter when offered, Esc`() {
@@ -65,5 +76,26 @@ class CardKeysTest {
     fun `the Cmd-Enter cap names the platform's key`() {
         assertEquals("⌘↩", cmdEnterCap(mac = true))
         assertEquals("Ctrl↩", cmdEnterCap(mac = false))
+    }
+
+    @Test
+    fun `digits pick options unless the Other field has focus`() {
+        assertEquals(QuestionKey.Pick(0), q(AwtKeyEvent.VK_1))
+        assertEquals(QuestionKey.Pick(8), q(AwtKeyEvent.VK_9))
+        assertEquals(QuestionKey.Pick(1), q(AwtKeyEvent.VK_NUMPAD2, numPad = true))
+        assertNull(q(AwtKeyEvent.VK_0))
+        assertNull(q(AwtKeyEvent.VK_1, other = true))
+        assertEquals(QuestionKey.Submit, q(AwtKeyEvent.VK_ENTER, other = true))
+        assertNull(q(AwtKeyEvent.VK_ENTER, other = true, shift = true))
+        assertNull(q(AwtKeyEvent.VK_ENTER, other = true, cmd = true))
+        assertNull(q(AwtKeyEvent.VK_ENTER))
+    }
+
+    @Test
+    fun `arrows switch tabs only when the strip has focus`() {
+        assertEquals(QuestionKey.PrevTab, q(AwtKeyEvent.VK_LEFT, strip = true))
+        assertEquals(QuestionKey.NextTab, q(AwtKeyEvent.VK_RIGHT, strip = true))
+        assertNull(q(AwtKeyEvent.VK_LEFT))
+        assertNull(q(AwtKeyEvent.VK_RIGHT, other = true))
     }
 }
