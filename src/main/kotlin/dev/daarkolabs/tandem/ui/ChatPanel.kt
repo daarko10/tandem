@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -33,7 +34,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
@@ -77,6 +77,9 @@ import org.jetbrains.jewel.intui.markdown.bridge.ProvideMarkdownStyling
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.VerticallyScrollableContainer
+import org.jetbrains.jewel.ui.component.styling.ButtonMetrics
+import org.jetbrains.jewel.ui.component.styling.ButtonStyle
+import org.jetbrains.jewel.ui.theme.outlinedButtonStyle
 
 /** How much less than the list's height Page Up and Page Down scroll, so a line of the last page stays in view (spec 4.16). */
 private val PAGE_OVERLAP = 40.dp
@@ -197,7 +200,7 @@ internal fun ChatPanel(
                             currentOnFocusComposer()
                         } else {
                             val page = listState.layoutInfo.viewportSize.height - with(density) { PAGE_OVERLAP.toPx() }
-                            scrollBy(action, listState, page.coerceAtLeast(0f), ui, scope)
+                            applyScrollAction(action, listState, page.coerceAtLeast(0f), ui, scope)
                         }
                         true
                     }
@@ -228,14 +231,18 @@ internal fun ChatPanel(
     }
 }
 
-/** Whether a scroll came from the user's wheel or drag rather than from code. */
-private fun isUser(source: NestedScrollSource): Boolean = source == NestedScrollSource.UserInput || source == NestedScrollSource.Wheel
+/**
+ * Whether a scroll came from the user's wheel or drag rather than from code. In this Compose `Wheel` and `Drag` are deprecated
+ * aliases of `UserInput` (spec 6's `|| source == Wheel` is the same test), so `UserInput` alone covers both.
+ */
+private fun isUser(source: NestedScrollSource): Boolean = source == NestedScrollSource.UserInput
 
 /**
  * Scrolls [listState] as [action] says, by [page] pixels for Page Up and Page Down, and tells [ui]'s follow state: Page Up and Home
- * pause before they move (so a pin cannot pull the list back), End resumes, Page Down resumes when it landed on the bottom.
+ * pause before they move (so a pin cannot pull the list back), End resumes and animates to the bottom like the `↓` pill (spec 4.16
+ * Jump), Page Down resumes when it landed on the bottom.
  */
-private fun scrollBy(action: ScrollAction, listState: LazyListState, page: Float, ui: ChatUiState, scope: CoroutineScope) {
+private fun applyScrollAction(action: ScrollAction, listState: LazyListState, page: Float, ui: ChatUiState, scope: CoroutineScope) {
     fun follow(atBottomAfter: Boolean) {
         action.followEvent(atBottomAfter)?.let { ui.follow.value = ui.follow.value.on(it) }
     }
@@ -255,7 +262,12 @@ private fun scrollBy(action: ScrollAction, listState: LazyListState, page: Float
         }
         ScrollAction.END -> {
             follow(true)
-            if (last >= 0) scope.launch { listState.scrollToItem(last, Int.MAX_VALUE) }
+            if (last >= 0) {
+                scope.launch {
+                    listState.animateScrollToItem(last)
+                    listState.requestScrollToItem(last, Int.MAX_VALUE)
+                }
+            }
         }
         ScrollAction.FOCUS_COMPOSER -> Unit
     }
@@ -264,9 +276,20 @@ private fun scrollBy(action: ScrollAction, listState: LazyListState, page: Float
 /** The `↓` pill (spec 4.16): `↓ 3 new` with the rows appended while paused, `↓` with none; it jumps to the bottom and follows. */
 @Composable
 private fun JumpToBottom(text: String, modifier: Modifier, onClick: () -> Unit) {
+    val base = JewelTheme.outlinedButtonStyle
+    // The theme's outlined button with fully rounded ends.
+    val pill = remember(base) {
+        val metrics = base.metrics
+        ButtonStyle(
+            base.colors,
+            ButtonMetrics(CornerSize(50), metrics.padding, metrics.minSize, metrics.borderWidth, metrics.focusOutlineExpand),
+            base.focusOutlineAlignment,
+        )
+    }
     OutlinedButton(
         onClick = onClick,
         modifier = modifier.height(28.dp).testTag("jump-to-bottom").semantics { contentDescription = "Jump to bottom" },
+        style = pill,
     ) {
         Text(text)
     }

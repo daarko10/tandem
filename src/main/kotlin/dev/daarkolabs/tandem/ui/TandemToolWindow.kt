@@ -176,7 +176,8 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                             Text("Create a session with + or open the sidebar.")
                         }
                     } else {
-                        // Composed afresh for each session, so that what is typed in one session's prompt box never shows in another's.
+                        // Each session's chat is composed in its own key, so that its remembered panel state (the pin's bookkeeping,
+                        // focus requesters) never leaks into another session's; the draft lives in the session's ChatUiState.
                         key(selected.id) {
                             val presenter = remember(selected) { presenters.presenter(selected) }
                             val ui = remember(selected.id) { presenters.ui(selected.id) }
