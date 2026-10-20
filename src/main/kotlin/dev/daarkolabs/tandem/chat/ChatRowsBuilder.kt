@@ -29,7 +29,8 @@ data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, va
  * per lone tool call or group of consecutive calls ([Grouping], spec 4.6.4), each with its key and its gap. A subagent's entries
  * (`parentToolUseId` naming an Agent call) become that call's children, one row per call. While a turn runs the last row is the
  * [WorkingRow] (spec 4.9); once the latest turn has ended its [TurnEndRow] stands where it ended (spec 4.10), and a failed turn's
- * `The turn failed` notice gives way to it (spec 4.11). The oldest pending request comes as the [ChatRows.card] ([Cards.pending]).
+ * `The turn failed` notice gives way to it when the footer states the failure (spec 4.10, 4.11). The oldest pending request comes as
+ * the [ChatRows.card] ([Cards.pending]).
  *
  * Rows are cached per turn (a turn runs from one user message to the next): a closed turn is built once more when it closes and then
  * kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the last entry it holds
@@ -87,9 +88,10 @@ class ChatRowsBuilder(private val options: RowOptions) {
         var previous = frozenRows.lastOrNull()
         val turnRows = region.turns.mapIndexed { t, turn ->
             val turnOpen = state.turn != null && t == region.turns.lastIndex && entries[turn.first] is ChatEntry.User
-            // The footer of a failed turn says why (spec 4.10), so its "The turn failed" notice would say it twice (spec 4.11).
-            val failed = turn.any { (entries[it] as? ChatEntry.TurnEnded)?.end == TurnEnd.FAILED }
-            val context = TurnContext(turnOpen, failed, end)
+            // The footer of a failed turn says why (spec 4.10), so its "The turn failed" notice would say it twice (spec 4.11). Not after
+            // the mid-response wording, which names no cause, and not in an older turn, which has no footer: there the notice follows.
+            val failureInFooter = end != null && end.end == TurnEnd.FAILED && !end.textStreamed && t == region.turns.lastIndex
+            val context = TurnContext(turnOpen, failureInFooter, end)
             val rows = Rows(previous, grouped = true) { reuse(withUniqueKey(it, keys)) }
             for (index in turn) {
                 if (index in region.childEntries) continue
@@ -112,11 +114,17 @@ class ChatRowsBuilder(private val options: RowOptions) {
         return ChatRows(all, lastCard, moreWaiting)
     }
 
-    /** What the rows of one turn depend on beyond its entries: whether it runs, whether it failed, and the latest turn's end. */
-    private class TurnContext(val turnOpen: Boolean, val failed: Boolean, val end: TurnEndAt?)
+    /**
+     * What the rows of one turn depend on beyond its entries: whether it runs, whether its footer states its failure (so the
+     * `The turn failed` notice is not drawn), and the latest turn's end.
+     */
+    private class TurnContext(val turnOpen: Boolean, val failureInFooter: Boolean, val end: TurnEndAt?)
 
-    /** The entry the footer stands at ([TurnEndRow] key `e:<entry id>`), how its turn ended and the footer's text. */
-    private class TurnEndAt(val entry: ChatEntry, val end: TurnEnd, val text: String)
+    /**
+     * The entry the footer stands at ([TurnEndRow] key `e:<entry id>`), how its turn ended, the footer's text and whether any
+     * main-thread text of the turn streamed (the `FAILED` footer then reads the mid-response wording).
+     */
+    private class TurnEndAt(val entry: ChatEntry, val end: TurnEnd, val text: String, val textStreamed: Boolean)
 
     /**
      * The footer of the latest turn, when it has ended (spec 4.10): at its [ChatEntry.TurnEnded], or, for a reloaded transcript that
@@ -137,8 +145,12 @@ class ChatRowsBuilder(private val options: RowOptions) {
                 is ChatEntry.ToolResult -> Unit
             }
         }
-        if (ended != null) return TurnEndAt(ended, ended.end, WorkingIndicator.footer(ended.end, ended.durationMs, ended.error, textStreamed))
-        if (marker != null) return TurnEndAt(marker, TurnEnd.INTERRUPTED, WorkingIndicator.footer(TurnEnd.INTERRUPTED, null, null, textStreamed))
+        if (ended != null) {
+            return TurnEndAt(ended, ended.end, WorkingIndicator.footer(ended.end, ended.durationMs, ended.error, textStreamed), textStreamed)
+        }
+        if (marker != null) {
+            return TurnEndAt(marker, TurnEnd.INTERRUPTED, WorkingIndicator.footer(TurnEnd.INTERRUPTED, null, null, textStreamed), textStreamed)
+        }
         return null
     }
 
@@ -312,7 +324,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
             is ChatEntry.ToolResult -> if (entry.toolUseId !in region.calls) rows.add { orphan(entry, gap(Kind.TOOL, it)) }
             // The interrupt marker shows as the turn's end, not as a row; it still closes a group.
             is ChatEntry.Notice -> when {
-                entry.kind == NoticeKind.INTERRUPTED || context.failed && entry.level == NoticeLevel.ERROR && entry.text.startsWith("The turn failed") ->
+                entry.kind == NoticeKind.INTERRUPTED ||
+                    context.failureInFooter && entry.level == NoticeLevel.ERROR && entry.text.startsWith("The turn failed") ->
                     rows.add { footer(entry, context, it) }
                 else -> rows.add { NoticeRow("n:${entry.id}", entry.level, entry.text, gap(Kind.NOTICE, it)) }
             }

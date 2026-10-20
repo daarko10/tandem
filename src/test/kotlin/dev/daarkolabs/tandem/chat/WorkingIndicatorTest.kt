@@ -36,9 +36,11 @@ class WorkingIndicatorTest {
         assertEquals(WorkingIndicator.verb("u1", null), WorkingIndicator.verb("u1", null))
         assertNotEquals(WorkingIndicator.verb("u1", "t1"), WorkingIndicator.verb("u1", null))
         assertTrue(WorkingIndicator.verb("u1", "t1") in WorkingIndicator.VERBS)
-        // A hash of Int.MIN_VALUE never yields a negative index.
         val all = (0 until 2_000).map { WorkingIndicator.verb("turn-$it", null) }
         assertTrue(all.all { it in WorkingIndicator.VERBS })
+        // A hash of Int.MIN_VALUE never yields a negative index: abs(Int.MIN_VALUE) is negative, so the modulo comes first.
+        assertEquals(Int.MIN_VALUE, "polygenelubricants".hashCode())
+        assertTrue(WorkingIndicator.verb("polygenelubricants", null) in WorkingIndicator.VERBS)
     }
 
     @Test

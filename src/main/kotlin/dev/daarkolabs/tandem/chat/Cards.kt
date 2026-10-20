@@ -211,7 +211,8 @@ object Cards {
             val options = q.array("options") ?: return null
             Question(
                 text = text,
-                header = q.string("header").orEmpty(),
+                // The tab label: the question text stands in for a blank header (spec 4.6.2).
+                header = q.string("header")?.takeIf { it.isNotBlank() } ?: text,
                 multiSelect = q.boolean("multiSelect") ?: false,
                 options = options.map { option ->
                     val o = option as? JsonObject ?: return null
@@ -248,8 +249,9 @@ object Cards {
     private fun draftWrite(state: ChatState, p: PendingPermission): AssistantBlock.ToolUse? =
         beforeCall(state, p).firstNotNullOfOrNull { block ->
             (block as? AssistantBlock.ToolUse)?.takeIf { write ->
-                write.name == "Write" && write.input?.string("content") != null &&
-                    write.input?.string("file_path")?.split('/', '\\')?.any { it.equals("plans", ignoreCase = true) } == true
+                val input = write.input ?: return@takeIf false
+                write.name == "Write" && input.string("content") != null &&
+                    input.string("file_path")?.split('/', '\\')?.any { it.equals("plans", ignoreCase = true) } == true
             }
         }
 
@@ -287,12 +289,15 @@ object Cards {
         return answers
     }
 
-    /** The plan card's source line (spec 4.14). */
+    /** The plan card's source line (spec 4.14). A [PlanSource.PLAN_FILE_DRAFT] card always has its file ([plan] sets it). */
     fun sourceLine(card: PlanCard): String {
         val file = card.planFilePath?.let(ToolLabels::basename)
         return when (card.source) {
             PlanSource.EXIT_PLAN_INPUT -> if (file != null) "From the plan file $file" else "From the plan Claude sent"
-            PlanSource.PLAN_FILE_DRAFT -> "From Claude's draft of ${file ?: "the plan"} (the plan file was not saved)"
+            PlanSource.PLAN_FILE_DRAFT -> {
+                val draft = checkNotNull(file) { "a plan file draft without its path" }
+                "From Claude's draft of $draft (the plan file was not saved)"
+            }
             PlanSource.ASSISTANT_TEXT -> "From Claude's last message (no plan file)"
             PlanSource.NONE -> "Claude sent no plan text."
         }

@@ -21,6 +21,7 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -149,8 +150,8 @@ class CardsTest {
         // Without the task, or without an agent, no line.
         assertNull(Cards.pending(state.copy(tasks = emptyMap())).first!!.agentDescription)
         assertNull(Cards.pending(state.copy(pendingPermissions = listOf(pending.copy(agentId = null)))).first!!.agentDescription)
-        val elsewhere = TaskInfo(pending.agentId!!, "missing", null, null, null, null, null, null, null, null)
-        assertNull(Cards.pending(state.copy(tasks = mapOf(pending.agentId!! to elsewhere))).first!!.agentDescription)
+        val elsewhere = TaskInfo(pending.agentId, "missing", null, null, null, null, null, null, null, null)
+        assertNull(Cards.pending(state.copy(tasks = mapOf(pending.agentId to elsewhere))).first!!.agentDescription)
     }
 
     @Test
@@ -199,7 +200,8 @@ class CardsTest {
         assertEquals(2, questions.size)
         assertEquals(listOf("First?", "Second?"), questions.map { it.text })
         assertEquals(Question("First?", "One", false, persistentListOf(Option("A", null))), questions[0])
-        assertEquals(Question("Second?", "", true, persistentListOf(Option("B", "bee"))), questions[1])
+        // A question without a header takes its text as the tab label (spec 4.6.2).
+        assertEquals(Question("Second?", "Second?", true, persistentListOf(Option("B", "bee"))), questions[1])
     }
 
     @Test
@@ -270,7 +272,7 @@ class CardsTest {
         val p = state.pendingPermissions.single()
         assertEquals("ExitPlanMode", p.toolName)
         val written = (Ndjson.decode(Fixtures.lines("plan-disallowed")[101]) as CliMessage.Assistant).content
-            .filterIsInstance<dev.daarkolabs.tandem.protocol.ContentBlock.ToolUse>().single().input!!["content"]!!.jsonPrimitive.content
+            .filterIsInstance<dev.daarkolabs.tandem.protocol.ContentBlock.ToolUse>().single().input["content"]!!.jsonPrimitive.content
         assertEquals(written to PlanSource.PLAN_FILE_DRAFT, Cards.planText(state, p))
         val card = Cards.plan(p, state)
         assertEquals(planPath, card.planFilePath)
@@ -332,6 +334,8 @@ class CardsTest {
         assertEquals("From Claude's last message (no plan file)", Cards.sourceLine(Cards.plan(p, text)))
         val (none, q) = planTurn(exitPlan)
         assertEquals("Claude sent no plan text.", Cards.sourceLine(Cards.plan(q, none)))
+        // A draft without its file is not a card Cards.plan builds: no line names a file it does not know.
+        assertFailsWith<IllegalStateException> { Cards.sourceLine(fromFile.copy(source = PlanSource.PLAN_FILE_DRAFT, planFilePath = null)) }
     }
 
     @Test

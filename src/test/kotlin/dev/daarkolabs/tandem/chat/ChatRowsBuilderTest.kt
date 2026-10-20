@@ -354,14 +354,15 @@ class ChatRowsBuilderTest {
     fun `the working row is last while busy and the footer replaces it`() {
         var sawWorking = false
         val (state, rows) = replay("tools-read") { _, state, rows ->
-            if (state.turn != null) {
+            val turn = state.turn
+            if (turn != null) {
                 sawWorking = true
                 val working = assertIs<WorkingRow>(rows.rows.last())
                 assertTrue(working.step.isNotBlank())
                 assertFalse(working.waiting)
-                assertEquals(state.turn!!.userUuid, working.turnUuid)
-                assertEquals(state.turn!!.startedAtMillis, working.startedAtMillis)
-                assertEquals(state.turn!!.outputTokens + state.turn!!.thinkingEstimate, working.outputTokens)
+                assertEquals(turn.userUuid, working.turnUuid)
+                assertEquals(turn.startedAtMillis, working.startedAtMillis)
+                assertEquals(turn.outputTokens + turn.thinkingEstimate, working.outputTokens)
                 assertEquals(1, rows.rows.count { it is WorkingRow })
             } else {
                 assertTrue(rows.rows.none { it is WorkingRow })
@@ -427,6 +428,48 @@ class ChatRowsBuilderTest {
     }
 
     @Test
+    fun `a failure after streamed text keeps its notice after the footer`() {
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 0))
+        state = reduce(state, cliLine("""{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"text","text":"partial"}]}}"""))
+        state = reduce(
+            state,
+            cliLine("""{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":2000,"result":"boom","session_id":"s"}"""),
+        )
+        val rows = ChatRowsBuilder(options).build(state).rows
+        // The mid-response footer names no cause, so the notice that does follows it (spec 4.10, hard rule 5).
+        val footer = assertIs<TurnEndRow>(rows[rows.size - 2])
+        assertEquals(TurnEnd.FAILED to "Server error mid-response. The response above may be incomplete.", footer.end to footer.text)
+        val notice = assertIs<NoticeRow>(rows.last())
+        assertEquals(NoticeLevel.ERROR to "The turn failed (error_max_turns): boom", notice.level to notice.text)
+        assertEquals(RowGap.SECTION, notice.gap)
+    }
+
+    @Test
+    fun `an older failed turn keeps its notice once its footer goes`() {
+        val builder = ChatRowsBuilder(options)
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 0))
+        state = reduce(
+            state,
+            cliLine("""{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":2000,"result":"boom","session_id":"s"}"""),
+        )
+        val failed = builder.build(state).rows
+        assertTrue(failed.none { it is NoticeRow }, failed.toString())
+        assertEquals("The turn failed (boom)", assertIs<TurnEndRow>(failed.last()).text)
+        // The next turn takes the footer away (spec 4.10), so the failure stays on record as its notice.
+        state = reduce(state, SessionEvent.UserSent("u2", "again", atMillis = 3_000))
+        val next = builder.build(state).rows
+        assertTrue(next.none { it is TurnEndRow }, next.toString())
+        val notice = next.filterIsInstance<NoticeRow>().single()
+        assertEquals(NoticeLevel.ERROR to "The turn failed (error_max_turns): boom", notice.level to notice.text)
+        assertIs<WorkingRow>(next.last())
+        state = reduce(state, cliLine("""{"type":"result","subtype":"success","is_error":false,"duration_ms":4000,"result":"ok","session_id":"s"}"""))
+        val done = builder.build(state).rows
+        assertSame(notice, done.filterIsInstance<NoticeRow>().single())
+        assertEquals("Worked for 4s", assertIs<TurnEndRow>(done.last()).text)
+        assertEquals(ChatRowsBuilder(options).build(state).rows, done)
+    }
+
+    @Test
     fun `no footer while a later turn runs`() {
         val (done, _) = replay("tools-read")
         val state = reduce(done, SessionEvent.UserSent("u2", "again", atMillis = 99_000))
@@ -466,18 +509,31 @@ class ChatRowsBuilderTest {
     fun `keys are unique and stable across every state of every fixture`() {
         for (name in Fixtures.names()) {
             var before: List<ChatRow> = emptyList()
-            replay(name) { line, _, rows ->
+            var usersBefore = 0
+            replay(name) { line, state, rows ->
                 val keys = rows.rows.map { it.key }
                 assertEquals(keys.distinct(), keys, "$name:$line duplicate keys")
+                // One builder across every turn: only the latest turn has a footer, and the working row is the last row.
+                assertTrue(rows.rows.count { it is TurnEndRow } <= 1, "$name:$line more than one footer")
+                val working = rows.rows.filterIsInstance<WorkingRow>()
+                assertTrue(working.size <= 1, "$name:$line more than one working row")
+                working.singleOrNull()?.let { assertSame(rows.rows.last(), it, "$name:$line the working row is not last") }
                 val now = keys.toSet()
                 val callsNow = rows.rows.toolRows().flatMap { row -> row.calls.map { it.id } }.toSet()
-                for (old in before.map { it.key }) {
+                val usersNow = rows.rows.count { it is UserRow }
+                for (old in before) {
                     // 5.3's one exception: a call that leaves its group moves the calls after it to a new row; they are still shown.
-                    val moved = old.startsWith("tool:") && old.removePrefix("tool:") in callsNow
-                    assertTrue(old in now || moved, "$name:$line lost the key $old")
+                    val moved = old.key.startsWith("tool:") && old.key.removePrefix("tool:") in callsNow
+                    // The footer goes when the next turn starts, the working row when its turn ends.
+                    val gone = when (old) {
+                        is TurnEndRow -> usersNow > usersBefore
+                        is WorkingRow -> state.turn?.userUuid != old.turnUuid
+                        else -> false
+                    }
+                    assertTrue(old.key in now || moved || gone, "$name:$line lost the key ${old.key}")
                 }
-                // The working row and the footer show a turn's progress and its end: they go when it ends or the next one starts.
-                before = rows.content()
+                before = rows.rows
+                usersBefore = usersNow
             }
         }
     }
