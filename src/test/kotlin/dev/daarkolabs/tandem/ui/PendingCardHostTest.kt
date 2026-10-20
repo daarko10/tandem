@@ -49,7 +49,7 @@ class PendingCardHostTest {
                 put("prompt", "Count the lines of seed.txt")
             },
         )
-        // T6: ("Run an agent", "").
+        // T6: ("Run", "an agent"): the object renders in mono (plan A, T6).
         assertEquals("Allow Claude to Run an agent?", permissionTitle(Cards.permission(agent, null)))
         assertEquals("From the agent \"Count lines in seed.txt\"", agentLine(Cards.pending(stateAt("agent-sync", 43)).first!!))
         assertNull(agentLine(Cards.permission(pendingAt("permission", 21), null)))

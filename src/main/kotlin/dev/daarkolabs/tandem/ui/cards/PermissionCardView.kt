@@ -184,15 +184,16 @@ private fun DiffLine(text: String, fill: Color) {
 }
 
 /**
- * A box in the command and code fill with a hairline border (spec 4.2), radius 6 dp, 8 dp inside unless not [padded]; what it holds
- * scrolls sideways rather than wrapping, and its lines are at least as wide as the box, so a line's fill spans it.
+ * A box in the command and code fill with a hairline border (spec 4.2), radius 6 dp, 8 dp inside (spec 4.12 item 4), only above and
+ * below when not [padded] (an edit's lines pad themselves, so their fills span the box); what it holds scrolls sideways rather than
+ * wrapping, and its lines are at least as wide as the box.
  */
 @Composable
 private fun PayloadBox(padded: Boolean = true, content: @Composable () -> Unit) {
     val shape = RoundedCornerShape(6.dp)
     BoxWithConstraints(
         Modifier.fillMaxWidth().background(chatPalette().boxFill, shape).border(1.dp, JewelTheme.globalColors.borders.normal, shape)
-            .padding(if (padded) 8.dp else 0.dp, if (padded) 8.dp else 4.dp),
+            .padding(horizontal = if (padded) 8.dp else 0.dp, vertical = 8.dp),
     ) {
         val width = maxWidth
         HorizontallyScrollableContainer(Modifier.fillMaxWidth()) {
