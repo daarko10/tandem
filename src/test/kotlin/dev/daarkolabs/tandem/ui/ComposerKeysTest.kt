@@ -1,7 +1,9 @@
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.text.TextRange
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -47,6 +49,19 @@ class ComposerKeysTest {
     @Test
     fun `Shift+Enter is a newline`() {
         assertNull(composer(enter, shift = true))
+    }
+
+    @Test
+    fun `the newline replaces the selection and the cursor follows it`() {
+        val atCursor = TextFieldState("ab", TextRange(1))
+        insertNewline(atCursor)
+        assertEquals("a\nb", atCursor.text.toString())
+        assertEquals(TextRange(2), atCursor.selection)
+
+        val overSelection = TextFieldState("abcd", TextRange(1, 3))
+        insertNewline(overSelection)
+        assertEquals("a\nd", overSelection.text.toString())
+        assertEquals(TextRange(2), overSelection.selection)
     }
 
     @Test

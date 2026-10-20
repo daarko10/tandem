@@ -70,6 +70,16 @@ class ToolWindowIdeTest {
             newSession()
             // Send with nothing typed sends nothing: the one prompt the CLI gets is the typed one (asserted below).
             iconButton("Send").click(Point(10, 10))
+            // Shift+Enter types a newline (spec 4.15): 'a', Shift+Enter, 'b' leaves three characters, not 'ab'. Then they are erased.
+            promptBox().click(Point(20, 20))
+            waitFor("prompt box focused", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
+            promptBox().keyboard { typeText("a", 20) }
+            promptBox().keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_ENTER) }
+            promptBox().keyboard { typeText("b", 20) }
+            val aNewlineB = "string-length(@editabletext)=3 and starts-with(@editabletext, 'a') and substring(@editabletext, 3)='b'"
+            waitFor("Shift+Enter typed a newline", 30.seconds) { ui.x("$PROMPT_BOX[$aNewlineB]").present() }
+            repeat(3) { promptBox().keyboard { key(KeyEvent.VK_BACK_SPACE) } }
+            waitFor("prompt box emptied", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
             typePrompt("Reply with the single word: pong")
             waitForText("Reply with the single word: pong")
             waitForText("pong")

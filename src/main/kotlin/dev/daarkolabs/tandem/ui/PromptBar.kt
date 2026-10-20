@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -145,22 +146,26 @@ private fun PromptBox(ui: ChatUiState, composer: ComposerModel, focus: Boolean, 
     val colors = JewelTheme.globalColors
     val shape = RoundedCornerShape(8.dp)
     Row(
-        Modifier.chatColumn().padding(start = 16.dp, end = 16.dp, top = 8.dp)
+        // 4 dp above, so that with the list's 12 dp bottom padding the last row sits 16 dp above the box (spec 4.1).
+        Modifier.chatColumn().padding(start = 16.dp, end = 16.dp, top = 4.dp)
             .border(1.dp, if (focused) colors.borders.focused else colors.borders.normal, shape)
-            .padding(start = 12.dp, end = 8.dp),
+            // 12 dp inside the box all round (spec 4.15), counting the undecorated TextArea's own content padding (5 dp across,
+            // 4 dp down): 7 + 5 at the start, 8 + 4 above and below the text, so 184 dp holds 8 lines of 20 dp.
+            .padding(start = 7.dp, end = 12.dp),
         verticalAlignment = Alignment.Bottom,
     ) {
         TextArea(
             ui.draft,
-            Modifier.weight(1f).heightIn(min = 40.dp, max = 184.dp).padding(vertical = 4.dp)
+            Modifier.weight(1f).heightIn(min = 40.dp, max = 184.dp).padding(vertical = 8.dp)
                 .focusRequester(inputFocus)
                 .onFocusChanged { focused = it.hasFocus }
-                .onPreviewKeyEvent { event -> composerKeyEvent(event, composer, onAction) },
+                .onPreviewKeyEvent { event -> composerKeyEvent(event, composer, ui.draft, onAction) },
             lineLimits = TextFieldLineLimits.MultiLine(1, 8),
             undecorated = true,
             placeholder = { Text("Describe a task or ask a question", color = colors.text.info) },
         )
-        val buttonModifier = Modifier.padding(start = 8.dp, bottom = 8.dp).size(24.dp)
+        // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
+        val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
         if (composer.busy) {
             IconButton(onClick = { onAction(ComposerAction.Stop) }, modifier = buttonModifier) {
                 Icon(AllIconsKeys.Actions.Suspend, contentDescription = "Stop", tint = colors.text.info)
@@ -174,10 +179,11 @@ private fun PromptBox(ui: ChatUiState, composer: ComposerModel, focus: Boolean, 
 }
 
 /**
- * Hands [event] to [composerKey] and runs what it returns. A plain Enter while a turn runs is swallowed as well, so that it does
- * nothing at all (spec 4.15) rather than leave a newline in the prompt; every other key it does not map goes to the text area.
+ * Hands [event] to [composerKey] and runs what it returns. Shift+Enter puts a newline in [draft] ([insertNewline]), which the text
+ * area would not; a plain Enter while a turn runs is swallowed, so that it does nothing at all (spec 4.15). Every other key it does
+ * not map goes to the text area.
  */
-private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, onAction: (ComposerAction) -> Unit): Boolean {
+private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, draft: TextFieldState, onAction: (ComposerAction) -> Unit): Boolean {
     val ctrlOrMeta = event.isCtrlPressed || event.isMetaPressed
     val action = composerKey(
         event.key,
@@ -192,8 +198,13 @@ private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, onAction:
         onAction(action)
         return true
     }
-    val plainEnter = (event.key == Key.Enter || event.key == Key.NumPadEnter) && !event.isShiftPressed && !event.isAltPressed && !ctrlOrMeta
-    return plainEnter && composer.busy && event.type == KeyEventType.KeyDown
+    val enter = event.key == Key.Enter || event.key == Key.NumPadEnter
+    if (!enter || event.type != KeyEventType.KeyDown || event.isAltPressed || ctrlOrMeta) return false
+    if (event.isShiftPressed) {
+        insertNewline(draft)
+        return true
+    }
+    return composer.busy
 }
 
 /** The effort the session started with, capitalised. It cannot change while the session runs, so it is shown and not picked. */
@@ -203,6 +214,7 @@ private fun EffortBadge(effort: String) {
         Text(
             effort.replaceFirstChar { it.titlecase(Locale.ROOT) },
             color = JewelTheme.globalColors.text.info,
+            style = smallTextStyle(),
             maxLines = 1,
             modifier = Modifier.semantics { contentDescription = "Effort" },
         )

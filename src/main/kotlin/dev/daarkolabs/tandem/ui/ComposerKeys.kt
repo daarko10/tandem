@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 
@@ -19,8 +20,9 @@ internal enum class ComposerAction {
  * What the composer does with [key] going [type], with Shift ([shift]), Alt ([alt]) and Ctrl or Cmd ([ctrlOrMeta]) held, while a
  * turn runs ([busy]) and while a card waits for an answer ([cardOpen]); null leaves the key to the text area.
  *
- * Enter alone sends, and does nothing while a turn runs (the Stop button stands in for Send). Shift+Enter is a newline, and
- * Alt+Enter and Ctrl/Cmd+Enter do nothing yet. Esc goes to the open card first, then stops a running turn.
+ * Enter alone sends, and does nothing while a turn runs (the Stop button stands in for Send). Shift+Enter is a newline, which the
+ * composer types itself ([insertNewline]), and Alt+Enter and Ctrl/Cmd+Enter do nothing yet. Esc goes to the open card first, then
+ * stops a running turn.
  */
 internal fun composerKey(
     key: Key,
@@ -40,5 +42,17 @@ internal fun composerKey(
             else -> null
         }
         else -> null
+    }
+}
+
+/**
+ * Puts a newline in place of [state]'s selection, with the cursor right after it: Shift+Enter in the composer (spec 4.15). The text
+ * area does not do it itself: Compose maps Enter to a newline only with no modifier held, and drops the typed `\n`.
+ */
+internal fun insertNewline(state: TextFieldState) {
+    state.edit {
+        val start = selection.min
+        replace(start, selection.max, "\n")
+        placeCursorAfterCharAt(start)
     }
 }
