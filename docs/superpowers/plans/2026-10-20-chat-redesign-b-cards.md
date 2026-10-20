@@ -301,6 +301,8 @@ assertNull(Cards.question(state.pendingPermissions.single().copy(input = buildJs
 
 - [ ] **Step 4: Run the tests and the suite** — the Step 2 command → PASS; `./gradlew check --init-script /home/user/tandem/scratch/central-mirror.init.gradle.kts` → BUILD SUCCESSFUL.
 
+Corrections found in review, recorded for the slice-B review: Shift+Enter does not fall through as the field's newline (the `TextArea` drops it, as in the composer), so the card's preview types it with `composerFallback` and `insertNewline`. A digit's typed character is a separate event after its press, so the `Other` row's digit typed itself into the field it focused; `questionSwallows` drops the character of a key that picked a row. Jewel's `SegmentedControl` also steps on an arrow's release, so `questionSwallows` drops `←`/`→` releases while the tabs have the focus. `questionKey` and its tests are unchanged. The IDE test presses `3` and Shift+Enter on ask-single (the field held `3ab` before the fix).
+
 - [ ] **Step 5: Write the IDE test**
 
 ```kotlin
