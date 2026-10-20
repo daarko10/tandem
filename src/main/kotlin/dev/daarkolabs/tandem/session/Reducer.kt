@@ -6,6 +6,7 @@ import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.InboundRequest
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
+import dev.daarkolabs.tandem.protocol.TaskUsage
 import dev.daarkolabs.tandem.protocol.array
 import dev.daarkolabs.tandem.protocol.asObject
 import dev.daarkolabs.tandem.protocol.string
@@ -16,14 +17,16 @@ import kotlinx.collections.immutable.persistentHashMapOf
 import kotlinx.collections.immutable.toPersistentHashMap
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** Inputs to [reduce]: decoded CLI lines plus what the host itself did. */
+/** Inputs to [reduce]: decoded CLI lines plus what the host itself did. [Cli], [UserSent] and [Ended] carry the host's time. */
 sealed interface SessionEvent {
-    data class Cli(val message: CliMessage) : SessionEvent
+    /** [atMillis]: when the line came, on the host's clock (a loaded transcript passes the line's own timestamp); 0 when unknown. */
+    data class Cli(val message: CliMessage, val atMillis: Long = 0L) : SessionEvent
 
-    data class UserSent(val uuid: String, val text: String) : SessionEvent
+    data class UserSent(val uuid: String, val text: String, val atMillis: Long = 0L) : SessionEvent
 
     /** The user picked a model (at spawn or via `set_model`); null means the CLI default. */
     data class ModelRequested(val model: String?) : SessionEvent
@@ -43,13 +46,18 @@ sealed interface SessionEvent {
      * The CLI process could not be started or exited. [detail] is shown to the user. [endedByHost]: Tandem itself ended it at once,
      * as when the IDE exits, so a turn in progress did not fail.
      */
-    data class Ended(val detail: String, val isError: Boolean, val endedByHost: Boolean = false) : SessionEvent
+    data class Ended(val detail: String, val isError: Boolean, val endedByHost: Boolean = false, val atMillis: Long = 0L) : SessionEvent
 }
 
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
 fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
-    is SessionEvent.Cli -> reduceCli(state, event.message)
-    is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text)).copy(busy = true, turnInterrupted = false)
+    is SessionEvent.Cli -> reduceCli(state, event.message, event.atMillis)
+    // A send opens a turn, replacing any still open: a loaded transcript sends again with no result between its turns.
+    is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text, sentAtMillis = event.atMillis)).copy(
+        busy = true,
+        turnInterrupted = false,
+        turn = TurnProgress(event.uuid, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
+    )
     // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch.
     is SessionEvent.ModelRequested -> state.copy(requestedModel = event.model, modelWarning = null)
     // Shown at once; what the CLI reports next (system/status, system/init) has the last word, and a rejection takes it back.
@@ -60,48 +68,67 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     )
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
     is SessionEvent.HostNotice -> state.notice(event.level, event.text)
-    is SessionEvent.Ended -> {
-        // A process that exits during a turn ends that turn without its result: a failure, whatever its exit code, and the chat
-        // says so as an error. One that exits between turns ends none, nor one Tandem itself ended at once (the IDE exits); a Stop,
-        // close or eviction lets the process go before it ends, so this never sees it.
-        val failedTurn = state.busy && !event.endedByHost
-        val said = if (failedTurn) {
-            val first = event.detail.substringBefore('\n')
-            val rest = event.detail.substringAfter('\n', missingDelimiterValue = "")
-            "$first The turn ended without its result." + if (rest.isEmpty()) "" else "\n$rest"
-        } else {
-            event.detail
-        }
-        state.finishStreaming().copy(
-            busy = false,
-            ended = true,
-            pendingPermissions = emptyList(),
-            permissionModeChanges = emptyMap(),
-            lastTurnEnd = if (failedTurn) TurnEnd.FAILED else state.lastTurnEnd,
-            turnsEnded = if (failedTurn) state.turnsEnded + 1 else state.turnsEnded,
-            turnInterrupted = false,
-        ).notice(if (event.isError || failedTurn) NoticeLevel.ERROR else NoticeLevel.INFO, said)
-    }
+    is SessionEvent.Ended -> reduceEnded(state, event)
 }
 
-private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (message) {
+/**
+ * A process that exits during a turn ends that turn without its result: a failure, whatever its exit code, and the chat says so as
+ * an error. One that Tandem itself ended at once (the IDE exits) ends it as interrupted, not failed, and says only how it exited.
+ * One that exits between turns ends none. A Stop, close or eviction lets the process go before it ends, so this never sees it.
+ * The turn's [ChatEntry.TurnEnded] comes before the notice.
+ */
+private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState {
+    val turn = state.turn
+    val end = when {
+        turn != null && event.endedByHost -> TurnEnd.INTERRUPTED
+        (turn != null || state.busy) && !event.endedByHost -> TurnEnd.FAILED
+        else -> null
+    }
+    val failedTurn = end == TurnEnd.FAILED
+    val said = if (failedTurn) {
+        val first = event.detail.substringBefore('\n')
+        val rest = event.detail.substringAfter('\n', missingDelimiterValue = "")
+        "$first The turn ended without its result." + if (rest.isEmpty()) "" else "\n$rest"
+    } else {
+        event.detail
+    }
+    var next = state.finishStreaming()
+    if (turn != null && end != null) {
+        next = next.append(
+            ChatEntry.TurnEnded(
+                id = turnEndId(state),
+                end = end,
+                durationMs = event.atMillis - turn.startedAtMillis,
+                outputTokens = turn.outputTokens,
+                denials = emptyList(),
+                error = if (failedTurn) turn.lastError ?: event.detail else null,
+            ),
+        )
+    }
+    return next.copy(
+        busy = false,
+        ended = true,
+        pendingPermissions = emptyList(),
+        permissionModeChanges = emptyMap(),
+        lastTurnEnd = end ?: state.lastTurnEnd,
+        turnsEnded = if (end != null) state.turnsEnded + 1 else state.turnsEnded,
+        turnInterrupted = false,
+        turn = null,
+    ).notice(if (event.isError || failedTurn) NoticeLevel.ERROR else NoticeLevel.INFO, said)
+}
+
+/** The id of the [ChatEntry.TurnEnded] that ends the next turn of [state]: every turn end counts one, so it is never reused. */
+private fun turnEndId(state: ChatState): String = "end-${state.turnsEnded + 1}"
+
+private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatState = when (message) {
     is CliMessage.SystemInit -> state.copy(
         sessionId = message.sessionId.ifEmpty { state.sessionId },
         permissionMode = message.permissionMode ?: state.permissionMode,
         claudeCodeVersion = message.claudeCodeVersion ?: state.claudeCodeVersion,
+        cwd = message.cwd ?: state.cwd,
     ).checkModel(message.model)
     is CliMessage.SystemStatus -> state.copy(permissionMode = message.permissionMode ?: state.permissionMode)
-    is CliMessage.ApiRetry -> state.notice(
-        NoticeLevel.WARNING,
-        buildString {
-            append("API request failed")
-            message.error?.let { append(" ($it)") }
-            append(", retrying")
-            if (message.attempt != null && message.maxRetries != null) append(" ${message.attempt}/${message.maxRetries}")
-            message.retryDelayMs?.let { append(" in ${(it + 999) / 1000}s") }
-            append('.')
-        },
-    )
+    is CliMessage.ApiRetry -> state.notice(NoticeLevel.INFO, retryText(message))
     is CliMessage.ModelRefusalFallback -> {
         val text = "${message.originalModel} declined this request; " +
             if (message.scope == "local") "this answer came from ${message.fallbackModel}." else "the session switched to ${message.fallbackModel}."
@@ -110,9 +137,9 @@ private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (
     }
     is CliMessage.ModelRefusalNoFallback ->
         state.notice(NoticeLevel.WARNING, message.content ?: "${message.originalModel ?: "The model"} declined this request.")
-    is CliMessage.Assistant -> reduceAssistant(state, message)
-    is CliMessage.User -> reduceUser(state, message)
-    is CliMessage.StreamEvent -> reduceStream(state, message)
+    is CliMessage.Assistant -> reduceAssistant(state, message, at)
+    is CliMessage.User -> reduceUser(state, message, at)
+    is CliMessage.StreamEvent -> reduceStream(state, message, at)
     is CliMessage.Result -> reduceResult(state, message)
     is CliMessage.ControlRequest -> when (val request = message.request) {
         is InboundRequest.CanUseTool -> state.copy(
@@ -123,6 +150,11 @@ private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (
                 toolUseId = request.toolUseId,
                 description = request.description ?: request.title,
                 suggestions = request.permissionSuggestions,
+                displayName = request.displayName,
+                requiresUserInteraction = request.requiresUserInteraction,
+                decisionReasonType = request.decisionReasonType,
+                agentId = request.agentId,
+                blockedPath = request.blockedPath,
             ),
         )
         is InboundRequest.Other -> state
@@ -137,9 +169,91 @@ private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (
             else -> state.rejectModeChange(message.requestId, change, message.error)
         }
     }
-    is CliMessage.ThinkingTokens, is CliMessage.TaskStarted, is CliMessage.TaskProgress, is CliMessage.TaskUpdated,
-    is CliMessage.TaskNotification -> state
+    is CliMessage.ThinkingTokens ->
+        state.withTurn { it.copy(thinkingEstimate = message.estimatedTokens) }.estimateThinking(message.estimatedTokens)
+    is CliMessage.TaskStarted ->
+        // Only subagents: a background command (local_bash) belongs to its Bash call and attaches nothing.
+        if (message.taskType == "local_agent" || message.subagentType != null) {
+            state.withTask(
+                TaskInfo(
+                    taskId = message.taskId,
+                    toolUseId = message.toolUseId,
+                    description = message.description,
+                    subagentType = message.subagentType,
+                    status = null,
+                    lastToolName = null,
+                    totalTokens = null,
+                    toolUses = null,
+                    durationMs = null,
+                    summary = null,
+                ),
+            )
+        } else {
+            state
+        }
+    is CliMessage.TaskProgress -> state.updateTask(message.taskId) { task ->
+        task.copy(
+            toolUseId = task.toolUseId ?: message.toolUseId,
+            description = message.description ?: task.description,
+            lastToolName = message.lastToolName ?: task.lastToolName,
+        ).withUsage(message.usage)
+    }
+    is CliMessage.TaskUpdated -> state.updateTask(message.taskId) { it.copy(status = message.status ?: it.status) }
+    is CliMessage.TaskNotification -> state.updateTask(message.taskId) { task ->
+        task.copy(
+            toolUseId = task.toolUseId ?: message.toolUseId,
+            status = message.status ?: task.status,
+            summary = message.summary ?: task.summary,
+        ).withUsage(message.usage)
+    }
     is CliMessage.KeepAlive, is CliMessage.Unknown -> state
+}
+
+/**
+ * The retry notice, as the reference words it: `<error_status> <error> · Retrying in <s>s · attempt <n>/<max>`, each part left out
+ * when the line lacks it (`API error` when it names neither status nor error).
+ */
+private fun retryText(message: CliMessage.ApiRetry): String {
+    val cause = listOfNotNull(message.errorStatus?.toString(), message.error).joinToString(" ").ifEmpty { "API error" }
+    val parts = listOfNotNull(
+        cause,
+        message.retryDelayMs?.let { "Retrying in ${it / 1000}s" },
+        if (message.attempt != null && message.maxRetries != null) "attempt ${message.attempt}/${message.maxRetries}" else null,
+    )
+    return parts.joinToString(" · ")
+}
+
+/** This state with [change] applied to the turn in progress; unchanged when none is. */
+private inline fun ChatState.withTurn(change: (TurnProgress) -> TurnProgress): ChatState = turn?.let { copy(turn = change(it)) } ?: this
+
+/** This state with [task] stored under its id, in the persistent map that [ChatState.tasks] holds. */
+private fun ChatState.withTask(task: TaskInfo): ChatState = copy(tasks = tasks.toPersistentHashMap().mutate { it[task.taskId] = task })
+
+/** This state with the task [taskId] changed by [change]; a line for a task that was never stored (`local_bash`) changes nothing. */
+private inline fun ChatState.updateTask(taskId: String, change: (TaskInfo) -> TaskInfo): ChatState =
+    tasks[taskId]?.let { withTask(change(it)) } ?: this
+
+private fun TaskInfo.withUsage(usage: TaskUsage?): TaskInfo = if (usage == null) {
+    this
+} else {
+    copy(
+        totalTokens = usage.totalTokens ?: totalTokens,
+        toolUses = usage.toolUses ?: toolUses,
+        durationMs = usage.durationMs ?: durationMs,
+    )
+}
+
+/**
+ * Sets [tokens] as the estimate of the thinking block that streams now: the last open one of the last streaming main-thread message
+ * (a `thinking_tokens` line names no message, and subagents stream nothing). No block is open: nothing changes.
+ */
+private fun ChatState.estimateThinking(tokens: Int): ChatState {
+    val draft = entries.lastOrNull { it is ChatEntry.Assistant && it.streaming && it.parentToolUseId == null } as? ChatEntry.Assistant
+        ?: return this
+    val index = draft.blocks.indexOfLast { it is AssistantBlock.Thinking && it.completedAtMillis == null }
+    if (index < 0) return this
+    val block = draft.blocks[index] as AssistantBlock.Thinking
+    return upsert(draft.copy(blocks = draft.blocks.toMutableList().also { it[index] = block.copy(estimatedTokens = tokens) }))
 }
 
 /**
@@ -162,14 +276,18 @@ private fun ChatState.rejectModeChange(requestId: String, change: PermissionMode
         .notice(NoticeLevel.ERROR, "The CLI rejected the switch to permission mode ${change.requested.wire}$reason$now")
 }
 
-private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant): ChatState {
+private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at: Long): ChatState {
     var next = state
     if (message.supersedes.isNotEmpty()) next = next.withoutAssistants(message.supersedes.toSet())
-    message.error?.let { return next.notice(NoticeLevel.ERROR, errorText(it, message, next)) }
+    message.error?.let { error ->
+        // The turn's failure, as its footer says it: `API Error: 404 model_not_found`.
+        val failure = "API Error: " + listOfNotNull(message.apiErrorStatus?.toString(), error).joinToString(" ")
+        return next.notice(NoticeLevel.ERROR, errorText(error, message, next)).withTurn { it.copy(lastError = failure) }
+    }
     if (message.parentToolUseId == null) next = next.checkModel(message.model, fromAssistant = true)
 
     val messageId = message.messageId ?: message.uuid ?: return next
-    val complete = message.content.map(::toBlock)
+    val complete = message.content.map { completeBlock(it, message, at) }
     val existing = next.assistant(messageId, message.parentToolUseId)
     val updated = if (existing == null) {
         ChatEntry.Assistant(
@@ -181,19 +299,25 @@ private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant): Ch
             completedBlocks = complete.size,
             streaming = false,
             uuids = setOfNotNull(message.uuid),
+            agentId = message.agentId,
+            subagentType = message.subagentType,
+            taskDescription = message.taskDescription,
         )
     } else {
         // The Nth complete line for a message replaces the Nth drafted block (docs/protocol.md 6.4).
         val blocks = existing.blocks.toMutableList()
         complete.forEachIndexed { offset, block ->
             val index = existing.completedBlocks + offset
-            if (index < blocks.size) blocks[index] = block else blocks += block
+            if (index < blocks.size) blocks[index] = completed(blocks[index], block, at) else blocks += block
         }
         existing.copy(
             blocks = blocks,
             completedBlocks = existing.completedBlocks + complete.size,
             model = message.model ?: existing.model,
             uuids = existing.uuids + setOfNotNull(message.uuid),
+            agentId = message.agentId ?: existing.agentId,
+            subagentType = message.subagentType ?: existing.subagentType,
+            taskDescription = message.taskDescription ?: existing.taskDescription,
         )
     }
     return next.upsert(updated).let { if (message.aborted) it.finishStreaming() else it }
@@ -205,22 +329,41 @@ internal fun isInterruptMarker(text: String): Boolean = text.startsWith("[Reques
 /** Whether a text block of this user line is the interrupt marker, which [reduce] shows as "Stopped.". */
 internal fun CliMessage.User.isInterrupt(): Boolean = content.any { it is ContentBlock.Text && isInterruptMarker(it.text) }
 
-private fun reduceUser(state: ChatState, message: CliMessage.User): ChatState {
+private fun reduceUser(state: ChatState, message: CliMessage.User, at: Long): ChatState {
     if (message.isReplay) return state
+    // The line's tool_use_result belongs to its one tool result; with several, none can tell whose it is.
+    val result: JsonElement? = message.toolUseResult.takeIf { message.content.count { it is ContentBlock.ToolResult } == 1 }
     var next = state
     for (block in message.content) {
         next = when (block) {
-            is ContentBlock.ToolResult ->
-                next.append(ChatEntry.ToolResult("result-${block.toolUseId}", block.toolUseId, toolResultText(block), block.isError))
-            is ContentBlock.Text ->
-                if (isInterruptMarker(block.text)) next.notice(NoticeLevel.INFO, "Stopped.").copy(turnInterrupted = true) else next
+            is ContentBlock.ToolResult -> next.append(
+                ChatEntry.ToolResult(
+                    id = "result-${block.toolUseId}",
+                    toolUseId = block.toolUseId,
+                    text = toolResultText(block),
+                    isError = block.isError,
+                    content = block.content,
+                    result = result,
+                    decision = message.toolResultMeta.firstOrNull { it.id == block.toolUseId }?.let { meta ->
+                        meta.decision?.let { PermissionDecision(it, meta.source, meta.reasonType, meta.nonExecutionKind) }
+                    },
+                    parentToolUseId = message.parentToolUseId,
+                    agentId = message.agentId,
+                    atMillis = at,
+                ),
+            )
+            is ContentBlock.Text -> if (isInterruptMarker(block.text)) {
+                next.notice(NoticeLevel.INFO, "Stopped.", NoticeKind.INTERRUPTED).copy(turnInterrupted = true)
+            } else {
+                next
+            }
             is ContentBlock.Thinking, is ContentBlock.ToolUse, is ContentBlock.Other -> next
         }
     }
     return next
 }
 
-private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent): ChatState {
+private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent, at: Long): ChatState {
     val parent = message.parentToolUseId
     return when (val event = message.event) {
         is StreamEvent.MessageStart -> {
@@ -242,13 +385,24 @@ private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent): Cha
             )
         }
         is StreamEvent.ContentBlockStart -> state.editDraft(message) { blocks ->
-            if (event.index < blocks.size) blocks else blocks + List(event.index - blocks.size) { AssistantBlock.Other("gap") } + toBlock(event.block)
+            if (event.index < blocks.size) {
+                blocks
+            } else {
+                blocks + List(event.index - blocks.size) { AssistantBlock.Other("gap") } + draftBlock(event.block, at)
+            }
+        }.let { next ->
+            // A main-thread tool call starting: the working row's verb re-rolls on it.
+            val block = event.block
+            if (block !is ContentBlock.ToolUse || parent != null) next else next.withTurn { it.copy(lastToolUseId = block.id, toolCount = it.toolCount + 1) }
         }
         is StreamEvent.ContentBlockDelta -> state.editDraft(message) { blocks ->
             val draft = blocks.getOrNull(event.index) ?: return@editDraft blocks
             val updated = when (val delta = event.delta) {
                 is Delta.Text -> (draft as? AssistantBlock.Text)?.copy(text = draft.text + delta.text)
-                is Delta.Thinking -> (draft as? AssistantBlock.Thinking)?.copy(text = draft.text + delta.thinking)
+                is Delta.Thinking -> (draft as? AssistantBlock.Thinking)?.copy(
+                    text = draft.text + delta.thinking,
+                    estimatedTokens = delta.estimatedTokens ?: draft.estimatedTokens,
+                )
                 is Delta.InputJson -> (draft as? AssistantBlock.ToolUse)?.copy(partialInput = draft.partialInput + delta.partialJson)
                 is Delta.Other -> null
             } ?: draft
@@ -258,8 +412,11 @@ private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent): Cha
             val entry = state.draftFor(message) ?: return state
             state.upsert(entry.copy(streaming = false))
         }
+        // The request's final count now includes its thinking: the running estimate is done.
+        is StreamEvent.MessageDelta ->
+            state.withTurn { it.copy(outputTokens = it.outputTokens + (event.outputTokens ?: 0), thinkingEstimate = 0) }
         // A late content_block_stop for an already completed block is a no-op (docs/protocol.md 6.4).
-        is StreamEvent.ContentBlockStop, is StreamEvent.MessageDelta, is StreamEvent.Other -> state
+        is StreamEvent.ContentBlockStop, is StreamEvent.Other -> state
     }
 }
 
@@ -271,13 +428,22 @@ private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState
         result.isError -> TurnEnd.FAILED
         else -> TurnEnd.COMPLETED
     }
-    val next = state.finishStreaming().copy(
+    val ended = ChatEntry.TurnEnded(
+        id = turnEndId(state),
+        end = end,
+        durationMs = result.durationMs,
+        outputTokens = result.outputTokens,
+        denials = result.permissionDenials,
+        error = if (end != TurnEnd.FAILED) null else state.turn?.lastError ?: result.result ?: result.errors.joinToString("; ").ifEmpty { null },
+    )
+    val next = state.finishStreaming().append(ended).copy(
         busy = false,
         sessionId = result.sessionId ?: state.sessionId,
         pendingPermissions = emptyList(),
         lastTurnEnd = end,
         turnsEnded = state.turnsEnded + 1,
         turnInterrupted = false,
+        turn = null,
     )
     return when {
         interrupted -> next // the interrupt already showed "Stopped."
@@ -335,12 +501,38 @@ private fun errorText(error: String, message: CliMessage.Assistant, state: ChatS
     }
 }
 
-private fun toBlock(block: ContentBlock): AssistantBlock = when (block) {
+/**
+ * A block as its `content_block_start` drafts it: a thinking block starts its clock at [at], and a tool call has no input until its
+ * complete line (the start carries `{}`, which is not the input).
+ */
+private fun draftBlock(block: ContentBlock, at: Long): AssistantBlock = when (block) {
+    is ContentBlock.Thinking -> AssistantBlock.Thinking(block.thinking, startedAtMillis = at)
+    is ContentBlock.ToolUse -> AssistantBlock.ToolUse(block.id, block.name, input = null, partialInput = "")
+    is ContentBlock.Text, is ContentBlock.ToolResult, is ContentBlock.Other -> completeBlock(block, null, at)
+}
+
+/** A block of a complete line ([message]'s, if any): a thinking block takes the line's duration and completes at [at]. */
+private fun completeBlock(block: ContentBlock, message: CliMessage.Assistant?, at: Long): AssistantBlock = when (block) {
     is ContentBlock.Text -> AssistantBlock.Text(block.text)
-    is ContentBlock.Thinking -> AssistantBlock.Thinking(block.thinking)
+    is ContentBlock.Thinking -> AssistantBlock.Thinking(block.thinking, durationMs = message?.thinkingDurationMs, completedAtMillis = at)
     is ContentBlock.ToolUse -> AssistantBlock.ToolUse(block.id, block.name, block.input, partialInput = "")
     is ContentBlock.ToolResult -> AssistantBlock.Other("tool_result")
     is ContentBlock.Other -> AssistantBlock.Other(block.type)
+}
+
+/**
+ * [complete], a block of a complete line, in place of its [draft]. A thinking block keeps what streamed: its text when the line's is
+ * empty (the line may omit what was displayed), its estimate and start, and takes its duration from the host's clock when the line
+ * has none (an older CLI).
+ */
+private fun completed(draft: AssistantBlock, complete: AssistantBlock, at: Long): AssistantBlock {
+    if (draft !is AssistantBlock.Thinking || complete !is AssistantBlock.Thinking) return complete
+    return complete.copy(
+        text = complete.text.ifEmpty { draft.text },
+        estimatedTokens = draft.estimatedTokens,
+        durationMs = complete.durationMs ?: draft.startedAtMillis?.let { at - it },
+        startedAtMillis = draft.startedAtMillis,
+    )
 }
 
 private fun toolResultText(block: ContentBlock.ToolResult): String = when (val content = block.content) {
@@ -438,5 +630,5 @@ private fun ChatState.finishStreaming(): ChatState = copy(
     },
 )
 
-private fun ChatState.notice(level: NoticeLevel, text: String): ChatState =
-    append(ChatEntry.Notice("notice-$noticeCount", level, text)).copy(noticeCount = noticeCount + 1)
+private fun ChatState.notice(level: NoticeLevel, text: String, kind: NoticeKind = NoticeKind.GENERIC): ChatState =
+    append(ChatEntry.Notice("notice-$noticeCount", level, text, kind)).copy(noticeCount = noticeCount + 1)

@@ -377,8 +377,8 @@ class ClaudeSessionTest {
     }
 
     @Test
-    fun `a process killed at once during a turn ends no turn`() = runBlocking {
-        // As the JVM shutdown hook kills it when the IDE exits: the turn in progress is not one that failed.
+    fun `a process killed at once during a turn ends it as interrupted, not failed`() = runBlocking {
+        // As the JVM shutdown hook kills it when the IDE exits: the turn in progress is not one that failed, but it did end.
         val output = CutOffOutput()
         val process = CutOffProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start(), output, cutOnKill = true)
         val run = CutOffSession(process, tmp, newSessionId)
@@ -389,8 +389,10 @@ class ClaudeSessionTest {
 
         run.session.killNow()
         val ended = withTimeout(10_000) { run.session.state.first { it.ended } }
-        assertEquals(0, ended.turnsEnded)
-        assertNull(ended.lastTurnEnd)
+        assertEquals(1, ended.turnsEnded)
+        assertEquals(TurnEnd.INTERRUPTED, ended.lastTurnEnd)
+        assertEquals(TurnEnd.INTERRUPTED, ended.entries.filterIsInstance<ChatEntry.TurnEnded>().single().end)
+        assertNull(ended.turn)
         run.scope.coroutineContext.job.cancelAndJoin()
     }
 

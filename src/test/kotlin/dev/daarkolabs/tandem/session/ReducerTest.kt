@@ -3,9 +3,13 @@ package dev.daarkolabs.tandem.session
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
+import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.StreamEvent
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
@@ -84,6 +88,8 @@ class ReducerTest {
         val final = replay("interrupt").last()
         val notices = final.entries.filterIsInstance<ChatEntry.Notice>()
         assertEquals(listOf("Stopped."), notices.map { it.text })
+        assertEquals(NoticeKind.INTERRUPTED, notices.single().kind)
+        assertEquals(TurnEnd.INTERRUPTED, final.entries.filterIsInstance<ChatEntry.TurnEnded>().single().end)
         assertFalse(final.busy)
         assertTrue(final.assistants().none { it.streaming })
     }
@@ -170,13 +176,13 @@ class ReducerTest {
             SessionEvent.Ended("The claude CLI exited with code 3.\nboom", isError = true),
         ).entries.last() as ChatEntry.Notice
         assertEquals("The claude CLI exited with code 3. The turn ended without its result.\nboom", crashedSaid.text)
-        // A process Tandem itself ended (killed as the IDE exits) ends no turn: nobody is to be told of one.
+        // A process Tandem itself ended (killed as the IDE exits) ends its turn as interrupted, not failed: the chat says nothing more.
         val killed = reduce(
             reduce(one, SessionEvent.UserSent("u2", "more")),
             SessionEvent.Ended("The claude CLI exited with code 137.", isError = true, endedByHost = true),
         )
-        assertEquals(1, killed.turnsEnded)
-        assertEquals(TurnEnd.COMPLETED, killed.lastTurnEnd)
+        assertEquals(2, killed.turnsEnded)
+        assertEquals(TurnEnd.INTERRUPTED, killed.lastTurnEnd)
         assertEquals("The claude CLI exited with code 137.", (killed.entries.last() as ChatEntry.Notice).text)
         // Between turns, an exit ends no turn, error or not.
         assertEquals(1, reduce(one, SessionEvent.Ended("exited with code 1", isError = true)).turnsEnded)
@@ -252,7 +258,7 @@ class ReducerTest {
     @Test
     fun `retries, errors and process exit are visible`() {
         var state = reduce(ChatState(), cli("""{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":4000,"error":"overloaded"}"""))
-        assertEquals("API request failed (overloaded), retrying 2/10 in 4s.", (state.entries.last() as ChatEntry.Notice).text)
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.INFO, "overloaded · Retrying in 4s · attempt 2/10"), state.entries.last())
         state = reduce(state, cli("""{"type":"assistant","error":"authentication_failed","message":{"id":"m","content":[]}}"""))
         assertEquals(
             "The claude CLI (Claude Code) is not signed in. Run `claude` in a terminal to sign in, then retry.",
@@ -548,5 +554,335 @@ class ReducerTest {
         assertEquals(listOf("u1", "m2"), state.entries.map { it.id })
         assertEquals("two more", state.text())
         assertEquals(state.positions(), state.entryIndex)
+    }
+
+    /** A state with a turn open, as a send leaves it: no fixture line opens one. */
+    private fun sent(): ChatState = reduce(ChatState(), SessionEvent.UserSent("u1", "prompt", atMillis = 0L))
+
+    private fun ChatState.toolResults(): List<ChatEntry.ToolResult> = entries.filterIsInstance<ChatEntry.ToolResult>()
+
+    private fun ChatState.turnEnds(): List<ChatEntry.TurnEnded> = entries.filterIsInstance<ChatEntry.TurnEnded>()
+
+    /** The last thinking block of the last assistant entry that has one. */
+    private fun ChatState.thinking(): AssistantBlock.Thinking? =
+        assistants().lastOrNull { entry -> entry.blocks.any { it is AssistantBlock.Thinking } }?.blocks?.filterIsInstance<AssistantBlock.Thinking>()?.last()
+
+    /** The last tool call of the last assistant entry that has one. */
+    private fun ChatState.toolUse(): AssistantBlock.ToolUse? =
+        assistants().lastOrNull { entry -> entry.blocks.any { it is AssistantBlock.ToolUse } }?.blocks?.filterIsInstance<AssistantBlock.ToolUse>()?.last()
+
+    // spec: ask-single: the question is a pending permission before the block stops and the answer links to the call
+    @Test
+    fun `ask-single - the question is a pending permission before the block stops and the answer links to the call`() {
+        val states = replay("ask-single")
+        val asked = states[22].pendingPermissions.single()
+        assertEquals("AskUserQuestion", asked.toolName)
+        assertTrue(asked.requiresUserInteraction)
+        assertTrue(states[22].assistants().last().streaming, "the block has not stopped yet")
+        val answer = states[26].toolResults().single { it.toolUseId == "<id-12>" }
+        assertTrue(answer.result!!.jsonObject["answers"] is JsonObject, answer.toString())
+    }
+
+    // spec: ask-deny: a cancelled question is a rejected result and the turn still completes
+    @Test
+    fun `ask-deny - a cancelled question is a rejected result and the turn still completes`() {
+        val final = replay("ask-deny").last()
+        val cancelled = final.toolResults().single()
+        assertTrue(cancelled.isError)
+        assertEquals("reject", cancelled.decision!!.decision)
+        val end = final.turnEnds().single()
+        assertEquals(TurnEnd.COMPLETED, end.end)
+        assertEquals(1, end.denials.size)
+    }
+
+    @Test
+    fun `a tool result before message_delta lands on the streaming message`() {
+        val states = replay("ask-multi-array")
+        assertTrue(states[30].toolResults().any { it.toolUseId == "<id-11>" })
+        assertTrue(states[30].assistants().single().streaming)
+        // message_delta (31) and message_stop (32): the message no longer streams once both are in.
+        assertTrue(states[32].assistants().none { it.streaming })
+        assertEquals(1, states[32].toolResults().size)
+    }
+
+    // spec: plan-approve: the status line after approval switches the mode before the tool result
+    @Test
+    fun `plan-approve - the status line after approval switches the mode before the tool result`() {
+        val states = replay("plan-approve")
+        assertEquals(PermissionMode.PLAN, states[89].permissionMode)
+        assertEquals(PermissionMode.ACCEPT_EDITS, states[90].permissionMode)
+        assertTrue(states[90].toolResults().none { it.toolUseId == "<id-92>" })
+        assertNotNull(states[91].toolResults().single { it.toolUseId == "<id-92>" }.result!!.jsonObject["plan"])
+    }
+
+    // spec: plan-deny: a deny keeps plan mode and the second request is pending again
+    @Test
+    fun `plan-deny - a deny keeps plan mode and the second request is pending again`() {
+        val requests = mapOf(79 to "ExitPlanMode", 143 to "ExitPlanMode", 175 to "Write")
+        var state = ChatState()
+        for ((index, message) in Fixtures.decode("plan-deny").withIndex()) {
+            val line = index + 1
+            state = reduce(state, SessionEvent.Cli(message))
+            requests[line]?.let { tool ->
+                assertEquals(tool, state.pendingPermissions.single().toolName, "line $line")
+                state = reduce(state, SessionEvent.PermissionAnswered(state.pendingPermissions.single().requestId))
+            }
+            if (line in 5 until 145) assertEquals(PermissionMode.PLAN, state.permissionMode, "line $line")
+            if (line == 145) assertEquals(PermissionMode.DEFAULT, state.permissionMode)
+        }
+    }
+
+    // spec: think-display-summarized: thinking text accumulates then the complete block brings the duration
+    @Test
+    fun `think-display-summarized - thinking text accumulates then the complete block brings the duration`() {
+        val messages = Fixtures.decode("think-display-summarized")
+        val states = replay("think-display-summarized")
+        val deltas = messages.withIndex().filter { (_, m) ->
+            ((m as? CliMessage.StreamEvent)?.event as? StreamEvent.ContentBlockDelta)?.delta is Delta.Thinking
+        }.map { it.index + 1 }
+        assertEquals(11, deltas.size)
+        for (line in deltas) {
+            val before = states[line - 1].thinking()!!.text
+            val after = states[line].thinking()!!.text
+            assertTrue(after.length > before.length && after.startsWith(before), "line $line: '$before' -> '$after'")
+            assertNull(states[line].thinking()!!.durationMs, "still a draft at line $line")
+        }
+        val complete = states[34].thinking()!!
+        assertTrue(complete.text.startsWith("47×83"), complete.text)
+        assertEquals(1991L, complete.durationMs)
+    }
+
+    @Test
+    fun `a thinking block without thinking_duration_ms takes its duration from the host clock`() {
+        val lines = Fixtures.lines("think-default").map { line ->
+            val json = Json.parseToJsonElement(line).jsonObject
+            if ("thinking_duration_ms" in json) JsonObject(json - "thinking_duration_ms").toString() else line
+        }
+        // The content_block_start (line 8) at 1000, the complete line (16) at 3000.
+        val final = lines.foldIndexed(ChatState()) { index, state, line ->
+            reduce(state, SessionEvent.Cli(Ndjson.decode(line), atMillis = if (index + 1 < 16) 1000L else 3000L))
+        }
+        val thinking = final.thinking()!!
+        assertEquals(2000L, thinking.durationMs)
+        assertEquals(1000L, thinking.startedAtMillis)
+        assertEquals(3000L, thinking.completedAtMillis)
+    }
+
+    // spec: think-default: the thinking estimate rises with thinking_tokens and clears on message_delta
+    @Test
+    fun `think-default - the thinking estimate rises with thinking_tokens and clears on message_delta`() {
+        val states = replay("think-default", sent())
+        assertEquals(listOf(0, 50, 150, 285), states.take(45).map { it.turn!!.thinkingEstimate }.distinct())
+        assertEquals(50, states[9].turn!!.thinkingEstimate)
+        assertEquals(150, states[11].turn!!.thinkingEstimate)
+        assertEquals(285, states[14].turn!!.thinkingEstimate)
+        // The draft block carries the estimate too: the delta's own (line 12: 100), then the thinking_tokens line's (14: 285).
+        assertEquals(100, states[12].thinking()!!.estimatedTokens)
+        assertEquals(285, states[14].thinking()!!.estimatedTokens)
+        val delta = (Fixtures.decode("think-default")[44] as CliMessage.StreamEvent).event as StreamEvent.MessageDelta
+        assertEquals(0, states[45].turn!!.thinkingEstimate)
+        assertEquals(delta.outputTokens, states[45].turn!!.outputTokens)
+        assertEquals(324, states[45].turn!!.outputTokens)
+    }
+
+    // spec: tools-bash: results keep content, result and decision
+    @Test
+    fun `tools-bash - results keep content, result and decision`() {
+        val states = replay("tools-bash", sent())
+        assertEquals("subcommandResults", states[20].pendingPermissions.single().decisionReasonType)
+        val (first, second) = states.last().toolResults()
+        assertEquals(PermissionDecision("accept", "user_temporary", null, null), first.decision)
+        assertNotNull(first.result!!.jsonObject["stdout"])
+        assertNotNull(first.content)
+        assertTrue(second.isError)
+        assertTrue(second.result is JsonPrimitive, second.result.toString())
+        val bash = states[18].toolUse()!!
+        assertEquals("Bash", bash.name)
+        assertEquals(bash.id, states[18].turn!!.lastToolUseId)
+        assertEquals(1, states[18].turn!!.toolCount)
+        assertEquals(2, states[34].turn!!.toolCount)
+        assertEquals(states[34].toolUse()!!.id, states[34].turn!!.lastToolUseId)
+    }
+
+    // spec: permission: a denied call records the reject decision
+    @Test
+    fun `permission - a denied call records the reject decision`() {
+        val denied = replay("permission")[56].toolResults().single { it.toolUseId == "<id-52>" }
+        assertEquals("reject", denied.decision!!.decision)
+    }
+
+    // spec: agent-sync: task lines fill tasks and subagent entries carry the parent id
+    @Test
+    fun `agent-sync - task lines fill tasks and subagent entries carry the parent id`() {
+        val states = replay("agent-sync")
+        val final = states.last()
+        val task = final.tasks.getValue("<task_id-42>")
+        assertEquals("completed", task.status)
+        assertNotNull(task.summary)
+        assertEquals(2, task.toolUses)
+        assertEquals("<id-12>", task.toolUseId)
+        val nested = final.entries.filter {
+            (it as? ChatEntry.Assistant)?.parentToolUseId == "<id-12>" || (it as? ChatEntry.ToolResult)?.parentToolUseId == "<id-12>"
+        }
+        assertEquals(4, nested.size, nested.toString())
+        for (entry in nested) {
+            val agent = (entry as? ChatEntry.Assistant)?.agentId ?: (entry as ChatEntry.ToolResult).agentId
+            assertEquals("<task_id-42>", agent, entry.toString())
+        }
+        assertEquals("Running wc -l seed.txt && tail -c1 seed.txt | xxd", states[41].tasks.getValue("<task_id-42>").description)
+        assertEquals("<task_id-42>", states[43].pendingPermissions.single().agentId)
+    }
+
+    // spec: agent-bash-task: a bash task is not stored
+    @Test
+    fun `agent-bash-task - a bash task is not stored`() {
+        for (state in replay("agent-bash-task")) assertTrue(state.tasks.isEmpty(), state.tasks.toString())
+    }
+
+    // spec: misc-state-action: the pending permission keeps blocked_path, display name and suggestions
+    @Test
+    fun `misc-state-action - the pending permission keeps blocked_path, display name and suggestions`() {
+        val asked = replay("misc-state-action")[21].pendingPermissions.single()
+        assertEquals("<path>", asked.blockedPath)
+        assertEquals("Bash", asked.displayName)
+        assertEquals(3, asked.suggestions.size)
+        assertFalse(asked.requiresUserInteraction)
+    }
+
+    @Test
+    fun `a streaming tool_use has no input until its complete line`() {
+        val states = replay("permission")
+        val started = states[11].toolUse()!!
+        assertNull(started.input)
+        assertEquals("", started.partialInput)
+        assertTrue(states[18].toolUse()!!.partialInput.length > states[13].toolUse()!!.partialInput.length)
+        assertNull(states[18].toolUse()!!.input)
+        assertEquals("touch tandem-fixture.txt", states[19].toolUse()!!.input!!["command"]!!.jsonPrimitive.content)
+    }
+
+    // spec: agent-forwarded: the forwarded text is a subagent assistant entry
+    @Test
+    fun `agent-forwarded - the forwarded text is a subagent assistant entry`() {
+        val forwarded = replay("agent-forwarded").last().assistants().single { entry ->
+            entry.agentId != null && entry.blocks.any { it == AssistantBlock.Text("7") }
+        }
+        assertEquals("<id-12>", forwarded.parentToolUseId)
+        assertEquals("general-purpose", forwarded.subagentType)
+        assertEquals("Count lines in seed.txt", forwarded.taskDescription)
+    }
+
+    // spec: misc-image: an image result keeps its content array
+    @Test
+    fun `misc-image - an image result keeps its content array`() {
+        val image = replay("misc-image").last().toolResults().first { it.toolUseId == "<id-12>" }
+        assertTrue(image.content is JsonArray, image.content.toString())
+    }
+
+    @Test
+    fun `UserSent records the send time and result appends a TurnEnded entry`() {
+        val initial = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 1234))
+        assertEquals(1234L, initial.turn!!.startedAtMillis)
+        assertEquals(TurnProgress("u1", 1234L, 0, 0, null, 0), initial.turn)
+        assertEquals(1234L, (initial.entries.single() as ChatEntry.User).sentAtMillis)
+        val final = replay("plain-reply", initial).last()
+        val result = Fixtures.decode("plain-reply").filterIsInstance<CliMessage.Result>().single()
+        val end = final.entries.last() as ChatEntry.TurnEnded
+        assertEquals(TurnEnd.COMPLETED, end.end)
+        assertEquals(result.durationMs, end.durationMs)
+        assertEquals(result.outputTokens, end.outputTokens)
+        assertNull(end.error)
+        assertNull(final.turn)
+        assertEquals(final.positions(), final.entryIndex)
+    }
+
+    @Test
+    fun `Ended during a turn appends a FAILED turn end with the host duration`() {
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 1000))
+        state = reduce(state, SessionEvent.Ended("exit 2", isError = true, atMillis = 4000))
+        val end = state.turnEnds().single()
+        assertEquals(TurnEnd.FAILED, end.end)
+        assertEquals(3000L, end.durationMs)
+        assertEquals("exit 2", end.error)
+        assertEquals(emptyList(), end.denials)
+        val error = state.entries.indexOfFirst { it is ChatEntry.Notice && it.level == NoticeLevel.ERROR }
+        assertTrue(state.entries.indexOf(end) in 0 until error, state.entries.toString())
+        assertNull(state.turn)
+    }
+
+    @Test
+    fun `Ended by the host during a turn appends an INTERRUPTED turn end`() {
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 1000))
+        state = reduce(state, SessionEvent.Ended("The claude CLI exited.", isError = false, endedByHost = true, atMillis = 4000))
+        val end = state.turnEnds().single()
+        assertEquals(TurnEnd.INTERRUPTED, end.end)
+        assertEquals(3000L, end.durationMs)
+        assertNull(end.error)
+        assertEquals(NoticeLevel.INFO, (state.entries.last() as ChatEntry.Notice).level)
+        assertNull(state.turn)
+    }
+
+    @Test
+    fun `turn end ids stay unique across a host stop and a later result`() {
+        val result = Fixtures.lines("plain-reply").first { "\"type\":\"result\"" in it }
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 1000))
+        state = reduce(state, SessionEvent.Ended("The claude CLI exited.", isError = false, endedByHost = true, atMillis = 2000))
+        state = reduce(state, SessionEvent.UserSent("u2", "again", atMillis = 3000))
+        state = reduce(state, cli(result))
+        val ends = state.turnEnds()
+        assertEquals(2, ends.size)
+        assertEquals(2, ends.map { it.id }.distinct().size, ends.toString())
+        assertEquals(state.entries.size, state.entryIndex.size)
+        assertEquals(state.positions(), state.entryIndex)
+    }
+
+    // spec: invalid-model: the assistant error line sets the turn error and the failed result carries it
+    @Test
+    fun `invalid-model - the assistant error line sets the turn error and the failed result carries it`() {
+        val states = replay("invalid-model", sent())
+        assertEquals("API Error: 404 model_not_found", states[4].turn!!.lastError)
+        val end = states.last().turnEnds().single()
+        assertEquals(TurnEnd.FAILED, end.end)
+        assertEquals("API Error: 404 model_not_found", end.error)
+    }
+
+    @Test
+    fun `an api_retry line yields the reference wording`() {
+        fun retry(fields: String): ChatEntry.Notice =
+            reduce(ChatState(), cli("""{"type":"system","subtype":"api_retry",$fields}""")).entries.single() as ChatEntry.Notice
+        assertEquals(
+            ChatEntry.Notice("notice-0", NoticeLevel.INFO, "529 overloaded · Retrying in 4s · attempt 2/10"),
+            retry(""""attempt":2,"max_retries":10,"retry_delay_ms":4000,"error":"overloaded","error_status":529"""),
+        )
+        assertEquals(
+            "overloaded · Retrying in 4s · attempt 2/10",
+            retry(""""attempt":2,"max_retries":10,"retry_delay_ms":4000,"error":"overloaded"""").text,
+        )
+        assertEquals("529 · Retrying in 4s", retry(""""retry_delay_ms":4999,"error_status":529""").text)
+        // The lines `entry ids stay unique after a retraction` uses: no error, no delay.
+        for (fields in listOf(""""attempt":1,"max_retries":3""", """"attempt":2,"max_retries":3""")) {
+            val text = retry(fields).text
+            assertFalse("null" in text, text)
+            assertEquals("API error · attempt ${fields.substringAfter(":").substringBefore(",")}/3", text)
+        }
+        assertEquals("API error", retry(""""attempt":1""").text)
+    }
+
+    @Test
+    fun `init stores cwd`() {
+        assertEquals("<path>", replay("tools-read")[5].cwd)
+        assertNull(replay("tools-read")[4].cwd)
+    }
+
+    @Test
+    fun `a line with two tool results attaches the object to neither`() {
+        val line = """{"type":"user","message":{"role":"user","content":[""" +
+            """{"type":"tool_result","tool_use_id":"t1","content":"one"},{"type":"tool_result","tool_use_id":"t2","content":"two"}]},""" +
+            """"tool_use_result":{"stdout":"one"}}"""
+        val results = reduce(ChatState(), cli(line)).toolResults()
+        assertEquals(listOf("t1", "t2"), results.map { it.toolUseId })
+        for (result in results) {
+            assertNull(result.result, result.toString())
+            assertNotNull(result.content)
+        }
     }
 }

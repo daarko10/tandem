@@ -30,6 +30,7 @@ internal fun ChatState.toTranscript(): List<TranscriptEntry> = entries.mapNotNul
             },
             streaming = false,
         )
+        is ChatEntry.TurnEnded -> null
     }
 }
 

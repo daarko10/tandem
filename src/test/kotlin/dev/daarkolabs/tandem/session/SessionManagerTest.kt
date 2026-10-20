@@ -345,7 +345,7 @@ class SessionManagerTest {
         assertEquals(listOf(handle), manager.sessions.value)
 
         manager.send(seeded, "Reply with the single word: pong")
-        val answered = handle.state.first { s -> !s.busy && s.entries.last() is ChatEntry.Assistant }
+        val answered = handle.state.first { s -> !s.busy && s.entries.lastOrNull { it !is ChatEntry.TurnEnded } is ChatEntry.Assistant }
         assertEquals("pong", answered.replyText())
         handle.status.await(SessionStatus.IDLE) // the new process starts from the settled chat, not from the ended one
         assertEquals(2, spawns().size)

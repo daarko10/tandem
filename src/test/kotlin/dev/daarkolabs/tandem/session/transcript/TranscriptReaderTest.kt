@@ -14,6 +14,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
@@ -55,6 +56,7 @@ class TranscriptReaderTest {
             }
             is ChatEntry.ToolResult -> "result: ${entry.text}" + if (entry.isError) " (error)" else ""
             is ChatEntry.Notice -> "${entry.level}: ${entry.text}"
+            is ChatEntry.TurnEnded -> "end: ${entry.end}"
         }
     }
 
@@ -210,7 +212,10 @@ class TranscriptReaderTest {
             """{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"file.txt","is_error":false},{"type":"text","text":"also check"},{"type":"text","text":"the docs"}]}}""",
         )
         assertEquals(
-            listOf(ChatEntry.ToolResult("result-toolu_1", "toolu_1", "file.txt", false), ChatEntry.User("u1", "also check\nthe docs")),
+            listOf(
+                ChatEntry.ToolResult("result-toolu_1", "toolu_1", "file.txt", false, content = JsonPrimitive("file.txt"), atMillis = 0L),
+                ChatEntry.User("u1", "also check\nthe docs", sentAtMillis = 0L),
+            ),
             TranscriptReader.read(f).state.entries,
         )
     }
