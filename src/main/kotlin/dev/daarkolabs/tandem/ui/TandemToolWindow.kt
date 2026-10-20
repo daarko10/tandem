@@ -62,7 +62,7 @@ private val SIDEBAR_WIDTH: Dp = 220.dp
  * prompt box.
  *
  * Every open session keeps a [ChatPresenter] and a [ChatUiState] from the first time it is shown until it is closed, so that
- * switching back to it does not parse its transcript again and finds its rows opened and scrolled as it left them.
+ * switching back to it does not parse its transcript again and finds its rows opened as it left them.
  */
 @Composable
 internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {

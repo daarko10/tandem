@@ -48,8 +48,11 @@ internal fun ChatPanel(project: Project, presenter: ChatPresenter, ui: ChatUiSta
     val chat by presenter.chat.collectAsState()
     val rows = chat.rows
 
-    // Follows the tail on every change, as before the redesign, until the intent-based autoscroll (spec 4.16) replaces it.
-    LaunchedEffect(chat) {
+    // A stand-in until T9's intent-based autoscroll (spec 4.16): scrolls to the bottom when the panel is shown, when rows are added
+    // and when one of the last two rows changes (a reply streaming above the working row). Keyed on row models only, so filling an
+    // opened body's Markdown (expandBody) or a change of the card never moves the list.
+    val tail = rows.takeLast(2).map { it.row }
+    LaunchedEffect(rows.size, tail) {
         if (rows.isNotEmpty()) ui.listState.scrollToItem(rows.lastIndex, Int.MAX_VALUE)
     }
 
