@@ -79,7 +79,7 @@ object ToolLabels {
         return basename(path)
     }
 
-    private fun basename(path: String): String =
+    internal fun basename(path: String): String =
         path.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\').ifEmpty { path }
 
     /** The host of [url]: no scheme, no credentials, no path, query or fragment (`https://docs.example.com/a?q=1` → `docs.example.com`). */
@@ -230,7 +230,7 @@ object ToolLabels {
     }
 
     /** `mcp__<server>__<tool>` as `<server>: <tool>`, underscores as spaces; the `mcp__` prefix never shows. */
-    private fun mcpName(name: String): String {
+    internal fun mcpName(name: String): String {
         val parts = name.removePrefix("mcp__").split("__", limit = 2)
         val server = parts[0].replace('_', ' ')
         return if (parts.size < 2) server else "$server: ${parts[1].replace('_', ' ')}"

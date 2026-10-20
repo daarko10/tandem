@@ -5,7 +5,9 @@ import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.NoticeKind
+import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.TaskInfo
+import dev.daarkolabs.tandem.session.TurnEnd
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.mutate
@@ -25,7 +27,9 @@ data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, va
 /**
  * Builds the chat rows from a [ChatState] (spec 5.3, 5.4): one row per user message, text block, thinking block and notice, and one
  * per lone tool call or group of consecutive calls ([Grouping], spec 4.6.4), each with its key and its gap. A subagent's entries
- * (`parentToolUseId` naming an Agent call) become that call's children, one row per call.
+ * (`parentToolUseId` naming an Agent call) become that call's children, one row per call. While a turn runs the last row is the
+ * [WorkingRow] (spec 4.9); once the latest turn has ended its [TurnEndRow] stands where it ended (spec 4.10), and a failed turn's
+ * `The turn failed` notice gives way to it (spec 4.11). The oldest pending request comes as the [ChatRows.card] ([Cards.pending]).
  *
  * Rows are cached per turn (a turn runs from one user message to the next): a closed turn is built once more when it closes and then
  * kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the last entry it holds
@@ -63,6 +67,10 @@ class ChatRowsBuilder(private val options: RowOptions) {
     private var live: Map<String, ChatRow> = emptyMap()
     private var bodies = IdentityHashMap<ChatEntry.ToolResult, Body>()
 
+    /** The previous build's working row and card: an equal one keeps this instance. */
+    private var lastWorking: WorkingRow? = null
+    private var lastCard: PendingCard? = null
+
     private val frozenEnd: Int get() = frozen.lastOrNull()?.end ?: 0
 
     fun build(state: ChatState): ChatRows {
@@ -75,13 +83,17 @@ class ChatRowsBuilder(private val options: RowOptions) {
         val region = Region(state, frozenEnd)
         val nextBodies = IdentityHashMap<ChatEntry.ToolResult, Body>()
         val keys = HashSet<String>()
+        val end = if (state.turn == null) turnEnd(entries) else null
         var previous = frozenRows.lastOrNull()
         val turnRows = region.turns.mapIndexed { t, turn ->
             val turnOpen = state.turn != null && t == region.turns.lastIndex && entries[turn.first] is ChatEntry.User
+            // The footer of a failed turn says why (spec 4.10), so its "The turn failed" notice would say it twice (spec 4.11).
+            val failed = turn.any { (entries[it] as? ChatEntry.TurnEnded)?.end == TurnEnd.FAILED }
+            val context = TurnContext(turnOpen, failed, end)
             val rows = Rows(previous, grouped = true) { reuse(withUniqueKey(it, keys)) }
             for (index in turn) {
                 if (index in region.childEntries) continue
-                entryRows(entries[index], turnOpen, region, nextBodies, rows)
+                entryRows(entries[index], context, region, nextBodies, rows)
             }
             rows.flush()
             previous = rows.previous
@@ -90,9 +102,62 @@ class ChatRowsBuilder(private val options: RowOptions) {
         bodies = nextBodies
         live = turnRows.flatten().associateBy { it.key }
 
-        val all = frozenRows.mutate { list -> turnRows.forEach(list::addAll) }
+        val all = frozenRows.mutate { list ->
+            turnRows.forEach(list::addAll)
+            workingRow(state, list)?.let(list::add)
+        }
         freeze(region, turnRows)
-        return ChatRows(all, card = null, moreWaiting = 0)
+        val (card, moreWaiting) = Cards.pending(state)
+        lastCard = lastCard?.takeIf { it == card } ?: card
+        return ChatRows(all, lastCard, moreWaiting)
+    }
+
+    /** What the rows of one turn depend on beyond its entries: whether it runs, whether it failed, and the latest turn's end. */
+    private class TurnContext(val turnOpen: Boolean, val failed: Boolean, val end: TurnEndAt?)
+
+    /** The entry the footer stands at ([TurnEndRow] key `e:<entry id>`), how its turn ended and the footer's text. */
+    private class TurnEndAt(val entry: ChatEntry, val end: TurnEnd, val text: String)
+
+    /**
+     * The footer of the latest turn, when it has ended (spec 4.10): at its [ChatEntry.TurnEnded], or, for a reloaded transcript that
+     * has none, at its interrupt marker. Only the latest turn has one; null when the last user message has neither after it.
+     */
+    private fun turnEnd(entries: List<ChatEntry>): TurnEndAt? {
+        var ended: ChatEntry.TurnEnded? = null
+        var marker: ChatEntry.Notice? = null
+        var textStreamed = false
+        for (i in entries.indices.reversed()) {
+            when (val entry = entries[i]) {
+                is ChatEntry.User -> break
+                is ChatEntry.TurnEnded -> if (ended == null) ended = entry
+                is ChatEntry.Notice -> if (marker == null && entry.kind == NoticeKind.INTERRUPTED) marker = entry
+                is ChatEntry.Assistant -> if (entry.parentToolUseId == null && entry.blocks.any { it is AssistantBlock.Text && it.text.isNotBlank() }) {
+                    textStreamed = true
+                }
+                is ChatEntry.ToolResult -> Unit
+            }
+        }
+        if (ended != null) return TurnEndAt(ended, ended.end, WorkingIndicator.footer(ended.end, ended.durationMs, ended.error, textStreamed))
+        if (marker != null) return TurnEndAt(marker, TurnEnd.INTERRUPTED, WorkingIndicator.footer(TurnEnd.INTERRUPTED, null, null, textStreamed))
+        return null
+    }
+
+    /** The working row while a turn runs (spec 4.9), after [rows]; the previous instance when it is unchanged. */
+    private fun workingRow(state: ChatState, rows: List<ChatRow>): WorkingRow? {
+        val turn = state.turn
+        if (turn == null) {
+            lastWorking = null
+            return null
+        }
+        val row = WorkingRow(
+            turnUuid = turn.userUuid,
+            startedAtMillis = turn.startedAtMillis,
+            step = WorkingIndicator.step(state, rows, options),
+            outputTokens = turn.outputTokens + turn.thinkingEstimate,
+            waiting = state.pendingPermissions.isNotEmpty(),
+            gap = gap(Kind.END, rows.lastOrNull()),
+        )
+        return (lastWorking?.takeIf { it == row } ?: row).also { lastWorking = it }
     }
 
     /** Whether the cached turns still describe [state]: no entry was removed, the last cached entry is the same, cwd unchanged. */
@@ -232,11 +297,12 @@ class ChatRowsBuilder(private val options: RowOptions) {
     /** Adds the top-level rows of [entry] to [rows]. */
     private fun entryRows(
         entry: ChatEntry,
-        turnOpen: Boolean,
+        context: TurnContext,
         region: Region,
         nextBodies: IdentityHashMap<ChatEntry.ToolResult, Body>,
         rows: Rows,
     ) {
+        val turnOpen = context.turnOpen
         when (entry) {
             is ChatEntry.User -> rows.add {
                 UserRow("u:${entry.id}", entry.text, entry.text.startsWith("/") || entry.text.startsWith("!"), gap(Kind.USER, it))
@@ -245,12 +311,12 @@ class ChatRowsBuilder(private val options: RowOptions) {
             is ChatEntry.Assistant -> assistantRows(entry, turnOpen, region, nextBodies, rows, thinking = entry.parentToolUseId == null)
             is ChatEntry.ToolResult -> if (entry.toolUseId !in region.calls) rows.add { orphan(entry, gap(Kind.TOOL, it)) }
             // The interrupt marker shows as the turn's end, not as a row; it still closes a group.
-            is ChatEntry.Notice -> if (entry.kind == NoticeKind.INTERRUPTED) {
-                rows.flush()
-            } else {
-                rows.add { NoticeRow("n:${entry.id}", entry.level, entry.text, gap(Kind.NOTICE, it)) }
+            is ChatEntry.Notice -> when {
+                entry.kind == NoticeKind.INTERRUPTED || context.failed && entry.level == NoticeLevel.ERROR && entry.text.startsWith("The turn failed") ->
+                    rows.add { footer(entry, context, it) }
+                else -> rows.add { NoticeRow("n:${entry.id}", entry.level, entry.text, gap(Kind.NOTICE, it)) }
             }
-            is ChatEntry.TurnEnded -> Unit
+            is ChatEntry.TurnEnded -> if (context.end?.entry === entry) rows.add { footer(entry, context, it) }
         }
     }
 
@@ -387,13 +453,19 @@ class ChatRowsBuilder(private val options: RowOptions) {
         return ToolRow("tool:${result.toolUseId}", persistentListOf(call), label, state, null, gap)
     }
 
-    private enum class Kind { USER, TEXT, THINKING, TOOL, NOTICE }
+    /** The latest turn's footer when it stands at [entry], else nothing (the entry still closes a group). */
+    private fun footer(entry: ChatEntry, context: TurnContext, before: ChatRow?): TurnEndRow? {
+        val end = context.end?.takeIf { it.entry === entry } ?: return null
+        return TurnEndRow("e:${entry.id}", end.end, end.text, gap(Kind.END, before))
+    }
+
+    private enum class Kind { USER, TEXT, THINKING, TOOL, NOTICE, END }
 
     /** The space above a row of [kind] after [previous] (spec 5.3, with the precedence of the plan's T4). */
     private fun gap(kind: Kind, previous: ChatRow?): RowGap = when {
         previous == null -> RowGap.NONE
         kind == Kind.USER -> RowGap.TURN
-        kind == Kind.NOTICE -> RowGap.SECTION
+        kind == Kind.NOTICE || kind == Kind.END -> RowGap.SECTION
         previous is UserRow -> RowGap.AFTER_BUBBLE
         previous is ToolRow || previous is ThinkingRow -> if (kind == Kind.TEXT) RowGap.BEFORE_TEXT else RowGap.ROW
         // After text, a notice, the working row or a footer.

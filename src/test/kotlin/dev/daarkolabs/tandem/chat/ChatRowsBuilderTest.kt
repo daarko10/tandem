@@ -8,8 +8,10 @@ import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.TurnEnd
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.runBlocking
@@ -325,17 +327,139 @@ class ChatRowsBuilderTest {
 
     @Test
     fun `invalid-model`() {
-        val invalid = replay("invalid-model").second.content()
-        val failed = invalid.filterIsInstance<NoticeRow>().single { it.text.startsWith("The turn failed") }
-        assertEquals(NoticeLevel.ERROR, failed.level)
+        val invalid = replay("invalid-model").second.rows
+        // The footer carries the failure (spec 4.10, 4.11): no "The turn failed" notice, the model rejection stays.
+        assertTrue(invalid.none { it is NoticeRow && it.text.startsWith("The turn failed") }, invalid.toString())
+        val rejected = invalid.filterIsInstance<NoticeRow>().single()
+        assertEquals(NoticeLevel.ERROR, rejected.level)
+        assertTrue(rejected.text.startsWith("The CLI rejected the model"), rejected.text)
+        assertEquals(TurnEnd.FAILED to "API Error: 404 model_not_found", assertIs<TurnEndRow>(invalid.last()).let { it.end to it.text })
     }
 
     @Test
     fun `interrupt`() {
-        val interrupt = replay("interrupt").second.content()
+        val (_, rows) = replay("interrupt")
+        val interrupt = rows.content()
         assertTrue(interrupt.toolRows().none { it.state == ToolState.PENDING || it.state == ToolState.RUNNING })
         assertTrue(interrupt.none { it is NoticeRow && it.text == "Stopped." })
         assertEquals(listOf("1"), interrupt.filterIsInstance<TextRow>().map { it.markdown })
+        // One footer (spec 7.6), last, and nothing else that ends the turn.
+        val footer = assertIs<TurnEndRow>(rows.rows.last())
+        assertEquals(TurnEnd.INTERRUPTED to "Interrupted · What should Claude do instead?", footer.end to footer.text)
+        assertEquals(1, rows.rows.count { it is TurnEndRow })
+        assertTrue(rows.rows.none { it is WorkingRow || it is NoticeRow }, rows.rows.toString())
+    }
+
+    @Test
+    fun `the working row is last while busy and the footer replaces it`() {
+        var sawWorking = false
+        val (state, rows) = replay("tools-read") { _, state, rows ->
+            if (state.turn != null) {
+                sawWorking = true
+                val working = assertIs<WorkingRow>(rows.rows.last())
+                assertTrue(working.step.isNotBlank())
+                assertFalse(working.waiting)
+                assertEquals(state.turn!!.userUuid, working.turnUuid)
+                assertEquals(state.turn!!.startedAtMillis, working.startedAtMillis)
+                assertEquals(state.turn!!.outputTokens + state.turn!!.thinkingEstimate, working.outputTokens)
+                assertEquals(1, rows.rows.count { it is WorkingRow })
+            } else {
+                assertTrue(rows.rows.none { it is WorkingRow })
+            }
+        }
+        assertTrue(sawWorking)
+        assertNull(state.turn)
+        assertTrue(rows.rows.none { it is WorkingRow })
+        val footer = assertIs<TurnEndRow>(rows.rows.last())
+        assertEquals(TurnEnd.COMPLETED, footer.end)
+        assertTrue(footer.text.startsWith("Worked for "), footer.text)
+        val ended = state.entries.filterIsInstance<ChatEntry.TurnEnded>().last()
+        assertEquals("e:${ended.id}", footer.key)
+    }
+
+    @Test
+    fun `the working row waits while a card is pending`() {
+        var waited = false
+        val (_, rows) = replay("permission") { _, state, rows ->
+            val working = rows.rows.lastOrNull() as? WorkingRow ?: return@replay
+            assertEquals(state.pendingPermissions.isNotEmpty(), working.waiting)
+            assertEquals(state.pendingPermissions.isNotEmpty(), rows.card != null)
+            if (working.waiting) waited = true
+        }
+        assertTrue(waited)
+        assertNull(rows.card)
+        assertEquals(0, rows.moreWaiting)
+    }
+
+    @Test
+    fun `a failed turn ends with the failure footer`() {
+        val rows = replay("invalid-model").second.rows
+        assertTrue(rows.none { it is NoticeRow && it.text.startsWith("The turn failed") })
+        assertEquals(1, rows.count { it is NoticeRow && it.level == NoticeLevel.ERROR && it.text.startsWith("The CLI rejected the model") })
+        val footer = assertIs<TurnEndRow>(rows.last())
+        assertEquals(TurnEnd.FAILED to "API Error: 404 model_not_found", footer.end to footer.text)
+    }
+
+    @Test
+    fun `a process exit keeps its notice after the footer`() {
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 0))
+        state = reduce(state, cliLine("""{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"text","text":"partial"}]}}"""))
+        state = reduce(state, SessionEvent.Ended("Process exited with code 1.", isError = true, atMillis = 4_000))
+        val rows = ChatRowsBuilder(options).build(state).rows
+        val footer = assertIs<TurnEndRow>(rows[rows.size - 2])
+        assertEquals(TurnEnd.FAILED to "Server error mid-response. The response above may be incomplete.", footer.end to footer.text)
+        val exit = assertIs<NoticeRow>(rows.last())
+        assertEquals(NoticeLevel.ERROR, exit.level)
+        assertTrue(exit.text.startsWith("Process exited with code 1."), exit.text)
+        assertEquals(RowGap.SECTION, exit.gap)
+    }
+
+    @Test
+    fun `a failed result before any text says why`() {
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 0))
+        state = reduce(
+            state,
+            cliLine("""{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":2000,"result":"boom","session_id":"s"}"""),
+        )
+        val rows = ChatRowsBuilder(options).build(state).rows
+        assertTrue(rows.none { it is NoticeRow }, rows.toString())
+        assertEquals(TurnEnd.FAILED to "The turn failed (boom)", assertIs<TurnEndRow>(rows.last()).let { it.end to it.text })
+    }
+
+    @Test
+    fun `no footer while a later turn runs`() {
+        val (done, _) = replay("tools-read")
+        val state = reduce(done, SessionEvent.UserSent("u2", "again", atMillis = 99_000))
+        val rows = ChatRowsBuilder(options).build(state).rows
+        assertTrue(rows.none { it is TurnEndRow })
+        assertIs<WorkingRow>(rows.last())
+        assertEquals(RowGap.SECTION, rows.last().gap)
+        assertIs<UserRow>(rows[rows.size - 2])
+        // Once that turn ends, only its footer shows.
+        val ended = reduce(state, cliLine("""{"type":"result","subtype":"success","is_error":false,"duration_ms":4000,"result":"ok","session_id":"s"}"""))
+        val after = ChatRowsBuilder(options).build(ended).rows
+        assertEquals(listOf("Worked for 4s"), after.filterIsInstance<TurnEndRow>().map { it.text })
+        assertIs<TurnEndRow>(after.last())
+    }
+
+    @Test
+    fun `a reloaded transcript has neither working row nor footer`() {
+        val reloaded = runBlocking { TranscriptReader.read(Fixtures.transcript("history-reply")) }.state
+        val rows = ChatRowsBuilder(options).build(reloaded).rows
+        assertTrue(rows.isNotEmpty())
+        assertTrue(rows.none { it is WorkingRow || it is TurnEndRow }, rows.toString())
+    }
+
+    @Test
+    fun `a reloaded interrupted transcript shows the Interrupted footer`() {
+        val reloaded = runBlocking { TranscriptReader.read(Fixtures.transcript("history-interrupt")) }.state
+        val rows = ChatRowsBuilder(options).build(reloaded).rows
+        val footer = rows.filterIsInstance<TurnEndRow>().single()
+        assertEquals(TurnEnd.INTERRUPTED to "Interrupted · What should Claude do instead?", footer.end to footer.text)
+        val marker = reloaded.entries.filterIsInstance<ChatEntry.Notice>().last { it.kind == NoticeKind.INTERRUPTED }
+        assertEquals("e:${marker.id}", footer.key)
+        assertTrue(rows.none { it is NoticeRow && it.text == "Stopped." })
+        assertTrue(rows.none { it is WorkingRow })
     }
 
     @Test
@@ -352,7 +476,8 @@ class ChatRowsBuilderTest {
                     val moved = old.startsWith("tool:") && old.removePrefix("tool:") in callsNow
                     assertTrue(old in now || moved, "$name:$line lost the key $old")
                 }
-                before = rows.rows
+                // The working row and the footer show a turn's progress and its end: they go when it ends or the next one starts.
+                before = rows.content()
             }
         }
     }
@@ -438,6 +563,7 @@ class ChatRowsBuilderTest {
         state = reduce(state, SessionEvent.UserSent("u2", "/compact"))
         state = reduce(state, SessionEvent.HostNotice(NoticeLevel.WARNING, "w"))
         val rows = ChatRowsBuilder(options).build(state).rows
+        assertEquals("working" to RowGap.SECTION, rows.last().let { it.key to it.gap })
         assertEquals(
             listOf(
                 "u:u1" to RowGap.NONE,
@@ -453,9 +579,15 @@ class ChatRowsBuilderTest {
                 "t:a2:0" to RowGap.SECTION,
                 "u:u2" to RowGap.TURN,
                 "n:${state.entries.last().id}" to RowGap.SECTION,
+                "working" to RowGap.SECTION,
             ),
             rows.map { it.key to it.gap },
         )
+        // A working row right after the user's message, and a footer, are a section apart.
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u9", "hi"))
+        assertEquals(listOf("u:u9" to RowGap.NONE, "working" to RowGap.SECTION), ChatRowsBuilder(options).build(sent).rows.map { it.key to it.gap })
+        val footer = replay("plain-reply").second.rows.last()
+        assertEquals(RowGap.SECTION, assertIs<TurnEndRow>(footer).gap)
         assertTrue(rows.filterIsInstance<UserRow>().single { it.key == "u:u2" }.mono)
         assertFalse(rows.filterIsInstance<UserRow>().single { it.key == "u:u1" }.mono)
         assertTrue(ChatRowsBuilder(options).build(ChatState(entries = listOf(ChatEntry.User("u", "!ls")))).rows.filterIsInstance<UserRow>().single().mono)
@@ -481,8 +613,9 @@ class ChatRowsBuilderTest {
         var built: ChatRows? = null
         val millis = measureTimeMillis { for (state in states) built = builder.build(state) }
         val last = built!!
-        assertEquals(32_000, last.rows.size)
-        assertEquals(listOf("u:u16000", "t:m16000:0"), last.rows.takeLast(2).map { it.key })
+        // The last turn has no result yet, so the working row follows its reply.
+        assertEquals(32_000, last.content().size)
+        assertEquals(listOf("u:u16000", "t:m16000:0", "working"), last.rows.takeLast(3).map { it.key })
         assertTrue(millis < 2_000, "building took $millis ms")
     }
 
