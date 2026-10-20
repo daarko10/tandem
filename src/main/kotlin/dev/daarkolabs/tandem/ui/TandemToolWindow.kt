@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -89,6 +90,9 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     // The session whose prompt box takes the focus when it shows: the one last picked or created. One still being opened when
     // another is selected (a fork, say) does not take it any more, nor once the user has moved to the filter or the title field.
     var promptFocusFor by remember { mutableStateOf<SessionId?>(null) }
+    // The user has moved the focus out of the chat, to the title field or the sidebar's filter, and not back since: a card that
+    // closes then leaves the focus where it is.
+    var focusLeftChat by remember { mutableStateOf(false) }
     LaunchedEffect(selectedId) {
         if (renaming != selectedId) renaming = null
         if (promptFocusFor != selectedId) promptFocusFor = null
@@ -124,12 +128,16 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     actions.show(id)
                     renaming = id
                     promptFocusFor = null
+                    focusLeftChat = true
                 },
                 modifier = modifier,
                 onPicked = { drawerOpen = false },
                 onSessionShown = sessionShown,
                 focusFilter = overChat,
-                onFilterFocused = { promptFocusFor = null },
+                onFilterFocused = {
+                    promptFocusFor = null
+                    focusLeftChat = true
+                },
                 rowMenus = rowMenus,
                 newSessionFocus = if (overChat) drawerEntryFocus else null,
             )
@@ -157,7 +165,10 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     renaming = selected != null && renaming == selected.id,
                     onRenamingChange = { editing ->
                         renaming = if (editing) selected?.id else null
-                        if (editing) promptFocusFor = null
+                        if (editing) {
+                            promptFocusFor = null
+                            focusLeftChat = true
+                        }
                     },
                     onRename = { title -> selected?.let { actions.rename(it.id, title) } },
                     toggleFocus = toggleFocus,
@@ -184,15 +195,16 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                             val presenter = remember(selected) { presenters.presenter(selected) }
                             val ui = remember(selected.id) { presenters.ui(selected.id) }
                             // When the session's card closes (answered, cancelled, the turn ended), the focus goes back to the
-                            // composer (spec 4.12); a card that follows another keeps it on the card.
+                            // composer (spec 4.12), unless the user has since moved it to the title field or the filter; a card
+                            // that follows another keeps it on the card.
                             LaunchedEffect(presenter) {
                                 var open = false
                                 presenter.chat.map { it.card != null }.distinctUntilChanged().collect { now ->
-                                    if (open && !now) promptFocusFor = selected.id
+                                    if (open && !now && !focusLeftChat) promptFocusFor = selected.id
                                     open = now
                                 }
                             }
-                            Box(chatFocus) {
+                            Box(Modifier.onFocusChanged { if (it.hasFocus) focusLeftChat = false }.then(chatFocus)) {
                                 ChatPane(
                                     project,
                                     selected,
