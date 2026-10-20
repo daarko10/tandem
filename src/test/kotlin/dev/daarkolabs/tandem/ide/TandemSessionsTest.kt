@@ -5,6 +5,9 @@ import com.intellij.testFramework.junit5.TestApplication
 import com.intellij.testFramework.junit5.fixture.tempPathFixture
 import com.intellij.testFramework.openProjectAsync
 import com.intellij.testFramework.useProjectAsync
+import dev.daarkolabs.tandem.chat.TextRow
+import dev.daarkolabs.tandem.chat.ThinkingRow
+import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
@@ -14,9 +17,16 @@ import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import dev.daarkolabs.tandem.ui.ChatPresenter
+import dev.daarkolabs.tandem.ui.RenderedChat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
+import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
 import java.nio.file.Files
@@ -106,6 +116,40 @@ class TandemSessionsTest {
         assertEquals("pong", state.replyText())
         assertEquals("claude-sonnet-5-5", state.activeModel)
         assertEquals(remembered, state.sessionId)
+        awaitNoOwnFakeCli()
+    }
+
+    @Test
+    @OptIn(ExperimentalJewelApi::class) // the presenter's rows carry Jewel's Markdown blocks
+    fun aPresenterRebuildsWhenShowThinkingChanges() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("thinking").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            // A turn that thinks with summaries, then answers.
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "think-display-summarized")
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            sessions.manager.send(handle.id, "What is 47 times 83 minus 19 squared?")
+            handle.state.first { s -> !s.busy && s.entries.any { it is ChatEntry.Assistant && !it.streaming } }
+            val presenterScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            try {
+                val presenter = ChatPresenter(presenterScope, handle.state, sessions.rowOptions)
+                // Never chat.value, which can precede the first emission.
+                val shown = presenter.chat.first { it.rows.any { r -> r.row is ThinkingRow } }
+                TandemSettings.getInstance().state.showThinking = false
+                sessions.settingsChanged()
+                val hidden = presenter.chat.first { it.rows.none { r -> r.row is ThinkingRow } }
+                fun keys(chat: RenderedChat): List<String> =
+                    chat.rows.map { it.row }.filter { it is ToolRow || it is TextRow }.map { it.key }
+                assertTrue(keys(shown).isNotEmpty(), keys(shown).toString())
+                assertEquals(keys(shown), keys(hidden), "the other rows keep their keys")
+            } finally {
+                // The settings are the application's: no other test may see showThinking = false.
+                TandemSettings.getInstance().loadState(TandemSettings.State())
+                sessions.settingsChanged()
+                presenterScope.cancel()
+            }
+        }
         awaitNoOwnFakeCli()
     }
 

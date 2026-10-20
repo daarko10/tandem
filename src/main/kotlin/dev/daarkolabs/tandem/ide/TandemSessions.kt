@@ -1,7 +1,9 @@
 package dev.daarkolabs.tandem.ide
 
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.components.serviceIfCreated
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.RowOptions
@@ -109,9 +111,13 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         deleteFiles = { deleteTranscript(it) },
     )
 
-    private val _rowOptions = MutableStateFlow(RowOptions(showThinking = true))
+    // The settings as already loaded: loading them reads a file, which the constructor must not (it may run on the EDT), so when
+    // they are not loaded yet the default holds until ensureStarted reads them on IO, before it restores any session.
+    private val _rowOptions = MutableStateFlow(
+        ApplicationManager.getApplication().serviceIfCreated<TandemSettings>()?.let(::rowOptionsOf) ?: RowOptions(showThinking = true),
+    )
 
-    /** What the chat rows show beyond the session's state: the `Show thinking` setting. */
+    /** What the chat rows show beyond the session's state: the `Show thinking rows` setting, as last applied ([settingsChanged]). */
     val rowOptions: StateFlow<RowOptions> = _rowOptions.asStateFlow()
 
     private val started = AtomicBoolean(false)
@@ -130,6 +136,7 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
      * launches coroutines, and waits for nothing.
      * - Until every session's process has ended, a JVM shutdown hook kills them ([SessionManager.killAllNow]): when the IDE exits, the
      *   JVM can stop before the sessions' coroutines have ended their processes.
+     * - [rowOptions] takes the settings ([settingsChanged]), before any session is restored.
      * - The [SessionNotifier] starts.
      * - The sessions that were open when the project was last closed open again, without a process: the one that was selected
      *   first, and selected again at once, then the others in their order. One whose transcript is gone, or that fails to open, is
@@ -143,6 +150,7 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         if (!started.compareAndSet(false, true)) return
         killOnJvmExit()
         scope.launch(Dispatchers.IO + CoroutineName("TandemSessions.start")) {
+            settingsChanged()
             SessionNotifier(project, manager, scope).start()
             restore()
             rememberInWorkspace()
@@ -235,6 +243,14 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         LOG.info("session ${session.id}: sent the autoPrompt")
     }
 
+    /**
+     * Takes the settings the chat rows depend on ([TandemSettings.State.showThinking]) into [rowOptions], so that every open chat
+     * rebuilds its rows; called when the settings page applies. Safe on the EDT: it reads the settings in memory and sets a flow.
+     */
+    fun settingsChanged() {
+        _rowOptions.value = rowOptionsOf(TandemSettings.getInstance())
+    }
+
     companion object {
         /** The project's sessions. Safe to call on the EDT: making the service touches no file. */
         fun get(project: Project): TandemSessions = project.service()
@@ -263,3 +279,6 @@ private fun physical(path: Path): Path =
 private fun configDir(): Path =
     System.getProperty(CONFIG_DIR_PROPERTY)?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
         ?: TranscriptFolder.configDir(ShellEnvironment.get())
+
+/** The chat rows' options as [settings] say. */
+private fun rowOptionsOf(settings: TandemSettings): RowOptions = RowOptions(showThinking = settings.state.showThinking)

@@ -111,7 +111,7 @@ internal fun ToolRowItem(rendered: RenderedRow, ui: ChatUiState) {
 /**
  * One tool line, a row's or a group's sub-row's: [label] in the colour of [state], [stats] before the chevron, the chevron that turns
  * when [open]. The whole line is the click target when [opens]; a running call draws its chevron disabled. Assistive technology
- * knows it as a button named by its label.
+ * knows it as a button named by [description], its label unless the caller says otherwise (a streaming thinking row).
  */
 @Composable
 internal fun ToolLine(
@@ -122,6 +122,7 @@ internal fun ToolLine(
     open: Boolean,
     minHeight: Dp,
     modifier: Modifier = Modifier,
+    description: String = label.text,
     onClick: () -> Unit,
 ) {
     val colors = JewelTheme.globalColors.text
@@ -141,7 +142,7 @@ internal fun ToolLine(
         modifier.fillMaxWidth().heightIn(min = minHeight)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
-                contentDescription = label.text
+                contentDescription = description
             }
             .thenIf(opens) {
                 background(if (hovered) hover else Color.Transparent, RoundedCornerShape(6.dp))

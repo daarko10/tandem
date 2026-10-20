@@ -28,9 +28,11 @@ import dev.daarkolabs.tandem.ui.dev.RecompositionCounter
 import dev.daarkolabs.tandem.ui.dev.RenderingSpike
 import dev.daarkolabs.tandem.ui.rows.NoticeItem
 import dev.daarkolabs.tandem.ui.rows.TextRowItem
+import dev.daarkolabs.tandem.ui.rows.ThinkingRowItem
 import dev.daarkolabs.tandem.ui.rows.ToolRowItem
 import dev.daarkolabs.tandem.ui.rows.TurnEndItem
 import dev.daarkolabs.tandem.ui.rows.UserBubble
+import dev.daarkolabs.tandem.ui.rows.WorkingRowItem
 import kotlinx.coroutines.flow.StateFlow
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -85,19 +87,7 @@ internal fun RowItem(rendered: RenderedRow, ui: ChatUiState, lastFrameAt: StateF
         is ToolRow -> ToolRowItem(rendered, ui)
         is NoticeRow -> NoticeItem(row)
         is TurnEndRow -> TurnEndItem(row)
-        // The thinking and working rows get their own items next (spec 4.5, 4.9); until then, their line.
-        is ThinkingRow -> SecondaryLine(row.label, row.gap.dp)
-        is WorkingRow -> SecondaryLine(row.step, row.gap.dp, small = true)
-    }
-}
-
-@Composable
-private fun SecondaryLine(text: String, gap: Int, small: Boolean = false) {
-    Box(Modifier.chatColumn().padding(top = gap.dp)) {
-        if (small) {
-            Text(text, style = smallTextStyle(), color = JewelTheme.globalColors.text.info)
-        } else {
-            Text(text, color = JewelTheme.globalColors.text.info)
-        }
+        is ThinkingRow -> ThinkingRowItem(row, ui)
+        is WorkingRow -> WorkingRowItem(row, lastFrameAt)
     }
 }

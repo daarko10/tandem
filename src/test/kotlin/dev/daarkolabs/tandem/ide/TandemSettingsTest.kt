@@ -25,6 +25,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JButton
+import javax.swing.JCheckBox
 import javax.swing.JComponent
 import javax.swing.JLabel
 import kotlin.io.path.createDirectories
@@ -348,6 +349,44 @@ class TandemSettingsTest {
             val state = TandemSettings.getInstance().state
             assertEquals("/opt/claude/bin/claude", state.claudePath)
             assertEquals(14, state.maxLiveSessions)
+        } finally {
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+    }
+
+    @Test
+    fun showThinkingRoundTrips() = timeoutRunBlocking {
+        assertTrue(TandemSettings.State().showThinking, "thinking rows show by default")
+        val settings = TandemSettings.getInstance()
+        settings.state.showThinking = false
+        assertFalse(settings.state.showThinking)
+        settings.loadState(TandemSettings.State())
+        assertTrue(settings.state.showThinking)
+        settings.loadState(TandemSettings.State().apply { showThinking = false })
+        assertFalse(settings.state.showThinking)
+        // Saved and read back under its name, as tandem.xml holds it.
+        val saved = XmlSerializer.serialize(TandemSettings.State().apply { showThinking = false })
+        assertTrue("showThinking" in JDOMUtil.write(saved), JDOMUtil.write(saved))
+        assertFalse(XmlSerializer.deserialize(saved, TandemSettings.State::class.java).showThinking)
+
+        // The page's checkbox writes it.
+        settings.loadState(TandemSettings.State())
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val (shown, changed, applied) = withContext(Dispatchers.EDT) {
+                val page = configurable.createComponent()
+                configurable.reset()
+                val box = UIUtil.findComponentsOfType(page, JCheckBox::class.java).single { it.text == "Show thinking rows" }
+                val shown = box.isSelected
+                box.doClick()
+                val changed = configurable.isModified
+                configurable.apply()
+                Triple(shown, changed, configurable.isModified)
+            }
+            assertTrue(shown, "the checkbox shows the stored value")
+            assertTrue(changed)
+            assertFalse(applied, "nothing left to apply once applied")
+            assertFalse(settings.state.showThinking)
         } finally {
             withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
         }
