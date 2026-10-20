@@ -42,12 +42,9 @@ private fun SubRow(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?, ui: Ch
     val opens = canExpand(call)
     val needsParse = parsedOnOpen(call.body) && blocks == null
     Column(Modifier.fillMaxWidth()) {
-        ToolLine(call.label, call.state, call.stats, opens, expanded && opens, minHeight = 36.dp) {
-            val open = !expandedState.value
-            expandedState.value = open
-            if (open && needsParse) ui.onExpand(key)
-        }
+        ToolLine(call.label, call.state, call.stats, opens, expanded && opens, minHeight = 36.dp) { expandedState.value = !expandedState.value }
         if (expanded && opens) {
+            // Asks for the body's Markdown once it is open, as ToolRowItem does.
             if (needsParse) LaunchedEffect(key) { ui.onExpand(key) }
             ToolBodyView(call, blocks, ui)
         }

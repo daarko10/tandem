@@ -92,18 +92,15 @@ internal fun ToolRowItem(rendered: RenderedRow, ui: ChatUiState) {
     val lone = row.calls.singleOrNull()
     val needsParse = lone != null && parsedOnOpen(lone.body) && rendered.bodies[row.key] == null
     Column(Modifier.chatColumn().padding(top = row.gap.dp.dp)) {
-        ToolLine(row.label, row.state, row.stats, opens, expanded && opens, minHeight = 24.dp) {
-            val open = !expandedState.value
-            expandedState.value = open
-            if (open && needsParse) ui.onExpand(row.key)
-        }
+        ToolLine(row.label, row.state, row.stats, opens, expanded && opens, minHeight = 24.dp) { expandedState.value = !expandedState.value }
         // An agent's sub-line: `Done (2 tool uses · 21.8k tokens · 5.8s)` (spec 4.8).
         lone?.progress?.takeIf { lone.kind == ToolKind.AGENT }?.let { Text(it, style = smallTextStyle(), color = JewelTheme.globalColors.text.info) }
         if (expanded && opens) {
             if (lone == null) {
                 ToolGroupBox(row.calls, rendered.bodies, ui)
             } else {
-                // Opened before its Markdown was parsed (a presenter made after the row was opened): ask for it again.
+                // The one place that asks for the body's Markdown: on the click that opens it, and again for a row that was already
+                // open when its presenter was made. The presenter ignores a key it already has.
                 if (needsParse) LaunchedEffect(row.key) { ui.onExpand(row.key) }
                 ToolBodyView(lone, rendered.bodies[row.key], ui)
             }
