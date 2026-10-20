@@ -128,7 +128,7 @@ class TandemSessionsTest {
     @Test
     fun aQuestionAnsweredFromTheServiceReachesTheFake() = timeoutRunBlocking(30.seconds) {
         val dir = tempDir.get().resolve("question").createDirectories()
-        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val log = tempDir.get().resolve("question-sent.ndjson")
         openProjectAsync(dir).useProjectAsync { project ->
             val sessions = TandemSessions.get(project)
             sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "ask-single", "TANDEM_FAKE_LOG" to log.toString())
