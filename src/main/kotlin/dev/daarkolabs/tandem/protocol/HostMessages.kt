@@ -31,7 +31,11 @@ object HostMessages {
         put("uuid", uuid)
     }
 
-    fun initialize(requestId: String): JsonObject = request(requestId, "initialize") { put("hooks", JsonNull) }
+    /** `forwardSubagentText` makes the CLI forward a subagent's text replies as assistant lines with an `agent_id`. */
+    fun initialize(requestId: String): JsonObject = request(requestId, "initialize") {
+        put("hooks", JsonNull)
+        put("forwardSubagentText", true)
+    }
 
     fun interrupt(requestId: String): JsonObject = request(requestId, "interrupt") {}
 

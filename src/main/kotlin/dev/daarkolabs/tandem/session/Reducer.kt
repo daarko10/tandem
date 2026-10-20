@@ -137,6 +137,8 @@ private fun reduceCli(state: ChatState, message: CliMessage): ChatState = when (
             else -> state.rejectModeChange(message.requestId, change, message.error)
         }
     }
+    is CliMessage.ThinkingTokens, is CliMessage.TaskStarted, is CliMessage.TaskProgress, is CliMessage.TaskUpdated,
+    is CliMessage.TaskNotification -> state
     is CliMessage.KeepAlive, is CliMessage.Unknown -> state
 }
 

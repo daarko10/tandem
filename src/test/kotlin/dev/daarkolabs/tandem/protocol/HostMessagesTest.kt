@@ -27,8 +27,15 @@ class HostMessagesTest {
     }
 
     @Test
+    fun `initialize forwards subagent text`() {
+        assertEquals(
+            """{"type":"control_request","request_id":"a0","request":{"subtype":"initialize","hooks":null,"forwardSubagentText":true}}""",
+            wire(HostMessages.initialize("a0")),
+        )
+    }
+
+    @Test
     fun `control requests`() {
-        assertEquals("""{"type":"control_request","request_id":"a0","request":{"subtype":"initialize","hooks":null}}""", wire(HostMessages.initialize("a0")))
         assertEquals("""{"type":"control_request","request_id":"a1","request":{"subtype":"interrupt"}}""", wire(HostMessages.interrupt("a1")))
         assertEquals(
             """{"type":"control_request","request_id":"a2","request":{"subtype":"set_model","model":"claude-opus-5-5"}}""",
