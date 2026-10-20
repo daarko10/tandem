@@ -88,7 +88,7 @@ object ToolBodies {
         val denial = message in setOf("The user denied this command.", "cancelled", "The user denied this request.")
         if (kind == ToolKind.SHELL && !denial) {
             val (lines, total) = clamp(ToolLabels.stripAnsi(message))
-            return ToolBody.Command(input?.string("command").orEmpty(), lines, total, firstLineError = true)
+            return ToolBody.Command(cut(input?.string("command").orEmpty()), lines, total, firstLineError = true)
         }
         val (lines, total) = clamp(message)
         return ToolBody.Mono(lines, total, firstLineError = !denial && lines.isNotEmpty())
@@ -100,7 +100,7 @@ object ToolBodies {
         val output = stdout.ifEmpty { text.takeIf { it.trim() != NO_OUTPUT }.orEmpty() }
         if (output.isBlank() && fields?.string("stderr").isNullOrBlank()) return ToolBody.None
         val (lines, total) = clamp(ToolLabels.stripAnsi(output.ifBlank { fields?.string("stderr").orEmpty() }))
-        return ToolBody.Command(input?.string("command").orEmpty(), lines, total, firstLineError = false)
+        return ToolBody.Command(cut(input?.string("command").orEmpty()), lines, total, firstLineError = false)
     }
 
     /** A read file's lines, numbered from its `startLine`, without system reminders; null without `content`. */

@@ -168,6 +168,15 @@ class ToolBodiesTest {
     }
 
     @Test
+    fun `a command over 50000 characters ends with the cut line`() {
+        val input = buildJsonObject { put("command", "z".repeat(60_000)) }
+        val ok = assertIs<ToolBody.Command>(ToolBodies.body(ToolKind.SHELL, input, JsonPrimitive("out"), null, isError = false))
+        assertEquals("z".repeat(50_000) + "\n… (cut, 10000 more characters)", ok.command)
+        val failed = assertIs<ToolBody.Command>(ToolBodies.body(ToolKind.SHELL, input, JsonPrimitive("Exit code 1"), null, isError = true))
+        assertEquals(ok.command, failed.command)
+    }
+
+    @Test
     fun `grep glob and write bodies list their lines`() {
         val grep = assertIs<ToolBody.Mono>(body("tools-read", 58, 62))
         assertEquals(listOf("seed.txt:29:line 29 seven"), grep.lines)

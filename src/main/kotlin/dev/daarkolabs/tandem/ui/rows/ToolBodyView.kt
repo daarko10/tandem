@@ -55,12 +55,16 @@ private val CLAMP_HEIGHT: Dp = 240.dp
 /** A clamped body's bottom fades out over about this many lines (spec 4.7). */
 private const val FADE_LINES = 3
 
+/** `Show all` opens a body up to this many lines; the rest is counted in `… N more lines` (spec 4.7, 5.3). */
+private const val MAX_LINES = 400
+
 /**
  * An opened call's body (spec 4.7), drawn from pre-built data: lines in the editor font in a filled box, a command's `$` line in its
  * box and its output on the page, Markdown from [blocks] (parsed by the presenter; nothing until they arrive), result links, question
- * answers, JSON input and output, an edit's lines, an image's size. Every body is clamped at 20 lines or 240 dp, whichever comes
- * first, faded, with `Show all N lines`; past the 400 lines a body keeps, `… N more lines` says how many were left out. Everything
- * is selectable; nothing scrolls inside the row.
+ * answers, JSON input and output, an edit's lines, an image's size. Every body, the command's box included, is clamped at 20 lines
+ * or 240 dp, whichever comes first, faded, with `Show all N lines`; past the 400 lines a body keeps, `… N more lines` says how many
+ * were left out. Markdown cannot be cut by line, so its bodies clamp by height alone. Everything is selectable; nothing scrolls
+ * inside the row.
  */
 @Composable
 internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?, ui: ChatUiState) {
@@ -74,14 +78,17 @@ internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?,
                     MonoBox(modifier) { MonoLines(body.lines.take(shown), body.firstLineError) }
                 }
                 is ToolBody.Command -> {
-                    MonoBox { Text("$ ${body.command}", style = mono, color = colors.normal) }
+                    val command = remember(body) { kept("$ ${body.command}") }
+                    Clamped("all:${call.id}:command", command.lines.size, command.total, ui) { shown, modifier ->
+                        MonoBox(modifier) { MonoLines(command.lines.take(shown), false) }
+                    }
                     Clamped("all:${call.id}", body.output.size, body.totalLines, ui) { shown, modifier ->
                         Box(modifier.fillMaxWidth().padding(top = 4.dp)) { MonoLines(body.output.take(shown), body.firstLineError) }
                     }
                 }
                 is ToolBody.Markdown -> {
                     val count = remember(body) { body.markdown.lines().size + (if (body.title != null) 1 else 0) }
-                    Clamped("all:${call.id}", count, count, ui) { _, modifier ->
+                    Clamped("all:${call.id}", count, count, ui, byLines = false) { _, modifier ->
                         Column(modifier.fillMaxWidth()) {
                             body.title?.let { Text(it, color = colors.info) }
                             blocks?.let { Markdown(it, body.markdown, modifier = Modifier.fillMaxWidth(), selectable = true) }
@@ -90,7 +97,7 @@ internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?,
                 }
                 is ToolBody.Links -> {
                     val count = remember(body) { body.links.size + body.markdown.lines().size }
-                    Clamped("all:${call.id}", count, count, ui) { _, modifier ->
+                    Clamped("all:${call.id}", count, count, ui, byLines = false) { _, modifier ->
                         Column(modifier.fillMaxWidth()) {
                             body.links.forEach { link -> Link(link.title, onClick = { openWebLink(link.url) }) }
                             blocks?.let { Markdown(it, body.markdown, modifier = Modifier.fillMaxWidth(), selectable = true) }
@@ -103,16 +110,16 @@ internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?,
                     }
                 }
                 is ToolBody.Json -> {
-                    val input = remember(body) { body.input.split("\n") }
-                    val output = remember(body) { body.output?.split("\n") }
+                    val input = remember(body) { kept(body.input) }
+                    val output = remember(body) { body.output?.let(::kept) }
                     Text("INPUT", color = colors.info)
-                    Clamped("all:${call.id}:input", input.size, input.size, ui) { shown, modifier ->
-                        MonoBox(modifier) { MonoLines(input.take(shown), false) }
+                    Clamped("all:${call.id}:input", input.lines.size, input.total, ui) { shown, modifier ->
+                        MonoBox(modifier) { MonoLines(input.lines.take(shown), false) }
                     }
-                    output?.let { lines ->
+                    output?.let { out ->
                         Text("OUTPUT", color = colors.info, modifier = Modifier.padding(top = 4.dp))
-                        Clamped("all:${call.id}:output", lines.size, lines.size, ui) { shown, modifier ->
-                            MonoBox(modifier) { MonoLines(lines.take(shown), false) }
+                        Clamped("all:${call.id}:output", out.lines.size, out.total, ui) { shown, modifier ->
+                            MonoBox(modifier) { MonoLines(out.lines.take(shown), false) }
                         }
                     }
                 }
@@ -155,6 +162,14 @@ private fun DiffLines(lines: List<DiffLine>, truncated: Boolean) {
     }
 }
 
+/** A text's first [MAX_LINES] [lines] and how many it has in [total]. */
+private class Kept(val lines: List<String>, val total: Int)
+
+private fun kept(text: String): Kept {
+    val all = text.split("\n")
+    return Kept(all.take(MAX_LINES), all.size)
+}
+
 /** `[image 8×8 png]`: an image result's size and type; its data never reaches a row. */
 internal fun imageLine(image: ToolBody.Image): String {
     val type = image.mediaType.substringAfter('/')
@@ -165,7 +180,9 @@ internal fun imageLine(image: ToolBody.Image): String {
 /**
  * A body of [lineCount] lines under the one clamp rule (spec 4.7): more than 20 lines, or taller than 240 dp, is clamped. [content]
  * then draws the first `shown` lines (20 at most) at most 240 dp tall, clipped, with its bottom faded out, and a `Show all N lines`
- * link opens it in place ([key] remembers it). [total] beyond the lines kept ends the opened body with `… N more lines`.
+ * link opens it in place ([key] remembers it). [total] beyond the lines kept ends the opened body with `… N more lines`. Without
+ * [byLines] (a body that cannot be cut by line, such as Markdown, whose content ignores `shown`) only the measured height decides,
+ * so a short rendering of many source lines is neither faded nor offered a `Show all` that reveals nothing.
  */
 @Composable
 private fun Clamped(
@@ -173,6 +190,7 @@ private fun Clamped(
     lineCount: Int,
     total: Int,
     ui: ChatUiState,
+    byLines: Boolean = true,
     content: @Composable (shown: Int, modifier: Modifier) -> Unit,
 ) {
     val showAllState = ui.expanded(key)
@@ -184,7 +202,7 @@ private fun Clamped(
     }
     // Whether the shown lines are taller than 240 dp, as measured; a 20-line body of wrapped lines can be.
     var tall by remember { mutableStateOf(false) }
-    val tooManyLines = lineCount > CLAMP_LINES
+    val tooManyLines = byLines && lineCount > CLAMP_LINES
     val clamped = tooManyLines || tall
     val fade = fadeHeight()
     val modifier = Modifier.clipToBounds().thenIf(clamped) { bottomFade(fade) }.capHeight(CLAMP_HEIGHT) { if (tall != it) tall = it }
