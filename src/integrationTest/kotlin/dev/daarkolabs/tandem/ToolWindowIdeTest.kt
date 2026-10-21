@@ -4,6 +4,7 @@ import com.intellij.driver.client.Driver
 import com.intellij.driver.client.Remote
 import com.intellij.driver.client.service
 import com.intellij.driver.model.OnDispatcher
+import com.intellij.driver.model.RemoteMouseButton
 import com.intellij.driver.sdk.ActionManager
 import com.intellij.driver.sdk.closeAndDisableAllBalloonNotifications
 import com.intellij.driver.sdk.getOpenProjects
@@ -31,11 +32,20 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
+import java.awt.GraphicsEnvironment
+import java.awt.Image
 import java.awt.Point
+import java.awt.Toolkit
+import java.awt.datatransfer.DataFlavor
+import java.awt.datatransfer.Transferable
+import java.awt.datatransfer.UnsupportedFlavorException
 import java.awt.event.KeyEvent
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
+import javax.imageio.ImageIO
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createFile
 import kotlin.io.path.exists
@@ -613,6 +623,85 @@ class ToolWindowIdeTest {
         }
     }
 
+    @Test
+    fun `a pasted image is sent as an image block`() {
+        // The IDE reads the clipboard of the display this JVM shares with it; open item 9: where this JVM cannot own it, the paste
+        // stays on the runIde checklist and the drop test below covers the attach path.
+        assumeTrue(
+            runCatching { Toolkit.getDefaultToolkit().systemClipboard.setContents(ImageTransferable(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB)), null) }
+                .isSuccess,
+            "the test JVM cannot own the clipboard",
+        )
+        val sent = runChat("pasted-image", fixtures = listOf("user-image")) {
+            newSession()
+            promptBox().click(Point(10, 10))
+            waitFor("prompt box focused", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
+            ui.keyboard { hotKey(if (isMac) KeyEvent.VK_META else KeyEvent.VK_CONTROL, KeyEvent.VK_V) }
+            waitFor("thumbnail", 30.seconds) { ui.x(FIRST_IMAGE).present() }
+            typePrompt("What colour?")
+            waitForText("Red.")
+        }
+        assertImagePrompt(sent)
+    }
+
+    @Test
+    fun `a dropped image file is attached`() {
+        // Open item 10. The drag starts in the IDE's own Project view, as a user drags a file from it: a drag from another process
+        // reaches no window under Xvfb, which has no window manager to mark the IDE's window as a drop site.
+        assumeTrue(!GraphicsEnvironment.isHeadless(), "no display to drag on")
+        val project = newProject()
+        ImageIO.write(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "png", project.resolve("drop.png").toFile())
+        val sent = runChat("dropped-image", fixtures = listOf("user-image"), project = project) {
+            newSession()
+            val box = promptBox().component
+            val boxOrigin = box.getLocationOnScreen()
+            val target = Point(boxOrigin.x + maxOf(box.width / 2, 20), boxOrigin.y + maxOf(box.height / 2, 15))
+            val tree = ui.x("//div[@class='MyProjectViewTree']")
+            val node = tree.waitOneText("drop.png")
+            val treeOrigin = tree.component.getLocationOnScreen()
+            val start = Point(treeOrigin.x + node.point.x, treeOrigin.y + node.point.y)
+            val robot = tree.robot
+            robot.moveMouse(start)
+            robot.pressMouse(RemoteMouseButton.LEFT)
+            var x = start.x
+            var y = start.y
+            while (x != target.x || y != target.y) {
+                x += (target.x - x).coerceIn(-10, 10)
+                y += (target.y - y).coerceIn(-10, 10)
+                robot.moveMouse(Point(x, y))
+                Thread.sleep(15)
+            }
+            Thread.sleep(300)
+            robot.releaseMouse(RemoteMouseButton.LEFT)
+            waitFor("thumbnail", 30.seconds) { ui.x(FIRST_IMAGE).present() }
+            typePrompt("What colour?")
+            waitForText("Red.")
+        }
+        assertImagePrompt(sent)
+    }
+
+    /** The one prompt sent: `What colour?` as its text block, then a PNG image block with data. */
+    private fun assertImagePrompt(sent: List<JsonObject>) {
+        val content = sent.single { it.type == "user" }["message"]!!.jsonObject["content"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(2, content.size, content.toString())
+        assertEquals("text", content[0]["type"]!!.jsonPrimitive.content)
+        assertEquals("What colour?", content[0]["text"]!!.jsonPrimitive.content)
+        assertEquals("image", content[1]["type"]!!.jsonPrimitive.content)
+        val source = content[1]["source"]!!.jsonObject
+        assertEquals("base64", source["type"]!!.jsonPrimitive.content)
+        assertEquals("image/png", source["media_type"]!!.jsonPrimitive.content)
+        assertTrue(source["data"]!!.jsonPrimitive.content.isNotEmpty(), "the image block carries data")
+    }
+
+    /** A clipboard image with no text: what a screenshot tool or a browser's Copy Image leaves. */
+    private class ImageTransferable(private val image: Image) : Transferable {
+        override fun getTransferDataFlavors(): Array<DataFlavor> = arrayOf(DataFlavor.imageFlavor)
+
+        override fun isDataFlavorSupported(flavor: DataFlavor): Boolean = flavor == DataFlavor.imageFlavor
+
+        override fun getTransferData(flavor: DataFlavor): Any = if (flavor == DataFlavor.imageFlavor) image else throw UnsupportedFlavorException(flavor)
+    }
+
     /** Makes the tool window wide enough to dock the sidebar: the IDE gives it less than 500 dp. */
     private fun Driver.widenToolWindow() {
         withContext(OnDispatcher.EDT) {
@@ -913,6 +1002,12 @@ class ToolWindowIdeTest {
         const val WIDE = 900
 
         const val EDITABLE = "//div[@class='ComposeNode' and @editabletext]"
+
+        /** The first attached or sent image: a thumbnail, or its placeholder while it decodes. */
+        const val FIRST_IMAGE = "//div[@class='ComposeNode' and @contentdescription='[Image #1]']"
+
+        /** Whether the IDE runs on macOS, where paste is Cmd+V. */
+        val isMac: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
 
         /** A turn's footer. */
         const val FOOTER = "//div[@class='ComposeNode' and starts-with(@visible_text, 'Worked for')]"
