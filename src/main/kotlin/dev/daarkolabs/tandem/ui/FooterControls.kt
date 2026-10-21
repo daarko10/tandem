@@ -61,10 +61,12 @@ import org.jetbrains.jewel.ui.component.PopupMenu
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.copyWithSize
 import org.jetbrains.jewel.ui.component.separator
+import java.awt.Component
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
-import java.awt.Window
 import java.awt.event.KeyEvent as AwtKeyEvent
+import java.beans.PropertyChangeListener
+import javax.swing.JComponent
 import javax.swing.SwingUtilities
 import kotlin.math.max
 
@@ -178,7 +180,7 @@ internal class AboveAnchor(val alignEnd: Boolean, val gapPx: Int) : PopupPositio
  * The digit 1 to 9 that an AWT key event stands for, from the number row or the keypad, without Shift, Ctrl, Alt or Meta; null for
  * any other key. A typed event has it as its character, a pressed or released one as its key code.
  */
-private fun digitOf(event: AwtKeyEvent): Int? {
+internal fun digitOf(event: AwtKeyEvent): Int? {
     if (event.isShiftDown || event.isControlDown || event.isAltDown || event.isMetaDown) return null
     if (event.id == AwtKeyEvent.KEY_TYPED) return event.keyChar.takeIf { it in '1'..'9' }?.digitToInt()
     return when (event.keyCode) {
@@ -189,15 +191,19 @@ private fun digitOf(event: AwtKeyEvent): Int? {
 }
 
 /**
- * Whether a key event goes to [home] (the window the control is in) or to a window it owns, such as the open menu's popup: a
- * footer menu takes no digits from another IDE window. With no [home] known, every window counts.
+ * Whether an open footer menu takes a key from [component], the AWT component the key event names (the focus owner): only one in
+ * [panel], the tool window's own Compose panel ([LocalComponent]), which holds the menu as a layer of its scene, not as a window of
+ * its own (open item 13). A key typed in the editor, the terminal, another tool window, a dialog or an IDE popup names a component
+ * outside the panel, so the menu leaves it alone: it never picks a model or a mode from a keystroke meant for something else.
  */
-private fun inWindowOf(event: AwtKeyEvent, home: Window?): Boolean {
-    if (home == null) return true
-    val component = event.component ?: return false
-    val window = component as? Window ?: SwingUtilities.getWindowAncestor(component) ?: return false
-    return generateSequence(window) { it.owner }.any { it === home }
-}
+internal fun takesKey(component: Component?, panel: JComponent): Boolean = component != null && SwingUtilities.isDescendingFrom(component, panel)
+
+/**
+ * Whether the AWT focus has left [panel] for [owner], the new focus owner, which closes an open footer menu: the menu gets no click
+ * from Swing components outside the panel, so it would stay open under the editor otherwise. No owner (the IDE window lost the
+ * focus) is not a move: the menu stays, and no key reaches it meanwhile.
+ */
+internal fun focusLeft(owner: Component?, panel: JComponent): Boolean = owner != null && !takesKey(owner, panel)
 
 /**
  * A footer control's pill (spec 2.3): the bubble fill at a 6 dp radius when [filled] (hovered, or its menu open), a 1 dp focus
@@ -393,7 +399,7 @@ internal class FooterMenu(val page: Int, val close: () -> Unit, val show: (Int) 
  * The page the arrow key of an AWT key press turns to from [page], or null for any other key or a press with Shift, Ctrl, Alt or
  * Meta: → the next page, ← the one before, as Jewel's submenus open and close on them.
  */
-private fun pageTurn(event: AwtKeyEvent, page: Int): Int? {
+internal fun pageTurn(event: AwtKeyEvent, page: Int): Int? {
     if (event.id != AwtKeyEvent.KEY_PRESSED || event.isShiftDown || event.isControlDown || event.isAltDown || event.isMetaDown) return null
     return when (event.keyCode) {
         AwtKeyEvent.VK_RIGHT -> page + 1
@@ -412,6 +418,9 @@ private fun pageTurn(event: AwtKeyEvent, page: Int): Int? {
  * The digits and the arrows are taken from AWT's key dispatch while the menu is open, not from a Compose key handler (open item 13):
  * in the IDE the menu is a focusable popup layer of the tool window's own Compose scene (the IDE leaves Jewel's `JBPopupRenderer`
  * off), which takes the keys with no Compose node focused in it, so neither a handler on the menu nor one on the control gets them.
+ * Only keys in the tool window's own panel are taken ([takesKey]), and the menu closes when the AWT focus leaves that panel
+ * ([focusLeft]): the layer gets no click from Swing components outside it, so a menu left open under the editor would otherwise
+ * take the digits and arrows typed there.
  *
  * The menu is placed in the control's outer box, which has no padding of its own, so that [AboveAnchor] measures from the pill's
  * edges: placed inside the pill's padding, it sat 5 dp above the pill and 7 dp inside its right edge.
@@ -448,10 +457,10 @@ private fun FooterControl(
     val panel = LocalComponent.current
     if (open) {
         DisposableEffect(panel) {
-            // Every event of a digit key in this window or its menu is taken while the menu is open, so that its typed character lands
-            // nowhere; the press picks. An arrow's press is taken when it turns a page.
+            // Every event of a digit key in the panel is taken while the menu is open, so that its typed character lands nowhere; the
+            // press picks. An arrow's press is taken when it turns a page. A key in any other component is left alone.
             val dispatcher = KeyEventDispatcher { event ->
-                if (!inWindowOf(event, SwingUtilities.getWindowAncestor(panel))) return@KeyEventDispatcher false
+                if (!takesKey(event.component, panel)) return@KeyEventDispatcher false
                 val digit = digitOf(event)
                 if (digit != null) {
                     if (event.id == AwtKeyEvent.KEY_PRESSED && page == FIRST_PAGE && currentDigitPick(digit)) open = false
@@ -461,9 +470,14 @@ private fun FooterControl(
                 page = next
                 true
             }
+            val focusListener = PropertyChangeListener { change -> if (focusLeft(change.newValue as? Component, panel)) open = false }
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
             focusManager.addKeyEventDispatcher(dispatcher)
-            onDispose { focusManager.removeKeyEventDispatcher(dispatcher) }
+            focusManager.addPropertyChangeListener("focusOwner", focusListener)
+            onDispose {
+                focusManager.removeKeyEventDispatcher(dispatcher)
+                focusManager.removePropertyChangeListener("focusOwner", focusListener)
+            }
         }
     }
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
