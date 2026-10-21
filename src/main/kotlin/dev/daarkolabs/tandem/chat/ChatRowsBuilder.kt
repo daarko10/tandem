@@ -29,8 +29,8 @@ data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, va
  * per lone tool call or group of consecutive calls ([Grouping], spec 4.6.4), each with its key and its gap. A subagent's entries
  * (`parentToolUseId` naming an Agent call) become that call's children, one row per call. While a turn runs the last row is the
  * [WorkingRow] (spec 4.9); once the latest turn has ended its [TurnEndRow] stands where it ended (spec 4.10), and a failed turn's
- * `The turn failed` notice gives way to it when the footer states the failure (spec 4.10, 4.11). The oldest pending request comes as
- * the [ChatRows.card] ([Cards.pending]).
+ * `The turn failed` notice gives way to it when the footer states all the notice says (spec 4.10, 4.11). The oldest pending request
+ * comes as the [ChatRows.card] ([Cards.pending]).
  *
  * Rows are cached per turn (a turn runs from one user message to the next): a closed turn is built once more when it closes and then
  * kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the last entry it holds
@@ -88,8 +88,9 @@ class ChatRowsBuilder(private val options: RowOptions) {
         var previous = frozenRows.lastOrNull()
         val turnRows = region.turns.mapIndexed { t, turn ->
             val turnOpen = state.turn != null && t == region.turns.lastIndex && entries[turn.first] is ChatEntry.User
-            // The footer of a failed turn says why (spec 4.10), so its "The turn failed" notice would say it twice (spec 4.11). Not after
-            // the mid-response wording, which names no cause, and not in an older turn, which has no footer: there the notice follows.
+            // The footer of a failed turn says why (spec 4.10), so its "The turn failed" notice may say it twice (spec 4.11): it goes
+            // when the footer holds all it says ([saidByFooter]). Not after the mid-response wording, which names no cause, and not in an
+            // older turn, which has no footer: there the notice follows.
             val failureInFooter = end != null && end.end == TurnEnd.FAILED && !end.textStreamed && t == region.turns.lastIndex
             val context = TurnContext(turnOpen, failureInFooter, end)
             val rows = Rows(previous, grouped = true) { reuse(withUniqueKey(it, keys)) }
@@ -115,8 +116,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
     }
 
     /**
-     * What the rows of one turn depend on beyond its entries: whether it runs, whether its footer states its failure (so the
-     * `The turn failed` notice is not drawn), and the latest turn's end.
+     * What the rows of one turn depend on beyond its entries: whether it runs, whether its footer states its failure (so a
+     * `The turn failed` notice that says nothing more is not drawn), and the latest turn's end.
      */
     private class TurnContext(val turnOpen: Boolean, val failureInFooter: Boolean, val end: TurnEndAt?)
 
@@ -329,7 +330,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
             // The interrupt marker shows as the turn's end, not as a row; it still closes a group.
             is ChatEntry.Notice -> when {
                 entry.kind == NoticeKind.INTERRUPTED ||
-                    context.failureInFooter && entry.level == NoticeLevel.ERROR && entry.text.startsWith("The turn failed") ->
+                    context.failureInFooter && entry.level == NoticeLevel.ERROR && saidByFooter(entry.text, context.end?.text.orEmpty()) ->
                     rows.add { footer(entry, context, it) }
                 else -> rows.add { NoticeRow("n:${entry.id}", entry.level, entry.text, gap(Kind.NOTICE, it)) }
             }
@@ -548,6 +549,19 @@ class ChatRowsBuilder(private val options: RowOptions) {
             if (start < entries.size) turns += turnStart until entries.size
         }
     }
+}
+
+/** The reducer's notice for a failed result: `The turn failed`, the failure kind in parentheses when there is one, `: ` and the details. */
+private val TURN_FAILED = Regex("The turn failed(?: \\(([^()]*)\\))?: (.*)", RegexOption.DOT_MATCHES_ALL)
+
+/**
+ * Whether the reducer's `The turn failed (<kind>): <details>` notice [notice] says nothing the failed turn's [footer] does not (spec
+ * 4.10, 4.11): its kind, when it has one, and its details are both in the footer's text. Any other notice says more, and stays.
+ */
+internal fun saidByFooter(notice: String, footer: String): Boolean {
+    val match = TURN_FAILED.matchEntire(notice) ?: return false
+    val kind = match.groups[1]?.value
+    return (kind == null || kind in footer) && match.groupValues[2] in footer
 }
 
 /** The call a subagent's entry belongs to, if any. */

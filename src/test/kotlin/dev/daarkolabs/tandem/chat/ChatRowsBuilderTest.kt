@@ -434,12 +434,15 @@ class ChatRowsBuilderTest {
     @Test
     fun `invalid-model`() {
         val invalid = replay("invalid-model").second.rows
-        // The footer carries the failure (spec 4.10, 4.11): no "The turn failed" notice, the model rejection stays.
-        assertTrue(invalid.none { it is NoticeRow && it.text.startsWith("The turn failed") }, invalid.toString())
-        val rejected = invalid.filterIsInstance<NoticeRow>().single()
+        // The model rejection stays above the footer; the footer names the API error, and the "The turn failed" notice follows it,
+        // since its kind and the CLI's sentence are not in the footer (spec 4.10, 4.11).
+        val (rejected, failed) = invalid.filterIsInstance<NoticeRow>().also { assertEquals(2, it.size, invalid.toString()) }
         assertEquals(NoticeLevel.ERROR, rejected.level)
         assertTrue(rejected.text.startsWith("The CLI rejected the model"), rejected.text)
-        assertEquals(TurnEnd.FAILED to "API Error: 404 model_not_found", assertIs<TurnEndRow>(invalid.last()).let { it.end to it.text })
+        assertEquals(TurnEnd.FAILED to "API Error: 404 model_not_found", assertIs<TurnEndRow>(invalid[invalid.size - 2]).let { it.end to it.text })
+        assertSame(failed, invalid.last())
+        assertEquals(NoticeLevel.ERROR, failed.level)
+        assertTrue(failed.text.startsWith("The turn failed (api_error): There's an issue with the selected model"), failed.text)
     }
 
     @Test
@@ -501,10 +504,11 @@ class ChatRowsBuilderTest {
     @Test
     fun `a failed turn ends with the failure footer`() {
         val rows = replay("invalid-model").second.rows
-        assertTrue(rows.none { it is NoticeRow && it.text.startsWith("The turn failed") })
         assertEquals(1, rows.count { it is NoticeRow && it.level == NoticeLevel.ERROR && it.text.startsWith("The CLI rejected the model") })
-        val footer = assertIs<TurnEndRow>(rows.last())
+        val footer = assertIs<TurnEndRow>(rows[rows.size - 2])
         assertEquals(TurnEnd.FAILED to "API Error: 404 model_not_found", footer.end to footer.text)
+        // The notice says more than the footer, so it follows it rather than going (hard rule 5).
+        assertTrue(assertIs<NoticeRow>(rows.last()).text.startsWith("The turn failed (api_error): "))
     }
 
     @Test
@@ -529,8 +533,29 @@ class ChatRowsBuilderTest {
             cliLine("""{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":2000,"result":"boom","session_id":"s"}"""),
         )
         val rows = ChatRowsBuilder(options).build(state).rows
+        assertEquals(TurnEnd.FAILED to "The turn failed (boom)", assertIs<TurnEndRow>(rows[rows.size - 2]).let { it.end to it.text })
+        // The footer lacks the failure kind, so the notice that names it follows (spec 4.10, 4.11).
+        val notice = assertIs<NoticeRow>(rows.last())
+        assertEquals(NoticeLevel.ERROR to "The turn failed (error_max_turns): boom", notice.level to notice.text)
+        assertEquals(1, rows.count { it is NoticeRow }, rows.toString())
+    }
+
+    @Test
+    fun `the failed turn's notice goes only when the footer holds all it says`() {
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 0))
+        // An error result whose subtype is success and which has no terminal reason: no kind, so the notice is `The turn failed: boom`.
+        state = reduce(state, cliLine("""{"type":"result","subtype":"success","is_error":true,"duration_ms":2000,"result":"boom","session_id":"s"}"""))
+        assertTrue(state.entries.any { it is ChatEntry.Notice && it.text == "The turn failed: boom" }, state.entries.toString())
+        val rows = ChatRowsBuilder(options).build(state).rows
         assertTrue(rows.none { it is NoticeRow }, rows.toString())
         assertEquals(TurnEnd.FAILED to "The turn failed (boom)", assertIs<TurnEndRow>(rows.last()).let { it.end to it.text })
+
+        assertTrue(saidByFooter("The turn failed: boom", "The turn failed (boom)"))
+        assertTrue(saidByFooter("The turn failed (api_error): boom", "The turn failed (api_error: boom)"))
+        assertFalse(saidByFooter("The turn failed (error_max_turns): boom", "The turn failed (boom)"))
+        assertFalse(saidByFooter("The turn failed: no details", "The turn failed"))
+        assertFalse(saidByFooter("The turn failed: boom and more", "The turn failed (boom)"))
+        assertFalse(saidByFooter("Process exited with code 1.", "The turn failed (Process exited with code 1.)"))
     }
 
     @Test
@@ -559,8 +584,8 @@ class ChatRowsBuilderTest {
             cliLine("""{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":2000,"result":"boom","session_id":"s"}"""),
         )
         val failed = builder.build(state).rows
-        assertTrue(failed.none { it is NoticeRow }, failed.toString())
-        assertEquals("The turn failed (boom)", assertIs<TurnEndRow>(failed.last()).text)
+        assertEquals("The turn failed (boom)", assertIs<TurnEndRow>(failed[failed.size - 2]).text)
+        assertEquals("The turn failed (error_max_turns): boom", assertIs<NoticeRow>(failed.last()).text)
         // The next turn takes the footer away (spec 4.10), so the failure stays on record as its notice.
         state = reduce(state, SessionEvent.UserSent("u2", "again", atMillis = 3_000))
         val next = builder.build(state).rows
