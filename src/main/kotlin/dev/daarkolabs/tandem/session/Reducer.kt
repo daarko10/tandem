@@ -76,7 +76,7 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     )
     is SessionEvent.EffortRequested -> state.copy(
         effort = event.level,
-        effortChanges = event.requestId?.let { state.effortChanges + (it to state.effort) } ?: state.effortChanges,
+        effortChanges = event.requestId?.let { state.effortChanges + (it to EffortChange(event.level, state.effort)) } ?: state.effortChanges,
     )
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
     is SessionEvent.HostNotice -> state.notice(event.level, event.text)
@@ -177,10 +177,10 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
     is CliMessage.ControlResponse -> {
         val change = state.permissionModeChanges[message.requestId]
         val answered = if (change == null) state else state.copy(permissionModeChanges = state.permissionModeChanges - message.requestId)
-        val effortChange = message.requestId in state.effortChanges
+        val effortChange = state.effortChanges[message.requestId]
         when {
-            effortChange && message.isSuccess -> state.copy(effortChanges = state.effortChanges - message.requestId)
-            effortChange -> state.rejectEffortChange(message.requestId, message.error)
+            effortChange != null && message.isSuccess -> state.copy(effortChanges = state.effortChanges - message.requestId)
+            effortChange != null -> state.rejectEffortChange(message.requestId, effortChange, message.error)
             message.isSuccess -> answered.withModels(message.payload)
             change == null -> answered.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
             else -> state.rejectModeChange(message.requestId, change, message.error)
@@ -294,12 +294,19 @@ private fun ChatState.rejectModeChange(requestId: String, change: PermissionMode
 }
 
 /**
- * The CLI answered the effort request [requestId] with [error] and kept the effort it had: the effort shown before that request
- * comes back, and the chat says why (the CLI's own words, docs/protocol.md 4.4).
+ * The CLI answered [change], request [requestId], with [error] and kept the effort it had, as [rejectModeChange] does for modes: the
+ * next change still waiting now starts from that effort; if none waits, the effort shown before [change] comes back, unless
+ * something else replaced it meanwhile. The chat says why (the CLI's own words, docs/protocol.md 4.4).
  */
-private fun ChatState.rejectEffortChange(requestId: String, error: String?): ChatState =
-    copy(effort = effortChanges[requestId], effortChanges = effortChanges - requestId)
-        .notice(NoticeLevel.ERROR, "Effort not changed: ${error ?: "unknown error"}")
+private fun ChatState.rejectEffortChange(requestId: String, change: EffortChange, error: String?): ChatState {
+    // In the order the requests were sent: the reducer adds each to the end of this map.
+    val ids = effortChanges.keys.toList()
+    val next = ids.getOrNull(ids.indexOf(requestId) + 1)
+    var pending = effortChanges - requestId
+    if (next != null) pending = pending + (next to pending.getValue(next).copy(previous = change.previous))
+    val level = if (next == null && effort == change.requested) change.previous else effort
+    return copy(effort = level, effortChanges = pending).notice(NoticeLevel.ERROR, "Effort not changed: ${error ?: "unknown error"}")
+}
 
 private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at: Long): ChatState {
     var next = state

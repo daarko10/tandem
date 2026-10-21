@@ -30,10 +30,11 @@ data class ChatState(
      */
     val effort: String? = null,
     /**
-     * The `apply_flag_settings` effort requests the CLI has not answered yet, by request id, each with the effort shown before it:
-     * [effort] shows the level picked at once, and goes back to that one if the CLI answers with an error. Empty once [settled].
+     * The `apply_flag_settings` effort requests the CLI has not answered yet, by request id, in the order they were sent: [effort]
+     * shows the level each asked for at once, and goes back to the effort before it if the CLI answers with an error. Empty once
+     * [settled].
      */
-    val effortChanges: Map<String, String?> = emptyMap(),
+    val effortChanges: Map<String, EffortChange> = emptyMap(),
     /**
      * A model was picked (`set_model`) and no `system/init` has confirmed it yet: until one does, the footer shows the
      * [requestedModel] rather than the [activeModel] the turn still running reports. A non-local refusal fallback clears it too.
@@ -118,6 +119,9 @@ enum class TurnEnd {
 
 /** A `set_permission_mode` request still to be answered: the mode it asks for, and the mode shown before it. */
 data class PermissionModeChange(val requested: PermissionMode, val previous: PermissionMode?)
+
+/** An `apply_flag_settings` effort request still to be answered: the level it asks for, and the effort shown before it. */
+data class EffortChange(val requested: String, val previous: String?)
 
 /**
  * A model the CLI offers: [value] is what `--model` and `set_model` take, [displayName] and [description] are for people.

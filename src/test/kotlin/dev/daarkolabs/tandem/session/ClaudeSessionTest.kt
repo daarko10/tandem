@@ -309,7 +309,7 @@ class ClaudeSessionTest {
         session.start()
         session.setEffort("high")
         assertEquals("high", session.state.value.effort)
-        assertEquals(null, session.state.value.effortChanges.values.single())
+        assertEquals(EffortChange("high", null), session.state.value.effortChanges.values.single())
 
         val written = withTimeout(10_000) {
             var lines = stdin.readLines()

@@ -503,7 +503,7 @@ class ReducerTest {
     fun `apply_flag_settings success keeps the effort, an error restores it with a notice`() {
         val requested = reduce(ChatState(effort = "medium"), SessionEvent.EffortRequested("high", "r1"))
         assertEquals("high", requested.effort)
-        assertEquals(mapOf("r1" to "medium"), requested.effortChanges)
+        assertEquals(mapOf("r1" to EffortChange("high", "medium")), requested.effortChanges)
 
         val kept = reduce(requested, cli("""{"type":"control_response","response":{"subtype":"success","request_id":"r1"}}"""))
         assertEquals("high", kept.effort)
@@ -515,6 +515,43 @@ class ReducerTest {
         assertEquals("medium", restored.effort)
         assertEquals(emptyMap(), restored.effortChanges)
         assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.ERROR, "Effort not changed: $error"), restored.entries.last())
+    }
+
+    @Test
+    fun `a rejected effort change hands its previous level to the next one waiting`() {
+        // From medium: high (r1), then max (r2), both sent before the CLI answers either.
+        val sent = reduce(
+            reduce(ChatState(effort = "medium"), SessionEvent.EffortRequested("high", "r1")),
+            SessionEvent.EffortRequested("max", "r2"),
+        )
+        assertEquals(mapOf("r1" to EffortChange("high", "medium"), "r2" to EffortChange("max", "high")), sent.effortChanges)
+
+        // r1 refused: max still shows, and r2 now starts from medium, where the CLI stayed.
+        val firstRefused = reduce(sent, rejection("r1", "no"))
+        assertEquals("max", firstRefused.effort)
+        assertEquals(mapOf("r2" to EffortChange("max", "medium")), firstRefused.effortChanges)
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.ERROR, "Effort not changed: no"), firstRefused.entries.last())
+
+        // Both refused: the CLI runs at medium, and so does the footer.
+        val bothRefused = reduce(firstRefused, rejection("r2", "no"))
+        assertEquals("medium", bothRefused.effort)
+        assertEquals(emptyMap(), bothRefused.effortChanges)
+
+        // r1 refused, r2 accepted: the CLI runs at max.
+        val secondAccepted = reduce(firstRefused, cli("""{"type":"control_response","response":{"subtype":"success","request_id":"r2"}}"""))
+        assertEquals("max", secondAccepted.effort)
+        assertEquals(emptyMap(), secondAccepted.effortChanges)
+
+        // r1 accepted, r2 refused: the CLI runs at high.
+        val firstAccepted = reduce(sent, cli("""{"type":"control_response","response":{"subtype":"success","request_id":"r1"}}"""))
+        assertEquals("high", reduce(firstAccepted, rejection("r2", "no")).effort)
+    }
+
+    @Test
+    fun `a rejected effort change leaves an effort set since then`() {
+        val requested = reduce(ChatState(effort = "medium"), SessionEvent.EffortRequested("high", "r1"))
+        val replaced = reduce(requested, SessionEvent.EffortRequested("low"))
+        assertEquals("low", reduce(replaced, rejection("r1", "no")).effort)
     }
 
     @Test
