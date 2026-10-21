@@ -137,11 +137,22 @@ data class ModelOption(
     val effortLevels: List<String> = emptyList(),
 )
 
+/**
+ * One image the user sent with a prompt: [id] is `<entry uuid>#<index>`, the same live and on reload; [base64] is its bytes as the
+ * wire carries them. Kept on the entry only: rows never copy the data.
+ */
+data class UserImage(val id: String, val mediaType: String, val base64: String)
+
 sealed interface ChatEntry {
     val id: String
 
-    /** What the user sent; [sentAtMillis] is when, on the host's clock. */
-    data class User(override val id: String, val text: String, val sentAtMillis: Long? = null) : ChatEntry
+    /** What the user sent; [sentAtMillis] is when, on the host's clock. [images] are its attachments, in the order sent. */
+    data class User(
+        override val id: String,
+        val text: String,
+        val sentAtMillis: Long? = null,
+        val images: List<UserImage> = emptyList(),
+    ) : ChatEntry
 
     /**
      * One API message. While [streaming], [blocks] are drafts built from stream deltas; each complete

@@ -2,6 +2,8 @@ package dev.daarkolabs.tandem.protocol
 
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.junit.Test
 import kotlin.test.assertEquals
@@ -23,6 +25,25 @@ class HostMessagesTest {
             """{"type":"user","session_id":"","message":{"role":"user","content":[{"type":"text","text":"ping"}]},""" +
                 """"parent_tool_use_id":null,"uuid":"u-1"}""",
             wire(HostMessages.userText("ping", uuid = "u-1")),
+        )
+    }
+
+    @Test
+    fun `user message with text and an image block`() {
+        assertEquals(
+            """{"type":"user","session_id":"","message":{"role":"user","content":[{"type":"text","text":"What is in this screenshot?"},""" +
+                """{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0"}}]},"parent_tool_use_id":null,"uuid":"u-2"}""",
+            wire(HostMessages.userMessage("What is in this screenshot?", listOf(ImageBlock("image/png", "iVBORw0")), "u-2")),
+        )
+    }
+
+    @Test
+    fun `user message with images only has no text block`() {
+        val message = HostMessages.userMessage("  ", listOf(ImageBlock("image/jpeg", "/9j/")), "u-3")
+        val content = message.getValue("message").jsonObject.getValue("content").jsonArray
+        assertEquals(
+            listOf("""{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/"}}"""),
+            content.map { it.toString() },
         )
     }
 

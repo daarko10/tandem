@@ -221,8 +221,17 @@ object Ndjson {
             }
             "tool_result" -> b.string("tool_use_id")?.let { ContentBlock.ToolResult(it, b["content"], b.boolean("is_error") == true) }
                 ?: ContentBlock.Other(type, b)
+            "image" -> imageOf(b) ?: ContentBlock.Other(type, b)
             else -> ContentBlock.Other(type, b)
         }
+    }
+
+    /** An image block with a base64 source, a media type and data; null for any other source (a URL, a file id, missing fields). */
+    private fun imageOf(b: JsonObject): ContentBlock.Image? {
+        val source = b.obj("source")?.takeIf { it.string("type") == "base64" } ?: return null
+        val mediaType = source.string("media_type") ?: return null
+        val data = source.string("data") ?: return null
+        return ContentBlock.Image(mediaType, data)
     }
 
     private fun decodeStreamEvent(o: JsonObject): CliMessage? {

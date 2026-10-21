@@ -1,4 +1,5 @@
 """Tests for drive_cli.py's Cli.call, without a real `claude`. Run from scripts/: python3 -m unittest"""
+import base64
 import queue
 import unittest
 
@@ -90,6 +91,23 @@ class CallTest(unittest.TestCase):
         modes = [m["request"].get("mode") for m in cli.sent if m["type"] == "control_request"]
         self.assertEqual(["auto"], modes)
         self.assertEqual(2, sum(m["type"] == "user" for m in cli.sent), "both turns ran")
+
+    def test_the_image_scenario_sends_a_text_block_then_a_base64_png(self):
+        cli = FakeCli(success)
+        drive_cli.user_image(cli)
+        content = cli.sent[0]["message"]["content"]
+        self.assertEqual(1, len(cli.sent))
+        self.assertEqual(["text", "image"], [block["type"] for block in content])
+        source = content[1]["source"]
+        self.assertEqual("base64", source["type"])
+        self.assertEqual("image/png", source["media_type"])
+        self.assertEqual(b"\x89PNG\r\n\x1a\n", base64.b64decode(source["data"])[:8])
+
+    def test_the_tiny_png_is_pinned(self):
+        # TranscriptReaderTest holds the same literal as TINY_PNG_BASE64: the recorded transcript keeps these bytes.
+        self.assertEqual(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==",
+            base64.b64encode(drive_cli.tiny_png()).decode())
 
 
 if __name__ == "__main__":

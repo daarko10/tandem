@@ -875,6 +875,24 @@ class ReducerTest {
     }
 
     @Test
+    fun `an image in assistant content is an Other block`() {
+        val image = """{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}"""
+        val complete = reduce(ChatState(), cli("""{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[$image]}}"""))
+        assertEquals(listOf<AssistantBlock>(AssistantBlock.Other("image")), complete.assistants().single().blocks)
+
+        var draft = reduce(ChatState(), cli("""{"type":"stream_event","event":{"type":"message_start","message":{"id":"m2"}}}"""))
+        draft = reduce(draft, cli("""{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":$image}}"""))
+        assertEquals(listOf<AssistantBlock>(AssistantBlock.Other("image")), draft.assistants().single().blocks)
+    }
+
+    @Test
+    fun `a user message keeps its images on the entry`() {
+        val images = listOf(UserImage("u1#0", "image/png", "AAAA"))
+        val state = reduce(ChatState(), SessionEvent.UserSent("u1", "look", 5L, images))
+        assertEquals(ChatEntry.User("u1", "look", 5L, listOf(UserImage("u1#0", "image/png", "AAAA"))), state.entries.single())
+    }
+
+    @Test
     fun `UserSent records the send time and result appends a TurnEnded entry`() {
         val initial = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 1234))
         assertEquals(1234L, initial.turn!!.startedAtMillis)

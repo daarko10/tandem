@@ -12,24 +12,45 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
+/** One image attachment of a prompt: its [mediaType] (`image/png`, ...) and its bytes as [base64], as the wire carries them. */
+data class ImageBlock(val mediaType: String, val base64: String)
+
 /** Frames the host writes to the CLI's stdin. Shapes follow docs/protocol.md sections 3 and 4. */
 object HostMessages {
-    /** A plain-text prompt. [uuid] comes back as `user_message_uuids` so turns can be correlated. */
-    fun userText(text: String, uuid: String): JsonObject = buildJsonObject {
+    /**
+     * A prompt: a text block for [text] unless it is blank, then one base64 image block per entry of [images], in order
+     * (docs/protocol.md 3). [uuid] comes back as `user_message_uuids` so turns can be correlated.
+     */
+    fun userMessage(text: String, images: List<ImageBlock>, uuid: String): JsonObject = buildJsonObject {
         put("type", "user")
         put("session_id", "")
         putJsonObject("message") {
             put("role", "user")
             putJsonArray("content") {
-                addJsonObject {
-                    put("type", "text")
-                    put("text", text)
+                if (text.isNotBlank()) {
+                    addJsonObject {
+                        put("type", "text")
+                        put("text", text)
+                    }
+                }
+                for (image in images) {
+                    addJsonObject {
+                        put("type", "image")
+                        putJsonObject("source") {
+                            put("type", "base64")
+                            put("media_type", image.mediaType)
+                            put("data", image.base64)
+                        }
+                    }
                 }
             }
         }
         put("parent_tool_use_id", JsonNull)
         put("uuid", uuid)
     }
+
+    /** A plain-text prompt: [userMessage] without images. */
+    fun userText(text: String, uuid: String): JsonObject = userMessage(text, emptyList(), uuid)
 
     /** `forwardSubagentText` makes the CLI forward a subagent's text replies as assistant lines with an `agent_id`. */
     fun initialize(requestId: String): JsonObject = request(requestId, "initialize") {

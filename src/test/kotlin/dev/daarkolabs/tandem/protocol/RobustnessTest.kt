@@ -41,6 +41,20 @@ class RobustnessTest {
     }
 
     @Test
+    fun `an image block without a base64 source stays Other`() {
+        val blocks = listOf(
+            """{"type":"image"}""",
+            """{"type":"image","source":{"type":"url","url":"x"}}""",
+            """{"type":"image","source":{"type":"base64","media_type":"image/png"}}""",
+            """{"type":"image","source":{"type":"base64","data":"AA"}}""",
+        )
+        for (block in blocks) {
+            val user = assertIs<CliMessage.User>(Ndjson.decode("""{"type":"user","message":{"content":[$block]}}"""), block)
+            assertEquals("image", assertIs<ContentBlock.Other>(user.content.single(), block).type)
+        }
+    }
+
+    @Test
     fun `new optional fields read as null or false when absent or mistyped`() {
         val user = assertIs<CliMessage.User>(
             Ndjson.decode(

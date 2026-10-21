@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -63,6 +64,47 @@ class ClaudeSessionTest {
         val written = stdin.readLines()
         assertTrue(written[0].contains("\"subtype\":\"initialize\""), written[0])
         assertTrue(written[1].contains("\"type\":\"user\""), written[1])
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `sendUserMessage writes one frame with the image blocks after the text`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val launcher = fakeCli("cat '${File(fixtures, "user-image.ndjson").path}'; cat > '${stdin.path}'")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        session.start()
+        session.sendUserMessage("What colour is this image? Reply with one word.", listOf(ImageBlock("image/png", "iVBORw0KGgo=")))
+
+        withTimeout(10_000) { session.state.first { state -> !state.busy && state.entries.any { it is ChatEntry.Assistant } } }
+        session.close()
+        val written = stdin.readLines()
+        val content = Json.parseToJsonElement(written[1]).jsonObject.getValue("message").jsonObject.getValue("content").jsonArray
+        assertEquals(listOf("text", "image"), content.map { it.jsonObject.getValue("type").jsonPrimitive.content })
+        assertEquals("What colour is this image? Reply with one word.", content[0].jsonObject.getValue("text").jsonPrimitive.content)
+        val source = content[1].jsonObject.getValue("source").jsonObject
+        assertEquals("base64", source.getValue("type").jsonPrimitive.content)
+        assertEquals("image/png", source.getValue("media_type").jsonPrimitive.content)
+        assertEquals("iVBORw0KGgo=", source.getValue("data").jsonPrimitive.content)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `image ids are the entry uuid and the index`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val launcher = fakeCli("cat '${File(fixtures, "user-image.ndjson").path}'; cat > '${stdin.path}'")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        session.start()
+        session.sendUserMessage("x", listOf(ImageBlock("image/png", "AAAA"), ImageBlock("image/jpeg", "/9j/")))
+
+        val entry = session.state.value.entries.filterIsInstance<ChatEntry.User>().single()
+        withTimeout(10_000) { session.state.first { state -> !state.busy && state.entries.any { it is ChatEntry.Assistant } } }
+        session.close()
+        val uuid = Json.parseToJsonElement(stdin.readLines()[1]).jsonObject.getValue("uuid").jsonPrimitive.content
+        assertEquals(uuid, entry.id)
+        assertEquals(listOf("$uuid#0", "$uuid#1"), entry.images.map { it.id })
+        assertEquals(listOf(UserImage("$uuid#0", "image/png", "AAAA"), UserImage("$uuid#1", "image/jpeg", "/9j/")), entry.images)
         scope.coroutineContext.job.cancelAndJoin()
     }
 

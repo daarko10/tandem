@@ -169,6 +169,17 @@ class FixtureDecodeTest {
     }
 
     @Test
+    fun `a user line with an image decodes a typed Image block`() {
+        val user = Fixtures.transcript("user-image").readLines().filter { it.isNotBlank() }.map(Ndjson::decode)
+            .filterIsInstance<CliMessage.User>().first()
+        val image = assertIs<ContentBlock.Image>(user.content[1])
+        assertEquals(listOf(ContentBlock.Text("What colour is this image? Reply with one word."), image), user.content)
+        assertEquals("image/png", image.mediaType)
+        val bytes = java.util.Base64.getDecoder().decode(image.data)
+        assertEquals(listOf(0x89, 'P'.code, 'N'.code, 'G'.code), bytes.take(4).map { it.toInt() and 0xFF })
+    }
+
+    @Test
     fun `fork fixture resumes under a new session id`() {
         val ids = Fixtures.decode("fork").filterIsInstance<CliMessage.SystemInit>().map { it.sessionId }
 

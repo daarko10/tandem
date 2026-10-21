@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.Fixtures
+import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
@@ -31,6 +32,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
@@ -292,6 +294,36 @@ class SessionManagerTest {
         assertEquals(listOf<String?>(seeded), spawns().map { it.valueOf("--resume") })
         val history = "Reply with the single word: pong" // the seeded transcript's prompt
         assertEquals(listOf(history, "Reply with the single word: pong", "And once more"), handle.state.value.prompts())
+    }
+
+    @Test
+    fun `send with images queues them with the prompt for a stopped session`() = test {
+        seed(seeded)
+        val manager = manager()
+        val handle = manager.open(seeded, spawn = false)
+        manager.send(handle.id, "see", listOf(ImageBlock("image/png", "AAAA")))
+        awaitLog { frames().any { it.type() == "user" } }
+        val content = frames().first { it.type() == "user" }["message"]!!.jsonObject["content"]!!.jsonArray
+        assertEquals(
+            listOf(
+                """{"type":"text","text":"see"}""",
+                """{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}""",
+            ),
+            content.map { it.toString() },
+        )
+    }
+
+    // The JVM takes no brackets in a method name: the spec's name is the display name.
+    @Test
+    @DisplayName("the live title after an images-only send is [Image #1]")
+    fun `the live title after an images-only send is Image #1`() = test {
+        val manager = manager()
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "", listOf(ImageBlock("image/png", "AAAA")))
+        handle.title.await("[Image #1]")
+        awaitLog { frames().any { it.type() == "user" } }
+        val content = frames().first { it.type() == "user" }["message"]!!.jsonObject["content"]!!.jsonArray
+        assertEquals(listOf("image"), content.map { it.jsonObject["type"]!!.jsonPrimitive.content }, "no text block")
     }
 
     @Test

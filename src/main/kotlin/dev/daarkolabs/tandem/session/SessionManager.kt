@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.session
 
 import com.intellij.openapi.diagnostic.logger
+import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
@@ -237,11 +238,14 @@ class SessionManager internal constructor(
         synchronized(lock) { selectLocked(id) }
     }
 
-    /** Sends a prompt. A stopped session starts a process first, and gets the prompt once it is up. */
-    fun send(id: SessionId, text: String) {
+    /**
+     * Sends a prompt: [text] and the [images] attached to it, in order. A stopped session starts a process first, and gets the
+     * prompt once it is up.
+     */
+    fun send(id: SessionId, text: String, images: List<ImageBlock> = emptyList()) {
         val handle = handle(id) ?: return
         handle.lastUsed = clock()
-        if (handle.sendOrQueue(text)) spawner.startInBackground(handle, forPrompts = true)
+        if (handle.sendOrQueue(Prompt(text, images))) spawner.startInBackground(handle, forPrompts = true)
     }
 
     /** Interrupts the turn in progress, if a process runs. */

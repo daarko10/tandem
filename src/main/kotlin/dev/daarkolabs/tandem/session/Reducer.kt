@@ -28,7 +28,8 @@ sealed interface SessionEvent {
     /** [atMillis]: when the line came, on the host's clock (a loaded transcript passes the line's own timestamp); 0 when unknown. */
     data class Cli(val message: CliMessage, val atMillis: Long = 0L) : SessionEvent
 
-    data class UserSent(val uuid: String, val text: String, val atMillis: Long = 0L) : SessionEvent
+    /** A prompt the user sent: its [text] and the [images] attached to it. */
+    data class UserSent(val uuid: String, val text: String, val atMillis: Long = 0L, val images: List<UserImage> = emptyList()) : SessionEvent
 
     /** The user picked a model (at spawn or via `set_model`); null means the CLI default. */
     data class ModelRequested(val model: String?) : SessionEvent
@@ -61,7 +62,7 @@ sealed interface SessionEvent {
 fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.Cli -> reduceCli(state, event.message, event.atMillis)
     // A send opens a turn, replacing any still open: a loaded transcript sends again with no result between its turns.
-    is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text, sentAtMillis = event.atMillis)).copy(
+    is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images)).copy(
         busy = true,
         turnInterrupted = false,
         turn = TurnProgress(event.uuid, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
@@ -389,7 +390,8 @@ private fun reduceUser(state: ChatState, message: CliMessage.User, at: Long): Ch
             } else {
                 next
             }
-            is ContentBlock.Thinking, is ContentBlock.ToolUse, is ContentBlock.Other -> next
+            // A prompt's image is its entry's, which UserSent brings.
+            is ContentBlock.Thinking, is ContentBlock.ToolUse, is ContentBlock.Image, is ContentBlock.Other -> next
         }
     }
     return next
@@ -540,7 +542,7 @@ private fun errorText(error: String, message: CliMessage.Assistant, state: ChatS
 private fun draftBlock(block: ContentBlock, at: Long): AssistantBlock = when (block) {
     is ContentBlock.Thinking -> AssistantBlock.Thinking(block.thinking, startedAtMillis = at)
     is ContentBlock.ToolUse -> AssistantBlock.ToolUse(block.id, block.name, input = null, partialInput = "")
-    is ContentBlock.Text, is ContentBlock.ToolResult, is ContentBlock.Other -> completeBlock(block, null, at)
+    is ContentBlock.Text, is ContentBlock.ToolResult, is ContentBlock.Image, is ContentBlock.Other -> completeBlock(block, null, at)
 }
 
 /** A block of a complete line ([message]'s, if any): a thinking block takes the line's duration and completes at [at]. */
@@ -549,6 +551,7 @@ private fun completeBlock(block: ContentBlock, message: CliMessage.Assistant?, a
     is ContentBlock.Thinking -> AssistantBlock.Thinking(block.thinking, durationMs = message?.thinkingDurationMs, completedAtMillis = at)
     is ContentBlock.ToolUse -> AssistantBlock.ToolUse(block.id, block.name, block.input, partialInput = "")
     is ContentBlock.ToolResult -> AssistantBlock.Other("tool_result")
+    is ContentBlock.Image -> AssistantBlock.Other("image")
     is ContentBlock.Other -> AssistantBlock.Other(block.type)
 }
 

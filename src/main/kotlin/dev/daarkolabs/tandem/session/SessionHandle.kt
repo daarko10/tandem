@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.promptTitle
 import kotlinx.coroutines.CoroutineName
@@ -91,7 +92,7 @@ class SessionHandle internal constructor(
     private var mirror: Job? = null
 
     /** Prompts sent while no process runs, in order: the next process gets them. */
-    private val queued = ArrayList<String>()
+    private val queued = ArrayList<Prompt>()
     private var closed = false
 
     /**
@@ -192,17 +193,17 @@ class SessionHandle internal constructor(
     internal fun liveSession(): ClaudeSession? = synchronized(lock) { liveLocked() }
 
     /**
-     * Sends [text] to the running process; without one, queues it for the next, which [attach] hands it to. True when it was
+     * Sends [prompt] to the running process; without one, queues it for the next, which [attach] hands it to. True when it was
      * queued, so that a process has to be started. Either way prompts keep their order. Dropped after [close].
      */
-    internal fun sendOrQueue(text: String): Boolean = synchronized(lock) {
+    internal fun sendOrQueue(prompt: Prompt): Boolean = synchronized(lock) {
         if (closed) return false
         val live = liveLocked()
         if (live != null && queued.isEmpty()) {
-            live.sendUserMessage(text)
+            live.sendUserMessage(prompt.text, prompt.images)
             false
         } else {
-            queued.add(text)
+            queued.add(prompt)
             true
         }
     }
@@ -405,7 +406,7 @@ class SessionHandle internal constructor(
     }
 
     private fun flushLocked(live: ClaudeSession) {
-        queued.forEach(live::sendUserMessage)
+        queued.forEach { live.sendUserMessage(it.text, it.images) }
         queued.clear()
     }
 
@@ -480,11 +481,18 @@ class SessionHandle internal constructor(
     }
 }
 
-/** The first prompt of this chat as a title: its first line, trimmed and cut to 80 characters; null without one. */
+/**
+ * The first prompt of this chat as a title: its first line, trimmed and cut to 80 characters, or `[Image #1]` for one of images
+ * only; null without one.
+ */
 internal fun ChatState.firstPrompt(): String? = firstUser()?.asTitle()
 
 private fun ChatState.firstUser(): ChatEntry.User? = entries.firstNotNullOfOrNull { it as? ChatEntry.User }
 
-private fun ChatEntry.User.asTitle(): String? = promptTitle(text).ifEmpty { null }
+/** An images-only prompt is titled by its first image. */
+private fun ChatEntry.User.asTitle(): String? = promptTitle(text).ifEmpty { if (images.isNotEmpty()) "[Image #1]" else null }
+
+/** A prompt waiting for a process: [text] and the [images] attached to it. */
+internal data class Prompt(val text: String, val images: List<ImageBlock> = emptyList())
 
 private fun List<SessionSummary>.titleOf(id: SessionId): String? = firstOrNull { it.id == id }?.title

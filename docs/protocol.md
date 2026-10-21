@@ -12,7 +12,9 @@ Sources, in order of authority:
    written up in `docs/superpowers/research/2026-10-18-protocol-probes.md`; this document cites them as
    `<name>.ndjson:<line>`. Their host-to-CLI frames are not in the fixtures; the probes doc quotes them.
    `effort-switch` and `permission-mode-auto` (CLI 2.1.306, `scripts/record-scenario.sh`, each with its transcript) record a
-   live effort change (4.4) and the `auto` permission mode (8).
+   live effort change (4.4) and the `auto` permission mode (8). `user-image` (CLI 2.1.306, `scripts/record-scenario.sh`,
+   with its transcript) records a user message of a text block then a base64 PNG block (section 3); the transcript's user
+   line keeps both blocks, the image's `data` verbatim.
 2. Measurements with CLI 2.1.301 where a section says so: headless runs in an empty scratch folder with the variables
    of section 1.2 removed. Most send only `initialize`, so no model is used; those that needed a prompt say so. The
    checks of `--session-id X` and `--resume X` on their own (1.1) ran signed in, with the usual config directory. Those
@@ -244,6 +246,10 @@ Images (base64 content block, Anthropic format):
   {"type":"text","text":"What is in this screenshot?"},
   {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0..."}}]}}
 ```
+
+Fixture `user-image` (CLI 2.1.306) sends exactly this with a 2 × 2 PNG. The transcript's user line keeps both blocks, the
+image's `data` verbatim, under the uuid the host sent; the CLI adds an `isMeta` user line after it naming where it cached the
+image, which the reader skips as it skips every `isMeta` line (section 11). Tandem omits the text block when the text is blank.
 
 Slash commands are sent as plain text (`"/compact"`) unless `client_composed:true`.
 Messages sent while a turn is running are queued and may be folded into the running turn; `result.user_message_uuids` lists which sends a turn consumed.
@@ -896,7 +902,7 @@ have `uuid` and `parentUuid` (11.3).
 
 | `type` | Fields Tandem reads | Use |
 |---|---|---|
-| `user` | `uuid`, `parentUuid`, `isSidechain`, `isMeta`, `isCompactSummary`, `permissionMode`, `message.content` | prompts (a string or text blocks) and tool results (`tool_result` blocks); the last `permissionMode` is the session's mode |
+| `user` | `uuid`, `parentUuid`, `isSidechain`, `isMeta`, `isCompactSummary`, `permissionMode`, `message.content` | prompts (a string, or text and base64 `image` blocks) and tool results (`tool_result` blocks); the last `permissionMode` is the session's mode |
 | `assistant` | `uuid`, `parentUuid`, `isSidechain`, `effort`, `message.id`, `message.model`, `message.content` | one line per content block, sharing `message.id`, as on stdout (6.1); the last model and effort |
 | `custom-title` | `customTitle` | the title the user or `rename_session` set |
 | `ai-title` | `aiTitle` | a generated title |
@@ -937,9 +943,9 @@ fixture has a rewind, a compaction or parallel tool calls yet; `TranscriptReader
 ### 11.4 What Tandem shows
 
 - Title, the first that applies: the last `custom-title`; the last `ai-title` or `summary`, whichever comes last; the
-  first prompt of the current history, slash commands aside, as its first line trimmed and cut to 80 characters; the
-  session id. A blank title does not count. The SDK's `listSessions` (0.3.300) differs: it joins the prompt's lines,
-  cuts at 200 characters and prefers `aiTitle` over `summary`.
+  first prompt of the current history, slash commands aside, as its first line trimmed and cut to 80 characters (a prompt
+  of images only: `[Image #1]`); the session id. A blank title does not count. The SDK's `listSessions` (0.3.300)
+  differs: it joins the prompt's lines, cuts at 200 characters and prefers `aiTitle` over `summary`.
 - Model: `message.model` of the last `assistant` line, except models that start with `<`, such as `<synthetic>` on the
   lines the CLI writes itself for API errors. Effort: the last `effort` present. Permission mode: the last `user` line's
   `permissionMode` that names a known mode; compact summaries do not count. All three from the current history only.

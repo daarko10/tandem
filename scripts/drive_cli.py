@@ -23,16 +23,21 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
   permission-mode-auto
                    one turn, set_permission_mode auto (answered either way), a second turn; record it once more with
                    --permission-mode auto as an extra flag to see what the spawn's init reports
+  user-image       one turn whose user message holds a text block then a base64 image block (a 2 x 2 PNG built here),
+                   as Tandem sends an attachment (docs/protocol.md 3)
 
 Run it from an empty directory (scripts/record-scenario.sh does this) and redact the output
 with redact_fixture.py before committing. Uses whatever sign-in the local `claude` already has.
 """
+import base64
 import json
 import os
+import struct
 import subprocess
 import sys
 import threading
 import queue
+import zlib
 
 TIMEOUT_S = 180
 FIRST_MODEL = "claude-sonnet-5-5"
@@ -108,10 +113,19 @@ class Cli:
         return message
 
     def user(self, text: str) -> None:
+        self.user_content([{"type": "text", "text": text}])
+
+    def user_blocks(self, text: str, png: bytes) -> None:
+        """One user message as Tandem sends an attachment: the text block, then the image as a base64 block."""
+        self.user_content([{"type": "text", "text": text},
+                           {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                        "data": base64.b64encode(png).decode()}}])
+
+    def user_content(self, content: list[dict]) -> None:
         self.next_id += 1
         self.send({"type": "user", "session_id": "", "parent_tool_use_id": None,
                    "uuid": f"00000000-0000-4000-8000-{self.next_id:012d}",
-                   "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+                   "message": {"role": "user", "content": content}})
 
     def until(self, predicate, on_message=None) -> dict:
         while True:
@@ -259,9 +273,26 @@ def permission_mode_auto(cli: Cli) -> None:
     cli.until(is_result)
 
 
+def tiny_png() -> bytes:
+    """A 2 x 2 RGB PNG, the same bytes every time: TranscriptReaderTest pins its base64 as TINY_PNG_BASE64."""
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)  # 2 x 2, depth 8, colour type 2 (RGB)
+    rows = b"\x00" + b"\xff\x00\x00" * 2 + b"\x00" + b"\xff\x00\x00" * 2  # filter 0, then two red pixels, per row
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+
+
+def user_image(cli: Cli) -> None:
+    # An image attachment on the wire (docs/protocol.md 3): the text block, then one base64 image block.
+    cli.user_blocks("What colour is this image? Reply with one word.", tiny_png())
+    cli.until(is_result)
+
+
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
              "permission-mode": permission_mode, "permission-mode-rejected": permission_mode_rejected, "fork": fork,
-             "settings": settings, "effort-switch": effort_switch, "permission-mode-auto": permission_mode_auto}
+             "settings": settings, "effort-switch": effort_switch, "permission-mode-auto": permission_mode_auto,
+             "user-image": user_image}
 
 # Flags a scenario adds to the caller's. The settings probe loads no user settings: 2.1.301 refuses an update_settings for
 # a source that --setting-sources leaves out, so even a CLI that took the user's settings as the default source would

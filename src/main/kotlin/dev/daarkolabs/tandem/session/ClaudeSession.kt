@@ -4,6 +4,7 @@ import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.HostMessages
+import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.InboundRequest
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
@@ -206,10 +207,12 @@ class ClaudeSession(
         }
     }
 
-    fun sendUserMessage(text: String) {
+    /** Sends a prompt: [text], then the [images] attached to it, in order. Each image's id is the prompt's uuid and its index. */
+    fun sendUserMessage(text: String, images: List<ImageBlock> = emptyList()) {
         val uuid = UUID.randomUUID().toString()
-        dispatch(SessionEvent.UserSent(uuid, text, clock()))
-        send(HostMessages.userText(text, uuid))
+        val shown = images.mapIndexed { i, image -> UserImage("$uuid#$i", image.mediaType, image.base64) }
+        dispatch(SessionEvent.UserSent(uuid, text, clock(), shown))
+        send(HostMessages.userMessage(text, images, uuid))
     }
 
     fun interrupt(): Unit = send(HostMessages.interrupt(newRequestId()))

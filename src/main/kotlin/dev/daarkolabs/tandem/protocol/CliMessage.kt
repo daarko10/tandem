@@ -213,6 +213,9 @@ sealed interface ContentBlock {
     /** [content] is a string or an array of blocks, depending on the tool. */
     data class ToolResult(val toolUseId: String, val content: JsonElement?, val isError: Boolean) : ContentBlock
 
+    /** A base64 image, as a prompt's attachment (docs/protocol.md 3): its [mediaType] and its bytes as base64 [data]. */
+    data class Image(val mediaType: String, val data: String) : ContentBlock
+
     data class Other(val type: String, val raw: JsonObject) : ContentBlock
 }
 

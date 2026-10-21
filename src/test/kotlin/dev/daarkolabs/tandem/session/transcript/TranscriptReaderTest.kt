@@ -8,6 +8,7 @@ import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.PendingPermission
 import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
 import kotlinx.coroutines.job
@@ -19,6 +20,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
@@ -26,6 +28,7 @@ import java.io.IOException
 import java.io.StringReader
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
+import java.time.Instant
 import java.util.BitSet
 import kotlin.io.path.appendText
 import kotlin.io.path.bufferedWriter
@@ -40,6 +43,10 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+/** The base64 of `scripts/drive_cli.py`'s `tiny_png()`, the image the `user-image` fixture sent; `test_drive_cli.py` pins the same. */
+private const val TINY_PNG_BASE64: String =
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg=="
 
 class TranscriptReaderTest {
     private fun ChatState.userTexts(): List<String> = entries.filterIsInstance<ChatEntry.User>().map { it.text }
@@ -825,6 +832,63 @@ class TranscriptReaderTest {
         // The subagent's own lines live in <id>/subagents/, which the reader does not read.
         assertTrue(state.entries.none { it is ChatEntry.Assistant && it.parentToolUseId != null })
         assertTrue(state.entries.none { it is ChatEntry.ToolResult && it.parentToolUseId != null })
+    }
+
+    @Test
+    fun `a reloaded user line with an image yields the same entry as its stream`() {
+        val e = read("user-image").entries.filterIsInstance<ChatEntry.User>().first()
+        assertEquals("What colour is this image? Reply with one word.", e.text)
+        // The uuid of the frame drive_cli sent, as the stream's command_lifecycle lines name it: the redactor gave it one
+        // placeholder across the pair, so the id is the same live and on reload.
+        val sent = Fixtures.lines("user-image").map { Json.parseToJsonElement(it).jsonObject }
+            .filter { it["type"]?.jsonPrimitive?.content == "command_lifecycle" }
+            .map { it["command_uuid"]!!.jsonPrimitive.content }
+            .distinct()
+            .single()
+        assertEquals(sent, e.id)
+        assertEquals(UserImage("${e.id}#0", "image/png", TINY_PNG_BASE64), e.images.single())
+    }
+
+    /** A transcript of one user line holding one image and no text. */
+    private fun imagesOnly(dir: Path): Path = dir.resolve("66666666-6666-4666-8666-666666666666.jsonl").apply {
+        writeLines(
+            """{"type":"user","uuid":"u9","timestamp":"2026-10-21T20:26:59.860Z","message":{"role":"user","content":""" +
+                """[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$TINY_PNG_BASE64"}}]}}""",
+        )
+    }
+
+    @Test
+    fun `a reloaded images-only user line keeps its images`(@TempDir dir: Path) = runBlocking<Unit> {
+        val state = TranscriptReader.read(imagesOnly(dir)).state
+        assertEquals(
+            ChatEntry.User(
+                "u9",
+                "",
+                Instant.parse("2026-10-21T20:26:59.860Z").toEpochMilli(),
+                listOf(UserImage("u9#0", "image/png", TINY_PNG_BASE64)),
+            ),
+            state.entries.filterIsInstance<ChatEntry.User>().single(),
+        )
+    }
+
+    // The JVM takes no brackets in a method name: the spec's name is the display name.
+    @Test
+    @DisplayName("an images-only first prompt is the meta's first prompt [Image #1]")
+    fun `an images-only first prompt is the meta's first prompt Image #1`(@TempDir dir: Path) = runBlocking<Unit> {
+        val file = imagesOnly(dir)
+        assertEquals("[Image #1]", TranscriptReader.meta(file).firstPrompt)
+        assertEquals("[Image #1]", TranscriptReader.read(file).meta.title)
+    }
+
+    @Test
+    fun `images beside tool results with nothing typed make no prompt`(@TempDir dir: Path) = runBlocking<Unit> {
+        val file = dir.resolve("77777777-7777-4777-8777-777777777777.jsonl")
+        file.writeLines(
+            """{"type":"user","uuid":"u8","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},""" +
+                """{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$TINY_PNG_BASE64"}}]}}""",
+        )
+        assertEquals(listOf("result: ok"), TranscriptReader.read(file).state.shape())
+        assertNull(TranscriptReader.meta(file).firstPrompt)
     }
 
     @Test
