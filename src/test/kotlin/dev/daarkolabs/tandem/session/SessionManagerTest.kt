@@ -1130,7 +1130,8 @@ class SessionManagerTest {
                     response["response"]?.jsonObject?.get("behavior")?.jsonPrimitive?.content == "deny"
             }
         }
-        assertEquals(emptyList(), handle.state.value.pendingPermissions)
+        // The frame reaches the fake's log before the reducer has applied the answer: wait for the state, do not read it once.
+        handle.state.first { it.pendingPermissions.isEmpty() }
     }
 
     @Test
