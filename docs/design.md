@@ -53,6 +53,10 @@ Key choices:
 ## Milestones
 0. **Jewel spike (2–3 days).** Streaming markdown + code blocks in a Jewel tool window at 60fps on a long transcript.
    Go/no-go for Jewel. If no-go, fall back to JCEF with strict isolation.
+   **Result: go.** 200 messages streamed at ~50 tokens/s in a headless sandbox IDE (Xvfb, IU 2026.2.3): one EDT
+   stall over 100 ms (~190 ms, first Markdown composition), otherwise p99 EDT wait 6 ms. The idle IDE's own startup
+   produced larger stalls (up to ~490 ms). Frame rate and feel were not measured headless; check them in `runIde`.
+   Reproduce with `xvfb-run ./gradlew runIde -Ptandem.spike=true -Ptandem.openProject=<dir>` (see `ui/dev/`).
 1. **MVP.** Protocol + session + chat + host permissions + model/error status + resume.
 2. **IDE-native edits.** MCP edit tools, diff preview, undo.
 3. **Parity.** Slash commands, plan mode, AskUserQuestion, images, context meter, rewind, subagent status.
@@ -61,4 +65,7 @@ Key choices:
 ## Open questions
 - Does the platform's classloader expose kotlinx.serialization to plugins? We bundle 1.9.0 (tree API only) for now.
 - Lowest supported IDE: 2026.1 (build 261). Revisit after the Jewel spike.
-- Exact flag set for host-answered permissions: confirm against `protocol.md` and a recorded fixture.
+- ~~Exact flag set for host-answered permissions~~: `--permission-prompt-tool=stdio`, confirmed by the `permission`
+  fixture (`protocol.md` 4.3).
+- Jewel Markdown and other IDE content modules must be listed under `<dependencies>` in `plugin.xml`; compiling
+  against them is not enough. Check with the Plugin Verifier that the module names hold for every release since 261.

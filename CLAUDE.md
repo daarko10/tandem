@@ -5,7 +5,7 @@ It drives the user's own installed `claude` CLI over stream-json and renders eve
 Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` before touching `protocol/` or `session/`.
 
 ## Hard rules (do not break these)
-1. **Never block the EDT.** No process I/O, file I/O, JSON parsing or waiting on the CLI from the UI thread. Use the platform coroutine scopes (`platform-coroutines-structured-concurrency` skill). CC GUI's worst bugs were EDT freezes while waiting on its bridge.
+1. **Never block the EDT.** No process I/O, file I/O, JSON parsing or waiting on the CLI from the UI thread. Use the platform coroutine scopes (`platform-coroutines-structured-concurrency` skill).
 2. **No Node, no Agent SDK at runtime.** We spawn the user's `claude` binary directly. Do not add a sidecar.
 3. **Never touch credentials.** Auth belongs to the CLI. Do not read `~/.claude/.credentials*`, keychains or API keys, and never offer a login flow.
 4. **Edits go through the IDE, not the disk.** Claude's built-in Edit/Write tools are disabled; our MCP edit tools apply changes with `WriteCommandAction` on the `Document`, so undo, unsaved buffers and local history work. Every edit shows a native diff before it lands, unless the user picked auto-accept.
@@ -21,7 +21,8 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 - `ui/` Jewel tool window. Renders state from `session/`; holds no protocol logic.
 
 ## Commands
-- `./gradlew test` unit and fixture tests (fast, no IDE).
+- `./gradlew test` unit, fixture and headless platform tests (no real `claude`; a fake CLI replays fixtures).
+- `xvfb-run ./gradlew integrationTest` IDE Starter + UI Driver tests: install the built ZIP in a real IDE, type prompts, answer permission prompts and press Stop against a fake CLI (`src/test/resources/fake-claude.py`). Slow; catch plugin-classloader and UI problems the platform tests cannot.
 - `./gradlew runIde` sandbox IDE with the plugin. Use it to check feel, freezes and focus; agents cannot judge these.
 - `./gradlew verifyPlugin` Plugin Verifier against every supported IDE release.
 - `./gradlew buildPlugin` installable ZIP in `build/distributions/`.
@@ -33,12 +34,11 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 - `.claude/skills/` has JetBrains' own IntelliJ skills (Apache-2.0, see its README). In them, `tests.cmd` and Bazel are monorepo-only: use `./gradlew test` instead.
 - `superpowers` for multi-file features: plan, then TDD. Skip it for small fixes.
 
-## How to work with me
-- Clarify ambiguity before coding; look for existing patterns in the repo first.
-- Start with the simplest working version, then iterate. Test as you go.
-- Keep changes focused; don't refactor unrelated code.
+## Working in this repo
+- Look for existing patterns before adding new ones. Keep changes focused; don't refactor unrelated code.
 - Say plainly what was verified and what was not. If tests fail, show the output.
 - Ask before anything destructive or outward-facing (force push, deleting data, publishing to the Marketplace).
+- Work on a feature branch, never directly on `main`. Scratch files go in `scratch/` (gitignored).
 
 ## Conventions
 - Kotlin, explicit types on public API. Follow the `code-style` skill.
@@ -48,9 +48,7 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 - Commits: Conventional Commits (`feat:`, `fix:`, `perf:`, `docs:`, `test:`, `refactor:`).
 - PRs: clear title, context + approach + testing notes, CI green.
 
-## Remote-session notes
-- Remote sandboxes may not reach Maven Central or JetBrains repos, so Gradle cannot run there. Say so instead of guessing that code compiles.
-- Work on a feature branch, never directly on `main`.
-- Put scratch files outside the repo or in `scratch/` (gitignored).
-
-_Based on [claude-base](https://github.com/daarko10/claude-base)._
+## Headless and cloud sandboxes
+- Gradle needs Maven Central, the Gradle Plugin Portal and `*.jetbrains.com`. The first build downloads the IntelliJ Platform (over 1 GB); run it in the background rather than letting it time out. If a host is refused, stop and name it instead of guessing that code compiles.
+- Without a running IDE there is no IntelliJ MCP server. Use `./gradlew test`, `./gradlew verifyPlugin` and compiler output. For UI checks run `xvfb-run ./gradlew integrationTest`, or the sandbox IDE under `xvfb-run` and look at screenshots.
+- `scripts/record-fixture.sh` uses whatever sign-in the local `claude` has; in a hosted Claude Code session that is the session's own.
