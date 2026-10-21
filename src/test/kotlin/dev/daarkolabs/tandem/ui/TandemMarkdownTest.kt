@@ -2,14 +2,19 @@
 
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.markdown.InlineMarkdown
 import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.jetbrains.jewel.markdown.processing.MarkdownProcessor
+import org.jetbrains.jewel.markdown.rendering.InlinesStyling
+import org.jetbrains.jewel.markdown.rendering.MarkdownStyling
 import org.junit.jupiter.api.Test
 import java.nio.file.Path
 import kotlin.test.assertEquals
@@ -60,6 +65,47 @@ class TandemMarkdownTest {
             SpanStyle(color = Color.Red, background = Color.Gray, fontFamily = FontFamily.Monospace, fontSize = 12.sp),
             inlineCodeStyle(palette(codeTint = Color.Red, boxFill = Color.Gray), FontFamily.Monospace, 13.sp),
         )
+    }
+
+    @Test
+    fun `inline code in a heading is the pill one point under the heading's size`() {
+        fun inlines(size: Int): InlinesStyling = InlinesStyling(
+            textStyle = TextStyle(fontSize = size.sp),
+            inlineCode = SpanStyle(color = Color.Blue),
+            link = SpanStyle(color = Color.Cyan),
+            linkDisabled = SpanStyle(),
+            linkFocused = SpanStyle(),
+            linkHovered = SpanStyle(),
+            linkPressed = SpanStyle(),
+            linkVisited = SpanStyle(),
+            emphasis = SpanStyle(),
+            strongEmphasis = SpanStyle(),
+            inlineHtml = SpanStyle(),
+        )
+        val padding = PaddingValues(top = 3.dp)
+        val bridge = MarkdownStyling.Heading(
+            MarkdownStyling.Heading.H1(inlines(26), 1.dp, Color.Green, 2.dp, padding),
+            MarkdownStyling.Heading.H2(inlines(20), 1.dp, Color.Green, 2.dp, padding),
+            MarkdownStyling.Heading.H3(inlines(16), 0.dp, Color.Green, 0.dp, padding),
+            MarkdownStyling.Heading.H4(inlines(14), 0.dp, Color.Green, 0.dp, padding),
+            MarkdownStyling.Heading.H5(inlines(13), 0.dp, Color.Green, 0.dp, padding),
+            MarkdownStyling.Heading.H6(inlines(12), 0.dp, Color.Green, 0.dp, padding),
+        )
+        val palette = palette(codeTint = Color.Red, boxFill = Color.Gray)
+        val heading = headingWithInlineCode(bridge, palette, FontFamily.Monospace)
+        val levels = with(heading) { listOf(h1, h2, h3, h4, h5, h6) }
+        val before = with(bridge) { listOf(h1, h2, h3, h4, h5, h6) }
+        assertEquals(listOf(25, 19, 15, 13, 12, 11).map { it.sp }, levels.map { it.inlinesStyling.inlineCode.fontSize })
+        levels.zip(before).forEach { (level, old) ->
+            val size = old.inlinesStyling.textStyle.fontSize
+            assertEquals(inlineCodeStyle(palette, FontFamily.Monospace, size), level.inlinesStyling.inlineCode)
+            // Everything but the inline code is the bridge's.
+            assertEquals(old.inlinesStyling.textStyle, level.inlinesStyling.textStyle)
+            assertEquals(old.inlinesStyling.link, level.inlinesStyling.link)
+            assertEquals(listOf(old.underlineWidth, old.underlineGap), listOf(level.underlineWidth, level.underlineGap))
+            assertEquals(old.underlineColor, level.underlineColor)
+            assertEquals(old.padding, level.padding)
+        }
     }
 
     private fun palette(codeTint: Color, boxFill: Color): ChatPalette {

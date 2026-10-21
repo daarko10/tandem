@@ -104,9 +104,10 @@ class TandemBlockRenderer(
 /**
  * The bridge's Markdown styling for [project] (code fences coloured by the IDE's lexers) with the GFM table and strikethrough
  * renderers and [TandemBlockRenderer], both built once per theme, and [LocalUrlHandler] for the links ([rememberUrlHandler]).
- * Inline code is the pill of polish spec 2.5 ([inlineCodeStyle]): the bridge's `MarkdownStyling.create` hands its one
- * `inlinesStyling` to the paragraph styling, which the paragraphs inside list items and block quotes use too, and the table renderer
- * reads it for its cells; headings build their own from their sizes and keep the bridge's inline code (open item 5).
+ * Inline code is the pill of polish spec 2.5 ([inlineCodeStyle]) in every block (open item 5): the bridge's `MarkdownStyling.create`
+ * hands its one `inlinesStyling` to the paragraph styling, which the paragraphs inside list items and block quotes use too, and the
+ * table renderer reads it for its cells; headings build their own from their sizes, so each level is rebuilt with the pill
+ * ([headingWithInlineCode]).
  */
 @Composable
 internal fun TandemMarkdownStyling(project: Project, content: @Composable () -> Unit) {
@@ -114,7 +115,10 @@ internal fun TandemMarkdownStyling(project: Project, content: @Composable () -> 
     val editorFont = JewelTheme.editorTextStyle.fontFamily ?: FontFamily.Monospace
     val bodySize = JewelTheme.defaultTextStyle.fontSize
     val (styling, renderer) = remember(JewelTheme.instanceUuid) {
-        val s = MarkdownStyling.create(inlinesStyling = InlinesStyling.create(inlineCode = inlineCodeStyle(palette, editorFont, bodySize)))
+        val s = MarkdownStyling.create(
+            inlinesStyling = InlinesStyling.create(inlineCode = inlineCodeStyle(palette, editorFont, bodySize)),
+            heading = headingWithInlineCode(MarkdownStyling.Heading.create(), palette, editorFont),
+        )
         val extensions = listOf(GitHubTableRendererExtension(GfmTableStyling.create(), s), GitHubStrikethroughRendererExtension)
         s to TandemBlockRenderer(s, extensions)
     }
@@ -134,6 +138,37 @@ internal fun inlineCodeStyle(palette: ChatPalette, editorFont: FontFamily, bodyS
     fontFamily = editorFont,
     fontSize = if (bodySize.isSp) (bodySize.value - 1).sp else bodySize,
 )
+
+/**
+ * [heading] with the inline code pill ([inlineCodeStyle]) in each of its six levels, everything else kept. The bridge's
+ * `Heading.create` builds each level's `InlinesStyling` from that level's size, so the root `inlinesStyling` never reaches a heading
+ * (open item 5). The pill sits one point under the heading's size, as it sits one under the body in a paragraph.
+ */
+internal fun headingWithInlineCode(heading: MarkdownStyling.Heading, palette: ChatPalette, editorFont: FontFamily): MarkdownStyling.Heading {
+    fun pill(inlines: InlinesStyling): InlinesStyling = InlinesStyling(
+        textStyle = inlines.textStyle,
+        inlineCode = inlineCodeStyle(palette, editorFont, inlines.textStyle.fontSize),
+        link = inlines.link,
+        linkDisabled = inlines.linkDisabled,
+        linkFocused = inlines.linkFocused,
+        linkHovered = inlines.linkHovered,
+        linkPressed = inlines.linkPressed,
+        linkVisited = inlines.linkVisited,
+        emphasis = inlines.emphasis,
+        strongEmphasis = inlines.strongEmphasis,
+        inlineHtml = inlines.inlineHtml,
+    )
+    return with(heading) {
+        MarkdownStyling.Heading(
+            MarkdownStyling.Heading.H1(pill(h1.inlinesStyling), h1.underlineWidth, h1.underlineColor, h1.underlineGap, h1.padding),
+            MarkdownStyling.Heading.H2(pill(h2.inlinesStyling), h2.underlineWidth, h2.underlineColor, h2.underlineGap, h2.padding),
+            MarkdownStyling.Heading.H3(pill(h3.inlinesStyling), h3.underlineWidth, h3.underlineColor, h3.underlineGap, h3.padding),
+            MarkdownStyling.Heading.H4(pill(h4.inlinesStyling), h4.underlineWidth, h4.underlineColor, h4.underlineGap, h4.padding),
+            MarkdownStyling.Heading.H5(pill(h5.inlinesStyling), h5.underlineWidth, h5.underlineColor, h5.underlineGap, h5.padding),
+            MarkdownStyling.Heading.H6(pill(h6.inlinesStyling), h6.underlineWidth, h6.underlineColor, h6.underlineGap, h6.padding),
+        )
+    }
+}
 
 /**
  * What a click on a Markdown link does; every `Markdown(...)` in the chat passes it as `onUrlClick`. Outside
