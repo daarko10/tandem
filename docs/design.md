@@ -122,4 +122,4 @@ Resolved while building the sessions spec (its open items; details in `protocol.
   (`protocol.md` 1.1 and 8).
 - ~~Changing effort on a live session~~: `apply_flag_settings` with `{"effortLevel": …}` changes the next turn's effort
   (the transcript shows it; `init` has no effort); `update_settings` writes settings files and is not for this
-  (`protocol.md` 4.4). The effort badge can become a picker later.
+  (`protocol.md` 4.4). An effort picked in the footer is sent as `apply_flag_settings` (`protocol.md` 4.4).
