@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-21-chat-polish-design.md` (cited as **spec §n**; it extends `docs/superpowers/specs/2026-10-19-chat-redesign-design.md`, **base §n**). Reference: `docs/superpowers/research/2026-10-18-claude-code-desktop-ui-reference.md` (**ref §n**); the owner's captures in `docs/superpowers/research/assets/owner-2026-10-21/` are gitignored and cited by file name only, through the spec's measurements; `docs/protocol.md` (**protocol §n**); the Jewel 0.37.0 surface in `/tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/understand/jewel.md`.
 
-**Dependencies and order (spec §8):** P1 ‖ P3 → P2 ‖ P6 → P4 ‖ P5 → P7 → whole-branch review → `verifyPlugin` → PR #3 updated. Each task of a parallel pair runs in its own worktree (`superpowers:using-git-worktrees`) off the branch head; they land in the order P1, P3, P2, P6, P4, P5, P7, and the later task of a pair rebases on the earlier and resolves the files both touch: `ToolWindowIdeTest.kt` (P1, P3), `Reducer.kt`, `ChatState.kt`, `ReducerTest.kt`, `TranscriptReaderTest.kt` and `ChatPresenter.kt` (P4, P5). Every task runs the whole IDE suite (spec §8); the two tasks of a parallel pair run theirs one after the other, never at once. Tiers (CLAUDE.md): implementation and per-task review on Opus; test scaffolding, fixture enumeration and docs lines on Sonnet; a task that fails review twice, and the whole-branch review, on Fable.
+**Dependencies and order (spec §8):** P1 ‖ P3 → P2 ‖ P6 → P4 ‖ P5 → P7 ‖ P8 → whole-branch review → `verifyPlugin` → PR #3 updated. Each task of a parallel pair runs in its own worktree (`superpowers:using-git-worktrees`) off the branch head; they land in the order P1, P3, P2, P6, P4, P5, P7, P8, and the later task of a pair rebases on the earlier and resolves the files both touch: `ToolWindowIdeTest.kt` (P1, P3; P7, P8), `ChatRowsBuilderTest.kt` (P7, P8), `Reducer.kt`, `ChatState.kt`, `ReducerTest.kt`, `TranscriptReaderTest.kt` and `ChatPresenter.kt` (P4, P5). Every task runs the whole IDE suite (spec §8); the two tasks of a parallel pair run theirs one after the other, never at once. Tiers (CLAUDE.md): implementation and per-task review on Opus; test scaffolding, fixture enumeration and docs lines on Sonnet; a task that fails review twice, and the whole-branch review, on Fable.
 
 Time matters here: do not spend time that can be avoided, and the earlier a correct result is obtained, the better.
 
@@ -630,6 +630,130 @@ private fun Driver.runningGroupRow(): UiComponent = ui.x(   // a group header on
 - [ ] **Step 7: Write the IDE test** `a pasted image is sent as an image block` (fixture `user-image`): before `runChat`, `assumeTrue(runCatching { Toolkit.getDefaultToolkit().systemClipboard.setContents(ImageTransferable(BufferedImage(2, 2, TYPE_INT_RGB)), null) }.isSuccess, "the test JVM cannot own the clipboard")` (`ImageTransferable`: a `Transferable` of `DataFlavor.imageFlavor` only); in the script: `newSession(); promptBox().click(Point(10, 10)); ui.keyboard { hotKey(if (SystemInfo.isMac) KeyEvent.VK_META else KeyEvent.VK_CONTROL, KeyEvent.VK_V) }`; `waitFor("thumbnail", 30.seconds) { ui.x("//div[@class='ComposeNode' and @contentdescription='[Image #1]']").present() }`; `typePrompt("What colour?")`; `waitForText("...")` on the fixture's reply word. Assert the logged `user` frame's `message.content`: `[0]` type `text` with `What colour?`, `[1]` type `image` with `source.media_type == "image/png"` and non-empty `data`. Open item 9: if the clipboard cannot be owned under xvfb, the test is skipped by the `assumeTrue` and the paste path stays on the `runIde` checklist; the drop test then asserts the attach path in its place (spec open item 9). Second test `a dropped image file is attached` (fixture `user-image`; it settles open item 10 and runs whether or not the clipboard can be owned): `assumeTrue(!GraphicsEnvironment.isHeadless(), …)`; the test JVM, on the IDE's display, shows an undecorated `JWindow` holding a `JLabel` whose `TransferHandler` exports a `javaFileListFlavor` `Transferable` of a temp 2 × 2 PNG `drop.png` (`exportAsDrag` on mouse press); a `java.awt.Robot` of the test JVM presses on the label, moves in 10 px steps to the centre of `promptBox()`'s on-screen bounds (its remote component's `locationOnScreen` and size) and releases: a real drop between two JVMs; `waitFor("thumbnail", 30.seconds)` on `[Image #1]`; `typePrompt("What colour?")`; the same frame assertions as the paste test.
 - [ ] **Step 8: Run** `xvfb-run -a ./gradlew integrationTest --init-script /home/user/tandem/scratch/central-mirror.init.gradle.kts --tests '*pasted image*' --tests '*dropped image*'`, then the whole suite → thirteen tests PASS (≈ 14–16 min), then `./gradlew verifyPlugin --init-script /home/user/tandem/scratch/central-mirror.init.gradle.kts` → green.
 - [ ] **Step 9: Commit and the PR** `git add src/integrationTest && git commit --author="Dago Kogos <34120174+daarko10@users.noreply.github.com>" -m "test(ide): a pasted or dropped image is sent as an image block"` (also `src/main`, after `/verify`, when Step 4's AWT `DropTarget` route was needed); then the whole-branch review (Fable), `git push`, and update PR #3's body (`gh pr edit 3 --body-file /home/user/tandem/scratch/pr-body.md`): the owner's five complaints and the eight decisions, the seven tasks, testing notes (`check` with Kover, the thirteen IDE tests and their wall-clock, `verifyPlugin`), the `runIde` checklist of spec §7 for the owner, the open items they decide (1, 3, 4, 8, 15, 17); open item 16 as a deviation from decision 4 for the owner to accept: "the model control shows Sonnet 5.5 without Medium until the effort is read from the transcript, 2b"; what P2, P3 and P7 recorded for 2, 5, 9, 10, 13, 14; and under "deferred" items 7, 11 and 12. No attribution lines, no session link.
+
+---
+
+### Task P8: question-card-next-submit
+
+Time matters here: do not spend time that can be avoided, and the earlier a correct result is obtained, the better.
+
+**Files:**
+- Modify: `src/main/kotlin/dev/daarkolabs/tandem/ui/cards/QuestionCardView.kt` (`afterPick` :86, `submit` :93, `active` :94, `QuestionKey.Submit -> submit()` :132, `onEnter = submit` :144, the `Submit answers` `CardButton` :203), `.../ui/cards/CardKeys.kt` (`QuestionKey.Submit` :104, its Enter mapping :134, the `questionKey` KDoc :117-118, the `questionSwallows` KDoc :142-143), `scripts/drive_cli.py` (`ask_two`, `ASK_TWO_PROMPT`, `SCENARIOS`, `SCENARIO_FLAGS`, the docstring's scenario list), `scripts/record-scenario.sh:13` (the usage line), `docs/protocol.md` (Sources item 1: the `ask-two` line), `src/test/kotlin/dev/daarkolabs/tandem/chat/ChatRowsBuilderTest.kt` (`assertEquals(29, probe.size)` in `a reloaded transcript builds the same tool rows as its stream`, :780 at the branch head: 29 → 30)
+- Create: `src/test/resources/fixtures/ask-two.ndjson`, `src/test/resources/fixtures/transcripts/ask-two.jsonl` (recorded and redacted, never hand-written: hard rule 6)
+- Test: `src/test/kotlin/dev/daarkolabs/tandem/ui/QuestionCardTest.kt`, `.../ui/CardKeysTest.kt`, `scripts/test_drive_cli.py`, `src/integrationTest/kotlin/dev/daarkolabs/tandem/ToolWindowIdeTest.kt`
+- Depends on: none of P1–P7's interfaces (`ui/cards/` and its tests are untouched by them, and P8 touches no composer, footer or row file). It shares `ToolWindowIdeTest.kt` with P1, P3 and P7 (one added test, two added helpers and one added wait inside `a question card answers with the picked option`, which none of them edits), so it runs in its own worktree off the branch head, in parallel with P7 (`P7 ‖ P8`), and the later of the two to land rebases and resolves that file. Its fixture adds one to each sweep count (P6's 49 / 45 become 50 / 46 once both are in; no test asserts those), and, named `ask-*`, one to the probe-prefix count that `ChatRowsBuilderTest`'s `a reloaded transcript builds the same tool rows as its stream` asserts (`assertEquals(29, probe.size)`, which the header's `names().size` grep misses): Step 9 bumps it to 30. P7 also edits `ChatRowsBuilderTest.kt` (one added test), so the later of the two resolves that file too. Tiers as the header: Opus for Steps 1–5 and 11–13, Sonnet for the scenario, the recording, the count bump and the docs lines of Steps 6–10.
+
+**Interfaces:**
+- Consumes: `CardFrame(requestId, tag, description, textFieldFocused, defaultFocus, takeFocus, onEnter, onCmdEnter, onEscape, content)`, `CardButton(label, cap, primary, enabled, modifier, onClick)` (described to the IDE tests by its label), `picksOf`, `tabLabel`, `togglePick`, `questionKey`, `questionSwallows(key, type, afterPick, stripFocused)`, `cardButtonSwallows`; `drive_cli.py`'s `Cli.user`, `Cli.until(predicate, on_message)`, `Cli.send`, `is_result` and the `can_use_tool` answer shape of its `permission` scenario; `scripts/record-scenario.sh` (it runs `drive_cli.py`, `copy_transcript.py` and `redact_fixture.py`); the IDE helpers `runChat`, `newSession`, `typePrompt`, `waitForText`, `waitFor`, `iconButton`, `option`, `toolRow`, `FOCUSED_OPTION_RED`, `ui.keyboard { key(…) }` / `enter()`; the test helper `pendingAt(name, line)` (`src/test/kotlin/dev/daarkolabs/tandem/ui/CardFixtures.kt`).
+- Produces:
+  ```kotlin
+  // ui/cards/QuestionCardView.kt (spec §2.8)
+  internal sealed interface QuestionPrimary {
+      val label: String
+      data class Next(val tab: Int) : QuestionPrimary            // "Next": shows question `tab`
+      data class Submit(val enabled: Boolean) : QuestionPrimary  // "Submit answers": enabled once every question has an answer
+  }
+  internal fun questionPrimary(answered: List<Boolean>, tab: Int): QuestionPrimary   // Next(j) for the first j of tab + 1 … size − 1, 0 … tab − 1 with !answered[j]; else Submit(answered.all { it });
+  //   tab coerced into answered.indices; one question never gives Next
+  // QuestionCardView: val primary = questionPrimary(questions.indices.map(::answered), active) (read in composition); val act: () -> Unit = { when (primary) {
+  //   is Next -> { tab = primary.tab; focusNext = true; afterPick = true }; is Submit -> submit() } }; CardFrame(onEnter = act); QuestionKey.Primary -> act();
+  //   CardButton(primary.label, "↩", primary = true, enabled = (primary as? QuestionPrimary.Submit)?.enabled ?: true, onClick = act);
+  //   var focusNext by remember(card.requestId) { mutableStateOf(false) }; LaunchedEffect(active) { if (focusNext) { focusNext = false; defaultFocus.requestFocus() } }
+  // ui/cards/CardKeys.kt: QuestionKey.Submit renamed QuestionKey.Primary ("Runs the primary action, Next or Submit answers (Enter in the Other field)"); the mapping :134 returns it
+  ```
+  ```python
+  # scripts/drive_cli.py
+  ASK_TWO_PROMPT = ("Use the AskUserQuestion tool exactly once, with two questions in that single call. Question 1: question 'Which colour?', header 'Colour', "
+                    "options Red and Blue, multiSelect false. Question 2: question 'Which toppings would you like?', header 'Toppings', options Cheese, Olives and Ham, "
+                    "multiSelect true. Then reply with the two answers joined by ' and ', nothing else.")
+  def ask_two(cli: Cli) -> None   # cli.user(ASK_TWO_PROMPT); cli.until(is_result, answer): answer sends, for the one control_request can_use_tool, {"behavior": "allow",
+  #   "updatedInput": {"questions": <the request's>, "answers": {questions[0]["question"]: "Red", questions[1]["question"]: "Cheese, Ham"}}, "toolUseID": <tool_use_id>}
+  #   in `permission`'s control_response envelope; raises RuntimeError (a bad recording fails here, never later in Gradle) when the request's tool_name is not
+  #   "AskUserQuestion"; on any second can_use_tool; when cli.until(is_result) returns without having answered exactly one AskUserQuestion request (the model
+  #   replied without calling it); and unless the questions are exactly 'Which colour?' (header 'Colour', option labels Red and Blue, multiSelect false) then
+  #   'Which toppings would you like?' (header 'Toppings', option labels Cheese, Olives and Ham, multiSelect true); option descriptions are the model's
+  SCENARIOS["ask-two"] = ask_two; SCENARIO_FLAGS["ask-two"] = ["--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"]   # Tandem's argv, as ask-single (probes §1)
+  ```
+
+- [ ] **Step 1: Write the failing tests**
+
+```kotlin
+// ui/QuestionCardTest.kt (spec §2.8 testing; QuestionPrimary.Next / Submit imported from ui.cards)
+`Next goes to the next unanswered question after the shown one and wraps`   // questionPrimary(listOf(false, false), 0) == Next(1); (listOf(true, false), 0) == Next(1); (listOf(false, false, false), 1) == Next(2);
+//   (listOf(false, true, false), 2) == Next(0); (listOf(false, true, true), 2) == Next(0); (listOf(true, true, false), 0) == Next(2) (skips an answered question forward);
+//   (listOf(true, false, true), 2) == Next(1) (wraps past an answered first question); Next(1).label == "Next"
+`Submit answers is offered once every other question is answered and enabled once all are`   // (listOf(false, true), 0) == Submit(false); (listOf(true, true), 0) == Submit(true); (listOf(true, false), 1) == Submit(false);
+//   (listOf(true, false, true), 1) == Submit(false); (listOf(false), 0) == Submit(false); (listOf(true), 0) == Submit(true); Submit(true).label == "Submit answers"
+// ui/CardKeysTest.kt
+`Enter in the Other field is the card's primary action`   // q(VK_ENTER, other = true) == QuestionKey.Primary; q(VK_ENTER, other = true, numPad = true) == QuestionKey.Primary;
+//   null for q(VK_ENTER, other = true, shift = true), q(VK_ENTER, other = true, cmd = true) and q(VK_ENTER) (cardKey's). `digits pick options unless the Other field has focus` keeps its
+//   digit assertions and drops its four Enter assertions (:103-106; they move here)
+```
+
+- [ ] **Step 2: Run** `./gradlew test --init-script /home/user/tandem/scratch/central-mirror.init.gradle.kts --tests 'dev.daarkolabs.tandem.ui.QuestionCardTest' --tests 'dev.daarkolabs.tandem.ui.CardKeysTest'` → unresolved `QuestionPrimary`, `questionPrimary`, `QuestionKey.Primary`.
+- [ ] **Step 3: Implement** the Interfaces block (spec §2.8): `QuestionPrimary` and `questionPrimary` next to `picksOf` in `QuestionCardView.kt`; the rename in `CardKeys.kt`; in the view `primary`, `act`, `focusNext` with its `LaunchedEffect(active)`, `CardFrame(onEnter = act)`, `QuestionKey.Primary -> act()`, and the button `CardButton(primary.label, "↩", primary = true, enabled = (primary as? QuestionPrimary.Submit)?.enabled ?: true, onClick = act)` in place of :203 (`picks` goes if nothing reads it any more). The `afterPick` comment widens to "the previous key event was a press the card handled (a pick, or the Enter that showed the next question), so this one may be the character it types"; the `QuestionCardView` KDoc gains the `Next` sentence (spec §2.8: `Next` while another question is unanswered, `Submit answers` once every other one is; Enter runs it; the focus moves to the shown question's first row). In `CardKeys.kt` two KDocs follow the rename: in `questionKey`'s (:117-118), Enter in the `Other` field "runs the primary action ([QuestionKey.Primary]: Next or Submit answers)" in place of "submits"; in `questionSwallows`'s (:142-143), [afterPick] becomes "the event before this one was a press the card handled: a [QuestionKey.Pick], or an Enter that showed the next question". Strings: `Next`, `Submit answers`, the cap `↩`. No other file in `src/main` changes; `chat/` is untouched.
+- [ ] **Step 4: Run** the two classes, then `./gradlew check --init-script /home/user/tandem/scratch/central-mirror.init.gradle.kts` → PASS.
+- [ ] **Step 5: `/verify`, then commit** `git add src/main/kotlin/dev/daarkolabs/tandem/ui/cards src/test/kotlin/dev/daarkolabs/tandem/ui && git commit --author="Dago Kogos <34120174+daarko10@users.noreply.github.com>" -m "feat(ui): the question card's primary button reads Next until every other question is answered"`
+- [ ] **Step 6: Write the failing scenario test.** In `scripts/test_drive_cli.py`: `test_the_ask_two_scenario_answers_both_questions_and_fails_on_one` (a `FakeCli` whose inbox holds a `control_request` `can_use_tool` for `AskUserQuestion` with the two questions of the Interfaces prompt, then a `result`: `drive_cli.ask_two(cli)` sends exactly one `control_response`, `behavior` `allow`, `updatedInput.questions` the request's, `updatedInput.answers == {"Which colour?": "Red", "Which toppings would you like?": "Cheese, Ham"}`; the same request with one question raises `RuntimeError`). A sibling `test_the_ask_two_scenario_fails_on_a_missing_or_reworded_request`: `RuntimeError` for an inbox holding only the `result` (the model replied without calling `AskUserQuestion`), for a second `can_use_tool` after the answered one, and for the two questions with a reworded question (`Which color?`), header or option label. Run `cd scripts && python3 -m unittest -v` → the new test FAILS (`drive_cli` has no `ask_two`).
+- [ ] **Step 7: Add the scenario.** The Interfaces block in `drive_cli.py` (`ASK_TWO_PROMPT`, `ask_two`, the `SCENARIOS` and `SCENARIO_FLAGS` entries), `ask-two` in `record-scenario.sh:13`'s usage list and in `drive_cli.py`'s docstring scenario list. Run `cd scripts && python3 -m unittest -v` → PASS.
+- [ ] **Step 8: Record `ask-two`.** `scripts/record-scenario.sh ask-two` (the sandbox's own `claude` sign-in; ≈ 1 min) → `src/test/resources/fixtures/ask-two.ndjson` and `src/test/resources/fixtures/transcripts/ask-two.jsonl`; keep the `claude version:` line the script prints last (Step 9's Sources line). If the model split the questions into two calls (the scenario raises on the first request), record once more with `scripts/record-scenario.sh ask-two src/test/resources/fixtures --model opus` (the out-dir comes before the extra `claude` flags); say which run shipped in the commit body.
+- [ ] **Step 9: Write the fixture test, bump the probe count and add the Sources line, then run `check`.** Read the fixture for its `can_use_tool` line number `L` and that line's `request_id` placeholder (`<request_id-N>`), and write `a two-question request yields two questions in input order` in `QuestionCardTest` (`Cards.question(pendingAt("ask-two", L))!!.questions`: `Question("Which colour?", "Colour", false, [Red, Blue])` then `Question("Which toppings would you like?", "Toppings", true, [Cheese, Olives, Ham])` with the recorded descriptions). In `ChatRowsBuilderTest`'s `a reloaded transcript builds the same tool rows as its stream`, `assertEquals(29, probe.size)` becomes `assertEquals(30, probe.size)` with the comment "the 29 probe recordings of 2026-10-18 plus `ask-two`, a scenario recording that joins the stream/reload parity sweep". The `docs/protocol.md` Sources item 1 line, after the probe recordings' sentence: "`ask-two` (CLI <the version Step 8 printed>) is a `scripts/record-scenario.sh ask-two` scenario recording, not one of the 29 probes: one `AskUserQuestion` call with two questions, a one-answer and a multi-select, answered together; it comes with its transcript." Run `./gradlew test --init-script /home/user/tandem/scratch/central-mirror.init.gradle.kts --tests 'dev.daarkolabs.tandem.ui.QuestionCardTest' --tests 'dev.daarkolabs.tandem.protocol.*' --tests 'dev.daarkolabs.tandem.chat.ChatRowsBuilderTest'` → PASS (the fixture sweeps decode the new file, and nothing in it may decode to `Unknown` that `ask-single` decodes typed; the parity sweep builds the same tool rows from its stream and its transcript), then `./gradlew check --init-script /home/user/tandem/scratch/central-mirror.init.gradle.kts` → PASS.
+- [ ] **Step 10: Commit** `git add scripts src/test/resources/fixtures/ask-two.ndjson src/test/resources/fixtures/transcripts/ask-two.jsonl src/test/kotlin/dev/daarkolabs/tandem/ui/QuestionCardTest.kt src/test/kotlin/dev/daarkolabs/tandem/chat/ChatRowsBuilderTest.kt docs/protocol.md && git commit --author="Dago Kogos <34120174+daarko10@users.noreply.github.com>" -m "test: record ask-two, one AskUserQuestion call with two questions"` (no `src/main`, so no `/verify`).
+- [ ] **Step 11: Write the IDE tests** in `ToolWindowIdeTest.kt`:
+
+```kotlin
+// `a question card answers with the picked option`: before iconButton("Submit answers").click(Point(10, 10)) (:142), which stays (the IDE tests' mouse
+// path of the primary; the two-question test covers Enter):
+waitFor("Submit answers, and no Next, on a one-question card", 30.seconds) { iconButton("Submit answers").present() && !iconButton("Next").present() }
+@Test fun `a two-question card is answered from the keyboard`() {   // ask-two: Which colour? (Red, Blue) then Which toppings would you like? (Cheese, Olives, Ham; multiSelect)
+    val sent = runChat("question-two", fixtures = listOf("ask-two")) {
+        newSession(); typePrompt("Ask me two questions")
+        waitForText("Which colour?")
+        waitFor("first option focused", 30.seconds) { ui.x(FOCUSED_OPTION_RED).present() }
+        waitFor("Next while the other question is unanswered", 30.seconds) { iconButton("Next").present() && !iconButton("Submit answers").present() }
+        ui.keyboard { key(KeyEvent.VK_1) }
+        waitFor("Red picked, no auto-advance", 30.seconds) { questionTab("Colour").present() && ui.x(FOCUSED_OPTION_RED).present() && iconButton("Next").present() }
+        // `3`, the Other row's key, focuses the empty Other field (Red stays the answer); Enter there runs Next (QuestionKey.Primary).
+        ui.keyboard { key(KeyEvent.VK_3) }
+        waitFor("Other field focused", 30.seconds) { ui.x("$EDITABLE[@focused='true']").present() && !ui.x("$PROMPT_BOX[@focused='true']").present() }
+        // Held until the focus is on Cheese, as a person's Enter is, so the release lands on that row, which must not toggle it (spec §2.8 edge 8).
+        // enter() presses and releases back to back: its release would reach the field before the focus moves. pressing() (driver 261.27258.48)
+        // presses, runs the block and releases in a finally. A key repeat during the hold is a no-op (Next to the shown question, or a disabled Submit answers).
+        ui.keyboard { pressing(KeyEvent.VK_ENTER) { waitFor("Cheese focused while Enter is held", 30.seconds) { focusedOption("Cheese").present() } } }
+        waitForText("Which toppings would you like?")
+        waitFor("the second tab keeps its dot and Submit answers shows", 30.seconds) { questionTab("Toppings ·").present() && iconButton("Submit answers").present() && !iconButton("Next").present() }
+        // The TextArea is the same node across questions: the next digit must reach the Cheese row, not the field; the Enter's newline reached no field.
+        waitFor("Cheese focused, no field focused or filled", 30.seconds) {
+            focusedOption("Cheese").present() && !ui.x("$EDITABLE[@focused='true']").present() && !ui.x("$EDITABLE[string-length(@editabletext) > 0]").present()
+        }
+        // Had the held Enter's release toggled Cheese on, this 1 would toggle it off and the answer would read Ham.
+        ui.keyboard { key(KeyEvent.VK_1) }
+        ui.keyboard { key(KeyEvent.VK_3) }
+        waitFor("Cheese and Ham picked", 30.seconds) { questionTab("Toppings").present() }
+        ui.keyboard { enter() }   // on the focused Cheese row: CardFrame's onEnter runs Submit answers, which sends the answer on the press
+        waitFor("question card closed", 2.minutes) { !ui.x("//div[@class='ComposeNode' and @contentdescription='Question from Claude']").present() }
+        waitForText("<the model's reply as recorded: ask-two's last assistant text>")
+        waitFor("Questions row", 2.minutes) { toolRow("Questions").present() }
+    }
+    val answer = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
+        .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-N>" }["response"]!!.jsonObject   // N from Step 9
+    assertEquals("allow", answer["behavior"]!!.jsonPrimitive.content)
+    val answers = answer["updatedInput"]!!.jsonObject["answers"]!!.jsonObject
+    assertEquals("Red", answers["Which colour?"]!!.jsonPrimitive.content)
+    assertEquals("Cheese, Ham", answers["Which toppings would you like?"]!!.jsonPrimitive.content)
+}
+/** A tab of the question card's strip, by its label (`Colour`, `Toppings ·`): Jewel's SegmentedControl button holds its Text as one node. */
+private fun Driver.questionTab(label: String): UiComponent = ui.x("//div[@class='ComposeNode' and @visible_text='$label']")
+/** A question card's option (a radio button or a checkbox) that has the keyboard focus, by its label. */
+private fun Driver.focusedOption(label: String): UiComponent = ui.x(
+    "//div[@class='ComposeNode' and @contentdescription='$label' and @focused='true' and (@role='RadioButton' or @role='Checkbox')]",
+)
+```
+
+- [ ] **Step 12: Run** `xvfb-run -a ./gradlew integrationTest --init-script /home/user/tandem/scratch/central-mirror.init.gradle.kts --tests '*two-question card*' --tests '*picked option*'`, then the whole suite → every test PASS, one more than the branch head's count (fourteen once P7 and P8 are both in), not at the same time as P7's suite. On a locator miss (the tab's node) read `out/ide-tests/…/ui-hierarchy/ui.html` and fix `questionTab` once. If the held Enter's release toggled `Cheese` (the answer reads `Ham` after the held Enter, since the `1` that follows untoggles it; or, when the release lands first, the wait for `Toppings ·` fails with the tab reading `Toppings`), give `ChoiceRow`'s row modifier `.onPreviewKeyEvent { it.key == Key.Enter || it.key == Key.NumPadEnter }` (spec §2.8 edge 8), rerun, `/verify`, and say so in the commit body.
+- [ ] **Step 13: Commit** `git add src/integrationTest && git commit --author="Dago Kogos <34120174+daarko10@users.noreply.github.com>" -m "test(ide): a two-question card is answered from the keyboard"` (also `src/main/kotlin/dev/daarkolabs/tandem/ui/cards`, after `/verify`, when Step 12's row swallow was needed). PR #3's body (P7 Step 9) gains one line, written by whichever of P7 and P8 lands later: "P8: the question card's `Next` / `Submit answers` primary and the keyboard path through a multi-question card (the owner's request after `tandem-06`); the `ask-two` fixture; fourteen IDE tests". No attribution lines, no session link.
+
+Self-review of P8 (spec §2.8 against the task): the states table → `questionPrimary`'s two pure tests (one question, the wrap, the disabled `Submit answers`); the keyboard rule → `CardKeysTest` (`Primary` in the field) and the two IDE tests (Enter in the `Other` field running `Next` through `QuestionKey.Primary`, with the focus then on `Cheese` and off the field; the Enter that runs `Next` held until the focus is on `Cheese`, so its release reaches that row and the answer still reads `Cheese, Ham`, no row toggled; the last Enter, on `Cheese` through `CardFrame`, submitting on its press; digits with no auto-advance; the click on `Submit answers` kept in the one-question test as the mouse path); the strings `Next` and `Submit answers` → the IDE locators; edges 1, 4, 5 → the pure tests, 2 and 3 → `picksOf`'s existing test (`picks are complete only when every question has an answer`) and the `Submit(false)` cases, 7 → the pure `Submit(false)` cases of `questionPrimary` (an edit to the shown question can only disable `Submit answers`; `Next` depends on the other questions only), 8 → the two-question IDE test's held Enter (its release on `Cheese`) with its Step 12 fallback; the scenario's checks → `test_drive_cli.py`'s two `ask_two` tests (Step 6), 6 → the `runIde` line of spec §2.8 Testing (a tab clicked with the mouse keeps the focus); the probe count → `ChatRowsBuilderTest` (Step 9); the names are the spec's as written, plus the IDE helper `questionTab` the spec names for the strip's nodes.
 
 ---
 
