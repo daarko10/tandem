@@ -230,6 +230,16 @@ class ClaudeSession(
         send(HostMessages.setPermissionMode(requestId, mode))
     }
 
+    /**
+     * Asks for another effort from the next turn on (`apply_flag_settings`). It shows at once; an error answer puts back the effort
+     * shown before, with a notice ([reduce]).
+     */
+    fun setEffort(level: String) {
+        val requestId = newRequestId()
+        dispatch(SessionEvent.EffortRequested(level, requestId))
+        send(HostMessages.applyFlagSettings(requestId, level))
+    }
+
     /** Asks the CLI to give the session a custom title (`rename_session`). */
     fun rename(title: String): Unit = send(HostMessages.renameSession(newRequestId(), title))
 

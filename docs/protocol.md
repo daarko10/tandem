@@ -11,6 +11,8 @@ Sources, in order of authority:
    2026-10-18 (CLI 2.1.302: `ask-*`, `plan-*`, `think-*`, `tools-*`, `agent-*`, `misc-*`, each with its transcript) are
    written up in `docs/superpowers/research/2026-10-18-protocol-probes.md`; this document cites them as
    `<name>.ndjson:<line>`. Their host-to-CLI frames are not in the fixtures; the probes doc quotes them.
+   `effort-switch` and `permission-mode-auto` (CLI 2.1.306, `scripts/record-scenario.sh`, each with its transcript) record a
+   live effort change (4.4) and the `auto` permission mode (8).
 2. Measurements with CLI 2.1.301 where a section says so: headless runs in an empty scratch folder with the variables
    of section 1.2 removed. Most send only `initialize`, so no model is used; those that needed a prompt say so. The
    checks of `--session-id X` and `--resume X` on their own (1.1) ran signed in, with the usual config directory. Those
@@ -439,7 +441,14 @@ turn at the default effort, then two requests, then a second turn.
 - Neither turn's `system/init` names an effort (section 5.1), so only the transcript confirms the change. The models in
   the `initialize` response list `supportsEffort` and `supportedEffortLevels` (`low` to `max`).
 
-Tandem passes effort only at spawn (`--effort`) for now; `apply_flag_settings` is the way to let a live session change it.
+Tandem passes `--effort` at spawn, and an effort picked in the footer of a live session goes as
+`{"subtype":"apply_flag_settings","settings":{"effortLevel":<level>}}` (fixture `effort-switch`, CLI 2.1.306: a turn, the
+`high` request answered by a success with no `response` field, `:18`, a second turn whose transcript `assistant` line has
+`"effort":"high"`). The footer shows the picked level at once; an `error` answer puts the level shown before it back, with the
+notice `Effort not changed: <error>` quoting the CLI's `error`. CLI 2.1.306 takes any `effortLevel` over stdio without
+checking it (`"bogus"` too, and with `CLAUDE_CODE_EFFORT_LEVEL` set), so the one refusal the fixture records is a request whose
+`settings` is not an object: `` {"subtype":"error","error":"apply_flag_settings requires `settings` to be an object, got string"} ``
+(`:19`). A picked effort on a stopped session is passed with `--effort` at the next spawn.
 
 Thinking display on a live session (fixture `think-summarized`, 2.1.302; section 6.3):
 `{"subtype":"set_max_thinking_tokens","thinking_display":"summarized"}` sent after `initialize` gets a bare success
@@ -453,11 +462,12 @@ thinking_display must be \"summarized\", \"omitted\", \"highlights\", or null"}`
 
 From the 2.1.301 binary's strings, not measured: a `CLAUDE_CODE_EFFORT_LEVEL` environment variable overrides the
 session's effort, and `apply_flag_settings` then refuses an effort change ("apply_flag_settings: CLAUDE_CODE_EFFORT_LEVEL
-overrides effort for this session"); a `maxEffort` setting or an organization's cap also clamps `--effort`. The variable
-passes through `cliEnvironment` (1.2), so the effort badge, which shows what Tandem passed, can disagree with the level
-the CLI runs at. The transcript's `assistant` lines should show the real level (their `effort` followed
-`apply_flag_settings` in the probe above). The effort picker of Phase 4 (the sessions spec's numbering: dialogs and
-control panels) has to handle both cases.
+overrides effort for this session"); a `maxEffort` setting or an organization's cap also clamps `--effort`. Measured with
+2.1.306: over stdio the request succeeds with the variable set (the refusal and an "unrecognized effortLevel" error sit in the
+2.1.306 binary's Remote Control path, `bridge_flag_settings`). The variable passes through `cliEnvironment` (1.2), so
+the footer's effort, which shows what Tandem passed or picked, can disagree with the level the CLI runs at. The
+transcript's `assistant` lines should show the real level (their `effort` followed `apply_flag_settings` in the probe
+above); reading it from there is left for later.
 
 ### 4.5 Other CLI → host requests
 
@@ -757,8 +767,8 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 | Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, and no `system/init` reports it before the fork's first prompt (only undocumented lines do, section 1.1) |
 | Resume at a point | `--resume <id> --resume-session-at <message uuid>` (not used) |
 | Switch model mid-session | `control_request{set_model, model}`; next turn's `system/init.model` must equal it. `--model` on resume also works |
-| Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`). Tandem shows the new mode at once; an `error` response to that request (envelope 4.1; fixture `permission-mode-rejected`, 2.1.302: `bypassPermissions` to a process not launched with `--dangerously-skip-permissions` gets `{"subtype":"error","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions","error_code":"bypass_not_launched"}`, and the session goes on) puts back the mode shown before it, unless a later pick replaced it, with an error notice naming the rejected mode |
-| Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4); Tandem picks effort only when a session is created |
+| Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`). Tandem shows the new mode at once; an `error` response to that request (envelope 4.1; fixture `permission-mode-rejected`, 2.1.302: `bypassPermissions` to a process not launched with `--dangerously-skip-permissions` gets `{"subtype":"error","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions","error_code":"bypass_not_launched"}`, and the session goes on) puts back the mode shown before it, unless a later pick replaced it, with an error notice naming the rejected mode. `auto` (fixture `permission-mode-auto`, 2.1.306): `set_permission_mode auto` is acknowledged with `{"mode":"auto"}` and a `system/status` line in `auto`, and the next `init` reports `auto`; a process spawned with `--permission-mode auto` reports `auto` in its first `init` too (a probe, not committed), so Tandem offers `auto` and a respawn keeps it |
+| Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4, fixture `effort-switch`): the next turn runs at the new level. Tandem sends it for an effort picked in the footer of a live session and shows the level at once; an `error` answer puts back the level shown before it, with the notice `Effort not changed: <error>`. A stopped session passes the pick with `--effort` at its next spawn |
 | Rename | a live process that has reported its first `system/init`: `control_request{rename_session}` (section 4.4); otherwise append a `custom-title` line (section 11.5) if the transcript exists. A live process that has not reported it yet also gets `rename_session` with that init, and so does the next process of a session renamed without a transcript or while an earlier title still waited for an init; only the last title is sent |
 | Delete | remove `<id>.jsonl` and `<id>/` (section 11.5) |
 | Rewind files | `rewind_files{user_message_id}` (needs `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` at spawn) |

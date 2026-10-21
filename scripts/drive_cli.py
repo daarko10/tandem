@@ -16,6 +16,13 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
                    for one more turn; its lines follow the first process's in the output
   settings         a probe, not a fixture: one turn, then update_settings and apply_flag_settings asking for effort
                    high, then a second turn; the transcript's assistant lines show the effort each turn ran with
+  effort-switch    one turn, apply_flag_settings effortLevel high, then an apply_flag_settings whose settings is a
+                   string (which the CLI must reject), a second turn. CLI 2.1.306 takes any effortLevel over stdio, even
+                   "bogus" and even with CLAUDE_CODE_EFFORT_LEVEL set, so a settings that is not an object is the one
+                   refusal it records; with CLAUDE_CODE_EFFORT_LEVEL set, a CLI that refuses the high one is recorded too
+  permission-mode-auto
+                   one turn, set_permission_mode auto (answered either way), a second turn; record it once more with
+                   --permission-mode auto as an extra flag to see what the spawn's init reports
 
 Run it from an empty directory (scripts/record-scenario.sh does this) and redact the output
 with redact_fixture.py before committing. Uses whatever sign-in the local `claude` already has.
@@ -228,9 +235,33 @@ def settings(cli: Cli) -> None:
     cli.until(is_result)
 
 
+def effort_switch(cli: Cli) -> None:
+    # A live effort pick (docs/protocol.md 4.4): one the CLI takes and one it must refuse. 2.1.306 takes any effortLevel over
+    # stdio ("bogus" too, with or without CLAUDE_CODE_EFFORT_LEVEL), so the refused one is a settings that is not an object.
+    # With CLAUDE_CODE_EFFORT_LEVEL set, a CLI that refuses the first one as well is recorded as it answers.
+    cli.user("Reply with the single word: one")
+    cli.until(is_result)
+    cli.call({"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}},
+             allow_error=bool(os.environ.get("CLAUDE_CODE_EFFORT_LEVEL")))
+    response = cli.call({"subtype": "apply_flag_settings", "settings": "high"}, allow_error=True)
+    if response.get("response", {}).get("subtype") != "error":
+        raise RuntimeError("claude accepted an apply_flag_settings whose settings is not an object; this scenario records a refusal")
+    cli.user("Reply with the single word: two")
+    cli.until(is_result)
+
+
+def permission_mode_auto(cli: Cli) -> None:
+    # Does the CLI take `auto` (docs/protocol.md 8)? The answer is recorded whichever it is.
+    cli.user("Reply with the single word: one")
+    cli.until(is_result)
+    cli.call({"subtype": "set_permission_mode", "mode": "auto"}, allow_error=True)
+    cli.user("Reply with the single word: two")
+    cli.until(is_result)
+
+
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
              "permission-mode": permission_mode, "permission-mode-rejected": permission_mode_rejected, "fork": fork,
-             "settings": settings}
+             "settings": settings, "effort-switch": effort_switch, "permission-mode-auto": permission_mode_auto}
 
 # Flags a scenario adds to the caller's. The settings probe loads no user settings: 2.1.301 refuses an update_settings for
 # a source that --setting-sources leaves out, so even a CLI that took the user's settings as the default source would

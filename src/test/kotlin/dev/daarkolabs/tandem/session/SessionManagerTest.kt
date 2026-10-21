@@ -378,6 +378,38 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `an effort pick on a stopped session sets the effort only`() = test {
+        val manager = manager()
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.stop(handle.id)
+
+        manager.setEffort(handle.id, "high")
+        assertEquals("high", handle.state.value.effort)
+        assertEquals(0, frames().count { it.subtype() == "apply_flag_settings" })
+        manager.send(handle.id, "Reply with the single word: pong")
+        awaitLog { spawns().size == 2 }
+        assertEquals("high", spawns()[1].valueOf("--effort"))
+    }
+
+    @Test
+    fun `a respawn keeps auto`() = test {
+        val manager = manager(fixtures = "permission-mode-auto,plain-reply")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Reply with the single word: one")
+        handle.state.first { it.turnsEnded == 1 }
+        manager.setPermissionMode(handle.id, PermissionMode.AUTO)
+        handle.state.first { it.permissionMode == PermissionMode.AUTO && it.permissionModeChanges.isEmpty() }
+        manager.stop(handle.id)
+
+        manager.send(handle.id, "again")
+        awaitLog { spawns().size == 2 }
+        assertEquals("auto", spawns()[1].valueOf("--permission-mode"))
+        assertTrue(handle.state.value.entries.none { it is ChatEntry.Notice && "not supported" in it.text })
+        manager.close(handle.id)
+    }
+
+    @Test
     fun `a switch the CLI rejects goes back to the mode before it, as recorded`() = test {
         // The fake answers the switch with the recorded rejection of bypassPermissions.
         val manager = manager(fixtures = "permission-mode-rejected")

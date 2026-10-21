@@ -59,7 +59,7 @@ data class NewSessionOptions(val model: String? = null, val effort: String? = nu
  * [scope] ends every process. Process and file work runs on [Dispatchers.IO].
  *
  * Threads: every function may be called from any thread, the EDT included. [create], [select], [send], [interrupt], [allow],
- * [deny], [setModel] and [setPermissionMode] never wait: they change state or queue work, and return. [open], [fork], [rename],
+ * [deny], [setModel], [setPermissionMode] and [setEffort] never wait: they change state or queue work, and return. [open], [fork], [rename],
  * [stop], [close], [delete] and [refreshIndex] suspend until they are done.
  *
  * Processes: a session starts or stops one process at a time (its spawn lock). [send] to a stopped session starts one and
@@ -281,6 +281,14 @@ class SessionManager internal constructor(
     /** Picks a permission mode. A running process switches (`set_permission_mode`); a stopped session starts with it. */
     fun setPermissionMode(id: SessionId, mode: PermissionMode) {
         handle(id)?.pick(live = { it.setPermissionMode(mode) }, stopped = SessionEvent.PermissionModeRequested(mode))
+    }
+
+    /**
+     * Picks an effort. A running process changes it from its next turn (`apply_flag_settings`); a stopped session starts with it
+     * (`--effort`).
+     */
+    fun setEffort(id: SessionId, level: String) {
+        handle(id)?.pick(live = { it.setEffort(level) }, stopped = SessionEvent.EffortRequested(level))
     }
 
     /**

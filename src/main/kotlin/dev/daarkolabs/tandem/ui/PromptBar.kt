@@ -1,14 +1,10 @@
-@file:OptIn(ExperimentalLayoutApi::class)
-
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -53,13 +49,12 @@ import org.jetbrains.jewel.ui.component.IconButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextArea
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
-import java.util.Locale
 
 /**
- * The bottom of a session's chat (spec 4.15): the composer, a text area in a rounded box with Send (`↵`), or Stop while a turn runs,
- * at its right, and below it the session's permission mode and model pickers ([PermissionModePicker], [ModelPicker]) and, when the
- * session has one, the effort it started with, read-only. Everything shown comes from [presenter]'s composer model, which changes
- * only when one of its own fields does, never on a streamed delta.
+ * The bottom of a session's chat (spec 4.15, polish spec 2.3): the composer, a text area in a filled rounded box with Send (`↵`), or
+ * Stop while a turn runs, at its right, and below it the footer: the session's permission mode at the start ([ModeControl]) and its
+ * model and effort at the end ([ModelControl]), each plain text that opens its menu. Everything shown comes from [presenter]'s
+ * composer model, which changes only when one of its own fields does, never on a streamed delta.
  *
  * The prompt being typed is [ui]'s draft, so it survives switching sessions. Enter sends it unless it is blank, and does nothing
  * while a turn runs; Shift+Enter is a newline; Esc goes to the open card ([onCardEscape]), else stops a running turn. A send makes
@@ -92,7 +87,8 @@ internal fun PromptBar(
             }
         }
     }
-    Column(Modifier.fillMaxWidth()) {
+    // The box and the footer share the chat column's width less 16 dp each side, so the footer measures from the box's edges.
+    Column(Modifier.chatColumn().padding(horizontal = 16.dp)) {
         PromptBox(
             ui,
             composer,
@@ -106,29 +102,35 @@ internal fun PromptBar(
                 }
             },
         )
-        FlowRow(
-            Modifier.chatColumn().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-            itemVerticalAlignment = Alignment.CenterVertically,
+        // Spec 2.3: the pills' edges 9 dp inside the box at the start and 10 dp at the end, 10 dp under it, 12 dp above the bottom.
+        Row(
+            Modifier.fillMaxWidth().padding(start = 9.dp, end = 10.dp, top = 10.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            PermissionModePicker(composer.permissionMode) { mode ->
+            ModeControl(composer) { mode ->
                 manager.setPermissionMode(handle.id, mode)
                 workspace.state.lastPermissionMode = mode.wire
             }
-            // Mode at the left, model and effort at the right; on a narrow pane they wrap onto a second line.
-            Spacer(Modifier.weight(1f))
-            ModelPicker(composer.models, composer.requestedModel, composer.activeModel) { model ->
-                manager.setModel(handle.id, model)
-                workspace.state.lastModel = model
+            // Mode at the start, model and effort at the end; on a narrow pane the model label ellipsises, nothing wraps.
+            Box(Modifier.weight(1f).padding(start = 8.dp), contentAlignment = Alignment.CenterEnd) {
+                ModelControl(
+                    composer,
+                    onPickModel = { model ->
+                        manager.setModel(handle.id, model)
+                        workspace.state.lastModel = model
+                    },
+                    onPickEffort = { level ->
+                        manager.setEffort(handle.id, level)
+                        workspace.state.lastEffort = level
+                    },
+                )
             }
-            composer.effort?.let { EffortBadge(it) }
         }
     }
 }
 
 /**
- * The text area and Send or Stop in one rounded box, capped to the chat column. Keys go through [composerKey]; [onAction] does
+ * The text area and Send or Stop in one filled rounded box, as wide as the footer under it. Keys go through [composerKey]; [onAction] does
  * what it returns. With [focus] the text area takes the focus, and then [onFocused] is called.
  */
 @Composable
@@ -142,35 +144,43 @@ private fun PromptBox(ui: ChatUiState, composer: ComposerModel, focus: Boolean, 
         }
     }
     val colors = JewelTheme.globalColors
-    val shape = RoundedCornerShape(8.dp)
-    Row(
-        // 4 dp above, so that with the list's 12 dp bottom padding the last row sits 16 dp above the box (spec 4.1).
-        Modifier.chatColumn().padding(start = 16.dp, end = 16.dp, top = 4.dp)
-            .border(1.dp, if (focused) colors.borders.focused else colors.borders.normal, shape)
-            // 12 dp inside the box all round (spec 4.15), counting the undecorated TextArea's own content padding (5 dp across,
-            // 4 dp down): 7 + 5 at the start, 8 + 4 above and below the text, so 184 dp holds 8 lines of 20 dp.
-            .padding(start = 7.dp, end = 12.dp),
-        verticalAlignment = Alignment.Bottom,
+    val shape = RoundedCornerShape(12.dp)
+    // Spec 2.3: a filled box, 44 dp tall empty, radius 12 dp. 4 dp above, so that with the list's 12 dp bottom padding the last
+    // row sits 16 dp above the box (spec 4.1).
+    Column(
+        Modifier.fillMaxWidth().padding(top = 4.dp)
+            .heightIn(min = 44.dp, max = 184.dp)
+            .background(chatPalette().bubbleFill, shape)
+            .border(1.dp, if (focused) colors.borders.focused else colors.borders.normal, shape),
     ) {
-        TextArea(
-            ui.draft,
-            Modifier.weight(1f).heightIn(min = 40.dp, max = 184.dp).padding(vertical = 8.dp)
-                .focusRequester(inputFocus)
-                .onFocusChanged { focused = it.hasFocus }
-                .onPreviewKeyEvent { event -> composerKeyEvent(event, composer, ui.draft, onAction) },
-            lineLimits = TextFieldLineLimits.MultiLine(1, 8),
-            undecorated = true,
-            placeholder = { Text("Describe a task or ask a question", color = colors.text.info) },
-        )
-        // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
-        val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
-        if (composer.busy) {
-            IconButton(onClick = { onAction(ComposerAction.Stop) }, modifier = buttonModifier.semantics { contentDescription = "Stop" }) {
-                Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
-            }
-        } else {
-            IconButton(onClick = { onAction(ComposerAction.Send) }, modifier = buttonModifier.semantics { contentDescription = "Send" }) {
-                Text("↵", style = JewelTheme.editorTextStyle, color = colors.text.info)
+        // The attachment strip goes here (spec 2.7), above the row, across the box's inner width.
+        Row(
+            // The text's ink starts about 42 dp inside the box (desktop-02), counting the undecorated TextArea's own content padding
+            // (5 dp across, 4 dp down): 37 + 5 at the start, where the `+` button comes (spec 2.7), and 8 + 4 above and below the text,
+            // so 184 dp holds 8 lines of 20 dp. The `+` and the send glyph stay on the last line as the text grows.
+            Modifier.fillMaxWidth().padding(start = 37.dp, end = 12.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            TextArea(
+                ui.draft,
+                Modifier.weight(1f).heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
+                    .focusRequester(inputFocus)
+                    .onFocusChanged { focused = it.hasFocus }
+                    .onPreviewKeyEvent { event -> composerKeyEvent(event, composer, ui.draft, onAction) },
+                lineLimits = TextFieldLineLimits.MultiLine(1, 8),
+                undecorated = true,
+                placeholder = { Text("Describe a task or ask a question", color = colors.text.info) },
+            )
+            // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
+            val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
+            if (composer.busy) {
+                IconButton(onClick = { onAction(ComposerAction.Stop) }, modifier = buttonModifier.semantics { contentDescription = "Stop" }) {
+                    Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
+                }
+            } else {
+                IconButton(onClick = { onAction(ComposerAction.Send) }, modifier = buttonModifier.semantics { contentDescription = "Send" }) {
+                    Text("↵", style = JewelTheme.editorTextStyle, color = colors.text.info)
+                }
             }
         }
     }
@@ -211,19 +221,5 @@ private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, draft: Te
         }
         ComposerFallback.Swallow -> true
         null -> false
-    }
-}
-
-/** The effort the session started with, capitalised. It cannot change while the session runs, so it is shown and not picked. */
-@Composable
-private fun EffortBadge(effort: String) {
-    WithTooltip("Effort is chosen when a session starts.") {
-        Text(
-            effort.replaceFirstChar { it.titlecase(Locale.ROOT) },
-            color = JewelTheme.globalColors.text.info,
-            style = smallTextStyle(),
-            maxLines = 1,
-            modifier = Modifier.semantics { contentDescription = "Effort" },
-        )
     }
 }

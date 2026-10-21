@@ -17,6 +17,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.daarkolabs.tandem.chat.Modes
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.OFFERED_MODES
@@ -46,21 +47,20 @@ internal fun modelEntries(models: List<ModelOption>, requested: String?, active:
     return (listOf(PickerEntry<String?>(DEFAULT_MODEL_LABEL, null)) + offered).withEntryFor(requested) { it }
 }
 
-/**
- * The permission mode picker's entries: the modes Tandem offers ([OFFERED_MODES]), in that order. A [mode] the session runs that
- * Tandem does not offer (bypassPermissions, dontAsk, auto) is an entry of its own, by its wire name, so that the picker never shows
- * another mode than the session's, and picking Default from it asks the CLI to switch.
- */
-internal fun permissionModeEntries(mode: PermissionMode?): List<PickerEntry<PermissionMode>> =
-    OFFERED_MODES.map { PickerEntry(permissionModeLabel(it), it) }.withEntryFor(mode, ::permissionModeLabel)
+/** The new-session popup's first permission mode entry: no `--permission-mode`, the mode the CLI's own settings give. */
+private const val DEFAULT_MODE_LABEL: String = "Default mode"
 
-/** What the permission mode picker calls [mode]: Default, Accept edits or Plan for the modes Tandem offers, else its wire name. */
-internal fun permissionModeLabel(mode: PermissionMode): String = when (mode) {
-    PermissionMode.DEFAULT -> "Default"
-    PermissionMode.ACCEPT_EDITS -> "Accept edits"
-    PermissionMode.PLAN -> "Plan"
-    PermissionMode.BYPASS_PERMISSIONS, PermissionMode.DONT_ASK, PermissionMode.AUTO -> mode.wire
-}
+/**
+ * The permission mode picker's entries: "Default mode" (null: no flag), then the modes Tandem offers ([OFFERED_MODES]), in that
+ * order, by the footer's labels ([Modes.label]). A [mode] Tandem does not offer (bypassPermissions, dontAsk) is an entry of its own,
+ * so that the picker never shows another mode than the one picked.
+ */
+internal fun permissionModeEntries(mode: PermissionMode?): List<PickerEntry<PermissionMode?>> =
+    (listOf(PickerEntry<PermissionMode?>(DEFAULT_MODE_LABEL, null)) + OFFERED_MODES.map { PickerEntry(permissionModeLabel(it), it) })
+        .withEntryFor(mode, ::permissionModeLabel)
+
+/** What the permission mode picker calls [mode]: the footer's label ([Modes.label]). */
+internal fun permissionModeLabel(mode: PermissionMode): String = Modes.label(mode)
 
 /** These entries, plus [value] as an entry of its own, labelled by [label], when it is not null and none of them stands for it. */
 internal fun <T> List<PickerEntry<T>>.withEntryFor(value: T?, label: (T & Any) -> String): List<PickerEntry<T>> =
@@ -215,11 +215,12 @@ internal fun ModelPicker(
 }
 
 /**
- * The permission mode picker: Default, Accept edits and Plan, plus a mode the session runs that Tandem does not offer, by its wire
- * name ([permissionModeEntries]). It shows [mode], and Default for none.
+ * The new-session popup's permission mode picker: "Default mode", then Auto, Manual, Accept edits and Plan, plus a mode Tandem does
+ * not offer when it is the one given ([permissionModeEntries]). It shows [mode], and "Default mode" for none; a pick calls [onPick]
+ * with the mode, null for "Default mode".
  */
 @Composable
-internal fun PermissionModePicker(mode: PermissionMode?, onPick: (PermissionMode) -> Unit) {
+internal fun PermissionModePicker(mode: PermissionMode?, onPick: (PermissionMode?) -> Unit) {
     val entries = remember(mode) { permissionModeEntries(mode) }
     Picker(entries, mode, "Permission mode", onPick = onPick)
 }

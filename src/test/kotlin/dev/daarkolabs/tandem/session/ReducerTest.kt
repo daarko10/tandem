@@ -468,6 +468,65 @@ class ReducerTest {
     }
 
     @Test
+    fun `the initialize models keep resolvedModel, supportsAutoMode and effort levels`() {
+        val models = reduce(ChatState(), SessionEvent.Cli(Fixtures.decode("agent-sync")[1])).models
+        val levels = listOf("low", "medium", "high", "xhigh", "max")
+        assertEquals(ModelOption("default", "Default (recommended)", "Fable 5.1", "claude-fable-5-1", true, levels), models[0])
+        val haiku = models.single { it.displayName == "Haiku 4.5" }
+        assertEquals("claude-haiku-4-5-20251001", haiku.value)
+        assertFalse(haiku.supportsAutoMode)
+        assertEquals(emptyList(), haiku.effortLevels)
+    }
+
+    @Test
+    fun `a model pick is pending until the next init`() {
+        var state = reduce(ChatState(), SessionEvent.ModelRequested("opus"))
+        assertTrue(state.modelSwitchPending)
+        state = reduce(state, reply("a1", "m1", "x"))
+        state = reduce(state, cli("""{"type":"assistant","uuid":"a2","message":{"id":"m2","model":"claude-sonnet-5-5","content":[{"type":"text","text":"x"}]}}"""))
+        assertTrue(state.modelSwitchPending, "an assistant line keeps it")
+        state = reduce(state, SessionEvent.Cli(Fixtures.decode("agent-sync")[5]))
+        assertFalse(state.modelSwitchPending, "init clears it")
+
+        state = reduce(state, SessionEvent.ModelRequested("opus"))
+        fun fallback(scope: String): SessionEvent = cli(
+            """{"type":"system","subtype":"model_refusal_fallback","original_model":"claude-opus-5-5","fallback_model":"claude-sonnet-5-5",""" +
+                """"scope":"$scope","retracted_message_uuids":[]}""",
+        )
+        state = reduce(state, fallback("local"))
+        assertTrue(state.modelSwitchPending, "a local fallback answers one request only")
+        state = reduce(state, fallback("session"))
+        assertFalse(state.modelSwitchPending, "the session switched")
+    }
+
+    @Test
+    fun `apply_flag_settings success keeps the effort, an error restores it with a notice`() {
+        val requested = reduce(ChatState(effort = "medium"), SessionEvent.EffortRequested("high", "r1"))
+        assertEquals("high", requested.effort)
+        assertEquals(mapOf("r1" to "medium"), requested.effortChanges)
+
+        val kept = reduce(requested, cli("""{"type":"control_response","response":{"subtype":"success","request_id":"r1"}}"""))
+        assertEquals("high", kept.effort)
+        assertEquals(emptyMap(), kept.effortChanges)
+        assertTrue(kept.entries.none { it is ChatEntry.Notice })
+
+        val error = "CLAUDE_CODE_EFFORT_LEVEL overrides effort for this session"
+        val restored = reduce(requested, rejection("r1", error))
+        assertEquals("medium", restored.effort)
+        assertEquals(emptyMap(), restored.effortChanges)
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.ERROR, "Effort not changed: $error"), restored.entries.last())
+    }
+
+    @Test
+    fun `settled clears the effort changes`() {
+        val state = reduce(ChatState(effort = "low"), SessionEvent.EffortRequested("max", "r2"))
+        assertEquals(emptyMap(), state.settled().effortChanges)
+        val stopped = reduce(ChatState(effort = "low"), SessionEvent.EffortRequested("high"))
+        assertEquals("high", stopped.effort)
+        assertEquals(emptyMap(), stopped.effortChanges)
+    }
+
+    @Test
     fun `model entries without a value are skipped and a missing display name falls back to the value`() {
         val state = reduce(
             ChatState(),

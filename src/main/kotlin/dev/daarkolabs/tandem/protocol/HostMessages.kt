@@ -45,6 +45,14 @@ object HostMessages {
     fun setPermissionMode(requestId: String, mode: PermissionMode): JsonObject =
         request(requestId, "set_permission_mode") { put("mode", mode.wire) }
 
+    /**
+     * Changes the session's effort from its next turn (`apply_flag_settings`, docs/protocol.md 4.4): [effortLevel] goes into the
+     * session's flag settings. The success has no `response` field.
+     */
+    fun applyFlagSettings(requestId: String, effortLevel: String): JsonObject = request(requestId, "apply_flag_settings") {
+        putJsonObject("settings") { put("effortLevel", effortLevel) }
+    }
+
     /** Asks the CLI to give the session a custom title. */
     fun renameSession(requestId: String, title: String): JsonObject = request(requestId, "rename_session") {
         put("title", title)

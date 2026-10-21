@@ -9,7 +9,9 @@ import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.protocol.TaskUsage
 import dev.daarkolabs.tandem.protocol.array
 import dev.daarkolabs.tandem.protocol.asObject
+import dev.daarkolabs.tandem.protocol.boolean
 import dev.daarkolabs.tandem.protocol.string
+import dev.daarkolabs.tandem.protocol.strings
 import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.PersistentMap
 import kotlinx.collections.immutable.mutate
@@ -37,6 +39,12 @@ sealed interface SessionEvent {
      */
     data class PermissionModeRequested(val mode: PermissionMode, val requestId: String? = null) : SessionEvent
 
+    /**
+     * The user picked an effort [level]: with [requestId], the `apply_flag_settings` request sent for it, whose error answer puts
+     * the effort shown before it back; without, for the next process to start with (`--effort`).
+     */
+    data class EffortRequested(val level: String, val requestId: String? = null) : SessionEvent
+
     data class PermissionAnswered(val requestId: String) : SessionEvent
 
     /** Something Tandem itself must tell the user, such as a pick it could not pass on to the CLI. Shown as a notice of [level]. */
@@ -59,12 +67,16 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
         turn = TurnProgress(event.uuid, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
     )
     // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch.
-    is SessionEvent.ModelRequested -> state.copy(requestedModel = event.model, modelWarning = null)
+    is SessionEvent.ModelRequested -> state.copy(requestedModel = event.model, modelWarning = null, modelSwitchPending = true)
     // Shown at once; what the CLI reports next (system/status, system/init) has the last word, and a rejection takes it back.
     is SessionEvent.PermissionModeRequested -> state.copy(
         permissionMode = event.mode,
         permissionModeChanges = event.requestId?.let { state.permissionModeChanges + (it to PermissionModeChange(event.mode, state.permissionMode)) }
             ?: state.permissionModeChanges,
+    )
+    is SessionEvent.EffortRequested -> state.copy(
+        effort = event.level,
+        effortChanges = event.requestId?.let { state.effortChanges + (it to state.effort) } ?: state.effortChanges,
     )
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
     is SessionEvent.HostNotice -> state.notice(event.level, event.text)
@@ -110,6 +122,7 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
         ended = true,
         pendingPermissions = emptyList(),
         permissionModeChanges = emptyMap(),
+        effortChanges = emptyMap(),
         lastTurnEnd = end ?: state.lastTurnEnd,
         turnsEnded = if (end != null) state.turnsEnded + 1 else state.turnsEnded,
         turnInterrupted = false,
@@ -126,6 +139,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         permissionMode = message.permissionMode ?: state.permissionMode,
         claudeCodeVersion = message.claudeCodeVersion ?: state.claudeCodeVersion,
         cwd = message.cwd ?: state.cwd,
+        modelSwitchPending = false,
     ).checkModel(message.model)
     is CliMessage.SystemStatus -> state.copy(permissionMode = message.permissionMode ?: state.permissionMode)
     is CliMessage.ApiRetry -> state.notice(NoticeLevel.INFO, retryText(message))
@@ -133,7 +147,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         val text = "${message.originalModel} declined this request; " +
             if (message.scope == "local") "this answer came from ${message.fallbackModel}." else "the session switched to ${message.fallbackModel}."
         val next = state.withoutAssistants(message.retractedMessageUuids.toSet()).notice(NoticeLevel.WARNING, message.content ?: text)
-        if (message.scope == "local") next else next.checkModel(message.fallbackModel)
+        if (message.scope == "local") next else next.copy(modelSwitchPending = false).checkModel(message.fallbackModel)
     }
     is CliMessage.ModelRefusalNoFallback ->
         state.notice(NoticeLevel.WARNING, message.content ?: "${message.originalModel ?: "The model"} declined this request.")
@@ -163,7 +177,10 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
     is CliMessage.ControlResponse -> {
         val change = state.permissionModeChanges[message.requestId]
         val answered = if (change == null) state else state.copy(permissionModeChanges = state.permissionModeChanges - message.requestId)
+        val effortChange = message.requestId in state.effortChanges
         when {
+            effortChange && message.isSuccess -> state.copy(effortChanges = state.effortChanges - message.requestId)
+            effortChange -> state.rejectEffortChange(message.requestId, message.error)
             message.isSuccess -> answered.withModels(message.payload)
             change == null -> answered.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
             else -> state.rejectModeChange(message.requestId, change, message.error)
@@ -275,6 +292,14 @@ private fun ChatState.rejectModeChange(requestId: String, change: PermissionMode
     return copy(permissionMode = mode, permissionModeChanges = pending)
         .notice(NoticeLevel.ERROR, "The CLI rejected the switch to permission mode ${change.requested.wire}$reason$now")
 }
+
+/**
+ * The CLI answered the effort request [requestId] with [error] and kept the effort it had: the effort shown before that request
+ * comes back, and the chat says why (the CLI's own words, docs/protocol.md 4.4).
+ */
+private fun ChatState.rejectEffortChange(requestId: String, error: String?): ChatState =
+    copy(effort = effortChanges[requestId], effortChanges = effortChanges - requestId)
+        .notice(NoticeLevel.ERROR, "Effort not changed: ${error ?: "unknown error"}")
 
 private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at: Long): ChatState {
     var next = state
@@ -549,10 +574,20 @@ private fun ChatState.withModels(payload: JsonObject?): ChatState {
     return copy(models = models.mapNotNull { it.asObject()?.modelOption() })
 }
 
-/** One entry of a `models` list; null without a string `value`. */
+/**
+ * One entry of a `models` list; null without a string `value`. Its effort levels count only with `supportsEffort` true (agent-sync:
+ * `Haiku 4.5` has neither), and a level that is no string is skipped.
+ */
 private fun JsonObject.modelOption(): ModelOption? {
     val value = string("value") ?: return null
-    return ModelOption(value, string("displayName") ?: value, string("description"))
+    return ModelOption(
+        value = value,
+        displayName = string("displayName") ?: value,
+        description = string("description"),
+        resolvedModel = string("resolvedModel"),
+        supportsAutoMode = boolean("supportsAutoMode") == true,
+        effortLevels = if (boolean("supportsEffort") == true) strings("supportedEffortLevels") else emptyList(),
+    )
 }
 
 private fun ChatState.assistant(messageId: String, parent: String?): ChatEntry.Assistant? =

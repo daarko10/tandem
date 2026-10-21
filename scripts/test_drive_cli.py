@@ -69,6 +69,28 @@ class CallTest(unittest.TestCase):
         drive_cli.settings(cli)
         self.assertEqual(2, sum(m["type"] == "user" for m in cli.sent), "both turns ran")
 
+    def test_the_effort_scenario_sends_two_settings_requests_between_two_turns(self):
+        def malformed_errors(request_id: str, request: dict) -> dict:
+            if not isinstance(request["settings"], dict):
+                return error(request_id, request)
+            return success(request_id, request)
+
+        cli = FakeCli(malformed_errors)
+        drive_cli.effort_switch(cli)
+        self.assertEqual(["user", "control_request", "control_request", "user"], [m["type"] for m in cli.sent])
+        self.assertEqual({"effortLevel": "high"}, cli.sent[1]["request"]["settings"])
+
+    def test_the_effort_scenario_fails_when_a_malformed_request_is_accepted(self):
+        with self.assertRaisesRegex(RuntimeError, "accepted an apply_flag_settings"):
+            drive_cli.effort_switch(FakeCli(success))
+
+    def test_the_auto_mode_scenario_records_the_answer_and_goes_on(self):
+        cli = FakeCli(error)
+        drive_cli.permission_mode_auto(cli)
+        modes = [m["request"].get("mode") for m in cli.sent if m["type"] == "control_request"]
+        self.assertEqual(["auto"], modes)
+        self.assertEqual(2, sum(m["type"] == "user" for m in cli.sent), "both turns ran")
+
 
 if __name__ == "__main__":
     unittest.main()

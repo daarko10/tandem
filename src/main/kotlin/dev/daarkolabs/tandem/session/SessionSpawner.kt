@@ -19,10 +19,12 @@ import java.util.concurrent.ConcurrentHashMap
 private val LOG = logger<SessionManager>()
 
 /**
- * The permission modes Tandem offers, in the order its picker lists them. A process never starts in another one (see
- * [SessionSpawner.configFor]).
+ * The permission modes Tandem offers, in the order its menus list them (`chat/Modes` labels them). A process never starts in another
+ * one (see [SessionSpawner.configFor]). `auto` is one: CLI 2.1.306 takes it both from `set_permission_mode` and from
+ * `--permission-mode` (fixture `permission-mode-auto`, docs/protocol.md 8).
  */
-internal val OFFERED_MODES: Set<PermissionMode> = setOf(PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN)
+internal val OFFERED_MODES: List<PermissionMode> =
+    listOf(PermissionMode.AUTO, PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN)
 
 /** The chat's notice when a process starts although [SessionManager]'s cap is reached and no session is idle. */
 private const val CAP_EXCEEDED_TEXT: String = "Max live sessions exceeded"
@@ -212,8 +214,8 @@ internal class SessionSpawner(
      * that would not.
      *
      * The picks come from [chat]: `--model` is [ChatState.requestedModel] and `--effort` is [ChatState.effort]. `--permission-mode`
-     * is [ChatState.permissionMode] when it is a mode Tandem offers (default, acceptEdits, plan). Any other mode a transcript
-     * recorded (bypassPermissions, auto, dontAsk) starts as default; [newSession] says so in the chat.
+     * is [ChatState.permissionMode] when it is a mode Tandem offers ([OFFERED_MODES]: auto, default, acceptEdits, plan). Any other
+     * mode a transcript recorded (bypassPermissions, dontAsk) starts as default; [newSession] says so in the chat.
      */
     private fun configFor(handle: SessionHandle, binary: String, hasTranscript: Boolean, chat: ChatState): SessionConfig {
         val mode = chat.permissionMode

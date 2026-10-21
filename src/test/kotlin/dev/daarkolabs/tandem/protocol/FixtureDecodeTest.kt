@@ -140,6 +140,34 @@ class FixtureDecodeTest {
         }
     }
 
+    // Plain branch: CLI 2.1.306 takes an effortLevel over stdio without checking it ("bogus" too, and with CLAUDE_CODE_EFFORT_LEVEL set),
+    // so the scenario's refused request is one whose settings is not an object (scripts/drive_cli.py effort_switch, docs/protocol.md 4.4).
+    @Test
+    fun `an apply_flag_settings success and error decode`() {
+        val responses = Fixtures.decode("effort-switch").filterIsInstance<CliMessage.ControlResponse>()
+        assertEquals(3, responses.size) // initialize, then the two apply_flag_settings answers
+        val high = responses[1]
+        assertTrue(high.isSuccess)
+        assertNull(high.payload, "the recorded success has no response field")
+        val refused = responses[2]
+        assertTrue(!refused.isSuccess)
+        assertEquals("apply_flag_settings requires `settings` to be an object, got string", refused.error)
+    }
+
+    // The recording shows a success: {"mode":"auto"}, then a system/status line in auto and the next init in auto.
+    @Test
+    fun `set_permission_mode auto is answered as recorded`() {
+        val messages = Fixtures.decode("permission-mode-auto")
+        val ack = messages.filterIsInstance<CliMessage.ControlResponse>()[1]
+        assertTrue(ack.isSuccess)
+        assertEquals(buildJsonObject { put("mode", "auto") }, ack.payload)
+        assertEquals(PermissionMode.AUTO, assertIs<CliMessage.SystemStatus>(messages[messages.indexOf(ack) + 1]).permissionMode)
+        assertEquals(
+            listOf(PermissionMode.DEFAULT, PermissionMode.AUTO),
+            messages.filterIsInstance<CliMessage.SystemInit>().map { it.permissionMode },
+        )
+    }
+
     @Test
     fun `fork fixture resumes under a new session id`() {
         val ids = Fixtures.decode("fork").filterIsInstance<CliMessage.SystemInit>().map { it.sessionId }

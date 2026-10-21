@@ -17,19 +17,28 @@ import kotlin.test.assertTrue
 class ComposerModelTest {
     @Test
     fun `composer model changes only on its own fields`() {
-        var previous: ChatState? = null
-        var compared = 0
-        replay("plain-reply") { line, state, _ ->
-            val event = (fixtureLine("plain-reply", line) as? CliMessage.StreamEvent)?.event
-            val before = previous
-            if (before != null && event is StreamEvent.ContentBlockDelta && event.delta is Delta.Text) {
-                assertNotEquals(before, state)
-                assertEquals(composerModel(before), composerModel(state))
-                compared++
+        for (fixture in listOf("plain-reply", "agent-sync")) {
+            var previous: ChatState? = null
+            var compared = 0
+            val (last, _) = replay(fixture) { line, state, _ ->
+                val event = (fixtureLine(fixture, line) as? CliMessage.StreamEvent)?.event
+                val before = previous
+                if (before != null && event is StreamEvent.ContentBlockDelta && event.delta is Delta.Text) {
+                    assertNotEquals(before, state)
+                    assertEquals(composerModel(before), composerModel(state))
+                    compared++
+                }
+                previous = state
             }
-            previous = state
+            assertTrue(compared > 0, fixture)
+            if (fixture == "agent-sync") {
+                // The shown model is Sonnet 5.5, the one init reports; the default entry resolves to Fable 5.1.
+                val composer = composerModel(last)
+                assertEquals("claude-fable-5-1", composer.defaultModel)
+                assertEquals(listOf("low", "medium", "high", "xhigh", "max"), composer.effortLevels)
+                assertEquals(true, composer.autoSupported)
+            }
         }
-        assertTrue(compared > 0)
     }
 
     @Test
@@ -45,6 +54,7 @@ class ComposerModelTest {
             permissionMode = PermissionMode.PLAN,
             effort = "high",
             claudeCodeVersion = "3.0.0",
+            modelSwitchPending = true,
         )
         assertEquals(
             ComposerModel(
@@ -58,6 +68,10 @@ class ComposerModelTest {
                 permissionMode = PermissionMode.PLAN,
                 effort = "high",
                 claudeCodeVersion = "3.0.0",
+                defaultModel = null,
+                effortLevels = kotlinx.collections.immutable.persistentListOf(),
+                autoSupported = false,
+                modelSwitchPending = true,
             ),
             composerModel(state),
         )

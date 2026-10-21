@@ -56,6 +56,14 @@ class HostMessagesTest {
     }
 
     @Test
+    fun `apply_flag_settings carries the effort level`() {
+        assertEquals(
+            """{"type":"control_request","request_id":"a6","request":{"subtype":"apply_flag_settings","settings":{"effortLevel":"high"}}}""",
+            wire(HostMessages.applyFlagSettings("a6", "high")),
+        )
+    }
+
+    @Test
     fun `can_use_tool answers`() {
         val input = buildJsonObject { put("command", "ls") }
         assertEquals(

@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.ui
 
+import dev.daarkolabs.tandem.chat.Modes
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NewSessionOptions
@@ -59,26 +60,35 @@ class PickersTest {
     }
 
     @Test
-    fun `the permission mode picker offers Default, Accept edits and Plan, and shows Default for none`() {
+    fun `the new-session popup uses the footer's mode labels`() {
         val entries = permissionModeEntries(null)
-        assertEquals(listOf("Default", "Accept edits", "Plan"), entries.map { it.label })
-        assertEquals(listOf(PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN), entries.map { it.value })
+        assertEquals(listOf("Default mode", "Auto", "Manual", "Accept edits", "Plan"), entries.map { it.label })
+        assertEquals(
+            listOf(null, PermissionMode.AUTO, PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN),
+            entries.map { it.value },
+        )
         assertEquals(0, entries.positionOf(null))
-        assertEquals(1, permissionModeEntries(PermissionMode.ACCEPT_EDITS).positionOf(PermissionMode.ACCEPT_EDITS))
-        assertEquals(2, permissionModeEntries(PermissionMode.PLAN).positionOf(PermissionMode.PLAN))
+        assertEquals(3, permissionModeEntries(PermissionMode.ACCEPT_EDITS).positionOf(PermissionMode.ACCEPT_EDITS))
+        assertEquals(4, permissionModeEntries(PermissionMode.PLAN).positionOf(PermissionMode.PLAN))
     }
 
     @Test
-    fun `a mode the picker does not offer is an entry of its own, by its wire name, and picking Default from it picks`() {
-        for (mode in listOf(PermissionMode.BYPASS_PERMISSIONS, PermissionMode.DONT_ASK, PermissionMode.AUTO)) {
+    fun `a mode the picker does not offer is an entry of its own, by its footer label, and picking Default mode from it picks`() {
+        for (mode in listOf(PermissionMode.BYPASS_PERMISSIONS, PermissionMode.DONT_ASK)) {
             val entries = permissionModeEntries(mode)
-            assertEquals(listOf("Default", "Accept edits", "Plan", mode.wire), entries.map { it.label }, mode.wire)
-            assertEquals(3, entries.positionOf(mode), mode.wire)
-            // Default is not the entry shown, so picking it asks the CLI to switch.
+            assertEquals(listOf("Default mode", "Auto", "Manual", "Accept edits", "Plan", Modes.label(mode)), entries.map { it.label }, mode.wire)
+            assertEquals(5, entries.positionOf(mode), mode.wire)
+            // Default mode is not the entry shown, so picking it is a pick.
             val keys = entries.pickerKeys()
-            val pickDefault = PickerList().opened().selected(0, keys, shown = 3).list.closed(keys, shown = 3)
+            val pickDefault = PickerList().opened().selected(0, keys, shown = 5).list.closed(keys, shown = 5)
             assertEquals(0, pickDefault.pick, mode.wire)
         }
+    }
+
+    @Test
+    fun `Default mode in the popup passes no permission mode`() {
+        assertEquals(PickerEntry<PermissionMode?>("Default mode", null), permissionModeEntries(null)[0])
+        assertNull(lastPicks(null, null, null).permissionMode)
     }
 
     @Test
@@ -90,7 +100,10 @@ class PickersTest {
             PickerEntry("Opus, again", "opus"),
         )
         assertEquals(keys(0, "sonnet", 2, 3), entries.pickerKeys())
-        assertEquals(modeKeys, permissionModeEntries(null).pickerKeys())
+        assertEquals(
+            keys(0, PermissionMode.AUTO, PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN),
+            permissionModeEntries(null).pickerKeys(),
+        )
     }
 
     @Test
@@ -205,21 +218,17 @@ class PickersTest {
         assertEquals(NewSessionOptions("sonnet", "high", PermissionMode.PLAN), lastPicks("sonnet", "high", "plan"))
         assertEquals(NewSessionOptions(null, null, PermissionMode.ACCEPT_EDITS), lastPicks(null, null, "acceptEdits"))
         assertEquals(NewSessionOptions(), lastPicks(null, null, null))
+        assertEquals(PermissionMode.AUTO, lastPicks(null, null, "auto").permissionMode)
     }
 
     @Test
-    fun `the popup's Default permission mode is none, whether picked or remembered`() {
-        assertNull(newSessionMode(PermissionMode.DEFAULT))
-        assertNull(newSessionMode(null))
-        assertEquals(PermissionMode.PLAN, newSessionMode(PermissionMode.PLAN))
-        assertEquals(PermissionMode.ACCEPT_EDITS, newSessionMode(PermissionMode.ACCEPT_EDITS))
-        assertNull(lastPicks(null, null, "default").permissionMode)
+    fun `Manual in the popup starts the session in default mode`() {
+        assertEquals(PermissionMode.DEFAULT, lastPicks(null, null, "default").permissionMode)
     }
 
     @Test
     fun `a last permission mode the popup does not offer starts as none`() {
         assertNull(lastPicks(null, null, "bypassPermissions").permissionMode)
-        assertNull(lastPicks(null, null, "auto").permissionMode)
         assertNull(lastPicks(null, null, "no such mode").permissionMode)
     }
 }

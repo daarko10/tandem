@@ -302,6 +302,30 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `setEffort sends apply_flag_settings and records the previous level`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > '${stdin.path}'"))
+        session.start()
+        session.setEffort("high")
+        assertEquals("high", session.state.value.effort)
+        assertEquals(null, session.state.value.effortChanges.values.single())
+
+        val written = withTimeout(10_000) {
+            var lines = stdin.readLines()
+            while (lines.none { "apply_flag_settings" in it }) {
+                delay(20)
+                lines = stdin.readLines()
+            }
+            lines
+        }
+        val line = written.single { "apply_flag_settings" in it }
+        assertTrue("\"subtype\":\"apply_flag_settings\"" in line, line)
+        assertTrue("\"effortLevel\":\"high\"" in line, line)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
     fun `rename asks the CLI to rename the session`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

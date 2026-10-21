@@ -8,7 +8,10 @@ import kotlin.test.assertEquals
 
 @TestApplication
 class TandemWorkspaceStateTest {
-    private val models = listOf(ModelOption("default", "Default (recommended)", "Sonnet 5.5"), ModelOption("opus", "Opus", null))
+    private val models = listOf(
+        ModelOption("default", "Default (recommended)", "Sonnet 5.5", "claude-sonnet-5-5", supportsAutoMode = true, effortLevels = listOf("low", "max")),
+        ModelOption("opus", "Opus", null),
+    )
 
     @Test
     fun `the last model list is remembered, and survives the workspace file`() {

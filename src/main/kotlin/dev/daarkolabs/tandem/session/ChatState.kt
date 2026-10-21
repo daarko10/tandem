@@ -24,8 +24,21 @@ data class ChatState(
      * for at once, and goes back to the mode before it if the CLI rejects it. Empty once a state is [settled].
      */
     val permissionModeChanges: Map<String, PermissionModeChange> = emptyMap(),
-    /** What Tandem passed with `--effort`, or what a loaded transcript recorded: the recorded `system/init` carries no effort. */
+    /**
+     * What Tandem passed with `--effort`, picked since (`apply_flag_settings`), or what a loaded transcript recorded: the recorded
+     * `system/init` carries no effort.
+     */
     val effort: String? = null,
+    /**
+     * The `apply_flag_settings` effort requests the CLI has not answered yet, by request id, each with the effort shown before it:
+     * [effort] shows the level picked at once, and goes back to that one if the CLI answers with an error. Empty once [settled].
+     */
+    val effortChanges: Map<String, String?> = emptyMap(),
+    /**
+     * A model was picked (`set_model`) and no `system/init` has confirmed it yet: until one does, the footer shows the
+     * [requestedModel] rather than the [activeModel] the turn still running reports. A non-local refusal fallback clears it too.
+     */
+    val modelSwitchPending: Boolean = false,
     val claudeCodeVersion: String? = null,
     val busy: Boolean = false,
     val pendingPermissions: List<PendingPermission> = emptyList(),
@@ -106,8 +119,19 @@ enum class TurnEnd {
 /** A `set_permission_mode` request still to be answered: the mode it asks for, and the mode shown before it. */
 data class PermissionModeChange(val requested: PermissionMode, val previous: PermissionMode?)
 
-/** A model the CLI offers: [value] is what `--model` and `set_model` take, [displayName] and [description] are for people. */
-data class ModelOption(val value: String, val displayName: String, val description: String?)
+/**
+ * A model the CLI offers: [value] is what `--model` and `set_model` take, [displayName] and [description] are for people.
+ * [resolvedModel] is the model id it stands for (what `system/init` reports), [supportsAutoMode] whether the `auto` permission mode
+ * is offered with it, and [effortLevels] the efforts it takes, in the CLI's order (empty without `supportsEffort`).
+ */
+data class ModelOption(
+    val value: String,
+    val displayName: String,
+    val description: String?,
+    val resolvedModel: String? = null,
+    val supportsAutoMode: Boolean = false,
+    val effortLevels: List<String> = emptyList(),
+)
 
 sealed interface ChatEntry {
     val id: String
@@ -224,6 +248,7 @@ internal fun ChatState.settled(): ChatState = copy(
     busy = false,
     pendingPermissions = emptyList(),
     permissionModeChanges = emptyMap(),
+    effortChanges = emptyMap(),
     ended = false,
     turnInterrupted = false,
     turn = null,
