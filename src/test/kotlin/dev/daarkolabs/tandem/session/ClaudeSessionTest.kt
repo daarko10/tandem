@@ -109,6 +109,28 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `blank text with an image makes an entry with no text, as on reload`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val launcher = fakeCli("cat > '${stdin.path}'")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        session.start()
+        session.sendUserMessage("  ", listOf(ImageBlock("image/png", "AAAA")))
+
+        val entry = session.state.value.entries.filterIsInstance<ChatEntry.User>().single()
+        assertEquals("", entry.text)
+        assertEquals(listOf(UserImage("${entry.id}#0", "image/png", "AAAA")), entry.images)
+        // The frame carries no text block, so the reloaded line's text is "" too.
+        val isPrompt = { line: String -> "\"type\":\"user\"" in line }
+        withTimeout(10_000) { while (stdin.readLines().none(isPrompt)) delay(20) }
+        session.close()
+        val frame = Json.parseToJsonElement(stdin.readLines().first(isPrompt)).jsonObject
+        val content = frame.getValue("message").jsonObject.getValue("content").jsonArray
+        assertEquals(listOf("image"), content.map { it.jsonObject.getValue("type").jsonPrimitive.content })
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
     fun `cancelling the owning scope leaves no process or child process behind`() = runBlocking {
         // Ignores stdin and spawns a grandchild: the worst case for cleanup.
         val launcher = fakeCli("sleep 600 & sleep 600")

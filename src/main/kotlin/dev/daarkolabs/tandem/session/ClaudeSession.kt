@@ -207,11 +207,14 @@ class ClaudeSession(
         }
     }
 
-    /** Sends a prompt: [text], then the [images] attached to it, in order. Each image's id is the prompt's uuid and its index. */
+    /**
+     * Sends a prompt: [text], then the [images] attached to it, in order. Each image's id is the prompt's uuid and its index. Blank
+     * text is left off the wire, so the entry's text is `""` then, as the reloaded line gives it.
+     */
     fun sendUserMessage(text: String, images: List<ImageBlock> = emptyList()) {
         val uuid = UUID.randomUUID().toString()
         val shown = images.mapIndexed { i, image -> UserImage("$uuid#$i", image.mediaType, image.base64) }
-        dispatch(SessionEvent.UserSent(uuid, text, clock(), shown))
+        dispatch(SessionEvent.UserSent(uuid, if (text.isBlank()) "" else text, clock(), shown))
         send(HostMessages.userMessage(text, images, uuid))
     }
 
