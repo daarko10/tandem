@@ -168,7 +168,9 @@ sealed interface ChatEntry {
 
     /**
      * One API message. While [streaming], [blocks] are drafts built from stream deltas; each complete
-     * `assistant` line replaces its draft block. [uuids] are the wire uuids of the complete lines (for retraction).
+     * `assistant` line replaces its draft block. [uuids] are the wire uuids of the complete lines (for retraction). [atMillis] is
+     * when it came: the host's clock at its main-thread `message_start`, else at its first complete line (a reloaded transcript's
+     * line timestamp); null when unknown (a line stamped 0, polish spec edge 21).
      */
     data class Assistant(
         override val id: String,
@@ -183,6 +185,7 @@ sealed interface ChatEntry {
         val agentId: String? = null,
         val subagentType: String? = null,
         val taskDescription: String? = null,
+        val atMillis: Long? = null,
     ) : ChatEntry
 
     /**

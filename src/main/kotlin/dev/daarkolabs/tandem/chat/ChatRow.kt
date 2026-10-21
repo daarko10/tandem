@@ -28,8 +28,43 @@ enum class RowGap(val dp: Int) {
 /** What the user sent, `u:<entry id>`. [mono]: a slash command or a `!` shell line, drawn in the editor font. */
 data class UserRow(override val key: String, val text: String, val mono: Boolean, override val gap: RowGap = RowGap.TURN) : ChatRow
 
-/** One text block of a reply, `t:<entry id>:<block index>`. */
-data class TextRow(override val key: String, val markdown: String, val streaming: Boolean, override val gap: RowGap) : ChatRow
+/**
+ * One text block of a reply, `t:<entry id>:<block index>`. [actions] is set on the last text block of each ended turn's reply, which
+ * the hover row goes under (polish spec 2.6).
+ */
+data class TextRow(
+    override val key: String,
+    val markdown: String,
+    val streaming: Boolean,
+    override val gap: RowGap,
+    val actions: MessageActions? = null,
+) : ChatRow
+
+/**
+ * What the hover row under a reply acts on (polish spec 2.6): the reply's entry ([entryId]), its [markdown] (the message's non-blank
+ * text blocks joined by a blank line, the narration messages before it left out) for Copy, and when it came ([atMillis], null when
+ * unknown) for its time.
+ */
+data class MessageActions(val entryId: String, val markdown: String, val atMillis: Long?)
+
+/** Whether a reply's `Fork from here` can fork now (polish spec 2.6). */
+enum class ForkState {
+    /** The latest ended turn's reply, while no turn runs. */
+    ENABLED,
+
+    /** The latest ended turn's reply while a newer turn runs: `Wait for the reply to finish`. */
+    WAIT,
+
+    /** An earlier reply: `Only the latest reply can be forked`. */
+    NOT_LATEST,
+}
+
+/** The fork state of reply [entryId] when [latestReply] is the latest ended turn's reply and [busy] says whether a turn runs. */
+fun forkState(entryId: String, latestReply: String?, busy: Boolean): ForkState = when {
+    entryId != latestReply -> ForkState.NOT_LATEST
+    busy -> ForkState.WAIT
+    else -> ForkState.ENABLED
+}
 
 /** One thinking block of a main-thread reply, `th:<entry id>:<block index>`; it opens only when [summary] is not blank. */
 data class ThinkingRow(

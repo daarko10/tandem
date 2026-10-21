@@ -1070,6 +1070,89 @@ class ChatRowsBuilderTest {
     /** [state] with [entry] appended as the reducer would, for entries no fixture line makes. */
     private fun ChatState.withEntry(entry: ChatEntry): ChatState = copy(entries = entries + entry, entryIndex = emptyMap())
 
+    /** The main-thread Assistant entry of [state] whose text is [text]. */
+    private fun replyOf(state: ChatState, text: String): ChatEntry.Assistant = state.entries.filterIsInstance<ChatEntry.Assistant>()
+        .single { entry -> entry.parentToolUseId == null && entry.blocks.any { it is AssistantBlock.Text && it.text == text } }
+
+    @Test
+    fun `only the turn's final reply carries actions`() {
+        val (state, rows) = replay("permission-mode")
+        // The rows by turn: each starts at a user row.
+        val turns = ArrayList<MutableList<ChatRow>>()
+        for (row in rows.rows) {
+            if (row is UserRow || turns.isEmpty()) turns += ArrayList<ChatRow>()
+            turns.last() += row
+        }
+        val replies = listOf("one", "two", "three").map { replyOf(state, it) }
+        assertEquals(3, turns.count { turn -> turn.any { it is TextRow } })
+        val withText = turns.filter { turn -> turn.any { it is TextRow } }
+        withText.forEachIndexed { t, turn ->
+            val texts = turn.filterIsInstance<TextRow>()
+            assertEquals(1, texts.count { it.actions != null }, texts.toString())
+            val actions = assertNotNull(texts.last().actions)
+            assertEquals(replies[t].id, actions.entryId)
+            assertEquals(replies[t].atMillis, actions.atMillis)
+        }
+    }
+
+    @Test
+    fun `the reply's actions carry its Markdown, text blocks joined by a blank line, narration excluded`() {
+        var firstTurn: ChatRows? = null
+        val (state, _) = replay("mcp-tool-call") { line, _, rows -> if (line == 48) firstTurn = rows }
+        val texts = assertNotNull(firstTurn).rows.filterIsInstance<TextRow>()
+        val narration = texts.single { it.markdown.startsWith("I'll load the echo tool's schema") }
+        assertNull(narration.actions)
+        val reply = texts.single { it.markdown == "hello tandem" }
+        val actions = assertNotNull(reply.actions)
+        assertEquals("hello tandem", actions.markdown)
+        assertEquals(replyOf(state, "hello tandem").id, actions.entryId)
+
+        // A reply message with two text blocks: one action row, under the last, with both blocks.
+        val ended = ChatState(entries = listOf(ChatEntry.User("u1", "hi"), assistant("m1", AssistantBlock.Text("a"), AssistantBlock.Text("b"))))
+        val built = ChatRowsBuilder(options).build(ended).rows.filterIsInstance<TextRow>()
+        assertEquals(listOf(null, MessageActions("m1", "a\n\nb", null)), built.map { it.actions })
+    }
+
+    @Test
+    fun `a streaming reply has no actions`() {
+        var running = 0
+        val (_, rows) = replay("plain-reply") { _, state, rows ->
+            if (state.turn != null) {
+                running++
+                assertTrue(rows.rows.filterIsInstance<TextRow>().all { it.actions == null }, rows.rows.toString())
+            }
+        }
+        assertTrue(running > 0)
+        assertEquals("pong", assertNotNull(rows.rows.filterIsInstance<TextRow>().single().actions).markdown)
+    }
+
+    @Test
+    fun `the latest reply is the last ended turn's, and none after a turn without text`() {
+        val seen = HashMap<Int, String?>()
+        val (state, rows) = replay("permission-mode") { line, _, rows -> seen[line] = rows.latestReply }
+        val (id1, id2, id3) = listOf("one", "two", "three").map { replyOf(state, it).id }
+        assertEquals(id1, seen[15], "after the first result")
+        // The second turn runs from the prompt sent before line 21 to its result at 38: not ended, so the latest is still the first.
+        for (line in 16..37) assertEquals(id1, seen[line], "line $line")
+        assertEquals(id2, seen[38], "after the second result")
+        for (line in 39..52) assertEquals(id2, seen[line], "line $line")
+        assertEquals(id3, rows.latestReply)
+
+        val again = reduce(state, SessionEvent.UserSent("u-x", "again"))
+        assertEquals(id3, ChatRowsBuilder(options).build(again).latestReply)
+        // interrupt:19, the error_during_execution result that ends a turn with no text.
+        val interrupted = reduce(again, SessionEvent.Cli(Fixtures.decode("interrupt").filterIsInstance<CliMessage.Result>().single()))
+        assertNull(interrupted.turn)
+        assertNull(ChatRowsBuilder(options).build(interrupted).latestReply)
+    }
+
+    @Test
+    fun `fork is enabled on the latest reply, waits while a turn runs, and is refused on earlier replies`() {
+        assertEquals(ForkState.ENABLED, forkState("a", "a", false))
+        assertEquals(ForkState.WAIT, forkState("a", "a", true))
+        assertEquals(ForkState.NOT_LATEST, forkState("a", "b", false))
+    }
+
     private fun cliLine(json: String): SessionEvent = SessionEvent.Cli(Ndjson.decode(json))
 
     private fun assistant(id: String, vararg blocks: AssistantBlock): ChatEntry.Assistant =

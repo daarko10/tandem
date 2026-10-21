@@ -1054,4 +1054,27 @@ class ReducerTest {
             assertNotNull(result.content)
         }
     }
+
+    @Test
+    fun `an assistant entry carries the time of its first line`() {
+        val messages = Fixtures.decode("plain-reply")
+        val state = messages.foldIndexed(ChatState()) { index, state, message -> reduce(state, SessionEvent.Cli(message, atMillis = index * 100L)) }
+        val start = messages.indexOfFirst { it is CliMessage.StreamEvent && it.event is StreamEvent.MessageStart }
+        assertTrue(start > 0)
+        // Stamped at its message_start, and kept when its complete line comes later.
+        assertEquals(start * 100L, state.assistants().single().atMillis)
+        // A complete line without a draft stamps its own time.
+        val complete = reduce(ChatState(), SessionEvent.Cli(Ndjson.decode(REPLY_LINE), atMillis = 1_234L))
+        assertEquals(1_234L, complete.assistants().single().atMillis)
+    }
+
+    @Test
+    fun `an assistant line stamped 0 carries no time`() {
+        val state = reduce(ChatState(), SessionEvent.Cli(Ndjson.decode(REPLY_LINE), atMillis = 0L))
+        assertNull(state.assistants().single().atMillis)
+    }
 }
+
+/** A complete main-thread `assistant` line with one text block. */
+private const val REPLY_LINE: String =
+    """{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-sonnet-5-5","content":[{"type":"text","text":"pong"}]}}"""

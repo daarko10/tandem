@@ -335,6 +335,7 @@ private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at:
             agentId = message.agentId,
             subagentType = message.subagentType,
             taskDescription = message.taskDescription,
+            atMillis = at.takeIf { it > 0 },
         )
     } else {
         // The Nth complete line for a message replaces the Nth drafted block (docs/protocol.md 6.4).
@@ -351,6 +352,7 @@ private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at:
             agentId = message.agentId ?: existing.agentId,
             subagentType = message.subagentType ?: existing.subagentType,
             taskDescription = message.taskDescription ?: existing.taskDescription,
+            atMillis = existing.atMillis ?: at.takeIf { it > 0 },
         )
     }
     return next.upsert(updated).let { if (message.aborted) it.finishStreaming() else it }
@@ -418,6 +420,8 @@ private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent, at: 
                     completedBlocks = 0,
                     streaming = true,
                     uuids = emptySet(),
+                    // When the reply began, for its hover row's time (polish spec 2.6); 0 is an unknown time.
+                    atMillis = at.takeIf { it > 0 && parent == null },
                 ),
             )
         }

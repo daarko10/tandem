@@ -1,7 +1,9 @@
 package dev.daarkolabs.tandem.ui
 
 import dev.daarkolabs.tandem.chat.ChatRowsBuilder
+import dev.daarkolabs.tandem.chat.ForkState
 import dev.daarkolabs.tandem.chat.NoticeRow
+import dev.daarkolabs.tandem.chat.PROMPT
 import dev.daarkolabs.tandem.chat.PlanCard
 import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.chat.TextRow
@@ -9,8 +11,11 @@ import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.chat.TurnEndRow
 import dev.daarkolabs.tandem.chat.WorkingRow
+import dev.daarkolabs.tandem.chat.forkState
 import dev.daarkolabs.tandem.chat.replay
 import dev.daarkolabs.tandem.ui.rows.shownWorkingRow
+import dev.daarkolabs.tandem.session.AssistantBlock
+import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
@@ -264,6 +269,47 @@ class ChatPresenterTest {
             val kept = before.rows.indexOfFirst { it.row is TurnEndRow }
             assertTrue(kept > 0, before.rows.toString())
             for (i in 0 until kept) assertSame(before.rows[i], after.rows[i])
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a turn's start sets the latest reply's fork to WAIT, and its end moves ENABLED to the new reply and NOT_LATEST to the earlier one, without the earlier TextRow changing`() = runBlocking {
+        val states = HashMap<Int, ChatState>()
+        val (final, _) = replay("permission-mode") { line, state, _ -> states[line] = state }
+        fun replyId(text: String): String = final.entries.filterIsInstance<ChatEntry.Assistant>()
+            .single { entry -> entry.blocks.any { it is AssistantBlock.Text && it.text == text } }.id
+        val id1 = replyId("one")
+        val id2 = replyId("two")
+        // After the first result; after the second prompt, sent before line 21 as replay sends it; after the second result.
+        val firstEnded = states.getValue(15)
+        val secondSent = reduce(states.getValue(20), SessionEvent.UserSent("u21", PROMPT, atMillis = 2_000L))
+        val secondEnded = states.getValue(38)
+        val state = MutableStateFlow(firstEnded)
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)))
+            fun replyRow(chat: RenderedChat): RenderedRow? = chat.rows.firstOrNull { (it.row as? TextRow)?.actions?.entryId == id1 }
+
+            assertEquals(id1, withTimeout(TIMEOUT) { presenter.latestReply.first { it != null } })
+            assertFalse(presenter.busy.value)
+            assertEquals(ForkState.ENABLED, forkState(id1, presenter.latestReply.value, presenter.busy.value))
+            val first = assertNotNull(replyRow(withTimeout(TIMEOUT) { presenter.chat.first { replyRow(it) != null } }))
+
+            state.value = secondSent
+            withTimeout(TIMEOUT) { presenter.busy.first { it } }
+            val running = withTimeout(TIMEOUT) { presenter.chat.first { chat -> chat.rows.any { it.row.key == "u:u21" } } }
+            assertEquals(id1, presenter.latestReply.value)
+            assertEquals(ForkState.WAIT, forkState(id1, presenter.latestReply.value, presenter.busy.value))
+            assertSame(first, replyRow(running))
+
+            state.value = secondEnded
+            assertEquals(id2, withTimeout(TIMEOUT) { presenter.latestReply.first { it == id2 } })
+            withTimeout(TIMEOUT) { presenter.busy.first { !it } }
+            assertEquals(ForkState.ENABLED, forkState(id2, presenter.latestReply.value, presenter.busy.value))
+            assertEquals(ForkState.NOT_LATEST, forkState(id1, presenter.latestReply.value, presenter.busy.value))
+            assertSame(first, replyRow(presenter.chat.value))
         } finally {
             scope.cancel()
         }

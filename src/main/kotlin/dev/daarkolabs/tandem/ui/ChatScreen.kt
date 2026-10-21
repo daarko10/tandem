@@ -20,6 +20,8 @@ import dev.daarkolabs.tandem.ui.cards.PendingCardHost
 import dev.daarkolabs.tandem.ui.cards.answerFor
 import dev.daarkolabs.tandem.ui.cards.escapeAnswer
 import dev.daarkolabs.tandem.ui.cards.pendingCard
+import dev.daarkolabs.tandem.ui.rows.ReplyHost
+import dev.daarkolabs.tandem.ui.rows.copyToClipboard
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import org.jetbrains.jewel.foundation.modifier.thenIf
@@ -32,7 +34,7 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
  * it waits: a prompt to a stopped session starts its process. While a permission card is open the transcript is dimmed. With
  * [focusPrompt] the prompt box takes the focus, and then [onPromptFocused] is called. Esc in the transcript asks for the prompt box's
  * focus with [onFocusComposer]; Esc in the prompt box while a card is open gives the card's Esc answer (spec 4.18). A card that opens
- * takes the focus only when [cardTakesFocus] says so then.
+ * takes the focus only when [cardTakesFocus] says so then. Under each ended turn's reply, Copy and Fork from here go through [actions].
  */
 @Composable
 internal fun ChatPane(
@@ -42,6 +44,7 @@ internal fun ChatPane(
     workspace: TandemWorkspaceState,
     presenter: ChatPresenter,
     ui: ChatUiState,
+    actions: SessionActions,
     focusPrompt: Boolean = false,
     onPromptFocused: () -> Unit = {},
     onFocusComposer: () -> Unit = {},
@@ -53,6 +56,12 @@ internal fun ChatPane(
     // The plan card's feedback, for the request on screen: Esc in the composer sends it too.
     val feedback = remember(pending.card?.requestId) { TextFieldState() }
     val panel = JewelTheme.globalColors.panelBackground
+    // The replies' hover rows (polish spec 2.6): only they read the two states, so a turn's start or end recomposes nothing else.
+    val latestReply = presenter.latestReply.collectAsState()
+    val busy = presenter.busy.collectAsState()
+    val reply = remember(handle.id, actions, latestReply, busy) {
+        ReplyHost(::copyToClipboard, { actions.fork(handle.id) }, latestReply, busy)
+    }
     Column(Modifier.fillMaxSize()) {
         Box(
             Modifier.weight(1f).fillMaxWidth()
@@ -69,7 +78,7 @@ internal fun ChatPane(
             } else {
                 "Ask Claude anything about this project."
             }
-            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis, onFocusComposer)
+            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis, onFocusComposer, reply)
         }
         pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) }
         PromptBar(

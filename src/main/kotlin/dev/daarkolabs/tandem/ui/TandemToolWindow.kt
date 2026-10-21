@@ -217,6 +217,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                     workspace,
                                     presenter,
                                     ui,
+                                    actions,
                                     focusPrompt = promptFocusFor == selected.id,
                                     onPromptFocused = { promptFocusFor = null },
                                     onFocusComposer = { promptFocusFor = selected.id },

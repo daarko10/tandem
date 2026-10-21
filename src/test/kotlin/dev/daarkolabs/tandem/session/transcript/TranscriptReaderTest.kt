@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session.transcript
 
+import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
@@ -41,6 +42,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -926,5 +928,16 @@ class TranscriptReaderTest {
         assertEquals(listOf("user: Reply with the single word: pong", "assistant: pong"), state.shape())
         assertNull(state.cwd)
         assertEquals(0L, state.entries.filterIsInstance<ChatEntry.User>().single().sentAtMillis ?: 0L)
+        // The reader stamps a line without a timestamp 0, which the reducer maps to no time (polish spec edge 21).
+        assertNull(state.entries.filterIsInstance<ChatEntry.Assistant>().single().atMillis)
+    }
+
+    @Test
+    fun `a reloaded assistant entry is stamped with its line's timestamp`() {
+        // history-reply's reply, line 18.
+        val line = Fixtures.transcript("history-reply").readLines()[17]
+        val stamped = assertNotNull((Ndjson.decode(line) as CliMessage.Assistant).timestampMillis)
+        assertEquals(Instant.parse("2026-10-16T15:28:34.762Z").toEpochMilli(), stamped)
+        assertEquals(stamped, read("history-reply").entries.filterIsInstance<ChatEntry.Assistant>().single().atMillis)
     }
 }

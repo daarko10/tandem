@@ -65,6 +65,7 @@ import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.ui.dev.RecompositionCounter
 import dev.daarkolabs.tandem.ui.dev.RenderingSpike
 import dev.daarkolabs.tandem.ui.rows.NoticeItem
+import dev.daarkolabs.tandem.ui.rows.ReplyHost
 import dev.daarkolabs.tandem.ui.rows.TextRowItem
 import dev.daarkolabs.tandem.ui.rows.ThinkingRowItem
 import dev.daarkolabs.tandem.ui.rows.ToolRowItem
@@ -98,7 +99,8 @@ private val AGENT_LIVE: Set<ToolState> = setOf(ToolState.RUNNING, ToolState.WAIT
  * Following is intent, not position ([dev.daarkolabs.tandem.chat.FollowState]): a user scroll up (wheel, drag, the scrollbar's
  * thumb, Page Up, Home) pauses it, and while it follows, new rows, a growing last row and a change of the list's height keep the
  * bottom in view. A user scroll down that reaches the bottom, End, the `↓` button and a send resume it. The focused transcript
- * scrolls with Page Up, Page Down, Home and End; Esc there gives the composer the focus ([onFocusComposer]).
+ * scrolls with Page Up, Page Down, Home and End; Esc there gives the composer the focus ([onFocusComposer]). With [reply], the ended
+ * turns' replies get their hover rows (polish spec 2.6).
  */
 @Composable
 internal fun ChatPanel(
@@ -108,6 +110,7 @@ internal fun ChatPanel(
     emptyText: String,
     lastFrameAt: StateFlow<Long>,
     onFocusComposer: () -> Unit,
+    reply: ReplyHost? = null,
 ) {
     val chat by presenter.chat.collectAsState()
     val rows = chat.rows
@@ -218,7 +221,7 @@ internal fun ChatPanel(
                     },
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             ) {
-                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt, agentExpanded) }
+                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt, agentExpanded, reply) }
             }
             val buttonText = ui.follow.value.buttonText
             if (buttonText != null && listState.canScrollForward) {
@@ -299,13 +302,22 @@ private fun JumpToBottom(text: String, modifier: Modifier, onClick: () -> Unit) 
     }
 }
 
-/** One row of the list, by its kind. [lastFrameAt] and [agentExpanded] (a running Agent row is open) are for the working row only. */
+/**
+ * One row of the list, by its kind. [lastFrameAt] and [agentExpanded] (a running Agent row is open) are for the working row only,
+ * [reply] for a text row's hover row.
+ */
 @Composable
-internal fun RowItem(rendered: RenderedRow, ui: ChatUiState, lastFrameAt: StateFlow<Long>, agentExpanded: Boolean = false) {
+internal fun RowItem(
+    rendered: RenderedRow,
+    ui: ChatUiState,
+    lastFrameAt: StateFlow<Long>,
+    agentExpanded: Boolean = false,
+    reply: ReplyHost? = null,
+) {
     if (RenderingSpike.enabled) SideEffect { RecompositionCounter.hit(rendered.row.key) }
     when (val row = rendered.row) {
         is UserRow -> UserBubble(row)
-        is TextRow -> TextRowItem(rendered)
+        is TextRow -> TextRowItem(rendered, reply)
         is ToolRow -> ToolRowItem(rendered, ui)
         is NoticeRow -> NoticeItem(row)
         is TurnEndRow -> TurnEndItem(row)
