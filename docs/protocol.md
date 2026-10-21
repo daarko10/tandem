@@ -77,7 +77,7 @@ Recommended Tandem argv (`SessionConfig.argv()` builds it):
 
 ```
 claude --output-format stream-json --verbose --input-format stream-json \
-  --include-partial-messages --permission-prompt-tool=stdio \
+  --include-partial-messages --thinking-display summarized --permission-prompt-tool=stdio \
   --model <picked> --effort <level> --permission-mode <mode> \
   --mcp-config '{"mcpServers":{"tandem":{...}}}' \
   --disallowedTools Edit,Write,MultiEdit,NotebookEdit \
@@ -287,6 +287,15 @@ Request fields (all optional): `hooks`, `sdkMcpServers`, `sdkMcpServerConfigs`, 
 `forwardSubagentText`, `supportedDialogKinds` (absence = cannot render any `request_user_dialog`; fails closed),
 `perTaskStopAffordance`, `plugins` (only with `--await-initialize`).
 
+Tandem sends (`HostMessages.initialize`):
+
+```json
+{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize","hooks":null,"forwardSubagentText":true}}
+```
+
+`forwardSubagentText:true` makes the CLI forward a subagent's text replies as `assistant` lines with an `agent_id`
+(`agent-forwarded.ndjson:38`; section 5.2, `task_notification`), which Tandem nests under the `Agent` row.
+
 Success `response` payload (`SDKControlInitializeResponse`):
 
 | Field | Type |
@@ -328,6 +337,9 @@ Enabled by `--permission-prompt-tool=stdio`. The CLI blocks the tool until answe
 | `title`, `display_name`, `description` | UI strings |
 | `agent_id` | subagent origin: a prompt from inside an `Agent` subagent is a normal request plus `agent_id` = the task's `task_id` (`agent-sync.ndjson:43`; section 5.2) |
 | `mcp_server` | `{name, source}` for MCP tools |
+
+Tandem decodes `requires_user_interaction` (absent or mistyped: `false`), `decision_reason_type` and `agent_id` on
+`CanUseTool`; `agent_id` gives the card its `From the agent "<description>"` line.
 
 Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_use_id`):
 
@@ -384,7 +396,7 @@ Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_u
 | `set_model` | `model?: string\|null` (`null`/`"default"` = session default) | none: the success frame has no `response` field (fixture). The CLI also emits a replayed `user` line (`isReplay:true`) with `<local-command-stdout>Set model to ...</local-command-stdout>` |
 | `set_permission_mode` | `mode: "default"\|"acceptEdits"\|"bypassPermissions"\|"plan"\|"dontAsk"\|"auto"` | `{"mode": "<wire name>"}`, then a `system/status` line with `status: null` and the new `permissionMode`; the next `init` agrees (fixture `permission-mode`, 2.1.301) |
 | `rename_session` | `title: string`, `source: "host"` | none: no `response` field, like `set_model`. A `system/session_title_changed` line (`title`) comes just before it, and the CLI appends a `custom-title` line to the transcript (fixtures `fork`, `fork-origin`) |
-| `set_max_thinking_tokens` | `max_thinking_tokens?: number\|null`, `thinking_display?: "summarized"\|"omitted"\|"highlights"\|null` | none: the success frame has no `response` field (`think-summarized.ndjson:25`, 2.1.302). Takes effect on the next turn (below) |
+| `set_max_thinking_tokens` | `max_thinking_tokens?: number\|null`, `thinking_display?: "summarized"\|"omitted"\|"highlights"\|null` | none: the success frame has no `response` field (`think-summarized.ndjson:25`, 2.1.302). Takes effect on the next turn (below). Not sent by Tandem, which passes `--thinking-display summarized` at spawn (1.1) |
 | `list_models` | — | model catalog (`{models: ModelInfo[]}`, inferred shape) |
 | `get_context_usage` | `detail?: "summary"\|"full"` | categories `{name, tokens, kind:"used"\|"free"\|"buffer"\|"deferred"}` plus totals |
 | `rewind_files` | `user_message_id: string`, `dry_run?: boolean` | rewind result (needs file checkpointing env) |
@@ -519,6 +531,15 @@ disk is the last `assistant` line's `effort` in its transcript (section 11).
 | `commands_changed` | `commands` | refresh palette |
 | `files_persisted`, `memory_recall`, `elicitation_complete`, `control_request_progress`, `plugin_install`, `mirror_error`, `worker_shutting_down` | | ignore or log type |
 
+Tandem decodes `thinking_tokens` (`ThinkingTokens{estimatedTokens, estimatedTokensDelta?, userMessageUuid?}`; a line
+without an integer `estimated_tokens` stays unknown), `task_started` (`TaskStarted{taskId, toolUseId?, description?,
+subagentType?, taskType?, isBackgrounded}`), `task_progress` (`TaskProgress{taskId, toolUseId?, description?,
+usage{totalTokens?, toolUses?, durationMs?}?, lastToolName?}`), `task_updated` (`TaskUpdated{taskId, status?}`, the
+status read from `patch.status`) and `task_notification` (`TaskNotification{taskId, toolUseId?, status?, summary?,
+usage?}`) as typed lines; every field but `task_id` is optional and a mistyped one reads as absent. The thinking row
+counts tokens from `thinking_tokens`; the `Agent` row's sub-line is `N tool uses · T tokens · D` from the latest
+`task_progress` while the task runs, and the working row names a running subagent's step from its `description`.
+
 `SDKAssistantMessageError` = `authentication_failed | oauth_org_not_allowed | account_on_hold | verification_required | billing_error | rate_limit | overloaded | invalid_request | model_not_found | server_error | unknown | max_output_tokens | cloud_credential_error`.
 
 ### 5.3 Model fallback signals (critical)
@@ -577,6 +598,9 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
   (section 6.3); `caller:{type:"direct"}` on every `tool_use` block (`ask-single.ndjson:21`); `wire_tool_inputs`
   (section 10); on subagent lines `agent_id`, `subagent_type` and `task_description` beside `parent_tool_use_id`
   (section 6.2).
+- Tandem reads `thinking_duration_ms` (the thinking row's `Thought for Ns`), `thinking_display`, `agent_id`,
+  `subagent_type`, `task_description` and `timestamp` (ISO-8601, as epoch milliseconds) on `assistant` lines, and the same
+  names on `user` lines (6.2); on disk the line carries `thinkingDurationMs`, `agentId` and `timestamp` (section 11).
 
 ### 6.2 `user` (tool results)
 
@@ -633,6 +657,9 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
 | `api_message_id` | fixture-only field: the API message id; matches `message_start.message.id` and `assistant.message.id` in real runs (inferred; redacted in the fixture) |
 | `ttft_ms` | on `message_start` |
 | `user_message_uuid(s)` | on the turn's first non-ping event: which client send this turn answers |
+| `estimated_tokens` | on `thinking_delta` frames, beside `thinking`: an integer on the first deltas of an `updates` block, `null` on its last one and on every `summarized` delta (below) |
+| `message_start.message.usage` | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`; Tandem decodes the sum of the three input counts (`plain-reply.ndjson:7`) |
+| `message_delta.usage` | the request's `output_tokens` and `output_tokens_details.thinking_tokens` (`plain-reply.ndjson:12`); Tandem decodes both, and the working row's ` · N tokens` adds up each request's `output_tokens` (plus the running `thinking_tokens` estimate until the request's `message_delta`) |
 | `thinking_display` | wrapper-level `"updates"\|"summarized"\|"highlights"` on `message_start`, the block's `content_block_start` and every `thinking_delta` frame (`think-default.ndjson:7,8,10`; `think-display-summarized.ndjson:8,11`), not on `signature_delta` or `content_block_stop` (`think-default.ndjson:15,17`; `think-display-highlights.ndjson:11`), so no decoder keys block membership on its presence; and on the `assistant` line that completes the block, with `thinking_duration_ms` (`think-default.ndjson:16`: 2143 ms). The SDK types it only on `set_max_thinking_tokens`; `"full"` never appears over stdio (section 4.4) |
 
 Thinking blocks (2.1.302, fixtures `think-*`; probes doc 2.3). In the default display, `updates` (Tandem's argv; Opus
@@ -701,6 +728,9 @@ Common fields: `duration_ms`, `duration_api_ms`, `is_error`, `num_turns`, `stop_
 Success only: `result`, `ttft_ms`, `ttft_stream_ms`, `time_to_request_ms`, `structured_output?`.
 Error only: `errors: string[]`, `startup_failure_reason?`.
 The fixture also has `api_error_status`, `subagent_stats`, `safety_stops`, `turn_start_resume_kind`, many `process_*` timing fields: ignore.
+Tandem reads `duration_ms` (the footer's `Worked for <duration>`), `duration_api_ms`, `num_turns`, `usage.output_tokens`
+and `permission_denials` (`PermissionDenial{toolName, toolUseId?}`; an entry without a string `tool_name` is skipped):
+each optional, a mistyped one absent.
 
 API error (fixture `invalid-model`, 2.1.302, run with `--model claude-nonexistent-0`): no stream frames; the CLI writes an
 `assistant` line itself, `message.model:"<synthetic>"`, with `error:"model_not_found"`, `is_api_error_message:true`,
@@ -798,7 +828,7 @@ Parse them leniently; any of them can change without notice.
 | `system/task_summary` | `{detail: string\|null}` | not in `sdk.d.ts`; short status line while a tool runs, `null` when done |
 | `system/session_title_changed` | `{title}` | not in `sdk.d.ts`. Just before the success of a `rename_session` (section 4.4); a fork of a renamed session also emits it, before its `initialize` response (fixture `fork`, 2.1.301) |
 | `assistant.wire_tool_inputs` | `{<tool_use id>: input}` | not in `sdk.d.ts` |
-| `user.tool_result_meta` | `[{id, permission_decision:{decision, source, reason_type?}, non_execution_kind?}]` | not in `sdk.d.ts`; section 6.2 (`reason_type`: `tools-read.ndjson:21`, 2.1.302) |
+| `user.tool_result_meta` | `[{id, permission_decision:{decision, source, reason_type?}, non_execution_kind?}]` | not in `sdk.d.ts`; typed, section 6.2 (`ToolResultMeta`; an entry without a string `id` is skipped; `reason_type`: `tools-read.ndjson:21`, 2.1.302) |
 | initialize `control_response` | `pid, current_permission_mode, session_state, feedback_mode, remote_control_*, user_output_styles_dir` | beyond `SDKControlInitializeResponse` |
 
 ---
@@ -902,7 +932,7 @@ fixture has a rewind, a compaction or parallel tool calls yet; `TranscriptReader
 
 | Text starts with | Written for | Tandem shows |
 |---|---|---|
-| `[Request interrupted` (`by user`, `by user for tool use`) | an interrupt | the "Stopped." notice, as live |
+| `[Request interrupted` (`by user`, `by user for tool use`) | an interrupt | the interrupt notice, shown as `Interrupted · What should Claude do instead?`, as live |
 | `<command-name>` or `<command-message>`, with `<command-args>` | a slash command | `/name args`, never as the title |
 | `<local-command-stdout>`, `<local-command-stderr>` | a command's output | nothing |
 | `<bash-input>` | a `!command` shell escape | `!command` |
@@ -915,6 +945,27 @@ the shape the hand-written test uses. The others come from the CLI's binary and 
 lines in `TranscriptReaderTest`.
 
 A loaded chat is settled whatever the file ends with: not busy, no pending permission, no streaming entry.
+
+The reader feeds the reducer the same events as the live stream, each stamped with its line's `timestamp`, and the
+decoder reads the on-disk names (`toolUseResult`, `thinkingDurationMs`, `agentId`, `permissionDecision` +
+`toolDenialKind`), so a reloaded session builds the same rows, with these differences:
+
+| Row element | Live source | On disk (`fixtures/transcripts/*.jsonl`) | On reload |
+|---|---|---|---|
+| tool bodies, stats | `tool_use_result` | `toolUseResult` (`tools-edit.jsonl` has `structuredPatch`) | identical bodies |
+| `DONE` / `FAILED` / `DENIED` | `tool_result_meta` / `is_error` | `permissionDecision` + `toolDenialKind` (`ask-deny.jsonl:20`), `is_error` in the block | identical states |
+| thinking summary, duration | deltas, `thinking_duration_ms` | the block text as recorded, `thinkingDurationMs` (`think-default.jsonl`: 2143) | `Thought for 2s`; the summary only if the session ran summarized (`think-display-summarized.jsonl:18`) |
+| thinking tokens | `system/thinking_tokens` | not on disk | no ` · n tokens` (the row is complete anyway) |
+| `Worked for …` footer | `result` | no `result` lines | no footer; `Interrupted · …` from the marker notice only |
+| working row | `turn` | settled state | none; every call without a result is `INTERRUPTED` |
+| subagent children | sidechain lines with `parent_tool_use_id` | not in `<id>.jsonl` (they live in `<id>/subagents/agent-*.jsonl`, not read) | `Agent` row with `Done (…)` from `toolUseResult.totalToolUseCount/totalTokens/totalDurationMs` (`agent-sync.jsonl`) and no children; its body is the agent's final text |
+| user send time, elapsed | `sentAtMillis` | `timestamp` on the user line | unused on a settled state |
+| notices (retries, fallbacks) | `system/*` lines | not on disk | absent |
+| `cwd` for relative names | `system/init.cwd` | every line's `cwd` | identical names |
+
+`cwd`: the first line's `cwd` (the first line of the current history that has one), so relative file names match the
+live session. A transcript whose lines have no `timestamp` and no `cwd` (an older CLI) still loads, with no `cwd` and the
+same entries.
 
 ### 11.5 What Tandem writes
 

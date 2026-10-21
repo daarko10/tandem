@@ -25,7 +25,9 @@ The existing options were studied in October 2026:
 ## Architecture
 
 ```
- Jewel tool window (ui/)  session sidebar, header, chat, prompt bar with the model and permission-mode pickers
+ Jewel tool window (ui/)  session sidebar, header; the chat: a keyed list of rows (bubbles, Markdown, tool, thinking,
+        │                 working and footer rows), the permission / question / plan cards, and the composer with the
+        │                 model and permission-mode pickers
         │  collects StateFlows, calls SessionManager
         ▼
  TandemSessions (ide/)  project service: owns the SessionManager in its coroutine scope, restores the open sessions
@@ -85,6 +87,11 @@ Key choices:
    several live sessions under a cap, resume, fork, rename and delete, model and permission-mode pickers, effort picked
    at creation. Covered by unit, fixture and platform tests, IDE Starter tests and the Plugin Verifier; feel, focus and
    freezes are still to be checked by hand in `runIde`.
+
+   **Phase 2a, chat redesign.** The desktop app's chat feel: typed tool rows with grouping, thinking rows, the working
+   indicator, the permission / question / plan cards, intent-based autoscroll, subagent nesting, reload parity; spec
+   docs/superpowers/specs/2026-10-19-chat-redesign-design.md. **Status: implemented on feat/chat-redesign**, covered by
+   fixture, pure-presentation (chat/), platform and IDE Starter tests; feel is checked by hand (spec 10.7).
 2. **IDE-native edits.** MCP edit tools, diff preview, undo.
 3. **Parity.** Slash commands, plan mode, AskUserQuestion, images, context meter, rewind, subagent status.
 4. **Hardening.** Windows/WSL, Remote Development, IDE matrix in CI, published benchmarks.
