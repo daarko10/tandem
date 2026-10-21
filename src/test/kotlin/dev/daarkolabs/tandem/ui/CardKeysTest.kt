@@ -81,6 +81,8 @@ class CardKeysTest {
         assertEquals(PlanKey.KEEP_PLANNING, planFeedbackKey(key(AwtKeyEvent.VK_ENTER, numPad = true), KeyEventType.KeyDown, shift = false))
         assertNull(planFeedbackKey(key(AwtKeyEvent.VK_ENTER), KeyEventType.KeyDown, shift = true))
         assertNull(planFeedbackKey(key(AwtKeyEvent.VK_ENTER), KeyEventType.KeyUp, shift = false))
+        // Cmd/Ctrl+Enter does nothing in the field, as on the rest of the card (4.18).
+        assertNull(planFeedbackKey(key(AwtKeyEvent.VK_ENTER), KeyEventType.KeyDown, shift = false, cmdOrCtrl = true))
         // The frame never approves while the field has focus.
         assertNull(press(AwtKeyEvent.VK_ENTER, textField = true))
     }

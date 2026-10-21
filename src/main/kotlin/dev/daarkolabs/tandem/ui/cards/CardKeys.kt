@@ -72,15 +72,22 @@ internal fun cmdEnterCap(mac: Boolean = SystemInfo.isMac): String = if (mac) "‚å
 /** What a key typed in the plan card's feedback field does (spec 4.14). */
 enum class PlanKey { KEEP_PLANNING }
 
-/** What [event] does in the plan card's feedback field ([planFeedbackKey] with Shift read from the event). */
-fun planFeedbackKey(event: KeyEvent): PlanKey? = planFeedbackKey(event.key, event.type, event.isShiftPressed)
+/**
+ * What [event] does in the plan card's feedback field ([planFeedbackKey] with its modifiers read from the event): Shift or Alt held
+ * count as one, as do Cmd and Ctrl, as in [cardKey].
+ */
+fun planFeedbackKey(event: KeyEvent): PlanKey? =
+    planFeedbackKey(event.key, event.type, event.isShiftPressed || event.isAltPressed, event.isMetaPressed || event.isCtrlPressed)
 
 /**
- * What [key] going [type] does in the plan card's feedback field (spec 4.14): Enter without [shift] is [PlanKey.KEEP_PLANNING], since
- * the feedback is what the user is typing; null leaves the key to the field. Only a key press counts.
+ * What [key] going [type] does in the plan card's feedback field (spec 4.14): Enter alone is [PlanKey.KEEP_PLANNING], since the
+ * feedback is what the user is typing; with Shift or Alt ([shift]) or Cmd or Ctrl ([cmdOrCtrl]) held it does nothing, as on the
+ * rest of the card (4.18). Null leaves the key to the field. Only a key press counts.
  */
-internal fun planFeedbackKey(key: Key, type: KeyEventType, shift: Boolean): PlanKey? =
-    PlanKey.KEEP_PLANNING.takeIf { type == KeyEventType.KeyDown && !shift && (key == Key.Enter || key == Key.NumPadEnter) }
+internal fun planFeedbackKey(key: Key, type: KeyEventType, shift: Boolean, cmdOrCtrl: Boolean = false): PlanKey? =
+    PlanKey.KEEP_PLANNING.takeIf {
+        type == KeyEventType.KeyDown && !shift && !cmdOrCtrl && (key == Key.Enter || key == Key.NumPadEnter)
+    }
 
 /** What a key typed on the question card does (spec 4.13, 4.18), before [cardKey] sees it. */
 sealed interface QuestionKey {
