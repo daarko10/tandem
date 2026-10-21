@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
@@ -151,16 +152,20 @@ internal fun ChatPanel(
         }
     }
 
-    // Pins the bottom while following, on every emission (a streamed delta grows the last row without adding one) and on every
-    // change of the list's height (a card docking, the composer growing). While paused it counts the rows added since the session's
-    // list last saw them ([ChatUiState.appendedSinceSeen], by key), including those added while another session was shown.
+    // Pins the bottom while following when the session is shown, when a row model changed (a streamed delta grows the last row
+    // without adding one) and when the list's height changed (a card docking, the composer growing), but not when only an opened
+    // body's Markdown arrived: row expand/collapse never scrolls (spec 4.16). While paused it counts the rows added since the
+    // session's list last saw them ([ChatUiState.seen], by key), including those added while another session was shown.
     var viewportHeight by remember { mutableIntStateOf(0) }
+    DisposableEffect(ui) {
+        onDispose { ui.hidden() }
+    }
     LaunchedEffect(chat, viewportHeight) {
-        val appended = ui.appendedSinceSeen(chat.rows)
+        val change = ui.seen(chat.rows, viewportHeight)
         if (ui.follow.value.following) {
-            if (chat.rows.isNotEmpty()) listState.requestScrollToItem(chat.rows.lastIndex, Int.MAX_VALUE)
-        } else if (appended != null) {
-            ui.follow.value = ui.follow.value.on(ScrollEvent.Appended(appended))
+            if (change.pin && chat.rows.isNotEmpty()) listState.requestScrollToItem(chat.rows.lastIndex, Int.MAX_VALUE)
+        } else if (change.appended != null) {
+            ui.follow.value = ui.follow.value.on(ScrollEvent.Appended(change.appended))
         }
     }
 
