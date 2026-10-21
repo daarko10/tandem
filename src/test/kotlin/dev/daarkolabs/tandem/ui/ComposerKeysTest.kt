@@ -41,6 +41,15 @@ class ComposerKeysTest {
     }
 
     @Test
+    fun `Enter does nothing while a card is open`() {
+        // The reducer keeps busy while a request waits; the card rule holds on its own should one ever outlive it (spec 4.15).
+        assertNull(composer(enter, cardOpen = true))
+        assertNull(composer(key(AwtKeyEvent.VK_ENTER, numPad = true), cardOpen = true))
+        assertEquals(ComposerFallback.Swallow, fallback(enter, cardOpen = true))
+        assertEquals(ComposerFallback.Newline, fallback(enter, shift = true, cardOpen = true))
+    }
+
+    @Test
     fun `Cmd-Enter does nothing`() {
         assertNull(composer(enter, ctrlOrMeta = true))
         assertNull(composer(enter, alt = true))
@@ -101,7 +110,8 @@ class ComposerKeysTest {
         alt: Boolean = false,
         ctrlOrMeta: Boolean = false,
         busy: Boolean = false,
-    ): ComposerFallback? = composerFallback(key, type, shift, alt, ctrlOrMeta, busy)
+        cardOpen: Boolean = false,
+    ): ComposerFallback? = composerFallback(key, type, shift, alt, ctrlOrMeta, busy, cardOpen)
 
     private fun key(code: Int, numPad: Boolean = false): Key =
         Key(code, if (numPad) AwtKeyEvent.KEY_LOCATION_NUMPAD else AwtKeyEvent.KEY_LOCATION_STANDARD)

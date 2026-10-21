@@ -20,7 +20,8 @@ internal enum class ComposerAction {
  * What the composer does with [key] going [type], with Shift ([shift]), Alt ([alt]) and Ctrl or Cmd ([ctrlOrMeta]) held, while a
  * turn runs ([busy]) and while a card waits for an answer ([cardOpen]); null leaves the key to the text area.
  *
- * Enter alone sends, and does nothing while a turn runs (the Stop button stands in for Send). Shift+Enter is a newline, which the
+ * Enter alone sends, and does nothing while a turn runs (the Stop button stands in for Send) or a card is open (until it is answered,
+ * spec 4.15), whether or not the reducer still counts the turn as running. Shift+Enter is a newline, which the
  * composer types itself ([composerFallback]), and Alt+Enter and Ctrl/Cmd+Enter do nothing yet. Esc goes to the open card first, then
  * stops a running turn.
  */
@@ -35,7 +36,7 @@ internal fun composerKey(
 ): ComposerAction? {
     if (type != KeyEventType.KeyDown) return null
     return when (key) {
-        Key.Enter, Key.NumPadEnter -> if (!shift && !alt && !ctrlOrMeta && !busy) ComposerAction.Send else null
+        Key.Enter, Key.NumPadEnter -> if (!shift && !alt && !ctrlOrMeta && !busy && !cardOpen) ComposerAction.Send else null
         Key.Escape -> when {
             cardOpen -> ComposerAction.CardEscape
             busy -> ComposerAction.Stop
@@ -50,14 +51,15 @@ internal enum class ComposerFallback {
     /** Types a newline ([insertNewline]): Shift+Enter, which the text area would drop. */
     Newline,
 
-    /** Swallows the key: a plain Enter while a turn runs, which the text area would otherwise type as a newline. */
+    /** Swallows the key: a plain Enter while a turn runs or a card is open, which the text area would otherwise type as a newline. */
     Swallow,
 }
 
 /**
  * What the composer does with a [key] going [type] that [composerKey] returned null for, with Shift ([shift]), Alt ([alt]) and
- * Ctrl or Cmd ([ctrlOrMeta]) held, while a turn runs ([busy]): Shift+Enter is a [ComposerFallback.Newline], a plain Enter while
- * busy is [ComposerFallback.Swallow]ed, so that it does nothing at all; null leaves the key to the text area.
+ * Ctrl or Cmd ([ctrlOrMeta]) held, while a turn runs ([busy]) and while a card is open ([cardOpen]): Shift+Enter is a
+ * [ComposerFallback.Newline], a plain Enter while busy or while a card is open is [ComposerFallback.Swallow]ed, so that it does
+ * nothing at all; null leaves the key to the text area.
  */
 internal fun composerFallback(
     key: Key,
@@ -66,11 +68,12 @@ internal fun composerFallback(
     alt: Boolean,
     ctrlOrMeta: Boolean,
     busy: Boolean,
+    cardOpen: Boolean,
 ): ComposerFallback? {
     if (type != KeyEventType.KeyDown || alt || ctrlOrMeta || (key != Key.Enter && key != Key.NumPadEnter)) return null
     return when {
         shift -> ComposerFallback.Newline
-        busy -> ComposerFallback.Swallow
+        busy || cardOpen -> ComposerFallback.Swallow
         else -> null
     }
 }

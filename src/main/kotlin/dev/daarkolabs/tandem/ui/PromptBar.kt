@@ -195,7 +195,16 @@ private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, draft: Te
         onAction(action)
         return true
     }
-    return when (composerFallback(event.key, event.type, event.isShiftPressed, event.isAltPressed, ctrlOrMeta, busy = composer.busy)) {
+    val fallback = composerFallback(
+        event.key,
+        event.type,
+        event.isShiftPressed,
+        event.isAltPressed,
+        ctrlOrMeta,
+        busy = composer.busy,
+        cardOpen = composer.cardOpen,
+    )
+    return when (fallback) {
         ComposerFallback.Newline -> {
             insertNewline(draft)
             true

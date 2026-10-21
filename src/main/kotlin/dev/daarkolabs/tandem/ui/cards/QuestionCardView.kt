@@ -115,10 +115,9 @@ internal fun QuestionCardView(
             if (questionSwallows(event.key, event.type, echo, stripFocused)) return@onPreviewKeyEvent true
             // The field would drop Shift+Enter (Compose types a newline only for Enter alone), so the card types it, as the composer.
             val ctrlOrMeta = event.isCtrlPressed || event.isMetaPressed
-            if (otherFocused &&
-                composerFallback(event.key, event.type, event.isShiftPressed, event.isAltPressed, ctrlOrMeta, busy = false) ==
-                ComposerFallback.Newline
-            ) {
+            val fallback =
+                composerFallback(event.key, event.type, event.isShiftPressed, event.isAltPressed, ctrlOrMeta, busy = false, cardOpen = false)
+            if (otherFocused && fallback == ComposerFallback.Newline) {
                 insertNewline(otherStates[active])
                 return@onPreviewKeyEvent true
             }
