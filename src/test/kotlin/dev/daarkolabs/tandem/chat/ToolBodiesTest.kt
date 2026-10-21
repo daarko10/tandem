@@ -48,6 +48,13 @@ class ToolBodiesTest {
     }
 
     @Test
+    fun `a shell body carries its tokens`() {
+        val bash = assertIs<ToolBody.Command>(body("tools-bash", 34, 39))
+        assertEquals(ShellTokens.tokenize(bash.command), bash.tokens)
+        assertTrue(bash.tokens.isNotEmpty())
+    }
+
+    @Test
     fun `a shell call that printed nothing keeps its command`() {
         val r = toolResultAt("misc-state-action", 25)
         val input = buildJsonObject { put("command", "touch x") }

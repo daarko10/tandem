@@ -2,6 +2,10 @@
 
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.sp
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.markdown.InlineMarkdown
 import org.jetbrains.jewel.markdown.MarkdownBlock
@@ -48,5 +52,30 @@ class TandemMarkdownTest {
         assertEquals(LinkTarget.Browse("http://e.com:8080/x"), linkTarget("http://e.com:8080/x", base))
         // The InvalidPathException branch (Markdown never passes a NUL: CommonMark maps it to U+FFFD), no exception.
         assertEquals(LinkTarget.None, linkTarget("a\u0000b", base))
+    }
+
+    @Test
+    fun `inline code is the code tint on the box fill in the editor font at body − 1`() {
+        assertEquals(
+            SpanStyle(color = Color.Red, background = Color.Gray, fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+            inlineCodeStyle(palette(codeTint = Color.Red, boxFill = Color.Gray), FontFamily.Monospace, 13.sp),
+        )
+    }
+
+    private fun palette(codeTint: Color, boxFill: Color): ChatPalette {
+        val none = Color.Unspecified
+        return ChatPalette(
+            bubbleFill = none,
+            boxFill = boxFill,
+            added = none,
+            removed = none,
+            insertedFill = none,
+            deletedFill = none,
+            dim = none,
+            secondary = none,
+            accent = none,
+            shell = ShellColors(none, none, none, none, none, none),
+            codeTint = codeTint,
+        )
     }
 }

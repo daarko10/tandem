@@ -82,16 +82,23 @@ internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?,
                 is ToolBody.Mono -> Clamped(owner, "body", body.lines.size, body.totalLines, ui) { shown, modifier ->
                     MonoBox(modifier) { MonoLines(body.lines.take(shown), body.firstLineError) }
                 }
-                is ToolBody.Command -> {
-                    val command = remember(body) { kept("$ ${body.command}") }
+                is ToolBody.Command -> CommandFrame(framed) {
+                    val palette = chatPalette()
+                    val total = remember(body) { body.command.count { it == '\n' } + 1 }
                     commandParts(body, framed).forEach { part ->
                         when (part) {
-                            CommandPart.HEADER -> Unit
-                            CommandPart.COMMAND -> Clamped(owner, "command", command.lines.size, command.total, ui) { shown, modifier ->
-                                MonoBox(modifier) { MonoLines(command.lines.take(shown), false) }
+                            CommandPart.HEADER -> Text(
+                                commandHeader(call.name),
+                                color = palette.secondary,
+                                modifier = Modifier.padding(bottom = 4.dp),
+                            )
+                            CommandPart.COMMAND -> Clamped(owner, "command", minOf(total, MAX_LINES), total, ui) { shown, modifier ->
+                                CommandBox(body, if (shown < total) shown else null, modifier)
                             }
                             CommandPart.OUTPUT -> Clamped(owner, "output", body.output.size, body.totalLines, ui) { shown, modifier ->
-                                Box(modifier.fillMaxWidth().padding(top = 4.dp)) { MonoLines(body.output.take(shown), body.firstLineError) }
+                                Box(modifier.fillMaxWidth().padding(top = 10.dp)) {
+                                    MonoLines(body.output.take(shown), body.firstLineError, palette.secondary)
+                                }
                             }
                         }
                     }
@@ -180,12 +187,43 @@ private fun DiffLines(lines: List<DiffLine>, truncated: Boolean) {
 internal enum class CommandPart { HEADER, COMMAND, OUTPUT }
 
 /**
- * The parts [body] draws, in order: its command box, then its output only when it printed something (a running call, or one that
- * printed nothing, shows the command alone, polish spec 2.1). [framed] is a lone row's body; it draws no header yet.
+ * The parts [body] draws, in order: on a lone row ([framed]) the `Bash` header, then its command box, then its output only when it
+ * printed something (a running call, or one that printed nothing, shows the command alone, polish spec 2.1). A group sub-row's body
+ * goes straight to the command box (polish spec 2.4).
  */
-@Suppress("UNUSED_PARAMETER")
-internal fun commandParts(body: ToolBody.Command, framed: Boolean): List<CommandPart> =
-    if (body.output.isEmpty()) listOf(CommandPart.COMMAND) else listOf(CommandPart.COMMAND, CommandPart.OUTPUT)
+internal fun commandParts(body: ToolBody.Command, framed: Boolean): List<CommandPart> = buildList {
+    if (framed) add(CommandPart.HEADER)
+    add(CommandPart.COMMAND)
+    if (body.output.isNotEmpty()) add(CommandPart.OUTPUT)
+}
+
+/**
+ * A command body's parts, on a lone row ([framed]) inside the outer box of polish spec 2.4: a 1 dp hairline, radius 8 dp, no fill,
+ * the content 7 dp in from its sides and 10 dp from its top and bottom. A group sub-row's body already sits in the group's box.
+ */
+@Composable
+private fun CommandFrame(framed: Boolean, content: @Composable ColumnScope.() -> Unit) {
+    val modifier = if (framed) {
+        Modifier.fillMaxWidth().border(1.dp, JewelTheme.globalColors.borders.normal, RoundedCornerShape(8.dp))
+            .padding(horizontal = 7.dp, vertical = 10.dp)
+    } else {
+        Modifier.fillMaxWidth()
+    }
+    Column(modifier, content = content)
+}
+
+/**
+ * The `$` command box (polish spec 2.4): the command in the editor font, coloured by its tokens ([commandText]), cut after
+ * [maxLines] lines while clamped, in a [MonoBox] with 8 dp × 4 dp of padding. Composition only maps token kinds to colours.
+ */
+@Composable
+private fun CommandBox(body: ToolBody.Command, maxLines: Int?, modifier: Modifier) {
+    val palette = chatPalette()
+    val text = remember(body.command, body.tokens, palette, maxLines) {
+        commandText(body.command, body.tokens, palette.shell, maxLines)
+    }
+    MonoBox(modifier, vertical = 4.dp) { Text(text, style = monoTextStyle()) }
+}
 
 /** A text's first [MAX_LINES] [lines] and how many it has in [total]. */
 private class Kept(val lines: List<String>, val total: Int)
@@ -266,20 +304,28 @@ private fun fadeHeight(): Dp {
     return with(LocalDensity.current) { line.toDp() } * FADE_LINES
 }
 
-/** A box in the command and code fill, with a hairline border (spec 4.2). */
+/** A box in the command and code fill, with a hairline border (spec 4.2); padded 8 dp × [vertical] (the command box's is 4 dp). */
 @Composable
-private fun MonoBox(modifier: Modifier = Modifier, padded: Boolean = true, content: @Composable ColumnScope.() -> Unit) {
+private fun MonoBox(
+    modifier: Modifier = Modifier,
+    padded: Boolean = true,
+    vertical: Dp = 6.dp,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     val shape = RoundedCornerShape(6.dp)
     Column(
         modifier.fillMaxWidth().background(chatPalette().boxFill, shape).border(1.dp, JewelTheme.globalColors.borders.normal, shape)
-            .padding(if (padded) 8.dp else 0.dp, if (padded) 6.dp else 4.dp),
+            .padding(if (padded) 8.dp else 0.dp, if (padded) vertical else 4.dp),
         content = content,
     )
 }
 
-/** [lines] as one text in the editor font; with [firstLineError] the first line is in the error colour. */
+/**
+ * [lines] as one text in the editor font, in [color] (the body text unless given; a Bash output's is the secondary tier, polish
+ * spec 2.4); with [firstLineError] the first line is in the error colour.
+ */
 @Composable
-private fun MonoLines(lines: List<String>, firstLineError: Boolean) {
+private fun MonoLines(lines: List<String>, firstLineError: Boolean, color: Color = JewelTheme.globalColors.text.normal) {
     val colors = JewelTheme.globalColors.text
     val text = buildAnnotatedString {
         lines.forEachIndexed { index, line ->
@@ -287,7 +333,7 @@ private fun MonoLines(lines: List<String>, firstLineError: Boolean) {
             if (index == 0 && firstLineError) withStyle(SpanStyle(color = colors.error)) { append(line) } else append(line)
         }
     }
-    Text(text, style = monoTextStyle(), color = colors.normal)
+    Text(text, style = monoTextStyle(), color = color)
 }
 
 /** Opens a web link in the browser; anything but `http(s)` is ignored. */

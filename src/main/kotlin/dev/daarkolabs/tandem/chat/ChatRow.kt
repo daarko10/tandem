@@ -111,8 +111,17 @@ sealed interface ToolBody {
     /** Lines in the editor font: a file read, file names, matches, written content, an error. */
     data class Mono(val lines: ImmutableList<String>, val totalLines: Int, val firstLineError: Boolean = false) : ToolBody
 
-    /** A shell command, then its output. */
-    data class Command(val command: String, val output: ImmutableList<String>, val totalLines: Int, val firstLineError: Boolean) : ToolBody
+    /**
+     * A shell command, then its output. [tokens] colour the command (polish spec 2.4); they are computed with the body, where it is
+     * built, off the EDT, never in composition.
+     */
+    data class Command(
+        val command: String,
+        val output: ImmutableList<String>,
+        val totalLines: Int,
+        val firstLineError: Boolean,
+        val tokens: ImmutableList<ShellToken> = ShellTokens.tokenize(command),
+    ) : ToolBody
 
     /** Markdown to parse on first expansion: a fetched page's answer, a plan, an agent's final text. */
     data class Markdown(val markdown: String, val title: String?) : ToolBody

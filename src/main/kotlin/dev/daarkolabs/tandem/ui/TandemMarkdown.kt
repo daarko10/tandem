@@ -14,6 +14,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.sp
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
@@ -34,6 +38,7 @@ import org.jetbrains.jewel.markdown.processing.MarkdownProcessor
 import org.jetbrains.jewel.markdown.rendering.DefaultInlineMarkdownRenderer
 import org.jetbrains.jewel.markdown.rendering.DefaultMarkdownBlockRenderer
 import org.jetbrains.jewel.markdown.rendering.InlineMarkdownRenderer
+import org.jetbrains.jewel.markdown.rendering.InlinesStyling
 import org.jetbrains.jewel.markdown.rendering.MarkdownBlockRenderer
 import org.jetbrains.jewel.markdown.rendering.MarkdownStyling
 import org.jetbrains.jewel.ui.component.IconActionButton
@@ -99,11 +104,17 @@ class TandemBlockRenderer(
 /**
  * The bridge's Markdown styling for [project] (code fences coloured by the IDE's lexers) with the GFM table and strikethrough
  * renderers and [TandemBlockRenderer], both built once per theme, and [LocalUrlHandler] for the links ([rememberUrlHandler]).
+ * Inline code is the pill of polish spec 2.5 ([inlineCodeStyle]): the bridge's `MarkdownStyling.create` hands its one
+ * `inlinesStyling` to the paragraph styling, which the paragraphs inside list items and block quotes use too, and the table renderer
+ * reads it for its cells; headings build their own from their sizes and keep the bridge's inline code (open item 5).
  */
 @Composable
 internal fun TandemMarkdownStyling(project: Project, content: @Composable () -> Unit) {
+    val palette = chatPalette()
+    val editorFont = JewelTheme.editorTextStyle.fontFamily ?: FontFamily.Monospace
+    val bodySize = JewelTheme.defaultTextStyle.fontSize
     val (styling, renderer) = remember(JewelTheme.instanceUuid) {
-        val s = MarkdownStyling.create()
+        val s = MarkdownStyling.create(inlinesStyling = InlinesStyling.create(inlineCode = inlineCodeStyle(palette, editorFont, bodySize)))
         val extensions = listOf(GitHubTableRendererExtension(GfmTableStyling.create(), s), GitHubStrikethroughRendererExtension)
         s to TandemBlockRenderer(s, extensions)
     }
@@ -112,6 +123,17 @@ internal fun TandemMarkdownStyling(project: Project, content: @Composable () -> 
         CompositionLocalProvider(LocalUrlHandler provides onUrl, content = content)
     }
 }
+
+/**
+ * The inline code pill (polish spec 2.5): [ChatPalette.codeTint] on [ChatPalette.boxFill] in the [editorFont], one point under
+ * [bodySize]. A `SpanStyle` has no border or radius, so the pill has square corners (polish spec open item 17).
+ */
+internal fun inlineCodeStyle(palette: ChatPalette, editorFont: FontFamily, bodySize: TextUnit): SpanStyle = SpanStyle(
+    color = palette.codeTint,
+    background = palette.boxFill,
+    fontFamily = editorFont,
+    fontSize = if (bodySize.isSp) (bodySize.value - 1).sp else bodySize,
+)
 
 /**
  * What a click on a Markdown link does; every `Markdown(...)` in the chat passes it as `onUrlClick`. Outside

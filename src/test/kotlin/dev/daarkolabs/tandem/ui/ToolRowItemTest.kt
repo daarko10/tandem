@@ -11,6 +11,7 @@ import dev.daarkolabs.tandem.ui.rows.CommandPart
 import dev.daarkolabs.tandem.ui.rows.Marker
 import dev.daarkolabs.tandem.ui.rows.canExpand
 import dev.daarkolabs.tandem.ui.rows.clampOwners
+import dev.daarkolabs.tandem.ui.rows.commandHeader
 import dev.daarkolabs.tandem.ui.rows.commandParts
 import dev.daarkolabs.tandem.ui.rows.headerMarker
 import dev.daarkolabs.tandem.ui.rows.marker
@@ -59,11 +60,33 @@ class ToolRowItemTest {
 
     @Test
     fun `a command body without output has no output part`() {
-        assertEquals(listOf(CommandPart.COMMAND), commandParts(ToolBody.Command("ls", persistentListOf(), 0, false), framed = true))
         assertEquals(
-            listOf(CommandPart.COMMAND, CommandPart.OUTPUT),
+            listOf(CommandPart.HEADER, CommandPart.COMMAND),
+            commandParts(ToolBody.Command("ls", persistentListOf(), 0, false), framed = true),
+        )
+        assertEquals(listOf(CommandPart.COMMAND), commandParts(ToolBody.Command("ls", persistentListOf(), 0, false), framed = false))
+        assertEquals(
+            listOf(CommandPart.HEADER, CommandPart.COMMAND, CommandPart.OUTPUT),
             commandParts(ToolBody.Command("ls", persistentListOf("a"), 1, false), framed = true),
         )
+    }
+
+    @Test
+    fun `a group sub-row's Bash body has no header and no frame`() {
+        assertEquals(
+            listOf(CommandPart.COMMAND, CommandPart.OUTPUT),
+            commandParts(ToolBody.Command("ls", persistentListOf("a"), 1, false), framed = false),
+        )
+        assertEquals(
+            listOf(CommandPart.HEADER, CommandPart.COMMAND, CommandPart.OUTPUT),
+            commandParts(ToolBody.Command("ls", persistentListOf("a"), 1, false), framed = true),
+        )
+    }
+
+    @Test
+    fun `a PowerShell body is headed PowerShell`() {
+        assertEquals("PowerShell", commandHeader("PowerShell"))
+        assertEquals("Bash", commandHeader("Bash"))
     }
 
     @Test
