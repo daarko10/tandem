@@ -20,6 +20,7 @@ import dev.daarkolabs.tandem.chat.ToolKind
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.composerModel
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.NoticeLevel
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.ImmutableMap
@@ -101,6 +102,13 @@ internal class ChatPresenter(
     /** What the composer shows; it changes only when one of its own fields does, not on every streamed delta. */
     val composer: StateFlow<ComposerModel> = state.map(::composerModel).distinctUntilChanged().flowOn(Dispatchers.Default)
         .stateIn(scope, SharingStarted.Eagerly, composerModel(state.value))
+
+    /**
+     * How full the context window is, for the footer's ring (polish spec 2.3): it changes on a main-thread `message_start` and a
+     * `result`, and only [ContextRing] collects it, so nothing else recomposes for it.
+     */
+    val context: StateFlow<ContextUsage?> = state.map { it.context }.distinctUntilChanged().flowOn(Dispatchers.Default)
+        .stateIn(scope, SharingStarted.Eagerly, state.value.context)
 
     // Touched by the rendering coroutine only.
     /**

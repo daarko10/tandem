@@ -303,6 +303,9 @@ object Ndjson {
             permissionDenials = o.objects("permission_denials").mapNotNull { d ->
                 d.string("tool_name")?.let { PermissionDenial(it, d.string("tool_use_id")) }
             },
+            contextWindows = o.obj("modelUsage")?.mapNotNull { (model, usage) ->
+                usage.asObject()?.long("contextWindow")?.let { model to it }
+            }?.toMap().orEmpty(),
             raw = o,
         )
     }

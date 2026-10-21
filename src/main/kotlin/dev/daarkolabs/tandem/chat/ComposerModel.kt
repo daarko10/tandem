@@ -2,10 +2,12 @@ package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
+import java.util.Locale
 
 /** The `value` of the CLI's own entry for its default model in an `initialize` model list. */
 internal const val DEFAULT_MODEL_ENTRY: String = "default"
@@ -84,3 +86,28 @@ internal fun shownModel(models: List<ModelOption>, requested: String?, active: S
 
 /** The model id this entry stands for. */
 private fun ModelOption.resolvesTo(): String = resolvedModel ?: value
+
+/**
+ * The context ring's text and arc (polish spec 2.3): `<used> / <window> (<pct>%)`, as the tooltip and the popover show it, and the
+ * share of the window in use. Both are null while the tokens or the window are unknown, and the ring is then not drawn.
+ */
+object ContextFormat {
+    /** `75.6k / 1M (8%)`: the tokens by [formatTokens], the window by [formatWindow], the share rounded to a whole percent. */
+    fun value(usage: ContextUsage): String? {
+        val tokens = usage.tokens ?: return null
+        val window = usage.window ?: return null
+        val pct = if (window == 0L) 0L else Math.round(100.0 * tokens / window)
+        return "${formatTokens(tokens)} / ${formatWindow(window)} ($pct%)"
+    }
+
+    /** The share of the window in use, from 0 to 1 (a count past the window fills the ring); null without both parts or with no window. */
+    fun fraction(usage: ContextUsage): Float? {
+        val tokens = usage.tokens ?: return null
+        val window = usage.window?.takeIf { it != 0L } ?: return null
+        return (tokens.toFloat() / window).coerceIn(0f, 1f)
+    }
+
+    /** `200k` under a million; `1M`, `1.5M` from one, with one decimal only when it is not zero (where [formatTokens] gives `1.0m`). */
+    fun formatWindow(window: Long): String =
+        if (window < 1_000_000) "${window / 1_000}k" else String.format(Locale.ROOT, "%.1f", window / 1_000_000.0).removeSuffix(".0") + "M"
+}

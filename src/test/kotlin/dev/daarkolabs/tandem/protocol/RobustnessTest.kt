@@ -55,6 +55,23 @@ class RobustnessTest {
     }
 
     @Test
+    fun `a result without context windows decodes an empty map`() {
+        val results = listOf(
+            """{"type":"result","subtype":"success","modelUsage":{"m":{"inputTokens":1}}}""",
+            """{"type":"result","subtype":"success"}""",
+            """{"type":"result","subtype":"success","modelUsage":{"m":7,"n":[1],"o":{"contextWindow":"200000"}}}""",
+            """{"type":"result","subtype":"success","modelUsage":[{"contextWindow":200000}]}""",
+        )
+        for (line in results) {
+            assertEquals(emptyMap(), assertIs<CliMessage.Result>(Ndjson.decode(line), line).contextWindows, line)
+        }
+        val mixed = Ndjson.decode("""{"type":"result","subtype":"success","modelUsage":{"m":7,"n":{"contextWindow":200000}}}""")
+        val result = assertIs<CliMessage.Result>(mixed)
+        assertEquals(mapOf("n" to 200_000L), result.contextWindows)
+        assertEquals(setOf("m", "n"), result.modelUsage)
+    }
+
+    @Test
     fun `new optional fields read as null or false when absent or mistyped`() {
         val user = assertIs<CliMessage.User>(
             Ndjson.decode(

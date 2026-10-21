@@ -73,7 +73,19 @@ data class ChatState(
     val turn: TurnProgress? = null,
     /** The subagents the CLI started, by task id; background commands (`local_bash` tasks) are not kept. */
     val tasks: Map<String, TaskInfo> = emptyMap(),
+    /**
+     * How full the context window is, for the footer's ring: null until a main-thread `message_start` or a `result` says anything,
+     * and on a reloaded transcript, whose lines' usage is not decoded.
+     */
+    val context: ContextUsage? = null,
 )
+
+/**
+ * How full the context window is: [tokens] is the input of the main thread's latest `message_start` (plain, cache-creation and
+ * cache-read), [window] the active model's context window from the latest `result`, else the largest it lists. Either may be
+ * unknown: a `result` before any main-thread `message_start` knows the window only, and the ring is drawn only when both are known.
+ */
+data class ContextUsage(val tokens: Long?, val window: Long?)
 
 /**
  * The turn in progress, as the working indicator shows it. [outputTokens] sums the turn's `message_delta` output tokens, and

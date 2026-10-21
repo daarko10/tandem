@@ -10,6 +10,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
@@ -985,6 +986,60 @@ class ReducerTest {
     fun `init stores cwd`() {
         assertEquals("<path>", replay("tools-read")[5].cwd)
         assertNull(replay("tools-read")[4].cwd)
+    }
+
+    /** The decoded line [line] (1-based) of fixture [name]. */
+    private fun at(name: String, line: Int): CliMessage = Ndjson.decode(Fixtures.lines(name)[line - 1])
+
+    private fun inputTokensAt(name: String, line: Int): Long? =
+        ((at(name, line) as CliMessage.StreamEvent).event as StreamEvent.MessageStart).inputTokens
+
+    // polish spec 2.3, 3.2: the context ring's tokens and window
+    @Test
+    fun `message_start sets the context tokens and result sets the window`() {
+        val states = replay("misc-image")
+        assertEquals(31_294L, inputTokensAt("misc-image", 8)) // 2 + 4754 + 26538
+        assertEquals(ContextUsage(inputTokensAt("misc-image", 8), null), states[8].context)
+        assertEquals(31_630L, inputTokensAt("misc-image", 52)) // 2 + 220 + 31408
+        assertEquals(ContextUsage(inputTokensAt("misc-image", 52), 1_000_000L), states.last().context)
+    }
+
+    @Test
+    fun `a subagent's message_start does not touch the context`() {
+        val initial = ChatState(context = ContextUsage(10, 200_000L))
+        fun start(parent: String?): SessionEvent = SessionEvent.Cli(
+            CliMessage.StreamEvent(StreamEvent.MessageStart("m", null, null, 5L), parentToolUseId = parent, apiMessageId = null, raw = buildJsonObject {}),
+        )
+        assertEquals(ContextUsage(10, 200_000L), reduce(initial, start("toolu_1")).context)
+        // The same event on the main thread sets the tokens: the parent guard, not a missing usage, is what keeps them above.
+        assertEquals(ContextUsage(5, 200_000L), reduce(initial, start(null)).context)
+        // A message_start without usage changes nothing either.
+        val noUsage = SessionEvent.Cli(
+            CliMessage.StreamEvent(StreamEvent.MessageStart("m", null, null, null), parentToolUseId = null, apiMessageId = null, raw = buildJsonObject {}),
+        )
+        assertEquals(ContextUsage(10, 200_000L), reduce(initial, noUsage).context)
+    }
+
+    @Test
+    fun `a result without modelUsage keeps the context`() {
+        val state = reduce(ChatState(context = ContextUsage(10, 200_000L)), cli("""{"type":"result","subtype":"success"}"""))
+        assertEquals(ContextUsage(10, 200_000L), state.context)
+    }
+
+    @Test
+    fun `a result before any message_start knows the window only`() {
+        assertEquals(ContextUsage(null, 1_000_000L), reduce(ChatState(), SessionEvent.Cli(at("misc-image", 66))).context)
+    }
+
+    // Review Focus 3: a mid-turn fallback leaves the active model out of modelUsage.
+    @Test
+    fun `the window falls back to the largest listed when the active model is not in modelUsage`() {
+        val opus = reduce(ChatState(activeModel = "claude-opus-5-5"), SessionEvent.Cli(at("misc-image", 66)))
+        assertEquals(1_000_000L, opus.context?.window)
+        val result = cli("""{"type":"result","subtype":"success","modelUsage":{"a":{"contextWindow":200000},"b":{"contextWindow":1000000}}}""")
+        assertEquals(ContextUsage(null, 1_000_000L), reduce(ChatState(activeModel = "c"), result).context)
+        // The active model's own window wins over a larger one.
+        assertEquals(ContextUsage(null, 200_000L), reduce(ChatState(activeModel = "a"), result).context)
     }
 
     @Test

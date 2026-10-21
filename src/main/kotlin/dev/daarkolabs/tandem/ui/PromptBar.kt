@@ -37,7 +37,6 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import dev.daarkolabs.tandem.chat.ComposerModel
 import dev.daarkolabs.tandem.chat.ScrollEvent
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionHandle
@@ -52,9 +51,10 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
 
 /**
  * The bottom of a session's chat (spec 4.15, polish spec 2.3): the composer, a text area in a filled rounded box with Send (`↵`), or
- * Stop while a turn runs, at its right, and below it the footer: the session's permission mode at the start ([ModeControl]) and its
- * model and effort at the end ([ModelControl]), each plain text that opens its menu. Everything shown comes from [presenter]'s
- * composer model, which changes only when one of its own fields does, never on a streamed delta.
+ * Stop while a turn runs, at its right, and below it the footer: the session's permission mode at the start ([ModeControl]), its
+ * model and effort ([ModelControl]), each plain text that opens its menu, and the context ring at the end ([ContextRing]). Everything
+ * shown comes from [presenter]'s composer model, which changes only when one of its own fields does, never on a streamed delta; the
+ * ring alone collects [presenter]'s context, which changes on a `message_start`.
  *
  * The prompt being typed is [ui]'s draft, so it survives switching sessions. Enter sends it unless it is blank, and does nothing
  * while a turn runs; Shift+Enter is a newline; Esc goes to the open card ([onCardEscape]), else stops a running turn. A send makes
@@ -91,7 +91,8 @@ internal fun PromptBar(
     Column(Modifier.chatColumn().padding(horizontal = 16.dp)) {
         PromptBox(
             ui,
-            composer,
+            composer.busy,
+            composer.cardOpen,
             focus,
             onFocused,
             onAction = { action ->
@@ -125,16 +126,18 @@ internal fun PromptBar(
                     },
                 )
             }
+            ContextRing(presenter.context)
         }
     }
 }
 
 /**
- * The text area and Send or Stop in one filled rounded box, as wide as the footer under it. Keys go through [composerKey]; [onAction] does
- * what it returns. With [focus] the text area takes the focus, and then [onFocused] is called.
+ * The text area and Send or Stop in one filled rounded box, as wide as the footer under it: Stop while [busy]. Keys go through
+ * [composerKey] with [busy] and [cardOpen]; [onAction] does what it returns. With [focus] the text area takes the focus, and then
+ * [onFocused] is called. It takes those two fields, not the whole composer model, so that a change to another one leaves it alone.
  */
 @Composable
-private fun PromptBox(ui: ChatUiState, composer: ComposerModel, focus: Boolean, onFocused: () -> Unit, onAction: (ComposerAction) -> Unit) {
+private fun PromptBox(ui: ChatUiState, busy: Boolean, cardOpen: Boolean, focus: Boolean, onFocused: () -> Unit, onAction: (ComposerAction) -> Unit) {
     val inputFocus = remember { FocusRequester() }
     var focused by remember { mutableStateOf(false) }
     LaunchedEffect(focus) {
@@ -166,14 +169,14 @@ private fun PromptBox(ui: ChatUiState, composer: ComposerModel, focus: Boolean, 
                 Modifier.weight(1f).heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
                     .focusRequester(inputFocus)
                     .onFocusChanged { focused = it.hasFocus }
-                    .onPreviewKeyEvent { event -> composerKeyEvent(event, composer, ui.draft, onAction) },
+                    .onPreviewKeyEvent { event -> composerKeyEvent(event, busy, cardOpen, ui.draft, onAction) },
                 lineLimits = TextFieldLineLimits.MultiLine(1, 8),
                 undecorated = true,
                 placeholder = { Text("Describe a task or ask a question", color = colors.text.info) },
             )
             // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
             val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
-            if (composer.busy) {
+            if (busy) {
                 IconButton(onClick = { onAction(ComposerAction.Stop) }, modifier = buttonModifier.semantics { contentDescription = "Stop" }) {
                     Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
                 }
@@ -190,7 +193,7 @@ private fun PromptBox(ui: ChatUiState, composer: ComposerModel, focus: Boolean, 
  * Hands [event] to [composerKey] and runs what it returns, else to [composerFallback]: a newline in [draft] ([insertNewline]),
  * which the text area would not type, or nothing at all (spec 4.15). Every other key goes to the text area.
  */
-private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, draft: TextFieldState, onAction: (ComposerAction) -> Unit): Boolean {
+private fun composerKeyEvent(event: KeyEvent, busy: Boolean, cardOpen: Boolean, draft: TextFieldState, onAction: (ComposerAction) -> Unit): Boolean {
     val ctrlOrMeta = event.isCtrlPressed || event.isMetaPressed
     val action = composerKey(
         event.key,
@@ -198,8 +201,8 @@ private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, draft: Te
         event.isShiftPressed,
         event.isAltPressed,
         ctrlOrMeta,
-        busy = composer.busy,
-        cardOpen = composer.cardOpen,
+        busy = busy,
+        cardOpen = cardOpen,
     )
     if (action != null) {
         onAction(action)
@@ -211,8 +214,8 @@ private fun composerKeyEvent(event: KeyEvent, composer: ComposerModel, draft: Te
         event.isShiftPressed,
         event.isAltPressed,
         ctrlOrMeta,
-        busy = composer.busy,
-        cardOpen = composer.cardOpen,
+        busy = busy,
+        cardOpen = cardOpen,
     )
     return when (fallback) {
         ComposerFallback.Newline -> {

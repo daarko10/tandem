@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,10 +14,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,6 +28,9 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -50,10 +57,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
 import dev.daarkolabs.tandem.chat.ComposerModel
+import dev.daarkolabs.tandem.chat.ContextFormat
 import dev.daarkolabs.tandem.chat.DEFAULT_MODEL_ENTRY
 import dev.daarkolabs.tandem.chat.Modes
 import dev.daarkolabs.tandem.chat.shownModel
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.session.ContextUsage
+import kotlinx.coroutines.flow.StateFlow
 import org.jetbrains.jewel.foundation.LocalComponent
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.MenuScope
@@ -206,17 +216,116 @@ internal fun takesKey(component: Component?, panel: JComponent): Boolean = compo
 internal fun focusLeft(owner: Component?, panel: JComponent): Boolean = owner != null && !takesKey(owner, panel)
 
 /**
- * A footer control's pill (spec 2.3): the bubble fill at a 6 dp radius when [filled] (hovered, or its menu open), a 1 dp focus
- * outline when [focused], then 7 dp by 3 dp inside. P4's context ring takes the same, and places its popover beside the pill, not
- * inside it, as `FooterControl` does.
+ * A footer control's pill (spec 2.3): [pillSurface], then 7 dp by 3 dp inside. The context ring takes the same surface as a 23 dp
+ * square instead ([ContextRing]), and places its popover beside the pill, not inside it, as `FooterControl` does.
  */
 @Composable
-internal fun Modifier.footerPill(filled: Boolean, focused: Boolean): Modifier {
+internal fun Modifier.footerPill(filled: Boolean, focused: Boolean): Modifier =
+    pillSurface(filled, focused).padding(horizontal = 7.dp, vertical = 3.dp)
+
+/** A pill's surface (spec 2.3): the bubble fill at a 6 dp radius when [filled] (hovered, or its menu open), a 1 dp focus outline when [focused]. */
+@Composable
+private fun Modifier.pillSurface(filled: Boolean, focused: Boolean): Modifier {
     val shape = RoundedCornerShape(6.dp)
     return this
         .then(if (filled) Modifier.background(chatPalette().bubbleFill, shape) else Modifier)
         .then(if (focused) Modifier.border(1.dp, JewelTheme.globalColors.outlines.focused, shape) else Modifier)
-        .padding(horizontal = 7.dp, vertical = 3.dp)
+}
+
+/**
+ * The footer's context ring (spec 2.3), the last control after a 5 dp gap: how full the context window is, as an accent arc over a
+ * dim track, with the tooltip `Context <value>` ([ContextFormat.value]). A click, Enter or Space opens its popover above it,
+ * right-aligned: `Context window` and the value. It composes nothing, gap included, while the tokens or the window are unknown
+ * ([ContextFormat.fraction] is null: before the first `result`, and on a reloaded transcript). It alone collects [context], so a
+ * `message_start` recomposes the ring and nothing else of the footer.
+ */
+@Composable
+internal fun ContextRing(context: StateFlow<ContextUsage?>) {
+    val usage by context.collectAsState()
+    val current = usage ?: return
+    val fraction = ContextFormat.fraction(current) ?: return
+    val value = ContextFormat.value(current) ?: return
+    Spacer(Modifier.width(5.dp))
+    WithTooltip("Context $value") { RingControl(fraction, value) }
+}
+
+/**
+ * The ring and its popover: a 23 dp pill, filled while hovered or open and outlined while focused, around a 14 dp ring with a 2 dp
+ * stroke, the arc clockwise from the top over [fraction] of the turn. As a footer control's menu, the popover closes when the AWT
+ * focus leaves the tool window's panel ([focusLeft]), which it gets no click from.
+ */
+@Composable
+private fun RingControl(fraction: Float, value: String) {
+    val palette = chatPalette()
+    val source = remember { MutableInteractionSource() }
+    val hovered by source.collectIsHoveredAsState()
+    val focused by source.collectIsFocusedAsState()
+    var open by remember { mutableStateOf(false) }
+    val panel = LocalComponent.current
+    if (open) {
+        DisposableEffect(panel) {
+            val focusListener = PropertyChangeListener { change -> if (focusLeft(change.newValue as? Component, panel)) open = false }
+            val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            focusManager.addPropertyChangeListener("focusOwner", focusListener)
+            onDispose { focusManager.removePropertyChangeListener("focusOwner", focusListener) }
+        }
+    }
+    val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
+    Box(
+        Modifier
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                contentDescription = "Context window"
+            }
+            .onPreviewKeyEvent { event ->
+                when {
+                    !open && event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.Spacebar) -> {
+                        open = true
+                        true
+                    }
+                    open && event.type == KeyEventType.KeyDown && event.key == Key.Escape -> {
+                        open = false
+                        true
+                    }
+                    else -> false
+                }
+            }
+            .hoverable(source)
+            .clickable(interactionSource = source, indication = null, role = Role.Button) { open = !open },
+    ) {
+        Box(Modifier.size(23.dp).pillSurface(filled = hovered || open, focused = focused), contentAlignment = Alignment.Center) {
+            Canvas(Modifier.size(14.dp)) {
+                val stroke = Stroke(width = 2.dp.toPx())
+                // Inset by half the stroke, so that the ink stays inside the 14 dp.
+                val inset = Offset(stroke.width / 2, stroke.width / 2)
+                val arc = Size(size.width - stroke.width, size.height - stroke.width)
+                drawArc(palette.dim, startAngle = 0f, sweepAngle = 360f, useCenter = false, topLeft = inset, size = arc, style = stroke)
+                drawArc(palette.accent, startAngle = -90f, sweepAngle = 360f * fraction, useCenter = false, topLeft = inset, size = arc, style = stroke)
+            }
+        }
+        if (open) {
+            PopupMenu(
+                onDismissRequest = { mode ->
+                    // A click on the ring itself closes the popover through the ring (its click toggles it).
+                    if (mode == InputMode.Touch && hovered) {
+                        false
+                    } else {
+                        open = false
+                        true
+                    }
+                },
+                popupPositionProvider = remember(gap) { AboveAnchor(alignEnd = true, gapPx = gap) },
+            ) {
+                passiveItem {
+                    Row(Modifier.widthIn(min = 280.dp).semantics(mergeDescendants = true) {}, verticalAlignment = Alignment.CenterVertically) {
+                        Text("Context window", style = smallTextStyle(), color = palette.dim)
+                        Spacer(Modifier.weight(1f))
+                        Text(value, style = smallTextStyle(), color = palette.dim)
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**

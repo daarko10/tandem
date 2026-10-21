@@ -402,7 +402,10 @@ private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent, at: 
     return when (val event = message.event) {
         is StreamEvent.MessageStart -> {
             if (parent == null) {
-                state.checkModel(event.model, fromAssistant = true)
+                // Only the main thread's requests fill the context the ring shows; a subagent runs in its own.
+                val tokens = event.inputTokens
+                val counted = if (tokens == null) state else state.copy(context = ContextUsage(tokens, state.context?.window))
+                counted.checkModel(event.model, fromAssistant = true)
             } else {
                 state
             }.upsertIfAbsent(
@@ -478,6 +481,7 @@ private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState
         turnsEnded = state.turnsEnded + 1,
         turnInterrupted = false,
         turn = null,
+        context = contextAfter(state, result),
     )
     return when {
         interrupted -> next // the interrupt already showed "Stopped."
@@ -488,6 +492,18 @@ private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState
         )
         else -> next
     }
+}
+
+/**
+ * The context with the window [result] reports: the active model's, else, after a mid-turn fallback that left it out of
+ * `modelUsage`, the largest listed. The tokens stay as the last main-thread `message_start` set them (null, never 0, before one);
+ * a result without any window keeps the context as it is.
+ */
+private fun contextAfter(state: ChatState, result: CliMessage.Result): ContextUsage? {
+    val windows = result.contextWindows
+    if (windows.isEmpty()) return state.context
+    val window = windows[state.activeModel] ?: windows.values.max()
+    return ContextUsage(state.context?.tokens, window)
 }
 
 /**

@@ -559,6 +559,12 @@ class TranscriptReaderTest {
         assertEquals(listOf("pong", "pong again"), state.assistantTexts())
     }
 
+    // polish spec 5, edge 3: assistant lines' usage is not decoded, so a reloaded session draws no ring.
+    @Test
+    fun `a reloaded transcript has no context`() = runBlocking<Unit> {
+        assertNull(TranscriptReader.read(Fixtures.transcript("history-reply")).state.context)
+    }
+
     @Test
     fun `recorded transcripts give their title, last model, effort, permission mode and folder`() = runBlocking<Unit> {
         val reply = TranscriptReader.read(Fixtures.transcript("history-reply"))

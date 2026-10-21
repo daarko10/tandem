@@ -311,6 +311,16 @@ class FixtureDecodeTest {
         assertEquals("tool_use", delta.stopReason)
     }
 
+    // polish spec 3.1: the result carries each model's context window
+    @Test
+    fun `the result carries each model's context window`() {
+        val windows = mapOf("claude-haiku-5-5" to 1_000_000L, "claude-sonnet-5-5" to 1_000_000L)
+        assertEquals(windows, assertIs<CliMessage.Result>(at("misc-image", 66)).contextWindows)
+        val plain = assertIs<CliMessage.Result>(at("plain-reply", 15))
+        assertEquals(windows, plain.contextWindows)
+        assertEquals(setOf("claude-haiku-5-5", "claude-sonnet-5-5"), plain.modelUsage)
+    }
+
     // spec: agent-sync: subagent user lines carry subagent_type, task_description and a timestamp
     @Test
     fun `agent-sync - subagent user lines carry subagent_type, task_description and a timestamp`() {

@@ -164,6 +164,8 @@ sealed interface CliMessage {
         val numTurns: Int?,
         /** The tool calls the user or a rule denied during the turn. */
         val permissionDenials: List<PermissionDenial>,
+        /** Each model's context window, from `modelUsage[model].contextWindow`; a model without one is left out, empty without any. */
+        val contextWindows: Map<String, Long> = emptyMap(),
         override val raw: JsonObject,
     ) : CliMessage
 
