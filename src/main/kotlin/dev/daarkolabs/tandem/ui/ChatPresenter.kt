@@ -6,10 +6,13 @@ import com.intellij.openapi.diagnostic.ControlFlowException
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.chat.ChatRow
+import dev.daarkolabs.tandem.chat.ChatRows
 import dev.daarkolabs.tandem.chat.ChatRowsBuilder
 import dev.daarkolabs.tandem.chat.ComposerModel
+import dev.daarkolabs.tandem.chat.NoticeRow
 import dev.daarkolabs.tandem.chat.PendingCard
 import dev.daarkolabs.tandem.chat.PlanCard
+import dev.daarkolabs.tandem.chat.RowGap
 import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ToolBody
@@ -17,8 +20,10 @@ import dev.daarkolabs.tandem.chat.ToolKind
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.composerModel
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.NoticeLevel
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.ImmutableMap
+import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.collections.immutable.toImmutableList
@@ -66,16 +71,20 @@ internal data class RenderedChat(
  * [ChatRowsBuilder] on [Dispatchers.Default], intermediate states are dropped when building falls behind, and Markdown is parsed
  * there too, once per row key and text, then kept until the row goes away. A tool body's Markdown is parsed only once the row is
  * opened, on [expandBody]: one collector merges those requests with the states, so none is dropped. A new [options] value takes a
- * new builder and keeps the parsed Markdown. A state that fails to render is logged (its exception's class, never row text) and
- * leaves the last rows on screen; the next state renders again.
+ * new builder and keeps the parsed Markdown. A state that fails to render shows the last rows that rendered with an ERROR notice
+ * after them that names the exception's class (hard rule 5), and is logged once (that class, never row text); the next state
+ * renders again, with a new builder, and takes the notice away when it succeeds.
  *
- * [parse] replaces the Markdown parser: tests watch where and how often it runs.
+ * [parse] replaces the Markdown parser: tests watch where and how often it runs. [buildRows] replaces the call to the builder and
+ * [logFailure] the logging of a failed render: tests make a state fail.
  */
 internal class ChatPresenter(
     scope: CoroutineScope,
     state: StateFlow<ChatState>,
     options: StateFlow<RowOptions>,
     parse: ((String) -> ImmutableList<MarkdownBlock>)? = null,
+    private val buildRows: (ChatRowsBuilder, ChatState) -> ChatRows = ChatRowsBuilder::build,
+    private val logFailure: (Throwable) -> Unit = { LOG.error(it) },
 ) {
     // One processor per presenter: bare URLs stay links, GFM tables and strikethrough parse (spec 4.0, 4.4).
     private val processor = tandemMarkdownProcessor()
@@ -101,8 +110,11 @@ internal class ChatPresenter(
     private var builder: ChatRowsBuilder? = null
     private var builderOptions: RowOptions? = null
     private val parsed = HashMap<String, Parsed>()
-    private var previous: Map<String, RenderedRow> = emptyMap()
     private var failed = false
+
+    /** The last chat that rendered, and its rows: an unchanged row keeps its rendered row ([render]). */
+    private var good: RenderedChat = rendered.value
+    private var goodRows: PersistentList<RenderedRow> = persistentListOf()
 
     private class Parsed(val markdown: String, val blocks: ImmutableList<MarkdownBlock>)
 
@@ -137,18 +149,37 @@ internal class ChatPresenter(
         expandRequests.trySend(key)
     }
 
-    /** [render] into [chat]; a failure keeps the last rows and is logged once until a render succeeds again. */
+    /**
+     * [render] into [chat]; a failure shows the last rows that rendered and the [failure] notice, and is logged once until a render
+     * succeeds again.
+     */
     private fun renderSafely(input: Input) {
         try {
-            rendered.value = render(input)
+            good = render(input)
+            rendered.value = good
             failed = false
         } catch (e: Throwable) {
             // An Error is caught too (a StackOverflowError from the recursive Markdown parser on deeply nested input), so one bad
             // state cannot end the collector; cancellation, the platform's control flow and the VM's own failures pass through.
             if (e is CancellationException || e is ControlFlowException || (e is VirtualMachineError && e !is StackOverflowError)) throw e
-            if (!failed) LOG.error(RenderFailure(e, input.state.entries.size))
-            failed = true
+            // The builder may have stopped halfway through its caches: the next state starts from a new one.
+            builder = null
+            rendered.value = failure(e)
+            if (!failed) {
+                failed = true
+                logFailure(RenderFailure(e, input.state.entries.size))
+            }
         }
+    }
+
+    /**
+     * The last chat that rendered with an ERROR notice after its rows, so that a chat that stops updating says so (hard rule 5). It
+     * names [e]'s class, never its message, which may quote row text.
+     */
+    private fun failure(e: Throwable): RenderedChat {
+        val text = "Tandem could not build the chat rows (${e.javaClass.name}), so the latest messages may be missing. See the IDE log."
+        val notice = NoticeRow(RENDER_FAILURE_KEY, NoticeLevel.ERROR, text, if (goodRows.isEmpty()) RowGap.NONE else RowGap.SECTION)
+        return good.copy(rows = goodRows.add(RenderedRow(notice, null)))
     }
 
     /**
@@ -157,12 +188,16 @@ internal class ChatPresenter(
      * rest of the cache goes, and so do the opened keys whose rows went.
      */
     private fun render(input: Input): RenderedChat {
-        val rows = (builder?.takeIf { builderOptions == input.options } ?: ChatRowsBuilder(input.options).also {
-            builder = it
-            builderOptions = input.options
-        }).build(input.state)
+        val rows = buildRows(
+            builder?.takeIf { builderOptions == input.options } ?: ChatRowsBuilder(input.options).also {
+                builder = it
+                builderOptions = input.options
+            },
+            input.state,
+        )
+        val previous = goodRows.associateBy { it.row.key }
         val live = HashSet<String>()
-        val out = rows.rows.map { renderRow(it, live) }.toImmutableList()
+        val out = rows.rows.mapTo(persistentListOf<RenderedRow>().builder()) { renderRow(it, previous, live) }.build()
         requested.retainAll(live)
         val card = rows.card
         val planBlocks = (card as? PlanCard)?.plan?.let { plan ->
@@ -171,15 +206,15 @@ internal class ChatPresenter(
             blocks(key, plan)
         }
         parsed.keys.retainAll(live)
-        previous = out.associateBy { it.row.key }
+        goodRows = out
         return RenderedChat(out, card, rows.moreWaiting, planBlocks)
     }
 
     /**
-     * [row] with its Markdown, its keys added to [live]; the previous instance when nothing it shows changed, so that its item is
-     * skipped.
+     * [row] with its Markdown, its keys added to [live]; the [previous] instance of its key when nothing it shows changed, so that its
+     * item is skipped.
      */
-    private fun renderRow(row: ChatRow, live: MutableSet<String>): RenderedRow {
+    private fun renderRow(row: ChatRow, previous: Map<String, RenderedRow>, live: MutableSet<String>): RenderedRow {
         val old = previous[row.key]
         live += row.key
         return when (row) {
@@ -241,6 +276,9 @@ internal class ChatPresenter(
         val LOG: Logger = logger<ChatPresenter>()
     }
 }
+
+/** The key of the notice a failed render shows after the last rows that rendered ([ChatPresenter]). */
+internal const val RENDER_FAILURE_KEY: String = "n:render-failure"
 
 /**
  * A render failure as logged: [cause]'s class and stack, never its message, which may quote row text (CLAUDE.md conventions), and

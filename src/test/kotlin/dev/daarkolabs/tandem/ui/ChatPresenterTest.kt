@@ -1,5 +1,7 @@
 package dev.daarkolabs.tandem.ui
 
+import dev.daarkolabs.tandem.chat.ChatRowsBuilder
+import dev.daarkolabs.tandem.chat.NoticeRow
 import dev.daarkolabs.tandem.chat.PlanCard
 import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.chat.TextRow
@@ -10,6 +12,7 @@ import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.chat.replay
 import dev.daarkolabs.tandem.ui.rows.shownWorkingRow
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.reduce
 import kotlinx.collections.immutable.ImmutableList
@@ -31,9 +34,11 @@ import org.jetbrains.jewel.markdown.extensions.autolink.AutolinkProcessorExtensi
 import org.jetbrains.jewel.markdown.processing.MarkdownProcessor
 import org.junit.jupiter.api.Test
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.SwingUtilities
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -84,10 +89,10 @@ class ChatPresenterTest {
         val threads: MutableList<String> = Collections.synchronizedList(ArrayList())
         val scope = CoroutineScope(SupervisorJob())
         try {
-            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true))) { text ->
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)), parse = { text ->
                 threads += Thread.currentThread().name
                 MarkdownProcessor().processMarkdownDocument(text).toImmutableList()
-            }
+            })
             // The ExitPlanMode request of plan-approve:88, keyed `plan:<request_id-97>`.
             state.value = stateAt("plan-approve", 88)
             val chat = withTimeout(TIMEOUT) { presenter.chat.first { it.planBlocks != null } }
@@ -177,10 +182,10 @@ class ChatPresenterTest {
             val states = mutableListOf<ChatState>()
             replay("plan-approve") { _, s, _ -> states += s }
             val state = MutableStateFlow(states[88 - 1])
-            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true))) { text ->
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)), parse = { text ->
                 seen += text
                 MarkdownProcessor().processMarkdownDocument(text).toImmutableList()
-            }
+            })
             val opened = withTimeout(TIMEOUT) { presenter.chat.first { it.planBlocks != null } }
             val first = assertNotNull(opened.planBlocks)
             val plan = assertIs<PlanCard>(opened.card).plan
@@ -195,6 +200,49 @@ class ChatPresenterTest {
             }
             assertSame(first, done.planBlocks)
             assertEquals(1, seen.count { it == plan }, "the plan was parsed once")
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a state that fails to build shows a notice instead of stale rows, and the next one that builds takes it away`() = runBlocking {
+        val failing = AtomicBoolean(false)
+        val logged: MutableList<Throwable> = Collections.synchronizedList(ArrayList())
+        val state = MutableStateFlow(replay("plain-reply").first)
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenter = ChatPresenter(
+                scope,
+                state,
+                MutableStateFlow(RowOptions(showThinking = true)),
+                buildRows = { builder, s -> if (failing.get()) throw IllegalStateException("row text") else builder.build(s) },
+                logFailure = { logged += it },
+            )
+            val good = withTimeout(TIMEOUT) { presenter.chat.first { it.rows.isNotEmpty() } }
+
+            // Every state fails now: the chat says so after the last rows that built, rather than silently staying as it was.
+            failing.set(true)
+            state.value = reduce(state.value, SessionEvent.UserSent("u8", "again"))
+            val failed = withTimeout(TIMEOUT) { presenter.chat.first { it.rows.lastOrNull()?.row?.key == RENDER_FAILURE_KEY } }
+            val notice = assertIs<NoticeRow>(failed.rows.last().row)
+            assertEquals(NoticeLevel.ERROR, notice.level)
+            assertTrue(IllegalStateException::class.java.name in notice.text, notice.text)
+            assertFalse("row text" in notice.text, notice.text)
+            assertEquals(good.rows, failed.rows.dropLast(1))
+            // A later state is tried again, and still says so; the failure is logged once, by its class only.
+            state.value = reduce(state.value, SessionEvent.UserSent("u9", "and again"))
+            delay(SETTLE_MS)
+            assertEquals(RENDER_FAILURE_KEY, presenter.chat.value.rows.last().row.key)
+            assertEquals(1, logged.size, logged.toString())
+            assertFalse("row text" in logged.single().message.orEmpty())
+
+            // The next state that builds takes the notice away and shows every row it holds.
+            failing.set(false)
+            state.value = reduce(state.value, SessionEvent.UserSent("u10", "once more"))
+            val back = withTimeout(TIMEOUT) { presenter.chat.first { chat -> chat.rows.any { it.row.key == "u:u10" } } }
+            assertTrue(back.rows.none { it.row.key == RENDER_FAILURE_KEY })
+            assertEquals(ChatRowsBuilder(RowOptions(showThinking = true)).build(state.value).rows, back.rows.map { it.row })
         } finally {
             scope.cancel()
         }
