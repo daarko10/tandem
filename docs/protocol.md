@@ -43,7 +43,7 @@ then appends optional flags in this order (only those Tandem cares about are lis
 | Flag | When the SDK adds it | Tandem |
 |---|---|---|
 | `--thinking=adaptive` / `--thinking=disabled` / `--max-thinking-tokens N` | `thinking` option | optional. `--thinking=adaptive` is accepted and changed nothing against the default (`think-adaptive.ndjson:7`, 2.1.302: `thinking_display:"updates"`, empty thinking text, as `think-default.ndjson:7`) |
-| `--thinking-display <summarized\|omitted\|highlights>` | not in the SDK; hidden from `--help` (2.1.302) | optional, section 6.3. `summarized` streams the thinking summary as text in `thinking_delta` frames and in the completed block (`think-display-summarized.ndjson:11,34`). `highlights` is accepted (`message_start` says `highlights`, `think-display-highlights.ndjson:8`) but gave one empty `thinking_delta`, no `system/thinking_tokens` line and an empty block while 79 thinking tokens were used (`:10,12,18`): unusable over stdio on the probing account. `omitted` was tried only through `set_max_thinking_tokens` (section 4.4). Without the flag the display is `updates`: empty text, token estimates only (`think-default.ndjson:10,16`) |
+| `--thinking-display <summarized\|omitted\|highlights>` | not in the SDK; hidden from `--help` (2.1.302) | yes, always `summarized` (`SessionConfig.argv()`); section 6.3. `summarized` streams the thinking summary as text in `thinking_delta` frames and in the completed block (`think-display-summarized.ndjson:11,34`). `highlights` is accepted (`message_start` says `highlights`, `think-display-highlights.ndjson:8`) but gave one empty `thinking_delta`, no `system/thinking_tokens` line and an empty block while 79 thinking tokens were used (`:10,12,18`): unusable over stdio on the probing account. `omitted` was tried only through `set_max_thinking_tokens` (section 4.4). Without the flag the display is `updates`: empty text, token estimates only (`think-default.ndjson:10,16`) |
 | `--effort <low\|medium\|high\|xhigh\|max>` | `effort` option | yes, picked when a session is created |
 | `--max-turns N`, `--max-budget-usd X` | limits | no |
 | `--model <id>` | `model` option | yes, user's pick |
@@ -599,8 +599,11 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
   (section 10); on subagent lines `agent_id`, `subagent_type` and `task_description` beside `parent_tool_use_id`
   (section 6.2).
 - Tandem reads `thinking_duration_ms` (the thinking row's `Thought for Ns`), `thinking_display`, `agent_id`,
-  `subagent_type`, `task_description` and `timestamp` (ISO-8601, as epoch milliseconds) on `assistant` lines, and the same
-  names on `user` lines (6.2); on disk the line carries `thinkingDurationMs`, `agentId` and `timestamp` (section 11).
+  `subagent_type`, `task_description` and `timestamp` (ISO-8601, as epoch milliseconds) on `assistant` lines, and
+  `agent_id`, `subagent_type`, `task_description` and `timestamp` on `user` lines (6.2). On disk the names are
+  `thinkingDurationMs`, `thinkingDisplay` and `timestamp` (section 11); `agentId`, `subagentType` and `taskDescription`
+  are read as fallbacks too, though the main `<id>.jsonl` carries `agentId` only inside `toolUseResult`
+  (`agent-sync.jsonl`, `agent-forwarded.jsonl`).
 
 ### 6.2 `user` (tool results)
 
@@ -662,15 +665,16 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
 | `message_delta.usage` | the request's `output_tokens` and `output_tokens_details.thinking_tokens` (`plain-reply.ndjson:12`); Tandem decodes both, and the working row's ` · N tokens` adds up each request's `output_tokens` (plus the running `thinking_tokens` estimate until the request's `message_delta`) |
 | `thinking_display` | wrapper-level `"updates"\|"summarized"\|"highlights"` on `message_start`, the block's `content_block_start` and every `thinking_delta` frame (`think-default.ndjson:7,8,10`; `think-display-summarized.ndjson:8,11`), not on `signature_delta` or `content_block_stop` (`think-default.ndjson:15,17`; `think-display-highlights.ndjson:11`), so no decoder keys block membership on its presence; and on the `assistant` line that completes the block, with `thinking_duration_ms` (`think-default.ndjson:16`: 2143 ms). The SDK types it only on `set_max_thinking_tokens`; `"full"` never appears over stdio (section 4.4) |
 
-Thinking blocks (2.1.302, fixtures `think-*`; probes doc 2.3). In the default display, `updates` (Tandem's argv; Opus
-the same, `think-opus`), every `thinking_delta` has `thinking:""` and a non-standard sibling `estimated_tokens`, an
+Thinking blocks (2.1.302, fixtures `think-*`; probes doc 2.3). In the default display, `updates`
+(without `--thinking-display`; Opus the same, `think-opus`), every `thinking_delta` has `thinking:""` and a non-standard sibling `estimated_tokens`, an
 integer on the first deltas and `null` on the last one before `signature_delta` (`think-default.ndjson:10,12,13`); the
 completed block is `{type:"thinking", thinking:"", signature}` (`:16`), and the thinking shows only as
 `system/thinking_tokens` lines (section 5.2) and `message_delta.usage.output_tokens_details.thinking_tokens`. With
 `summarized` (`--thinking-display summarized`, section 1.1, or `set_max_thinking_tokens`, section 4.4)
 `thinking_delta.thinking` is a text chunk and `estimated_tokens` is `null` (`think-display-summarized.ndjson:11`), each
-chunk preceded by a `thinking_tokens` line (`:10`), and the completed block holds the whole summary (`:34`). With
-`highlights` the block streams one empty delta and no `thinking_tokens` line (`think-display-highlights.ndjson:10`). So
+chunk preceded by a `thinking_tokens` line (`:10`), and the completed block holds the whole summary (`:34`). Tandem
+always passes `--thinking-display summarized` (section 1.1). With `highlights` the block streams one empty delta and no
+`thinking_tokens` line (`think-display-highlights.ndjson:10`). So
 render a thinking block by appending `thinking_delta.thinking` and replacing it with the completed block; an empty
 string with a signature is normal, not a parse error. The transcript on disk keeps what was streamed (section 11), so a
 session recorded in `updates` has no summaries to load.
