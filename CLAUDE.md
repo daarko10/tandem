@@ -19,7 +19,7 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 - `session/` `SessionManager` owns the project's sessions (`SessionHandle`), each with one `ClaudeSession` per live process: spawns the CLI, owns stdin/stdout, reconciles partial and complete messages, exposes `StateFlow`s. Imports only the JDK, kotlinx.coroutines, kotlinx.serialization.json, the platform's kotlinx.collections.immutable and `com.intellij.openapi.diagnostic`.
 - `session/transcript/` the CLI's own transcripts, `<config>/projects/<key>/<id>.jsonl` (`docs/protocol.md` 11): folder key, index, reader. Read-only, except a rename's `custom-title` line and delete.
 - `chat/` pure Kotlin presentation of a `ChatState`: the row model (`ChatRowsBuilder`, tool labels, states and bodies). Imports only the JDK, kotlinx.collections.immutable, kotlinx.serialization.json and `session/`/`protocol/` types: no Compose, no Jewel, no IntelliJ.
-- `ide/` IDE-side integration: the `TandemSessions` project service, the settings page (Settings | Tools | Tandem: `claude` path, max live sessions), workspace state, notifications. Later the MCP server with edit tools, diff and file context.
+- `ide/` IDE-side integration: the `TandemSessions` project service, the settings page (Settings | Tools | Tandem: `claude` path, max live sessions, show thinking rows), workspace state, notifications. Later the MCP server with edit tools, diff and file context.
 - `ui/` Jewel tool window. Renders state from `session/`; holds no protocol logic.
 
 ## Commands
