@@ -1,7 +1,9 @@
 package dev.daarkolabs.tandem.ui
 
 import dev.daarkolabs.tandem.chat.Cards
+import dev.daarkolabs.tandem.chat.Option
 import dev.daarkolabs.tandem.chat.PermissionCard
+import dev.daarkolabs.tandem.chat.Question
 import dev.daarkolabs.tandem.ui.cards.QuestionPrimary.Next
 import dev.daarkolabs.tandem.ui.cards.QuestionPrimary.Submit
 import dev.daarkolabs.tandem.ui.cards.permissionTitle
@@ -89,6 +91,23 @@ class QuestionCardTest {
         assertEquals(Submit(false), questionPrimary(listOf(false), 0))
         assertEquals(Submit(true), questionPrimary(listOf(true), 0))
         assertEquals("Submit answers", Submit(true).label)
+    }
+
+    @Test
+    fun `a two-question request yields two questions in input order`() {
+        val questions = Cards.question(pendingAt("ask-two", 33))!!.questions
+        assertEquals(
+            listOf(
+                Question("Which colour?", "Colour", false, listOf(Option("Red", "Red"), Option("Blue", "Blue")).toImmutableList()),
+                Question(
+                    "Which toppings would you like?",
+                    "Toppings",
+                    true,
+                    listOf(Option("Cheese", "Cheese"), Option("Olives", "Olives"), Option("Ham", "Ham")).toImmutableList(),
+                ),
+            ),
+            questions,
+        )
     }
 
     @Test

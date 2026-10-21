@@ -103,6 +103,79 @@ class CallTest(unittest.TestCase):
         self.assertEqual("image/png", source["media_type"])
         self.assertEqual(b"\x89PNG\r\n\x1a\n", base64.b64decode(source["data"])[:8])
 
+    @staticmethod
+    def ask_two_request(request_id: str = "req-1", questions: list[dict] | None = None) -> dict:
+        """A can_use_tool for AskUserQuestion with the two questions ASK_TWO_PROMPT asks for, as the CLI sends it."""
+        if questions is None:
+            questions = [
+                {"question": "Which colour?", "header": "Colour", "multiSelect": False,
+                 "options": [{"label": "Red", "description": "A warm colour"},
+                             {"label": "Blue", "description": "A cool colour"}]},
+                {"question": "Which toppings would you like?", "header": "Toppings", "multiSelect": True,
+                 "options": [{"label": "Cheese", "description": "Melted"}, {"label": "Olives", "description": "Black"},
+                             {"label": "Ham", "description": "Sliced"}]},
+            ]
+        return {"type": "control_request", "request_id": request_id,
+                "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "display_name": "AskUserQuestion",
+                            "input": {"questions": questions}, "tool_use_id": "toolu_1",
+                            "requires_user_interaction": True}}
+
+    def test_the_ask_two_scenario_answers_both_questions_and_fails_on_one(self):
+        cli = FakeCli(success)
+        request = self.ask_two_request()
+        cli.inbox.put(request)
+        drive_cli.ask_two(cli)
+        responses = [m for m in cli.sent if m["type"] == "control_response"]
+        self.assertEqual(1, len(responses))
+        self.assertEqual("req-1", responses[0]["response"]["request_id"])
+        body = responses[0]["response"]["response"]
+        self.assertEqual("allow", body["behavior"])
+        self.assertEqual("toolu_1", body["toolUseID"])
+        self.assertEqual(request["request"]["input"]["questions"], body["updatedInput"]["questions"])
+        self.assertEqual({"Which colour?": "Red", "Which toppings would you like?": "Cheese, Ham"}, body["updatedInput"]["answers"])
+        one = FakeCli(success)
+        one.inbox.put(self.ask_two_request(questions=self.ask_two_request()["request"]["input"]["questions"][:1]))
+        with self.assertRaises(RuntimeError):
+            drive_cli.ask_two(one)
+
+    def test_the_ask_two_scenario_fails_on_a_missing_or_reworded_request(self):
+        # The model replied without calling AskUserQuestion: the inbox holds only the turn's result.
+        with self.assertRaisesRegex(RuntimeError, "AskUserQuestion"):
+            drive_cli.ask_two(FakeCli(success))
+        # A second can_use_tool after the answered one.
+        twice = FakeCli(success)
+        twice.inbox.put(self.ask_two_request("req-1"))
+        twice.inbox.put(self.ask_two_request("req-2"))
+        with self.assertRaises(RuntimeError):
+            drive_cli.ask_two(twice)
+        # Another tool.
+        other = FakeCli(success)
+        bash = self.ask_two_request()
+        bash["request"]["tool_name"] = "Bash"
+        other.inbox.put(bash)
+        with self.assertRaises(RuntimeError):
+            drive_cli.ask_two(other)
+        # A reworded question, header or option label.
+        for path, value in ((("question",), "Which color?"), (("header",), "Color"), (("options", 1, "label"), "Navy")):
+            questions = self.ask_two_request()["request"]["input"]["questions"]
+            target = questions[0]
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            reworded = FakeCli(success)
+            reworded.inbox.put(self.ask_two_request(questions=questions))
+            with self.assertRaises(RuntimeError, msg=str(path)):
+                drive_cli.ask_two(reworded)
+        # The multi-select flag of the second question.
+        questions = self.ask_two_request()["request"]["input"]["questions"]
+        questions[1]["multiSelect"] = False
+        flag = FakeCli(success)
+        flag.inbox.put(self.ask_two_request(questions=questions))
+        with self.assertRaises(RuntimeError):
+            drive_cli.ask_two(flag)
+        # No answer is sent for a request the scenario refuses.
+        self.assertEqual([], [m for m in flag.sent if m["type"] == "control_response"])
+
     def test_the_tiny_png_is_pinned(self):
         # TranscriptReaderTest holds the same literal as TINY_PNG_BASE64: the recorded transcript keeps these bytes.
         self.assertEqual(

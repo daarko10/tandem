@@ -11,6 +11,9 @@ Sources, in order of authority:
    2026-10-18 (CLI 2.1.302: `ask-*`, `plan-*`, `think-*`, `tools-*`, `agent-*`, `misc-*`, each with its transcript) are
    written up in `docs/superpowers/research/2026-10-18-protocol-probes.md`; this document cites them as
    `<name>.ndjson:<line>`. Their host-to-CLI frames are not in the fixtures; the probes doc quotes them.
+   `ask-two` (CLI 2.1.306) is a `scripts/record-scenario.sh ask-two` scenario recording, not one of the 29 probes: one
+   `AskUserQuestion` call with two questions, a one-answer and a multi-select, answered together; it comes with its
+   transcript.
    `effort-switch` and `permission-mode-auto` (CLI 2.1.306, `scripts/record-scenario.sh`, each with its transcript) record a
    live effort change (4.4) and the `auto` permission mode (8). `user-image` (CLI 2.1.306, `scripts/record-scenario.sh`,
    with its transcript) records a user message of a text block then a base64 PNG block (section 3); the transcript's user

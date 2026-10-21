@@ -25,6 +25,9 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
                    --permission-mode auto as an extra flag to see what the spawn's init reports
   user-image       one turn whose user message holds a text block then a base64 image block (a 2 x 2 PNG built here),
                    as Tandem sends an attachment (docs/protocol.md 3)
+  ask-two          one turn whose single AskUserQuestion call asks two questions, a one-answer one and a multi-select
+                   one, answered together (Red, then Cheese and Ham); the run stops if the model asks anything else,
+                   in another number of calls, or not at all: record it again (with --model opus as an extra flag)
 
 Run it from an empty directory (scripts/record-scenario.sh does this) and redact the output
 with redact_fixture.py before committing. Uses whatever sign-in the local `claude` already has.
@@ -293,15 +296,59 @@ def user_image(cli: Cli) -> None:
     cli.until(is_result)
 
 
+ASK_TWO_PROMPT = ("Use the AskUserQuestion tool exactly once, with two questions in that single call. Question 1: question "
+                  "'Which colour?', header 'Colour', options Red and Blue, multiSelect false. Question 2: question "
+                  "'Which toppings would you like?', header 'Toppings', options Cheese, Olives and Ham, multiSelect true. "
+                  "Then reply with the two answers joined by ' and ', nothing else.")
+# What ask_two expects each question of the one request to be: question, header, option labels, multiSelect.
+ASK_TWO_QUESTIONS = [("Which colour?", "Colour", ["Red", "Blue"], False),
+                     ("Which toppings would you like?", "Toppings", ["Cheese", "Olives", "Ham"], True)]
+ASK_TWO_ANSWERS = ["Red", "Cheese, Ham"]
+
+
+def ask_two(cli: Cli) -> None:
+    """One AskUserQuestion call with the two questions of ASK_TWO_PROMPT, answered together. Raises, so that a bad recording
+    fails here and never later in Gradle, when the model calls another tool, asks other questions, asks a second time, or
+    replies without asking."""
+    answered = []
+
+    def answer(msg: dict) -> None:
+        req = msg.get("request", {})
+        if msg.get("type") != "control_request" or req.get("subtype") != "can_use_tool":
+            return
+        if req.get("tool_name") != "AskUserQuestion":
+            raise RuntimeError(f"expected an AskUserQuestion request, got {req.get('tool_name')}")
+        if answered:
+            raise RuntimeError("a second can_use_tool after the AskUserQuestion request: the model split the questions")
+        questions = req.get("input", {}).get("questions")
+        shape = [(q.get("question"), q.get("header"), [o.get("label") for o in q.get("options", [])],
+                  q.get("multiSelect", False)) for q in questions or []]
+        if shape != ASK_TWO_QUESTIONS:
+            raise RuntimeError(f"the AskUserQuestion request does not ask the two questions of the prompt: {shape}")
+        answered.append(msg["request_id"])
+        answers = {q["question"]: a for q, a in zip(questions, ASK_TWO_ANSWERS)}
+        body = {"behavior": "allow", "updatedInput": {"questions": questions, "answers": answers},
+                "toolUseID": req.get("tool_use_id")}
+        cli.send({"type": "control_response",
+                  "response": {"subtype": "success", "request_id": msg["request_id"], "response": body}})
+
+    cli.user(ASK_TWO_PROMPT)
+    cli.until(is_result, answer)
+    if len(answered) != 1:
+        raise RuntimeError("the turn ended without an AskUserQuestion request: the model replied without asking")
+
+
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
              "permission-mode": permission_mode, "permission-mode-rejected": permission_mode_rejected, "fork": fork,
              "settings": settings, "effort-switch": effort_switch, "permission-mode-auto": permission_mode_auto,
-             "user-image": user_image}
+             "user-image": user_image, "ask-two": ask_two}
 
 # Flags a scenario adds to the caller's. The settings probe loads no user settings: 2.1.301 refuses an update_settings for
 # a source that --setting-sources leaves out, so even a CLI that took the user's settings as the default source would
 # refuse rather than write that file during the probe.
-SCENARIO_FLAGS = {"settings": ["--setting-sources", "project,local"]}
+SCENARIO_FLAGS = {"settings": ["--setting-sources", "project,local"],
+                  # Tandem's argv, as the ask-single probe was recorded with (its built-in edit tools are disallowed).
+                  "ask-two": ["--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"]}
 
 
 def main(scenario: str, out: str, extra: list[str]) -> None:

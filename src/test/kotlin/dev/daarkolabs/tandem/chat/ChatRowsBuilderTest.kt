@@ -787,7 +787,8 @@ class ChatRowsBuilderTest {
     @Test
     fun `a reloaded transcript builds the same tool rows as its stream`() {
         val probe = Fixtures.names().filter { it.substringBefore("-") in setOf("ask", "plan", "think", "tools", "agent", "misc") }
-        assertEquals(29, probe.size)
+        // The 29 probe recordings of 2026-10-18 plus `ask-two`, a scenario recording that joins the stream/reload parity sweep.
+        assertEquals(30, probe.size)
 
         fun build(s: ChatState): ChatRows = ChatRowsBuilder(RowOptions(showThinking = true)).build(s)
         fun stream(name: String): ChatState = replay(name).first.settled()
