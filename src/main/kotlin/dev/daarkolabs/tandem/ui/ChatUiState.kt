@@ -4,7 +4,6 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
-import dev.daarkolabs.tandem.chat.ChatRow
 import dev.daarkolabs.tandem.chat.FollowState
 
 /**
@@ -31,11 +30,11 @@ internal class ChatUiState {
 
     val listState: LazyListState = LazyListState()
 
-    // The row keys, the row models and the list's height at the list's last emission, and whether the list has had an emission
-    // since it last showed this session. Kept here, not in the panel, so that rows added while another session is shown count when
-    // this one is shown again (spec 4.16, 7.8). Null keys until the first emission.
+    // The row keys, the rows and the list's height at the list's last emission, and whether the list has had an emission since it
+    // last showed this session. Kept here, not in the panel, so that rows added while another session is shown count when this one
+    // is shown again (spec 4.16, 7.8). Null keys until the first emission.
     private var seenKeys: HashSet<String>? = null
-    private var seenRows: List<ChatRow> = emptyList()
+    private var seenRows: List<RenderedRow> = emptyList()
     private var seenHeight: Int = 0
     private var shown: Boolean = false
 
@@ -47,18 +46,32 @@ internal class ChatUiState {
     /**
      * Records [rows], drawn in a list [height] px tall, as what the list has seen, and says what changed since the last call
      * (spec 4.16). Rows are compared by their models ([RenderedRow.row]), so a body's Markdown arriving for an opened row
-     * ([RenderedRow.bodies]) changes nothing: opening a row never scrolls.
+     * ([RenderedRow.bodies]) changes nothing: opening a row never scrolls. [rows] must not change afterwards (the presenter's are
+     * immutable).
+     *
+     * It runs on the EDT for every emission, so it does no more than the rows that changed need: the presenter hands back the rows
+     * before a streamed delta as the same models, and only the rows after the first one that is not the same are compared, counted
+     * and have their keys recorded again.
      */
     fun seen(rows: List<RenderedRow>, height: Int): ListChange {
+        val before = seenRows
+        if (rows === before && height == seenHeight && shown) return ListChange(pin = false, appended = null)
+        val common = minOf(rows.size, before.size)
+        var same = 0
+        while (same < common && rows[same].row === before[same].row) same++
+        val rowsChanged = rows.size != before.size || (same until rows.size).any { rows[it].row != before[it].row }
         val keys = seenKeys
-        val models = rows.map { it.row }
-        val rowsChanged = models != seenRows
-        // Counted by key, so that grouping (a lone call joining a group shrinks the list) never miscounts.
-        val added = if (keys == null) 0 else rows.count { it.row.key !in keys }
-        val tailChanged = models.lastOrNull() != seenRows.lastOrNull()
+        // Counted by key, so that grouping (a lone call joining a group shrinks the list) never miscounts. The rows before `same`
+        // are the same models, so their keys were there already.
+        val added = if (keys == null) 0 else (same until rows.size).count { rows[it].row.key !in keys }
+        val tailChanged = rows.lastOrNull()?.row != before.lastOrNull()?.row
         val pin = !shown || rowsChanged || height != seenHeight
-        seenKeys = rows.mapTo(HashSet(rows.size)) { it.row.key }
-        seenRows = models
+        seenKeys = (keys ?: HashSet(rows.size)).apply {
+            // Keys are unique within a list, so those of the rows that stayed are untouched.
+            for (i in same until before.size) remove(before[i].row.key)
+            for (i in same until rows.size) add(rows[i].row.key)
+        }
+        seenRows = rows
         seenHeight = height
         shown = true
         return ListChange(pin = pin, appended = if (keys != null && (added > 0 || tailChanged)) added else null)
