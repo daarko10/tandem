@@ -19,21 +19,22 @@ class ScrollKeysTest {
 
     @Test
     fun `Home and PageUp pause, End resumes`() {
-        assertEquals(FollowState(false, 0), FollowState().on(scrollKey(home, KeyEventType.KeyDown, false)!!.followEvent(false)!!))
-        assertEquals(FollowState(false, 0), FollowState().on(scrollKey(pageUp, KeyEventType.KeyDown, false)!!.followEvent(false)!!))
-        assertEquals(FollowState(true, 0), FollowState(false, 2).on(scrollKey(end, KeyEventType.KeyDown, false)!!.followEvent(false)!!))
-        assertEquals(ScrollAction.END, scrollKey(end, KeyEventType.KeyDown, true))
-        assertEquals(ScrollEvent.ReachedBottom, scrollKey(pageDown, KeyEventType.KeyDown, false)!!.followEvent(true))
-        assertNull(scrollKey(pageDown, KeyEventType.KeyDown, false)!!.followEvent(false))
-        assertNull(scrollKey(home, KeyEventType.KeyUp, false))
-        assertNull(scrollKey(key(AwtKeyEvent.VK_A), KeyEventType.KeyDown, false))
+        assertEquals(FollowState(false, 0), FollowState().on(scrollKey(home, KeyEventType.KeyDown)!!.followEvent(false)!!))
+        assertEquals(FollowState(false, 0), FollowState().on(scrollKey(pageUp, KeyEventType.KeyDown)!!.followEvent(false)!!))
+        assertEquals(FollowState(true, 0), FollowState(false, 2).on(scrollKey(end, KeyEventType.KeyDown)!!.followEvent(false)!!))
+        // Ctrl/Cmd+End is the same key: End.
+        assertEquals(ScrollAction.END, scrollKey(end, KeyEventType.KeyDown))
+        assertEquals(ScrollEvent.ReachedBottom, scrollKey(pageDown, KeyEventType.KeyDown)!!.followEvent(true))
+        assertNull(scrollKey(pageDown, KeyEventType.KeyDown)!!.followEvent(false))
+        assertNull(scrollKey(home, KeyEventType.KeyUp))
+        assertNull(scrollKey(key(AwtKeyEvent.VK_A), KeyEventType.KeyDown))
     }
 
     @Test
     fun `Esc in the transcript focuses the composer`() {
-        assertEquals(ScrollAction.FOCUS_COMPOSER, scrollKey(escape, KeyEventType.KeyDown, false))
+        assertEquals(ScrollAction.FOCUS_COMPOSER, scrollKey(escape, KeyEventType.KeyDown))
         assertNull(ScrollAction.FOCUS_COMPOSER.followEvent(false))
-        assertNull(scrollKey(escape, KeyEventType.KeyUp, false))
+        assertNull(scrollKey(escape, KeyEventType.KeyUp))
     }
 
     private fun key(code: Int): Key = Key(code, AwtKeyEvent.KEY_LOCATION_STANDARD)

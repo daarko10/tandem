@@ -198,7 +198,7 @@ internal fun ChatPanel(
                     .focusRequester(listFocus)
                     .focusable()
                     .onPreviewKeyEvent { event ->
-                        val action = scrollKey(event.key, event.type, event.isCtrlPressed || event.isMetaPressed)
+                        val action = scrollKey(event.key, event.type)
                             ?: return@onPreviewKeyEvent false
                         if (action == ScrollAction.FOCUS_COMPOSER) {
                             currentOnFocusComposer()

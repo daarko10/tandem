@@ -23,11 +23,10 @@ internal enum class ScrollAction {
 }
 
 /**
- * What the transcript does with [key] going [type]; [ctrlOrMeta] says whether Ctrl or Cmd is held, which changes nothing: End and
- * Ctrl/Cmd+End both go to the bottom. Null for any other key, and for a key going up.
+ * What the transcript does with [key] going [type], whatever modifiers are held: End and Ctrl/Cmd+End both go to the bottom. Null
+ * for any other key, and for a key going up.
  */
-@Suppress("UNUSED_PARAMETER")
-internal fun scrollKey(key: Key, type: KeyEventType, ctrlOrMeta: Boolean): ScrollAction? {
+internal fun scrollKey(key: Key, type: KeyEventType): ScrollAction? {
     if (type != KeyEventType.KeyDown) return null
     return when (key) {
         Key.PageUp -> ScrollAction.PAGE_UP
