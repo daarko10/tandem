@@ -100,12 +100,12 @@ data class LoadedTranscript(
  * what each line says about the meta until the first pass has placed it.
  *
  * Prompts (`user` text and images), tool results (`user` `tool_result` blocks) and `assistant` lines make the history: an interrupt
- * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`, a line of images only a
- * prompt with no text. Each goes to the reducer
- * stamped with its line's `timestamp` (0 when it has none), and [TranscriptMeta.cwd] becomes the state's `cwd`. `custom-title`,
- * `ai-title` and `summary` lines make the title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the
- * output of commands and shell escapes, background-task notifications, every other type, and lines that are not a JSON object
- * (such as a last line the CLI is still writing) are skipped. Bad input never throws.
+ * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`, and a line of images
+ * only (or a generated tag with images) a prompt with no text. Each goes to the reducer stamped with its line's `timestamp` (0
+ * when it has none), and [TranscriptMeta.cwd] becomes the state's `cwd`. `custom-title`, `ai-title` and `summary` lines make the
+ * title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the output of commands and shell escapes,
+ * background-task notifications and other generated tags unless they carry images, every other type, and lines that are not a
+ * JSON object (such as a last line the CLI is still writing) are skipped. Bad input never throws.
  */
 object TranscriptReader {
     /**

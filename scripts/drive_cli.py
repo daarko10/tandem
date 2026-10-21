@@ -274,7 +274,11 @@ def permission_mode_auto(cli: Cli) -> None:
 
 
 def tiny_png() -> bytes:
-    """A 2 x 2 RGB PNG, the same bytes every time: TranscriptReaderTest pins its base64 as TINY_PNG_BASE64."""
+    """A 2 x 2 RGB PNG, the same bytes every time: TranscriptReaderTest pins its base64 as TINY_PNG_BASE64.
+
+    The pin assumes the reference zlib (as on CI's ubuntu-latest): zlib-ng compresses the same rows to other bytes. Moving to
+    stored blocks (level 0) would remove that, but needs a re-recording of user-image and a new pinned literal.
+    """
     def chunk(kind: bytes, body: bytes) -> bytes:
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
 

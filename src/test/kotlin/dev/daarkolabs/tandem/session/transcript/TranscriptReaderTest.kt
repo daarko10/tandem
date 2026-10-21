@@ -849,11 +849,11 @@ class TranscriptReaderTest {
         assertEquals(UserImage("${e.id}#0", "image/png", TINY_PNG_BASE64), e.images.single())
     }
 
-    /** A transcript of one user line holding one image and no text. */
+    /** A transcript of one user line holding one image, its data redacted to the placeholder (spec 5.7), and no text. */
     private fun imagesOnly(dir: Path): Path = dir.resolve("66666666-6666-4666-8666-666666666666.jsonl").apply {
         writeLines(
             """{"type":"user","uuid":"u9","timestamp":"2026-10-21T20:26:59.860Z","message":{"role":"user","content":""" +
-                """[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$TINY_PNG_BASE64"}}]}}""",
+                """[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"<base64>"}}]}}""",
         )
     }
 
@@ -865,7 +865,7 @@ class TranscriptReaderTest {
                 "u9",
                 "",
                 Instant.parse("2026-10-21T20:26:59.860Z").toEpochMilli(),
-                listOf(UserImage("u9#0", "image/png", TINY_PNG_BASE64)),
+                listOf(UserImage("u9#0", "image/png", "<base64>")),
             ),
             state.entries.filterIsInstance<ChatEntry.User>().single(),
         )
