@@ -181,6 +181,11 @@ class ToolWindowIdeTest {
             waitFor("working row with elapsed", 1.minutes) {
                 node("Claude is working") { "contains($it, ' · ') and substring($it, string-length($it)) = 's'" }.present()
             }
+            // A lone running call opens on its command (polish spec 2.1) while its permission request is still held back.
+            toolRow("Creating empty fixture file").click(Point(10, 10))
+            waitFor("a lone running call opens on its command", 30.seconds) {
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, '\$ touch tandem-fixture.txt')]").present()
+            }
             gate.createFile()
             waitForText("Allow Claude to Run touch tandem-fixture.txt?")
             waitFor("amber waiting row", 1.minutes) { workingRow("Claude is waiting for you").present() }
@@ -201,6 +206,22 @@ class ToolWindowIdeTest {
         val answers = sent.filter { it.type == "control_response" }
             .map { it["response"]!!.jsonObject["response"]!!.jsonObject["behavior"]!!.jsonPrimitive.content }
         assertEquals(listOf("allow", "deny"), answers)
+    }
+
+    @Test
+    fun `an opened running group lists its finished calls`() {
+        // tools-read streams its 50 stream_event lines at 400 ms (about 20 s); its calls run as a group from line 24 on. The lone
+        // pending `Reading…` of lines 9-16 matches neither of the running group's predicates and cannot open.
+        runChat("live-group", fixtures = listOf("tools-read"), lineDelayMs = 400) {
+            newSession()
+            typePrompt("Read the file")
+            waitFor("running group row", 1.minutes) { runningGroupRow().present() }
+            runningGroupRow().click(Point(10, 10))
+            waitFor("finished sub-row inside the open box", 30.seconds) { toolRow("Read <path>").present() }
+            waitFor("the group finished with its box still open", 1.minutes) {
+                toolRow("Read a file, found files, searched for a pattern").present() && toolRow("Searched for seven · 1 match").present()
+            }
+        }
     }
 
     @Test
@@ -769,6 +790,15 @@ class ToolWindowIdeTest {
 
     /** A tool row (a lone call, a group or a group's sub-row), found by its label, which is what it says to assistive technology. */
     private fun Driver.toolRow(label: String): UiComponent = ui.x("//div[@class='ComposeNode' and @contentdescription='$label']")
+
+    /**
+     * The header of a running group, a row only a running group has: its sentence ends with `…` and reads `Reading <count>…` or
+     * holds a clause separator (`Read a file, finding files…`).
+     */
+    private fun Driver.runningGroupRow(): UiComponent = ui.x(
+        "//div[@class='ComposeNode' and @role='Button' and substring(@contentdescription, string-length(@contentdescription)) = '…' and " +
+            "(starts-with(@contentdescription, 'Reading ') or contains(@contentdescription, ', '))]",
+    )
 
     /** The editable text (a text field or area) that has the keyboard focus, if it holds [text]. */
     private fun Driver.focusedEditable(text: String): UiComponent = ui.x("$EDITABLE[@focused='true' and @editabletext='$text']")
