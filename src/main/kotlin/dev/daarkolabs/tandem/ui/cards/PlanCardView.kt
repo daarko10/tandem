@@ -2,15 +2,18 @@
 
 package dev.daarkolabs.tandem.ui.cards
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,6 +26,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -39,15 +43,27 @@ import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.jetbrains.jewel.ui.component.Link
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
+import org.jetbrains.jewel.ui.component.VerticalScrollbar
 import java.nio.file.Path
 
 /** A plan taller than this is clamped until `Show more` (spec 4.14). */
 private val PLAN_CLAMP = 240.dp
 
 /**
+ * The most an expanded plan takes: half the height the card has left where the plan starts, never less than the clamp ([clamp], in
+ * pixels); the rest scrolls. Unbounded, a long plan would take the whole chat height and push the card's buttons, the composer and
+ * the transcript out of the tool window, since the card is measured before them.
+ */
+private fun Modifier.expandedPlanHeight(clamp: Int): Modifier = layout { measurable, constraints ->
+    val cap = if (constraints.hasBoundedHeight) minOf(constraints.maxHeight, maxOf(clamp, constraints.maxHeight / 2)) else 2 * clamp
+    val placeable = measurable.measure(constraints.copy(minHeight = minOf(constraints.minHeight, cap), maxHeight = cap))
+    layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+}
+
+/**
  * The plan approval card of an `ExitPlanMode` request (spec 4.14): `Approve this plan?`, where the plan came from
  * ([Cards.sourceLine]), the plan as Markdown ([blocks], parsed by the presenter; clamped at 240 dp, faded, with `Show more` /
- * `Show less`), `Open plan file` when the request names an absolute plan file ([planFileToOpen]), the [feedback] field, then
+ * `Show less`; expanded, at most half the height left to the card, scrolling), `Open plan file` when the request names an absolute plan file ([planFileToOpen]), the [feedback] field, then
  * `Keep planning` (Esc, and Enter in the field), `Approve, keep current mode` and `Approve and start coding` (Enter elsewhere on the
  * card, the default, which takes the focus when [takeFocus] says so), and how many more requests wait behind it ([moreWaiting]).
  * [onApprove] says whether to start coding.
@@ -84,21 +100,28 @@ internal fun PlanCardView(
         if (plan != null && blocks != null) {
             var expanded by remember(card.requestId) { mutableStateOf(false) }
             var overflows by remember(card.requestId) { mutableStateOf(false) }
-            val density = LocalDensity.current
+            val scroll = remember(card.requestId) { ScrollState(0) }
+            val clamp = with(LocalDensity.current) { PLAN_CLAMP.roundToPx() }
             Box(
                 Modifier.fillMaxWidth()
-                    .then(if (expanded) Modifier else Modifier.heightIn(max = PLAN_CLAMP).clipToBounds())
+                    .then(if (expanded) Modifier.expandedPlanHeight(clamp) else Modifier.heightIn(max = PLAN_CLAMP).clipToBounds())
                     .then(if (overflows && !expanded) Modifier.bottomFade(60.dp) else Modifier),
             ) {
                 Markdown(
                     blocks,
                     plan,
-                    // Unbounded, so that the size seen here is the plan's whole height inside the clamp.
+                    // Unbounded (or scrolling, expanded), so that the size seen here is the plan's whole height.
                     modifier = Modifier.fillMaxWidth()
+                        .then(if (expanded) Modifier.verticalScroll(scroll) else Modifier)
                         .wrapContentHeight(Alignment.Top, unbounded = true)
-                        .onSizeChanged { overflows = it.height > with(density) { PLAN_CLAMP.roundToPx() } },
+                        .onSizeChanged { overflows = it.height > clamp },
                     selectable = true,
                 )
+                if (expanded) {
+                    Box(Modifier.matchParentSize()) {
+                        VerticalScrollbar(scroll, Modifier.align(Alignment.TopEnd).fillMaxHeight())
+                    }
+                }
             }
             if (overflows) Link(if (expanded) "Show less" else "Show more", onClick = { expanded = !expanded })
         }
