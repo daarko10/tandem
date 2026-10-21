@@ -149,6 +149,11 @@ class ToolWindowIdeTest {
             waitFor("Other holds a, a newline and b", 30.seconds) { ui.x("$EDITABLE[@focused='true' and $aNewlineB]").present() }
             // Picking an option of a one-answer question clears Other, so the answer is the option.
             option("Blue").click(Point(10, 10))
+            // A one-question card never offers Next (spec 2.8 of the polish). The click is the IDE tests' mouse path of the primary;
+            // the two-question test covers Enter.
+            waitFor("Submit answers, and no Next, on a one-question card", 30.seconds) {
+                iconButton("Submit answers").present() && !iconButton("Next").present()
+            }
             iconButton("Submit answers").click(Point(10, 10))
             // The card's own option is a "Blue" text node too.
             waitFor("question card closed", 2.minutes) {
@@ -162,6 +167,66 @@ class ToolWindowIdeTest {
             .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-27>" }["response"]!!.jsonObject
         assertEquals("allow", answer["behavior"]!!.jsonPrimitive.content)
         assertEquals("Blue", answer["updatedInput"]!!.jsonObject["answers"]!!.jsonObject["Which colour?"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `a two-question card is answered from the keyboard`() {
+        // ask-two: Which colour? (Red, Blue) then Which toppings would you like? (Cheese, Olives, Ham; multiSelect).
+        val sent = runChat("question-two", fixtures = listOf("ask-two")) {
+            newSession()
+            typePrompt("Ask me two questions")
+            waitForText("Which colour?")
+            waitFor("first option focused", 30.seconds) { ui.x(FOCUSED_OPTION_RED).present() }
+            waitFor("Next while the other question is unanswered", 30.seconds) {
+                iconButton("Next").present() && !iconButton("Submit answers").present()
+            }
+            ui.keyboard { key(KeyEvent.VK_1) }
+            waitFor("Red picked, no auto-advance", 30.seconds) {
+                questionTab("Colour").present() && ui.x(FOCUSED_OPTION_RED).present() && iconButton("Next").present()
+            }
+            // `3`, the Other row's key, focuses the empty Other field (Red stays the answer); Enter there runs Next (QuestionKey.Primary).
+            ui.keyboard { key(KeyEvent.VK_3) }
+            waitFor("Other field focused", 30.seconds) {
+                ui.x("$EDITABLE[@focused='true']").present() && !ui.x("$PROMPT_BOX[@focused='true']").present()
+            }
+            // Held until the focus is on Cheese, as a person's Enter is, so the release lands on that row, which must not toggle it
+            // (spec 2.8 of the polish, edge 8). enter() presses and releases back to back: its release would reach the field before
+            // the focus moves. pressing() (driver 261.27258.48) presses, runs the block and releases in a finally. A key repeat
+            // during the hold is a no-op (Next to the shown question, or a disabled Submit answers).
+            ui.keyboard {
+                pressing(KeyEvent.VK_ENTER) {
+                    waitFor("Cheese focused while Enter is held", 30.seconds) { focusedOption("Cheese").present() }
+                }
+            }
+            waitForText("Which toppings would you like?")
+            waitFor("the second tab keeps its dot and Submit answers shows", 30.seconds) {
+                questionTab("Toppings ·").present() && iconButton("Submit answers").present() && !iconButton("Next").present()
+            }
+            // The TextArea is the same node across questions: the next digit must reach the Cheese row, not the field; the Enter's
+            // newline reached no field.
+            waitFor("Cheese focused, no field focused or filled", 30.seconds) {
+                focusedOption("Cheese").present() && !ui.x("$EDITABLE[@focused='true']").present() &&
+                    !ui.x("$EDITABLE[string-length(@editabletext) > 0]").present()
+            }
+            // Had the held Enter's release toggled Cheese on, this 1 would toggle it off and the answer would read Ham.
+            ui.keyboard { key(KeyEvent.VK_1) }
+            ui.keyboard { key(KeyEvent.VK_3) }
+            waitFor("Cheese and Ham picked", 30.seconds) { questionTab("Toppings").present() }
+            // On the focused Cheese row: CardFrame's onEnter runs Submit answers, which sends the answer on the press.
+            ui.keyboard { enter() }
+            waitFor("question card closed", 2.minutes) {
+                !ui.x("//div[@class='ComposeNode' and @contentdescription='Question from Claude']").present()
+            }
+            // The model's reply, ask-two:43.
+            waitForText("Red and Cheese, Ham")
+            waitFor("Questions row", 2.minutes) { toolRow("Questions").present() }
+        }
+        val answer = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
+            .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-38>" }["response"]!!.jsonObject
+        assertEquals("allow", answer["behavior"]!!.jsonPrimitive.content)
+        val answers = answer["updatedInput"]!!.jsonObject["answers"]!!.jsonObject
+        assertEquals("Red", answers["Which colour?"]!!.jsonPrimitive.content)
+        assertEquals("Cheese, Ham", answers["Which toppings would you like?"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -892,6 +957,17 @@ class ToolWindowIdeTest {
     /** A question card's option (a radio button or a checkbox), found by its label, which is what it says to assistive technology. */
     private fun Driver.option(label: String): UiComponent = ui.x(
         "//div[@class='ComposeNode' and @contentdescription='$label' and (@role='RadioButton' or @role='Checkbox')]",
+    )
+
+    /**
+     * A tab of the question card's strip, by its label (`Colour`, `Toppings ·`): Jewel's SegmentedControl button holds its Text as
+     * one node.
+     */
+    private fun Driver.questionTab(label: String): UiComponent = ui.x("//div[@class='ComposeNode' and @visible_text='$label']")
+
+    /** A question card's option (a radio button or a checkbox) that has the keyboard focus, by its label. */
+    private fun Driver.focusedOption(label: String): UiComponent = ui.x(
+        "//div[@class='ComposeNode' and @contentdescription='$label' and @focused='true' and (@role='RadioButton' or @role='Checkbox')]",
     )
 
     /** The working row, found by what it says to assistive technology: `Claude is working` or `Claude is waiting for you`. */
