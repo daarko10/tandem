@@ -231,7 +231,10 @@ private class Scanner(private val s: String) {
         return !braceOnly && s[at] in "|&;<>)`"
     }
 
-    /** A word starting at [i]: it runs over quotes, escapes, `${…}`, `$((…))` and `NAME=(…)` to whitespace or an operator. */
+    /**
+     * A word starting at [i]: it runs over quotes, escapes, `${…}`, `$((…))` and `NAME=(…)` to whitespace or an operator. Never
+     * empty: [step] takes every character the loop stops on before it gets here.
+     */
     private fun word(i: Int): Int {
         val assignment = assignmentEnd(i)
         var j = i
@@ -251,7 +254,6 @@ private class Scanner(private val s: String) {
                 else -> j + 1
             }
         }
-        if (j == i) j = i + 1
         emit(classify(i, j, assignment >= 0), i, j)
         glued = true
         return j
