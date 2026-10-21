@@ -53,6 +53,16 @@ class ComposerImagesTest {
         val png = requireNotNull(bytes)
         assertContentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47), png.copyOf(4))
         assertEquals(1, calls.get())
+        // An image offered but not readable leaves the notice, never nothing at all.
+        val unreadable = object : Transferable {
+            override fun getTransferDataFlavors(): Array<DataFlavor> = arrayOf(DataFlavor.imageFlavor)
+
+            override fun isDataFlavorSupported(flavor: DataFlavor): Boolean = flavor == DataFlavor.imageFlavor
+
+            override fun getTransferData(flavor: DataFlavor): Any = throw IOException("the owner went away")
+        }
+        assertEquals(listOf("Pasted image.png" to null), ComposerImages.readClipboardImages(contents = { unreadable }, encodePng = counting))
+        assertEquals(1, calls.get())
     }
 
     @Test

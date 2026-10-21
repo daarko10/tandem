@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
+@file:OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class, ExperimentalJewelApi::class)
 
 package dev.daarkolabs.tandem.ui
 
@@ -55,6 +55,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
+import com.intellij.ide.PasteProvider
+import com.intellij.openapi.actionSystem.ActionUpdateThread
+import com.intellij.openapi.actionSystem.DataContext
+import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.Attachments
@@ -65,6 +69,8 @@ import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.jetbrains.jewel.foundation.ExperimentalJewelApi
+import org.jetbrains.jewel.foundation.actionSystem.provideData
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Icon
 import org.jetbrains.jewel.ui.component.IconButton
@@ -207,6 +213,8 @@ private fun PromptBox(
     var focused by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
     val currentOnDrop by rememberUpdatedState(onDrop)
+    val currentOnAction by rememberUpdatedState(onAction)
+    val imagePaste = remember { ImagePasteProvider { currentOnAction(ComposerAction.PasteImage) } }
     val dropTarget = remember {
         object : DragAndDropTarget {
             override fun onEntered(event: DragAndDropEvent) {
@@ -267,6 +275,14 @@ private fun PromptBox(
                 Modifier.weight(1f).heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
                     .focusRequester(inputFocus)
                     .onFocusChanged { focused = it.hasFocus }
+                    // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it: while the
+                    // clipboard holds images, the focused composer's paste provider takes the paste from the Compose text paste (polish
+                    // spec 2.7). Asked for only by a paste, so the clipboard's flavours are not queried on every action update.
+                    .provideData {
+                        lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
+                            imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
+                        }
+                    }
                     .onPreviewKeyEvent { event -> composerKeyEvent(event, busy || sending, cardOpen, ui, onAction) },
                 lineLimits = TextFieldLineLimits.MultiLine(1, 8),
                 undecorated = true,
@@ -285,6 +301,23 @@ private fun PromptBox(
             }
         }
     }
+}
+
+/**
+ * The Paste action's provider while the clipboard holds images and the composer has the focus: it pastes them ([onPaste]) instead of
+ * text. The IDE binds Ctrl/Cmd+V to its Paste action, which asks the focused component for a [PasteProvider] before the key reaches
+ * Compose; with no images on the clipboard the composer offers none, and the Compose text paste runs as before.
+ */
+private class ImagePasteProvider(private val onPaste: () -> Unit) : PasteProvider {
+    override fun performPaste(dataContext: DataContext) {
+        onPaste()
+    }
+
+    override fun isPastePossible(dataContext: DataContext): Boolean = true
+
+    override fun isPasteEnabled(dataContext: DataContext): Boolean = true
+
+    override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
 }
 
 /**

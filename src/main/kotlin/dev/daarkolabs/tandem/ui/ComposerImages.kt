@@ -60,8 +60,10 @@ internal object ComposerImages {
             val files = filesOf(transferable)
             return@withContext if (files.any { it.isImageFile() }) readFiles(files) else emptyList()
         }
-        val image = readOrNull { transferable.getTransferData(DataFlavor.imageFlavor) as? Image } ?: return@withContext emptyList()
-        listOf(PASTED_NAME to readOrNull { encodePng(image) })
+        if (!readOrFalse { transferable.isDataFlavorSupported(DataFlavor.imageFlavor) }) return@withContext emptyList()
+        // Offered but not readable, or not encodable: the notice says so rather than nothing happening.
+        val image = readOrNull { transferable.getTransferData(DataFlavor.imageFlavor) as? Image }
+        listOf(PASTED_NAME to image?.let { readOrNull { encodePng(it) } })
     }
 
     /** The clipboard's text, read on [Dispatchers.IO]; null when it has none or cannot be read. */
