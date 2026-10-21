@@ -24,7 +24,10 @@ import com.intellij.ide.starter.project.LocalProjectInfo
 import com.intellij.ide.starter.runner.Starter
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -149,6 +152,100 @@ class ToolWindowIdeTest {
             .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-27>" }["response"]!!.jsonObject
         assertEquals("allow", answer["behavior"]!!.jsonPrimitive.content)
         assertEquals("Blue", answer["updatedInput"]!!.jsonObject["answers"]!!.jsonObject["Which colour?"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `the plan card approves and the picker follows`() {
+        val sent = runChat("plan", fixtures = listOf("plan-approve")) {
+            newSession()
+            typePrompt("Plan a changelog")
+            waitForText("Approve this plan?")
+            iconButton("Approve and start coding").click(Point(10, 10))
+            // The CLI's status line after the approval (plan-approve:90) says acceptEdits.
+            waitFor("mode follows the approval", 1.minutes) { picker("Permission mode", "Accept edits").present() }
+        }
+        val approval = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
+            .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-97>" }["response"]!!.jsonObject
+        assertEquals("allow", approval["behavior"]!!.jsonPrimitive.content)
+        assertEquals("setMode", approval["updatedPermissions"]!!.jsonArray[0].jsonObject["type"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `the working indicator shows while a turn runs and a footer after it`() {
+        // The fake CLI holds both permission requests (permission:21 and :52) back until this file exists.
+        val gate = Files.createTempDirectory("tandem-gate").resolve("open")
+        val sent = runChat("working", fixtures = listOf("permission"), gateFile = gate) {
+            newSession()
+            typePrompt("Create the fixture file")
+            // One merged node: "<Verb>… · Ns" (spec 4.19), its text ending in the elapsed seconds (or in "tokens").
+            waitFor("working row with elapsed", 1.minutes) {
+                node("Claude is working") { "contains($it, ' · ') and substring($it, string-length($it)) = 's'" }.present()
+            }
+            gate.createFile()
+            waitForText("Allow Claude to Run touch tandem-fixture.txt?")
+            waitFor("amber waiting row", 1.minutes) { workingRow("Claude is waiting for you").present() }
+            answerCard()
+            waitFor("footer, working row gone", 2.minutes) {
+                ui.x(FOOTER).present() && !workingRow("Claude is working").present() && !workingRow("Claude is waiting for you").present()
+            }
+            // permission.ndjson is two turns (result :35, init :40): the second request (:52) belongs to the second one.
+            typePrompt("Now remove it")
+            waitForText("Allow Claude to Run rm tandem-fixture.txt?")
+            waitFor("waiting again", 1.minutes) { workingRow("Claude is waiting for you").present() }
+            iconButton("Deny").click(Point(10, 10))
+            waitFor("denied row and footer, working row gone", 2.minutes) {
+                toolRow("Remove fixture file · Denied").present() && ui.x(FOOTER).present() &&
+                    !workingRow("Claude is working").present() && !workingRow("Claude is waiting for you").present()
+            }
+        }
+        val answers = sent.filter { it.type == "control_response" }
+            .map { it["response"]!!.jsonObject["response"]!!.jsonObject["behavior"]!!.jsonPrimitive.content }
+        assertEquals(listOf("allow", "deny"), answers)
+    }
+
+    @Test
+    fun `scrolling up pauses following and the jump button catches up`() {
+        val configDir = Files.createTempDirectory("tandem-config")
+        val project = newProject()
+        val seeded = "55555555-5555-4555-8555-555555555555"
+        // A session long enough to overflow the chat, so that Home moves the viewport away from the bottom.
+        configDir.resolve("projects").resolve(TranscriptFolder.key(project.toRealPath().toString())).createDirectories()
+            .resolve("$seeded.jsonl").writeText(longTranscript(seeded))
+        // synthetic-long-reply streams 183 lines, 70 ms apart: about 12.8 s, one new row per paragraph.
+        val sent = runChat(
+            "autoscroll",
+            fixtures = listOf("synthetic-long-reply"),
+            configDir = configDir,
+            project = project,
+            lineDelayMs = 70,
+        ) {
+            openSidebar()
+            row("Seeded").click(Point(10, 10))
+            waitFor("seeded history shown, prompt focused", 1.minutes) { ui.x("$PROMPT_BOX[@focused='true']").present() }
+            typePrompt("Write me a long reply")
+            waitFor("streaming", 30.seconds) { iconButton("Stop").present() }
+            // Inside the 16 dp padding: the press focuses the list, and no row takes it.
+            ui.x(TRANSCRIPT).click(Point(10, 10))
+            ui.keyboard { key(KeyEvent.VK_HOME) }
+            waitFor("jump button offered", 30.seconds) { iconButton("Jump to bottom").present() }
+            // The first bubble is in the viewport (only visible rows are in the tree).
+            waitForText("Prompt 1 of the seeded history")
+            Thread.sleep(3_000)
+            assertFalse(ui.x("//div[@class='ComposeNode' and @visible_text='pong']").present(), "the viewport moved while paused")
+            assertTrue(iconButton("Stop").present(), "the turn is still streaming")
+            assertTrue(
+                node("Jump to bottom") { "starts-with($it, '↓ ') and substring($it, string-length($it) - 3) = ' new'" }.present(),
+                "rows were appended while paused",
+            )
+            assertTrue(
+                ui.x("//div[@class='ComposeNode' and @visible_text='Prompt 1 of the seeded history']").present(),
+                "still at the top",
+            )
+            iconButton("Jump to bottom").click(Point(10, 10))
+            waitForText("pong")
+            waitFor("jump button gone", 30.seconds) { !iconButton("Jump to bottom").present() }
+        }
+        assertEquals(1, sent.count { it.type == "user" })
     }
 
     @Test
@@ -507,6 +604,42 @@ class ToolWindowIdeTest {
         return models[index].jsonObject["displayName"]!!.jsonPrimitive.content
     }
 
+    /**
+     * A transcript of [turns] short turns, long enough to overflow the chat: history-reply.jsonl's user line (3) and assistant
+     * line (18), repeated with the user text `Prompt <n> of the seeded history` and the reply `Reply <n>.`, the uuids `u<n>` and
+     * `a<n>` chained through `parentUuid`, and a `message.id` of its own on each assistant line (the reducer merges lines with
+     * equal message ids); then the title `Seeded` for session [seeded].
+     */
+    private fun longTranscript(seeded: String, turns: Int = 30): String {
+        val lines = Path.of(fakeClaude).resolveSibling("fixtures/transcripts/history-reply.jsonl").readLines()
+        val user = Json.parseToJsonElement(lines[2]).jsonObject
+        val assistant = Json.parseToJsonElement(lines[17]).jsonObject
+        val message = assistant["message"]!!.jsonObject
+        val text = message["content"]!!.jsonArray.single().jsonObject
+        return buildString {
+            for (n in 1..turns) {
+                val prompt = user + mapOf(
+                    "uuid" to JsonPrimitive("u$n"),
+                    "parentUuid" to if (n == 1) JsonNull else JsonPrimitive("a${n - 1}"),
+                    "message" to JsonObject(user["message"]!!.jsonObject + ("content" to JsonPrimitive("Prompt $n of the seeded history"))),
+                )
+                val reply = assistant + mapOf(
+                    "uuid" to JsonPrimitive("a$n"),
+                    "parentUuid" to JsonPrimitive("u$n"),
+                    "message" to JsonObject(
+                        message + mapOf(
+                            "id" to JsonPrimitive("m$n"),
+                            "content" to JsonArray(listOf(JsonObject(text + ("text" to JsonPrimitive("Reply $n."))))),
+                        ),
+                    ),
+                )
+                append(JsonObject(prompt)).append('\n')
+                append(JsonObject(reply)).append('\n')
+            }
+            append("""{"type":"custom-title","customTitle":"Seeded","sessionId":"$seeded"}""").append('\n')
+        }
+    }
+
     /** A new project folder with one file. */
     private fun newProject(): Path {
         val project = Files.createTempDirectory("tandem-ide-test").resolve("demo").createDirectories()
@@ -518,8 +651,8 @@ class ToolWindowIdeTest {
      * Starts the IDE on [project] with the plugin and the fake CLI, opens the tool window, runs [script], and returns the frames
      * the plugin wrote to the CLI's stdin, each process's `__spawn__` line included. The Nth process the plugin starts replays
      * fixture N of [fixtures] (the last one once they run out). [configDir] becomes the CLI's config directory
-     * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists. The frames go to
-     * [sentLog] as the fake CLI reads them, so that [script] can wait for one.
+     * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists and sleeps
+     * [lineDelayMs] before each stream line. The frames go to [sentLog] as the fake CLI reads them, so that [script] can wait for one.
      */
     private fun runChat(
         name: String,
@@ -528,9 +661,10 @@ class ToolWindowIdeTest {
         gateFile: Path? = null,
         project: Path = newProject(),
         sentLog: Path = Files.createTempFile("tandem-sent", ".ndjson"),
+        lineDelayMs: Int? = null,
         script: Driver.() -> Unit,
     ): List<JsonObject> {
-        ideContext(name, fixtures, configDir, gateFile, project, sentLog).runTandem(name, script)
+        ideContext(name, fixtures, configDir, gateFile, project, sentLog, lineDelayMs).runTandem(name, script)
         return if (sentLog.exists()) sentLog.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject } else emptyList()
     }
 
@@ -542,6 +676,7 @@ class ToolWindowIdeTest {
         gateFile: Path?,
         project: Path,
         sentLog: Path,
+        lineDelayMs: Int? = null,
     ): IDETestContext =
         Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
@@ -554,6 +689,7 @@ class ToolWindowIdeTest {
                 withEnv("TANDEM_FAKE_LOG", sentLog.toString())
                 if (configDir != null) withEnv("CLAUDE_CONFIG_DIR", configDir.toString())
                 if (gateFile != null) withEnv("TANDEM_FAKE_GATE_FILE", gateFile.toString())
+                if (lineDelayMs != null) withEnv("TANDEM_FAKE_LINE_DELAY_MS", lineDelayMs.toString())
             }
         }
 
@@ -611,6 +747,19 @@ class ToolWindowIdeTest {
     /** A question card's option (a radio button or a checkbox), found by its label, which is what it says to assistive technology. */
     private fun Driver.option(label: String): UiComponent = ui.x(
         "//div[@class='ComposeNode' and @contentdescription='$label' and (@role='RadioButton' or @role='Checkbox')]",
+    )
+
+    /** The working row, found by what it says to assistive technology: `Claude is working` or `Claude is waiting for you`. */
+    private fun Driver.workingRow(description: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @contentdescription='$description']")
+
+    /**
+     * The node described as [description] whose text passes [textPredicate], an XPath condition on the attribute it is given: the
+     * merged text as `@text` first, `@visible_text` as the fallback (spec 10.6).
+     */
+    private fun Driver.node(description: String, textPredicate: (attr: String) -> String): UiComponent = ui.x(
+        "//div[@class='ComposeNode' and @contentdescription='$description' and " +
+            "((${textPredicate("@text")}) or (${textPredicate("@visible_text")}))]",
     )
 
     /** A tool row (a lone call, a group or a group's sub-row), found by its label, which is what it says to assistive technology. */
@@ -699,6 +848,12 @@ class ToolWindowIdeTest {
         const val WIDE = 900
 
         const val EDITABLE = "//div[@class='ComposeNode' and @editabletext]"
+
+        /** A turn's footer. */
+        const val FOOTER = "//div[@class='ComposeNode' and starts-with(@visible_text, 'Worked for')]"
+
+        /** The transcript, the chat's list of rows. */
+        const val TRANSCRIPT = "//div[@class='ComposeNode' and @contentdescription='Transcript']"
 
         /** Every sidebar row. */
         const val ROW = "//div[@class='ComposeNode' and @role='Tab']"

@@ -16,6 +16,8 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
   TANDEM_FAKE_GATE_FILE   before emitting each control_request (after the delay, if both are set), wait until this file
                           exists, checking every 100 ms for up to 60 s, then emit it anyway: a test holds a request
                           back until it is ready for it, in place of guessing a delay
+  TANDEM_FAKE_LINE_DELAY_MS  sleep this long before emitting each stream_event line (unset or 0: no sleep), so that a
+                          reply streams for as long as a test needs to act while it streams
 
 Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
 with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
@@ -41,6 +43,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 log_path = os.environ.get("TANDEM_FAKE_LOG")
 delay_ms = int(os.environ.get("TANDEM_FAKE_DELAY_MS") or 0)
+line_delay_ms = int(os.environ.get("TANDEM_FAKE_LINE_DELAY_MS") or 0)
 gate_file = os.environ.get("TANDEM_FAKE_GATE_FILE")
 SPAWN_PREFIX = '{"type":"__spawn__"'
 SESSION_PLACEHOLDER = re.compile(r"<session_id-\d+>")
@@ -150,6 +153,8 @@ for message in lines:
         time.sleep(delay_ms / 1000)
     if kind == "control_request" and gate_file:
         wait_for_gate()
+    if kind == "stream_event" and line_delay_ms:
+        time.sleep(line_delay_ms / 1000)
     emit(message)
     if kind == "control_request":
         wait_for(lambda m: m.get("type") == "control_response"
