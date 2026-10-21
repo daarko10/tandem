@@ -328,8 +328,10 @@ class ToolWindowIdeTest {
             modelControl(defaultModelName("permission-mode")).click(Point(10, 10))
             waitFor("the model menu open", 30.seconds) { menuItemContaining("Opus").present() }
             // Picked by its digit, its place among the models other than `default`: Sonnet (checked), Fable 2, Opus 3, Haiku 4. A
-            // click on the item is not used: the Driver places it from the menu's popup window, which under Xvfb is not always where
-            // it is drawn, and a click elsewhere closes the menu.
+            // pointer click is not used: under Xvfb the Driver places the Opus item where it is drawn, and that place holds still,
+            // but the menu's popup window takes the pointer about two items lower (on Opus's drawn place it highlights Effort and
+            // opens its submenu), so a click there dismisses the menu as a click outside it. Clicking a footer menu item is on the
+            // owner's runIde list.
             ui.keyboard { key(KeyEvent.VK_3) }
             // The fake CLI answers set_model with the next acknowledgement it recorded, set_permission_mode's acceptEdits one, and
             // that one's status line: so the session ends in Accept edits. Wait for the frame itself before the IDE closes.
