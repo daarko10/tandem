@@ -34,18 +34,12 @@ private val PICKER_POPUP_WIDTH: Dp = 220.dp
 internal data class PickerEntry<out T>(val label: String, val value: T)
 
 /**
- * The model picker's entries: "Default model" (null: the CLI's default), then the models the CLI offers ([models], by display name),
- * or, while it has not listed them, the model it reports it runs ([active]). A [requested] model that none of these stands for is an
- * entry of its own, so that the picker always shows what was picked.
+ * The model picker's entries: "Default model" (null: the CLI's default), then the models the CLI offers ([models], by display name).
+ * A [requested] model that none of these stands for is an entry of its own, so that the picker always shows what was picked.
  */
-internal fun modelEntries(models: List<ModelOption>, requested: String?, active: String?): List<PickerEntry<String?>> {
-    val offered = if (models.isNotEmpty()) {
-        models.map { PickerEntry(it.displayName, it.value) }
-    } else {
-        listOfNotNull(active?.let { PickerEntry(it, it) })
-    }
-    return (listOf(PickerEntry<String?>(DEFAULT_MODEL_LABEL, null)) + offered).withEntryFor(requested) { it }
-}
+internal fun modelEntries(models: List<ModelOption>, requested: String?): List<PickerEntry<String?>> =
+    (listOf(PickerEntry<String?>(DEFAULT_MODEL_LABEL, null)) + models.map { PickerEntry(it.displayName, it.value) })
+        .withEntryFor(requested) { it }
 
 /** The new-session popup's first permission mode entry: no `--permission-mode`, the mode the CLI's own settings give. */
 private const val DEFAULT_MODE_LABEL: String = "Default mode"
@@ -198,13 +192,12 @@ internal fun <T> Picker(
 }
 
 /**
- * The new-session popup's model picker: "Default model", then the models the CLI offers ([modelEntries]; no session runs yet, so
- * there is no running model to list while it has not listed them). It shows [model], the one picked (null: the CLI's default); a
- * pick calls [onPick] with its value, null for "Default model".
+ * The new-session popup's model picker: "Default model", then the models the CLI offers ([modelEntries]). It shows [model], the one
+ * picked (null: the CLI's default); a pick calls [onPick] with its value, null for "Default model".
  */
 @Composable
 internal fun ModelPicker(models: List<ModelOption>, model: String?, onPick: (String?) -> Unit) {
-    val entries = remember(models, model) { modelEntries(models, model, active = null) }
+    val entries = remember(models, model) { modelEntries(models, model) }
     Picker(entries, model, "Model", onPick = onPick)
 }
 

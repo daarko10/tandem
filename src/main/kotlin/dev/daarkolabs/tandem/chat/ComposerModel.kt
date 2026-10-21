@@ -8,7 +8,7 @@ import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
 
 /** The `value` of the CLI's own entry for its default model in an `initialize` model list. */
-private const val DEFAULT_ENTRY: String = "default"
+internal const val DEFAULT_MODEL_ENTRY: String = "default"
 
 /**
  * What the composer and its footer show (spec 4.15, polish spec 2.3), taken from the state so that it changes only when one of its own
@@ -47,7 +47,7 @@ fun composerModel(state: ChatState): ComposerModel {
         permissionMode = state.permissionMode,
         effort = state.effort,
         claudeCodeVersion = state.claudeCodeVersion,
-        defaultModel = state.models.firstOrNull { it.value == DEFAULT_ENTRY }?.resolvedModel,
+        defaultModel = state.models.firstOrNull { it.value == DEFAULT_MODEL_ENTRY }?.resolvedModel,
         effortLevels = shown?.effortLevels.orEmpty().toImmutableList(),
         autoSupported = shown?.supportsAutoMode == true,
         modelSwitchPending = state.modelSwitchPending,
@@ -65,12 +65,12 @@ fun composerModel(state: ChatState): ComposerModel {
  * CLI's own `default` entry) counts as no request: the entry it resolves to stands for it.
  */
 internal fun shownModel(models: List<ModelOption>, requested: String?, active: String?, switchPending: Boolean): ModelOption? {
-    val choices = models.filter { it.value != DEFAULT_ENTRY }
-    val picked = requested?.takeIf { it != DEFAULT_ENTRY }
+    val choices = models.filter { it.value != DEFAULT_MODEL_ENTRY }
+    val picked = requested?.takeIf { it != DEFAULT_MODEL_ENTRY }
     fun requestedOrDefault(): ModelOption? = if (picked != null) {
         choices.firstOrNull { it.value == picked }
     } else {
-        val resolved = models.firstOrNull { it.value == DEFAULT_ENTRY }?.resolvedModel ?: return null
+        val resolved = models.firstOrNull { it.value == DEFAULT_MODEL_ENTRY }?.resolvedModel ?: return null
         choices.firstOrNull { it.resolvesTo() == resolved }
     }
     return when {

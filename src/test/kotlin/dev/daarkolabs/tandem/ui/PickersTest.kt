@@ -16,7 +16,7 @@ class PickersTest {
         ModelOption("opus", "Opus", null),
     )
 
-    /** The permission mode picker's list keys, which are its modes. */
+    /** Three value keys that the PickerList state tests use. */
     private val modeKeys: List<PickerKey> =
         listOf(PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN).map { PickerKey.Value(it) }
 
@@ -26,37 +26,33 @@ class PickersTest {
 
     @Test
     fun `the model picker lists Default model, then the models the CLI offers in its order`() {
-        val entries = modelEntries(models, requested = null, active = "claude-sonnet-5-5")
+        val entries = modelEntries(models, requested = null)
         assertEquals(listOf("Default model", "Default (recommended)", "Sonnet", "Opus"), entries.map { it.label })
         assertEquals(listOf(null, "default", "sonnet", "opus"), entries.map { it.value })
     }
 
     @Test
-    fun `without the CLI's models the model picker lists Default model and the model the CLI runs`() {
-        assertEquals(
-            listOf(PickerEntry<String?>("Default model", null), PickerEntry<String?>("claude-sonnet-5-5", "claude-sonnet-5-5")),
-            modelEntries(emptyList(), requested = null, active = "claude-sonnet-5-5"),
-        )
-        assertEquals(listOf(PickerEntry<String?>("Default model", null)), modelEntries(emptyList(), requested = null, active = null))
+    fun `without the CLI's models the model picker lists Default model alone`() {
+        assertEquals(listOf(PickerEntry<String?>("Default model", null)), modelEntries(emptyList(), requested = null))
     }
 
     @Test
     fun `the model picker shows the requested model, Default model for none`() {
-        assertEquals(0, modelEntries(models, null, null).positionOf(null))
-        assertEquals(2, modelEntries(models, "sonnet", null).positionOf("sonnet"))
-        assertEquals(1, modelEntries(emptyList(), "claude-sonnet-5-5", "claude-sonnet-5-5").positionOf("claude-sonnet-5-5"))
+        assertEquals(0, modelEntries(models, null).positionOf(null))
+        assertEquals(2, modelEntries(models, "sonnet").positionOf("sonnet"))
+        assertEquals(1, modelEntries(emptyList(), "claude-sonnet-5-5").positionOf("claude-sonnet-5-5"))
     }
 
     @Test
     fun `a requested model the picker does not list is an entry of its own, which it shows`() {
-        val entries = modelEntries(models, requested = "claude-opus-5-5[1m]", active = null)
+        val entries = modelEntries(models, requested = "claude-opus-5-5[1m]")
         assertEquals(PickerEntry<String?>("claude-opus-5-5[1m]", "claude-opus-5-5[1m]"), entries.last())
         assertEquals(entries.lastIndex, entries.positionOf("claude-opus-5-5[1m]"))
         assertEquals(models.size + 2, entries.size)
 
-        val withoutModels = modelEntries(emptyList(), requested = "opus", active = "claude-sonnet-5-5")
-        assertEquals(listOf("Default model", "claude-sonnet-5-5", "opus"), withoutModels.map { it.label })
-        assertEquals(2, withoutModels.positionOf("opus"))
+        val withoutModels = modelEntries(emptyList(), requested = "opus")
+        assertEquals(listOf("Default model", "opus"), withoutModels.map { it.label })
+        assertEquals(1, withoutModels.positionOf("opus"))
     }
 
     @Test

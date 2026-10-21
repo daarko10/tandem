@@ -7,6 +7,7 @@ import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.PendingPermission
+import kotlinx.collections.immutable.persistentListOf
 import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -61,7 +62,7 @@ class ComposerModelTest {
                 busy = true,
                 ended = false,
                 cardOpen = true,
-                models = kotlinx.collections.immutable.persistentListOf(ModelOption("opus", "Opus", null)),
+                models = persistentListOf(ModelOption("opus", "Opus", null)),
                 requestedModel = "opus",
                 activeModel = "claude-opus-5-5",
                 modelWarning = "w",
@@ -69,7 +70,7 @@ class ComposerModelTest {
                 effort = "high",
                 claudeCodeVersion = "3.0.0",
                 defaultModel = null,
-                effortLevels = kotlinx.collections.immutable.persistentListOf(),
+                effortLevels = persistentListOf(),
                 autoSupported = false,
                 modelSwitchPending = true,
             ),

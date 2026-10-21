@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
 import dev.daarkolabs.tandem.chat.ComposerModel
+import dev.daarkolabs.tandem.chat.DEFAULT_MODEL_ENTRY
 import dev.daarkolabs.tandem.chat.Modes
 import dev.daarkolabs.tandem.chat.shownModel
 import dev.daarkolabs.tandem.protocol.PermissionMode
@@ -68,9 +69,6 @@ import kotlin.math.max
 
 /** What the model control reads while nothing is known about the model yet. */
 private const val NO_MODEL_LABEL: String = "Model"
-
-/** The value of the CLI's own `default` entry in its model list: the model menu lists it as the Default-badged model instead. */
-private const val DEFAULT_MODEL_ENTRY: String = "default"
 
 /** What the mode control reads before the first `system/init` or a pick. */
 private const val NO_MODE_LABEL: String = "Mode"
