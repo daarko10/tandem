@@ -161,13 +161,17 @@ class ChatRowsBuilder(private val options: RowOptions) {
             lastWorking = null
             return null
         }
+        val step = WorkingIndicator.step(state, rows, options)
+        // When the step is a subagent's progress: the step while its Agent row is open (spec 4.9).
+        val withoutAgent = WorkingIndicator.step(state, rows, options, skipAgent = true)
         val row = WorkingRow(
             turnUuid = turn.userUuid,
             startedAtMillis = turn.startedAtMillis,
-            step = WorkingIndicator.step(state, rows, options),
+            step = step,
             outputTokens = turn.outputTokens + turn.thinkingEstimate,
             waiting = state.pendingPermissions.isNotEmpty(),
             gap = gap(Kind.END, rows.lastOrNull()),
+            expandedStep = withoutAgent.takeIf { it != step },
         )
         return (lastWorking?.takeIf { it == row } ?: row).also { lastWorking = it }
     }

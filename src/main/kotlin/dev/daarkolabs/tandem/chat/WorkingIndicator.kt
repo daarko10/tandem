@@ -23,11 +23,12 @@ object WorkingIndicator {
     /**
      * What the working row says the turn does now, never what the row above it already says: the latest progress of a subagent of
      * this turn, else `Thinking` while a thinking block streams that no row shows, else the turn's [verb]. [rows] are the rows above
-     * the working row (a trailing working row is skipped).
+     * the working row (a trailing working row is skipped). [skipAgent] leaves the subagent's progress out: the step while its Agent
+     * row is open, whose nested rows show it (spec 4.9).
      */
-    fun step(state: ChatState, rows: List<ChatRow>, options: RowOptions): String {
+    fun step(state: ChatState, rows: List<ChatRow>, options: RowOptions, skipAgent: Boolean = false): String {
         val turn = state.turn
-        agentStep(state, rows)?.let { return it }
+        if (!skipAgent) agentStep(state, rows)?.let { return it }
         if (!options.showThinking && thinkingStreams(state)) return "Thinking"
         val verb = verb(turn?.userUuid.orEmpty(), turn?.lastToolUseId)
         // The row above: the last one, or the one before it when [rows] already end with the working row.

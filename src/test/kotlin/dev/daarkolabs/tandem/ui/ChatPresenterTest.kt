@@ -1,18 +1,28 @@
 package dev.daarkolabs.tandem.ui
 
+import dev.daarkolabs.tandem.chat.PlanCard
 import dev.daarkolabs.tandem.chat.RowOptions
+import dev.daarkolabs.tandem.chat.TextRow
+import dev.daarkolabs.tandem.chat.ToolRow
+import dev.daarkolabs.tandem.chat.ToolState
+import dev.daarkolabs.tandem.chat.TurnEndRow
+import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.chat.replay
+import dev.daarkolabs.tandem.ui.rows.shownWorkingRow
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.reduce
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -24,6 +34,7 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.SwingUtilities
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -91,10 +102,124 @@ class ChatPresenterTest {
         }
     }
 
+    @Test
+    fun `expanding an agent row parses its nested text`() = runBlocking {
+        val threads: MutableList<String> = Collections.synchronizedList(ArrayList())
+        val seen: MutableList<String> = Collections.synchronizedList(ArrayList())
+        val parse: (String) -> ImmutableList<MarkdownBlock> = { text ->
+            threads += Thread.currentThread().name
+            seen += text
+            MarkdownProcessor(listOf(AutolinkProcessorExtension)).processMarkdownDocument(text).toImmutableList()
+        }
+        val agentKey = "tool:<id-12>"
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            // agent-forwarded: through line 37 the Agent runs with one child tool row; line 38 forwards the subagent's text.
+            val forwarded = mutableListOf<ChatState>()
+            replay("agent-forwarded") { _, s, _ -> forwarded += s }
+            val state = MutableStateFlow(forwarded[37 - 1])
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)), parse)
+            val emissions: MutableList<RenderedChat> = Collections.synchronizedList(ArrayList())
+            val collector = scope.launch(Dispatchers.Default) { presenter.chat.toList(emissions) }
+            withTimeout(TIMEOUT) { presenter.chat.first { chat -> chat.rows.any { it.row.key == agentKey } } }
+            SwingUtilities.invokeAndWait { presenter.expandBody(agentKey) }
+            state.value = forwarded[38 - 1]
+            val opened = withTimeout(TIMEOUT) {
+                presenter.chat.first { chat ->
+                    val agent = chat.rows.first { it.row.key == agentKey }
+                    val child = childText(agent)
+                    child != null && agent.bodies[child] != null
+                }
+            }
+            val openedAgent = opened.rows.first { it.row.key == agentKey }
+            val childKey = assertNotNull(childText(openedAgent))
+            val blocks = assertNotNull(openedAgent.bodies[childKey])
+            assertTrue(threads.isNotEmpty() && threads.none { it.startsWith("AWT-EventQueue") }, threads.toString())
+
+            for (line in 39..forwarded.size) {
+                state.value = forwarded[line - 1]
+                delay(PUSH_MS)
+            }
+            withTimeout(TIMEOUT) { presenter.chat.first { chat -> chat.rows.any { it.row is TurnEndRow } } }
+            delay(PUSH_MS)
+            collector.cancel()
+            val later = emissions.toList().dropWhile { it !== opened }
+            assertTrue(later.size > 1, "the pushes after line 38 emitted")
+            later.forEach { chat -> assertSame(blocks, chat.rows.first { it.row.key == agentKey }.bodies[childKey]) }
+
+            // agent-sync: through line 45 the Agent runs with no body; its summary (:49) and its result (:50) carry the same text.
+            val sync = mutableListOf<ChatState>()
+            replay("agent-sync") { _, s, _ -> sync += s }
+            val syncState = MutableStateFlow(sync[45 - 1])
+            val syncPresenter = ChatPresenter(scope, syncState, MutableStateFlow(RowOptions(showThinking = true)), parse)
+            withTimeout(TIMEOUT) { syncPresenter.chat.first { chat -> chat.rows.any { it.row.key == agentKey } } }
+            SwingUtilities.invokeAndWait { syncPresenter.expandBody(agentKey) }
+            seen.clear()
+            for (line in 46..sync.size) {
+                syncState.value = sync[line - 1]
+                delay(PUSH_MS)
+            }
+            val final = withTimeout(TIMEOUT) {
+                syncPresenter.chat.first { chat -> chat.rows.any { it.row is TurnEndRow } && chat.rows.first { it.row.key == agentKey }.bodies[agentKey] != null }
+            }
+            assertNotNull(final.rows.first { it.row.key == agentKey }.bodies[agentKey])
+            assertEquals(1, seen.count { it == "7 lines. The last line ends with a trailing newline." }, seen.toString())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a plan card's markdown stays cached while the card is open`() = runBlocking {
+        val seen: MutableList<String> = Collections.synchronizedList(ArrayList())
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val states = mutableListOf<ChatState>()
+            replay("plan-approve") { _, s, _ -> states += s }
+            val state = MutableStateFlow(states[88 - 1])
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true))) { text ->
+                seen += text
+                MarkdownProcessor().processMarkdownDocument(text).toImmutableList()
+            }
+            val opened = withTimeout(TIMEOUT) { presenter.chat.first { it.planBlocks != null } }
+            val first = assertNotNull(opened.planBlocks)
+            val plan = assertIs<PlanCard>(opened.card).plan
+            // The status line (permissionMode becomes acceptEdits), then the ExitPlanMode result: the bare replay keeps the card open.
+            state.value = states[90 - 1]
+            withTimeout(TIMEOUT) { presenter.chat.first { it.planBlocks != null } }
+            state.value = states[91 - 1]
+            val done = withTimeout(TIMEOUT) {
+                presenter.chat.first { chat ->
+                    chat.rows.any { (it.row as? ToolRow)?.let { row -> row.label.text == "Plan approved" && row.state == ToolState.DONE } == true }
+                }
+            }
+            assertSame(first, done.planBlocks)
+            assertEquals(1, seen.count { it == plan }, "the plan was parsed once")
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `an expanded agent row returns the working row to the turn's verb`() {
+        val row = WorkingRow(turnUuid = "u1", startedAtMillis = 0L, step = "Running x", outputTokens = 0, waiting = false, expandedStep = "Pondering")
+        assertEquals(row.expandedStep, shownWorkingRow(row, true).step)
+        assertSame(row, shownWorkingRow(row, false))
+        val plain = row.copy(expandedStep = null)
+        assertSame(plain, shownWorkingRow(plain, true))
+    }
+
+    /** The key of the Agent row's forwarded text row, once it has one. */
+    private fun childText(agent: RenderedRow): String? =
+        (agent.row as ToolRow).calls.single().children.filterIsInstance<TextRow>().firstOrNull()?.key
+
     private companion object {
         const val TIMEOUT = 30_000L
 
         /** Long enough for a second parse to have run and been emitted, had there been one. */
         const val SETTLE_MS = 500L
+
+        /** Between two pushed states, so the presenter renders most of them rather than only the last. */
+        const val PUSH_MS = 20L
     }
 }

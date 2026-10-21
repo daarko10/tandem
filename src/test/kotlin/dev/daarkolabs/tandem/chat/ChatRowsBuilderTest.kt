@@ -15,7 +15,13 @@ import dev.daarkolabs.tandem.session.TurnEnd
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Test
 import kotlin.system.measureTimeMillis
@@ -32,6 +38,9 @@ class ChatRowsBuilderTest {
     private val options = RowOptions(showThinking = true)
 
     private fun List<ChatRow>.labels(): List<Pair<String, ToolState>> = toolRows().map { it.label.text to it.state }
+
+    /** The row of the lone Agent call. */
+    private fun agent(rows: ChatRows): ToolRow = rows.rows.toolRows().single { it.calls.singleOrNull()?.kind == ToolKind.AGENT }
 
     @Test
     fun `plain-reply`() {
@@ -174,35 +183,131 @@ class ChatRowsBuilderTest {
 
     @Test
     fun `agent-sync`() {
-        val (_, rows) = replay("agent-sync") { line, _, rows ->
-            if (line == 41) {
-                val agent = rows.content().toolRows().single { it.calls.single().kind == ToolKind.AGENT }
-                assertEquals(ToolState.RUNNING, agent.state)
-                assertEquals("1 tool use · 21.5k tokens · 2.0s", agent.calls.single().progress)
+        var after41 = false
+        var after43 = false
+        var after50 = false
+        val (state, rows) = replay("agent-sync") { line, s, rows ->
+            when (line) {
+                41 -> {
+                    val agent = agent(rows)
+                    assertEquals(ToolState.RUNNING, agent.state)
+                    assertEquals("1 tool use · 21.5k tokens · 2.0s", agent.calls.single().progress)
+                    val working = assertIs<WorkingRow>(rows.rows.last())
+                    assertEquals("Running wc -l seed.txt && tail -c1 seed.txt | xxd", working.step)
+                    // No main-thread tool_use since the Agent's: the verb the working row returns to when the Agent row is open.
+                    val turn = assertNotNull(s.turn)
+                    assertEquals("<id-12>", turn.lastToolUseId)
+                    assertEquals(WorkingIndicator.verb(turn.userUuid, turn.lastToolUseId), working.expandedStep)
+                    after41 = true
+                }
+                43 -> {
+                    val agent = agent(rows)
+                    val child = agent.calls.single().children.toolRows().single { it.calls.single().id == "<id-49>" }
+                    assertEquals(ToolState.WAITING, child.state)
+                    assertEquals(ToolState.RUNNING, agent.state)
+                    assertEquals("Count lines in seed.txt", assertNotNull(Cards.pending(s).first).agentDescription)
+                    val working = assertIs<WorkingRow>(rows.rows.last())
+                    assertTrue(working.waiting)
+                    after43 = true
+                }
+                50 -> {
+                    // The task has ended: the step is no longer the agent's.
+                    assertNull(assertIs<WorkingRow>(rows.rows.last()).expandedStep)
+                    after50 = true
+                }
             }
         }
+        assertTrue(after41 && after43 && after50)
         val content = rows.content()
         val agent = content.toolRows().single()
         val call = agent.calls.single()
         assertEquals("Ran an agent: Count lines in seed.txt", agent.label.text)
         assertEquals(ToolState.DONE, agent.state)
         assertEquals("Done (2 tool uses · 21.8k tokens · 5.8s)", call.progress)
-        assertTrue(call.children.isNotEmpty())
+        assertTrue(rows.rows.none { it is WorkingRow })
         assertEquals(
-            listOf("Failed to run wc -l seed.txt && tail -c1 seed.txt | xxd", "Ran tail -c1 seed.txt | od -c"),
-            call.children.toolRows().map { it.label.text },
+            listOf(
+                "Failed to run wc -l seed.txt && tail -c1 seed.txt | xxd" to ToolState.FAILED,
+                "Ran tail -c1 seed.txt | od -c" to ToolState.DONE,
+            ),
+            call.children.map { (it as ToolRow).label.text to it.state },
         )
         assertEquals(ToolBody.Markdown("7 lines. The last line ends with a trailing newline.", null), call.body)
-        assertTrue(content.none { it.key.startsWith("t:<id-12>/") || it.key == "tool:<id-49>" || it.key == "tool:<id-56>" }, content.toString())
+        // No top-level text or tool row comes from a subagent's entry.
+        val subagent = state.entries.filter { it is ChatEntry.Assistant && it.parentToolUseId != null || it is ChatEntry.ToolResult && it.parentToolUseId != null }
+        assertTrue(subagent.isNotEmpty())
+        val textPrefixes = subagent.filterIsInstance<ChatEntry.Assistant>().map { "t:${it.id}:" }
+        val callIds = subagent.flatMap { entry ->
+            when (entry) {
+                is ChatEntry.Assistant -> entry.blocks.filterIsInstance<AssistantBlock.ToolUse>().map { it.id }
+                is ChatEntry.ToolResult -> listOf(entry.toolUseId)
+                else -> emptyList()
+            }
+        }.toSet()
+        assertTrue(
+            rows.rows.none { row ->
+                row is TextRow && textPrefixes.any { row.key.startsWith(it) } || row is ToolRow && row.calls.any { it.id in callIds }
+            },
+            content.toString(),
+        )
     }
 
     @Test
     fun `agent-forwarded`() {
         val forwarded = replay("agent-forwarded").second.content()
         val forwardedCall = forwarded.toolRows().single().calls.single()
-        assertTrue(forwardedCall.children.any { it is TextRow && it.markdown == "7" })
+        val children = forwardedCall.children
+        assertEquals(listOf(ToolRow::class, TextRow::class), children.map { it::class })
+        assertEquals("Ran wc -l <path>", (children[0] as ToolRow).label.text)
+        assertEquals("7", (children[1] as TextRow).markdown)
         assertTrue(forwarded.none { it is TextRow && it.markdown == "7" })
         assertEquals(ToolBody.None, forwardedCall.body)
+    }
+
+    @Test
+    fun `a progress line with missing usage shows no sub-line`() {
+        // agent-sync:41, the first task_progress, without its usage.
+        val lines = Fixtures.lines("agent-sync").mapIndexed { i, l ->
+            if (i == 40) JsonObject(Json.parseToJsonElement(l).jsonObject - "usage").toString() else l
+        }
+        var after41: String? = "unset"
+        var after50: String? = null
+        replay("agent-sync", lines = lines) { line, _, rows ->
+            if (line == 41) after41 = agent(rows).calls.single().progress
+            if (line == 50) after50 = agent(rows).calls.single().progress
+        }
+        assertNull(after41)
+        assertEquals("Done (2 tool uses · 21.8k tokens · 5.8s)", after50)
+    }
+
+    @Test
+    fun `a subagent entry whose agent call is unknown is not dropped`() {
+        val s = replay("agent-sync").first
+        val stray = ChatEntry.Assistant(
+            id = "stray", messageId = "stray", parentToolUseId = "nope", model = null, blocks = listOf(AssistantBlock.Text("stray")),
+            completedBlocks = 1, streaming = false, uuids = emptySet(), agentId = "x",
+        )
+        val rows = ChatRowsBuilder(options).build(s.copy(entries = s.entries + stray, entryIndex = emptyMap())).rows
+        assertTrue(rows.any { it is TextRow && it.markdown == "stray" }, rows.toString())
+    }
+
+    @Test
+    fun `subagent calls are never grouped`() {
+        // agent-sync:44, the subagent's first Bash result, made a success: two successful calls in a row would group on the main thread.
+        val lines = Fixtures.lines("agent-sync").mapIndexed { i, l ->
+            if (i != 43) {
+                l
+            } else {
+                val line = Json.parseToJsonElement(l).jsonObject
+                val message = line.getValue("message").jsonObject
+                val content = message.getValue("content").jsonArray
+                val result = JsonObject(content[0].jsonObject + ("is_error" to JsonPrimitive(false)) + ("content" to JsonPrimitive("7 seed.txt")))
+                JsonObject(line + ("message" to JsonObject(message + ("content" to JsonArray(listOf(result) + content.drop(1)))))).toString()
+            }
+        }
+        val children = agent(replay("agent-sync", lines = lines).second).calls.single().children
+        assertEquals(2, children.size)
+        assertTrue(children.all { it is ToolRow && it.calls.size == 1 }, children.toString())
     }
 
     @Test

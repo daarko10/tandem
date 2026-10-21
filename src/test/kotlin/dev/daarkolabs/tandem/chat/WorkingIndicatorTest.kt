@@ -81,6 +81,24 @@ class WorkingIndicatorTest {
     }
 
     @Test
+    fun `step skips the agent progress when asked`() {
+        val options = RowOptions(showThinking = true)
+        var checked = false
+        replay("agent-sync") { line, state, rows ->
+            if (line == 41) {
+                assertEquals("Running wc -l seed.txt && tail -c1 seed.txt | xxd", WorkingIndicator.step(state, rows.rows, options))
+                val turn = assertNotNull(state.turn)
+                assertEquals(
+                    WorkingIndicator.verb(turn.userUuid, turn.lastToolUseId),
+                    WorkingIndicator.step(state, rows.rows, options, skipAgent = true),
+                )
+                checked = true
+            }
+        }
+        assertTrue(checked)
+    }
+
+    @Test
     fun `a task of an earlier turn is not the step`() {
         val options = RowOptions(showThinking = true)
         val stale = TaskInfo("k1", "agent-old", "Count lines", "general-purpose", null, "Bash", null, null, null, null)

@@ -56,7 +56,10 @@ data class NoticeRow(override val key: String, val level: NoticeLevel, val text:
 /** How the latest turn ended, `e:<entry id>` (or `e:<notice id>` for an interrupt marker without a result). */
 data class TurnEndRow(override val key: String, val end: TurnEnd, val text: String, override val gap: RowGap = RowGap.SECTION) : ChatRow
 
-/** The working indicator while a turn runs; at most one, always last. */
+/**
+ * The working indicator while a turn runs; at most one, always last. When [step] is a running subagent's progress, [expandedStep] is
+ * the step without it, shown while that subagent's Agent row is open (its nested rows then name the step, spec 4.9); else null.
+ */
 data class WorkingRow(
     override val key: String = "working",
     val turnUuid: String,
@@ -65,6 +68,7 @@ data class WorkingRow(
     val outputTokens: Int,
     val waiting: Boolean,
     override val gap: RowGap = RowGap.SECTION,
+    val expandedStep: String? = null,
 ) : ChatRow
 
 /** A row's one line of text; each of [spans] (start and end index, inclusive) is drawn in the editor font. */

@@ -32,13 +32,21 @@ import org.jetbrains.jewel.ui.component.Text
 private const val TICK_MS: Long = 1_000
 
 /**
+ * The working row as shown: while a running subagent's Agent row is open ([agentExpanded]) its nested rows name the step, so the row
+ * shows the turn's own step ([WorkingRow.expandedStep]) in place of the subagent's progress (spec 4.9); otherwise [row] itself.
+ */
+internal fun shownWorkingRow(row: WorkingRow, agentExpanded: Boolean): WorkingRow =
+    if (agentExpanded && row.expandedStep != null) row.copy(step = row.expandedStep) else row
+
+/**
  * The working row while a turn runs (spec 4.9): the [Spark], then `Pondering… · 3s · 1.2k tokens`, `Waiting for you · 3s` in the
  * warning colour or `Not responding · 1m 5s` in the error colour. Once a second it reads the clock and when the process last wrote a
  * line ([lastFrameAt], read on the tick, never collected, so that a line never recomposes the row); [WorkingIndicator.view] does the
- * rest. One node for assistive technology, described as `Claude is working` (or waiting, or not responding), with the text merged in.
+ * rest. [agentExpanded]: a running Agent row is open ([shownWorkingRow]). One node for assistive technology, described as
+ * `Claude is working` (or waiting, or not responding), with the text merged in.
  */
 @Composable
-internal fun WorkingRowItem(row: WorkingRow, lastFrameAt: StateFlow<Long>) {
+internal fun WorkingRowItem(row: WorkingRow, lastFrameAt: StateFlow<Long>, agentExpanded: Boolean = false) {
     var now by remember(row.key) { mutableLongStateOf(System.currentTimeMillis()) }
     var lastFrame by remember(row.key) { mutableLongStateOf(lastFrameAt.value) }
     LaunchedEffect(row.key) {
@@ -48,7 +56,7 @@ internal fun WorkingRowItem(row: WorkingRow, lastFrameAt: StateFlow<Long>) {
             lastFrame = lastFrameAt.value
         }
     }
-    val view = WorkingIndicator.view(row, now, lastFrame, reducedMotion())
+    val view = WorkingIndicator.view(shownWorkingRow(row, agentExpanded), now, lastFrame, reducedMotion())
     val colors = JewelTheme.globalColors.text
     val color = when (view.mode) {
         Mode.RUNNING -> colors.info

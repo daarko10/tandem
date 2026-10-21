@@ -6,9 +6,14 @@ import com.intellij.testFramework.junit5.fixture.tempPathFixture
 import com.intellij.testFramework.openProjectAsync
 import com.intellij.testFramework.useProjectAsync
 import dev.daarkolabs.tandem.chat.Cards
+import dev.daarkolabs.tandem.chat.ChatRowsBuilder
+import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ThinkingRow
+import dev.daarkolabs.tandem.chat.ToolKind
 import dev.daarkolabs.tandem.chat.ToolRow
+import dev.daarkolabs.tandem.chat.ToolState
+import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
@@ -21,6 +26,7 @@ import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import dev.daarkolabs.tandem.ui.ChatPresenter
 import dev.daarkolabs.tandem.ui.RenderedChat
+import dev.daarkolabs.tandem.ui.cards.agentLine
 import dev.daarkolabs.tandem.ui.cards.picksOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +52,7 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
@@ -151,6 +158,40 @@ class TandemSessionsTest {
         assertEquals("allow", response["behavior"]!!.jsonPrimitive.content)
         assertEquals("<id-12>", response["toolUseID"]!!.jsonPrimitive.content)
         assertEquals("Blue", response["updatedInput"]!!.jsonObject["answers"]!!.jsonObject["Which colour?"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `a subagent's permission request names the agent on its card and the nested row waits`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("subagent").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "agent-sync")
+            sessions.ensureStarted()
+            val manager = sessions.manager
+            val handle = manager.create(NewSessionOptions())
+            manager.send(handle.id, "Count lines")
+            // agent-sync:43, the subagent's Bash request; the fake holds the rest back until it is answered.
+            val state = handle.state.first { it.pendingPermissions.isNotEmpty() }
+            val p = state.pendingPermissions.single()
+            assertNotNull(p.agentId)
+            val rows = ChatRowsBuilder(RowOptions(showThinking = true)).build(state)
+            val card = assertNotNull(rows.card)
+            assertEquals("Count lines in seed.txt", card.agentDescription)
+            assertEquals("From the agent \"Count lines in seed.txt\"", agentLine(card))
+            assertEquals(0, rows.moreWaiting)
+            val agent = rows.rows.filterIsInstance<ToolRow>().single { it.calls.singleOrNull()?.kind == ToolKind.AGENT }
+            val nested = agent.calls.single().children.filterIsInstance<ToolRow>().single { it.calls.single().id == "<id-49>" }
+            assertEquals(ToolState.WAITING, nested.state)
+            val working = rows.rows.last()
+            assertTrue(working is WorkingRow && working.waiting, working.toString())
+
+            manager.answer(handle.id, p.requestId, PermissionAnswers.allowOnce(p))
+            val done = ChatRowsBuilder(RowOptions(showThinking = true)).build(handle.state.first { !it.busy })
+            val doneAgent = done.rows.filterIsInstance<ToolRow>().single { it.calls.singleOrNull()?.kind == ToolKind.AGENT }
+            assertEquals(ToolState.DONE, doneAgent.state)
+            assertEquals("Done (2 tool uses · 21.8k tokens · 5.8s)", doneAgent.calls.single().progress)
+        }
+        awaitNoOwnFakeCli()
     }
 
     @Test

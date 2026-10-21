@@ -13,6 +13,7 @@ import dev.daarkolabs.tandem.chat.PlanCard
 import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ToolBody
+import dev.daarkolabs.tandem.chat.ToolKind
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.composerModel
 import dev.daarkolabs.tandem.session.ChatState
@@ -94,7 +95,10 @@ internal class ChatPresenter(
         .stateIn(scope, SharingStarted.Eagerly, composerModel(state.value))
 
     // Touched by the rendering coroutine only.
-    /** The keys of the bodies opened so far: their Markdown is parsed while their row exists, and they go with it. */
+    /**
+     * The keys of the bodies opened so far: their Markdown is parsed while their row exists, and they go with it. An opened Agent
+     * row's key also has its subagent's text rows and Markdown bodies parsed, as they arrive.
+     */
     private val requested = HashSet<String>()
     private var builder: ChatRowsBuilder? = null
     private var builderOptions: RowOptions? = null
@@ -149,36 +153,42 @@ internal class ChatPresenter(
         }
     }
 
+    /**
+     * The rows with their Markdown (spec 5.6). A parsed key stays cached, and is attached again on every render, while it names a
+     * row, a group's sub-row `c:<call id>` or a subagent's row (at any depth) of the latest rows, or the open plan card's plan; the
+     * rest of the cache goes, and so do the opened keys whose rows went.
+     */
     private fun render(input: Input): RenderedChat {
         val rows = (builder?.takeIf { builderOptions == input.options } ?: ChatRowsBuilder(input.options).also {
             builder = it
             builderOptions = input.options
         }).build(input.state)
-        val used = HashSet<String>()
         val live = HashSet<String>()
-        val out = rows.rows.map { renderRow(it, live, used) }.toImmutableList()
+        val out = rows.rows.map { renderRow(it, live) }.toImmutableList()
         requested.retainAll(live)
         val card = rows.card
-        val planBlocks = (card as? PlanCard)?.plan?.let { blocks("plan:${card.requestId}", it, used) }
-        parsed.keys.retainAll(used)
+        val planBlocks = (card as? PlanCard)?.plan?.let { plan ->
+            val key = "plan:${card.requestId}"
+            live += key
+            blocks(key, plan)
+        }
+        parsed.keys.retainAll(live)
         previous = out.associateBy { it.row.key }
         return RenderedChat(out, card, rows.moreWaiting, planBlocks)
     }
 
-    /** [row] with its Markdown; the previous instance when nothing it shows changed, so that its item is skipped. */
-    private fun renderRow(row: ChatRow, live: MutableSet<String>, used: MutableSet<String>): RenderedRow {
+    /**
+     * [row] with its Markdown, its keys added to [live]; the previous instance when nothing it shows changed, so that its item is
+     * skipped.
+     */
+    private fun renderRow(row: ChatRow, live: MutableSet<String>): RenderedRow {
         val old = previous[row.key]
+        live += row.key
         return when (row) {
-            is TextRow -> {
-                if (old != null && old.row == row) {
-                    used += row.key
-                    old
-                } else {
-                    RenderedRow(row, blocks(row.key, row.markdown, used))
-                }
-            }
+            is TextRow -> if (old != null && old.row == row) old else RenderedRow(row, blocks(row.key, row.markdown))
             is ToolRow -> {
-                val bodies = bodies(row, live, used)
+                var bodies = persistentMapOf<String, ImmutableList<MarkdownBlock>>()
+                toolBodies(row, parse = false, live) { key, blocks -> bodies = bodies.put(key, blocks) }
                 if (old != null && old.row == row && old.bodies == bodies) old else RenderedRow(row, null, bodies)
             }
             else -> if (old != null && old.row == row) old else RenderedRow(row, null)
@@ -186,24 +196,37 @@ internal class ChatPresenter(
     }
 
     /**
-     * The parsed bodies of [row]'s opened calls: the row's own for a lone call, each call's `c:<call id>` in a group. Adds each body
-     * key to [live] while any body is open.
+     * Hands [put] the parsed Markdown of [row]'s calls, by the row's key for a lone call and by `c:<call id>` in a group: parsed when
+     * the key was opened or [parse] says so (the row is a child of an opened Agent row), else from the cache when it holds the same
+     * text. An Agent call's subagent rows follow, parsed when the Agent's key was opened. Adds every key to [live].
      */
-    private fun bodies(row: ToolRow, live: MutableSet<String>, used: MutableSet<String>): ImmutableMap<String, ImmutableList<MarkdownBlock>> {
-        if (requested.isEmpty()) return persistentMapOf()
-        var bodies = persistentMapOf<String, ImmutableList<MarkdownBlock>>()
+    private fun toolBodies(row: ToolRow, parse: Boolean, live: MutableSet<String>, put: (String, ImmutableList<MarkdownBlock>) -> Unit) {
         row.calls.forEach { call ->
             val key = if (row.calls.size == 1) row.key else "c:${call.id}"
             live += key
-            val markdown = markdownOf(call.body)
-            if (markdown != null && key in requested) bodies = bodies.put(key, blocks(key, markdown, used))
+            val opened = parse || key in requested
+            markdownOf(call.body)?.let { markdown -> body(key, markdown, opened)?.let { put(key, it) } }
+            if (call.kind == ToolKind.AGENT) {
+                // The subagent's rows, parsed once this call's own key is opened: its text and its rows' Markdown bodies.
+                val agentOpened = key in requested
+                call.children.forEach { child ->
+                    live += child.key
+                    when (child) {
+                        is TextRow -> body(child.key, child.markdown, agentOpened)?.let { put(child.key, it) }
+                        is ToolRow -> toolBodies(child, agentOpened, live, put)
+                        else -> Unit
+                    }
+                }
+            }
         }
-        return bodies
     }
 
+    /** [markdown] of the body keyed [key]: parsed (or from the cache) when [parse], else from the cache only when it is the same text. */
+    private fun body(key: String, markdown: String, parse: Boolean): ImmutableList<MarkdownBlock>? =
+        if (parse) blocks(key, markdown) else parsed[key]?.takeIf { it.markdown == markdown }?.blocks
+
     /** [markdown] parsed, from the cache when the row keyed [key] had the same text last time. */
-    private fun blocks(key: String, markdown: String, used: MutableSet<String>): ImmutableList<MarkdownBlock> {
-        used += key
+    private fun blocks(key: String, markdown: String): ImmutableList<MarkdownBlock> {
         parsed[key]?.takeIf { it.markdown == markdown }?.let { return it.blocks }
         val blocks = parseMarkdown(markdown)
         parsed[key] = Parsed(markdown, blocks)

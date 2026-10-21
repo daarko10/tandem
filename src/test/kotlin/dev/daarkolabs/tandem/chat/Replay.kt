@@ -19,19 +19,21 @@ internal const val PROMPT = "Reply with the single word: pong"
 /**
  * Replays fixture [name] through [reduce], starting from [initial], with one [ChatRowsBuilder] that builds after every event (it never
  * throws). Before every `system/init` line it sends [prompt] as `UserSent("u<line>")`, as the fake CLI waits for one prompt per init.
- * Each line `i` (0-based) is stamped `i * 100` ms. [onLine] sees the 1-based line number, the state and the rows after that line.
+ * Each line `i` (0-based) is stamped `i * 100` ms. [lines] replaces the fixture's lines (a test that patches one in memory). [onLine]
+ * sees the 1-based line number, the state and the rows after that line.
  */
 internal fun replay(
     name: String,
     options: RowOptions = RowOptions(showThinking = true),
     prompt: String = PROMPT,
     initial: ChatState = ChatState(),
+    lines: List<String> = Fixtures.lines(name),
     onLine: (line: Int, state: ChatState, rows: ChatRows) -> Unit = { _, _, _ -> },
 ): Pair<ChatState, ChatRows> {
     val builder = ChatRowsBuilder(options)
     var state = initial
     var rows = builder.build(state)
-    Fixtures.lines(name).forEachIndexed { i, line ->
+    lines.forEachIndexed { i, line ->
         val message = Ndjson.decode(line)
         if (message is CliMessage.SystemInit) {
             state = reduce(state, SessionEvent.UserSent("u${i + 1}", prompt, atMillis = i * 100L))

@@ -57,10 +57,12 @@ private val RUNNING: Set<ToolState> = setOf(ToolState.PENDING, ToolState.RUNNING
 
 /**
  * Whether [row] opens (spec 4.6.1): once it is no longer running, a group always does and a lone call does when its body has
- * something to show. A running row or group draws its chevron disabled, with no click, until its result arrives.
+ * something to show. A running row or group draws its chevron disabled, with no click, until its result arrives; except a lone Agent
+ * call whose subagent has rows, which opens while it runs to show them (spec 4.8, 4.9).
  */
 internal fun canExpand(row: ToolRow): Boolean =
-    row.state !in setOf(ToolState.PENDING, ToolState.RUNNING, ToolState.WAITING) && (row.calls.size > 1 || row.calls.single().body !is ToolBody.None)
+    row.state !in RUNNING && (row.calls.size > 1 || row.calls.single().body !is ToolBody.None) ||
+        (row.calls.size == 1 && row.calls.single().children.isNotEmpty())
 
 /** Whether a group's sub-row for [call] opens: the rule of [canExpand] for one call. */
 internal fun canExpand(call: ToolCall): Boolean = call.state !in RUNNING && call.body !is ToolBody.None
@@ -98,6 +100,11 @@ internal fun ToolRowItem(rendered: RenderedRow, ui: ChatUiState) {
         if (expanded && opens) {
             if (lone == null) {
                 ToolGroupBox(row.calls, rendered.bodies, ui)
+            } else if (lone.kind == ToolKind.AGENT) {
+                // Every open asks, whatever the call holds yet: the presenter then parses the nested text and the agent's own body
+                // as they arrive, while the row exists.
+                LaunchedEffect(row.key) { ui.onExpand(row.key) }
+                AgentBody(row.key, lone, rendered.bodies, ui)
             } else {
                 // The one place that asks for the body's Markdown: on the click that opens it, and again for a row that was already
                 // open when its presenter was made. The presenter ignores a key it already has.

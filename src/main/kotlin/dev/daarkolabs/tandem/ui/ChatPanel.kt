@@ -56,7 +56,9 @@ import dev.daarkolabs.tandem.chat.NoticeRow
 import dev.daarkolabs.tandem.chat.ScrollEvent
 import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ThinkingRow
+import dev.daarkolabs.tandem.chat.ToolKind
 import dev.daarkolabs.tandem.chat.ToolRow
+import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.chat.TurnEndRow
 import dev.daarkolabs.tandem.chat.UserRow
 import dev.daarkolabs.tandem.chat.WorkingRow
@@ -84,6 +86,9 @@ import org.jetbrains.jewel.ui.theme.outlinedButtonStyle
 
 /** How much less than the list's height Page Up and Page Down scroll, so a line of the last page stays in view (spec 4.16). */
 private val PAGE_OVERLAP = 40.dp
+
+/** The states of an Agent call whose subagent still runs. */
+private val AGENT_LIVE: Set<ToolState> = setOf(ToolState.RUNNING, ToolState.WAITING)
 
 /**
  * The chat transcript (spec 4.1, 4.16, 6.0): the presenter's rows in a list keyed by row key, inside the IDE's scrollbar, each row
@@ -175,6 +180,11 @@ internal fun ChatPanel(
         }
         return
     }
+    // Whether a running Agent row is open: the working row then leaves the subagent's step to the nested rows (spec 4.9).
+    val agentExpanded = rows.any { r ->
+        val call = (r.row as? ToolRow)?.calls?.singleOrNull()
+        call != null && call.kind == ToolKind.AGENT && call.state in AGENT_LIVE && ui.expanded(r.row.key).value
+    }
     val density = LocalDensity.current
     val currentOnFocusComposer by rememberUpdatedState(onFocusComposer)
     val listFocus = remember { FocusRequester() }
@@ -209,7 +219,7 @@ internal fun ChatPanel(
                     },
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             ) {
-                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt) }
+                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt, agentExpanded) }
             }
             val buttonText = ui.follow.value.buttonText
             if (buttonText != null && listState.canScrollForward) {
@@ -290,9 +300,9 @@ private fun JumpToBottom(text: String, modifier: Modifier, onClick: () -> Unit) 
     }
 }
 
-/** One row of the list, by its kind. [lastFrameAt] is for the working row only. */
+/** One row of the list, by its kind. [lastFrameAt] and [agentExpanded] (a running Agent row is open) are for the working row only. */
 @Composable
-internal fun RowItem(rendered: RenderedRow, ui: ChatUiState, lastFrameAt: StateFlow<Long>) {
+internal fun RowItem(rendered: RenderedRow, ui: ChatUiState, lastFrameAt: StateFlow<Long>, agentExpanded: Boolean = false) {
     if (RenderingSpike.enabled) SideEffect { RecompositionCounter.hit(rendered.row.key) }
     when (val row = rendered.row) {
         is UserRow -> UserBubble(row)
@@ -301,6 +311,6 @@ internal fun RowItem(rendered: RenderedRow, ui: ChatUiState, lastFrameAt: StateF
         is NoticeRow -> NoticeItem(row)
         is TurnEndRow -> TurnEndItem(row)
         is ThinkingRow -> ThinkingRowItem(row, ui)
-        is WorkingRow -> WorkingRowItem(row, lastFrameAt)
+        is WorkingRow -> WorkingRowItem(row, lastFrameAt, agentExpanded)
     }
 }
