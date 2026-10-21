@@ -213,6 +213,22 @@ class ToolBodiesTest {
     }
 
     @Test
+    fun `a cut command colours the kept part as shell and its cut line as plain`() {
+        val input = buildJsonObject { put("command", "z".repeat(60_000)) }
+        val body = assertIs<ToolBody.Command>(ToolBodies.body(ToolKind.SHELL, input, JsonPrimitive("out"), null, isError = false))
+        val note = ShellToken(ShellTokenKind.PLAIN, 50_000 until body.command.length)
+        assertEquals(ShellTokens.tokenize("z".repeat(50_000)) + note, body.tokens)
+        assertEquals("\n… (cut, 10000 more characters)", body.command.substring(note.range))
+        // A kept part that ends in blanks: the blanks and the cut line are one PLAIN token, so no two PLAIN tokens touch.
+        val blanks = buildJsonObject { put("command", "echo " + "a".repeat(49_990) + " ".repeat(10_000)) }
+        val pending = assertIs<ToolBody.Command>(ToolBodies.pending(ToolKind.SHELL, blanks))
+        assertEquals(ShellToken(ShellTokenKind.PLAIN, 49_995 until pending.command.length), pending.tokens.last())
+        assertEquals(ShellTokens.tokenize("echo " + "a".repeat(49_990)), pending.tokens.dropLast(1))
+        val failed = assertIs<ToolBody.Command>(ToolBodies.body(ToolKind.SHELL, input, JsonPrimitive("Exit code 1"), null, isError = true))
+        assertEquals(body.tokens, failed.tokens)
+    }
+
+    @Test
     fun `grep glob and write bodies list their lines`() {
         val grep = assertIs<ToolBody.Mono>(body("tools-read", 58, 62))
         assertEquals(listOf("seed.txt:29:line 29 seven"), grep.lines)

@@ -113,7 +113,8 @@ sealed interface ToolBody {
 
     /**
      * A shell command, then its output. [tokens] colour the command (polish spec 2.4); they are computed with the body, where it is
-     * built, off the EDT, never in composition.
+     * built, off the EDT, never in composition. A command cut at 50,000 characters gets its tokens from [ToolBodies], which colours
+     * the kept part as shell and its cut line as one PLAIN token.
      */
     data class Command(
         val command: String,

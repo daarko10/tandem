@@ -63,7 +63,7 @@ object ToolBodies {
     fun pending(kind: ToolKind, input: JsonObject?): ToolBody {
         if (input == null) return ToolBody.None
         return when (kind) {
-            ToolKind.SHELL -> ToolBody.Command(cut(input.string("command").orEmpty()), persistentListOf(), 0, firstLineError = false)
+            ToolKind.SHELL -> commandBody(input.string("command").orEmpty(), persistentListOf(), 0, firstLineError = false)
             ToolKind.MCP, ToolKind.TASKS, ToolKind.OTHER -> json(input, null, "")
             ToolKind.READ, ToolKind.FIND, ToolKind.SEARCH, ToolKind.WEB_FETCH, ToolKind.WEB_SEARCH, ToolKind.AGENT, ToolKind.QUESTION,
             ToolKind.PLAN, ToolKind.PLAN_ENTER, ToolKind.TOOL_SEARCH, ToolKind.EDIT, ToolKind.CREATE,
@@ -105,7 +105,7 @@ object ToolBodies {
         val denial = message in setOf("The user denied this command.", "cancelled", "The user denied this request.")
         if (kind == ToolKind.SHELL && !denial) {
             val (lines, total) = clamp(ToolLabels.stripAnsi(message))
-            return ToolBody.Command(cut(input?.string("command").orEmpty()), lines, total, firstLineError = true)
+            return commandBody(input?.string("command").orEmpty(), lines, total, firstLineError = true)
         }
         val (lines, total) = clamp(message)
         return ToolBody.Mono(lines, total, firstLineError = !denial && lines.isNotEmpty())
@@ -116,13 +116,31 @@ object ToolBodies {
      * (polish spec 2.1), so an opened running call keeps its body when the result lands.
      */
     private fun shell(input: JsonObject?, text: String, fields: JsonObject?): ToolBody {
-        val command = cut(input?.string("command").orEmpty())
+        val command = input?.string("command").orEmpty()
         val stdout = fields?.string("stdout").orEmpty()
         val output = stdout.ifEmpty { text.takeIf { it.trim() != NO_OUTPUT }.orEmpty() }
         val printed = output.ifBlank { fields?.string("stderr").orEmpty() }
-        if (printed.isBlank()) return ToolBody.Command(command, persistentListOf(), 0, firstLineError = false)
+        if (printed.isBlank()) return commandBody(command, persistentListOf(), 0, firstLineError = false)
         val (lines, total) = clamp(ToolLabels.stripAnsi(printed))
-        return ToolBody.Command(command, lines, total, firstLineError = false)
+        return commandBody(command, lines, total, firstLineError = false)
+    }
+
+    /**
+     * A shell body for the command [raw], cut at [MAX_CHARS] characters ([cut]). Its tokens colour the kept part as shell; the cut
+     * line is Tandem's own note, never shell, so it is one PLAIN token (joined to a PLAIN token the kept part ends with, as
+     * [ShellTokens] never puts two PLAIN tokens side by side).
+     */
+    private fun commandBody(raw: String, output: ImmutableList<String>, total: Int, firstLineError: Boolean): ToolBody.Command {
+        val command = cut(raw)
+        if (command.length == raw.length) return ToolBody.Command(command, output, total, firstLineError)
+        val kept = ShellTokens.tokenize(raw.substring(0, MAX_CHARS))
+        val last = kept.lastOrNull()
+        val tokens = if (last?.kind == ShellTokenKind.PLAIN) {
+            kept.dropLast(1) + ShellToken(ShellTokenKind.PLAIN, last.range.first until command.length)
+        } else {
+            kept + ShellToken(ShellTokenKind.PLAIN, MAX_CHARS until command.length)
+        }
+        return ToolBody.Command(command, output, total, firstLineError, tokens.toImmutableList())
     }
 
     /** A read file's lines, numbered from its `startLine`, without system reminders; null without `content`. */
