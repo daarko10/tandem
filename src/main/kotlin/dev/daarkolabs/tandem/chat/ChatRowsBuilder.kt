@@ -36,8 +36,9 @@ data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, va
  * kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the last entry it holds
  * and scans only the entries after it, so a long session costs no more per event than a short one. A later entry that refers to a
  * cached turn (a late result, a background agent's lines) opens that turn again; a state whose entries shrank (a retraction) or whose
- * working directory changed drops the cache. The rows of the open turns that equal the previous build's keep their previous instance,
- * and a result's body is built once, so unchanged rows compare by identity.
+ * working directory changed drops the cache. The rows and the calls of the open turns that equal the previous build's keep their
+ * previous instance, a result's body is built once and a live call's body once per input instance, so unchanged rows and calls
+ * compare by identity (polish spec 6).
  *
  * Not thread-safe: one builder per presenter coroutine. A new [RowOptions] value takes a new builder.
  */
@@ -55,6 +56,12 @@ class ChatRowsBuilder(private val options: RowOptions) {
     /** A result's body and stats, built once per result entry for the call input it was built with. */
     private class Body(val input: JsonObject?, val body: ToolBody, val stats: DiffStats?)
 
+    /** The bodies one build makes or keeps: the results' and the live calls'. The next build looks them up. */
+    private class Bodies {
+        val results = IdentityHashMap<ChatEntry.ToolResult, Body>()
+        val pending = IdentityHashMap<JsonObject, ToolBody>()
+    }
+
     private val frozen = ArrayList<Frozen>()
     private var frozenRows: PersistentList<ChatRow> = persistentListOf()
     private val frozenKeys = HashSet<String>()
@@ -66,7 +73,13 @@ class ChatRowsBuilder(private val options: RowOptions) {
 
     /** The previous build's rows after the cached turns, by key: an equal row keeps this instance. */
     private var live: Map<String, ChatRow> = emptyMap()
+
+    /** The previous build's calls of those rows (an Agent call's nested calls too), by id: an equal call keeps this instance. */
+    private var liveCalls: Map<String, ToolCall> = emptyMap()
     private var bodies = IdentityHashMap<ChatEntry.ToolResult, Body>()
+
+    /** The previous build's bodies of live calls, by the identity of the input they were built from (polish spec 6). */
+    private var pendingBodies = IdentityHashMap<JsonObject, ToolBody>()
 
     /** The previous build's working row and card: an equal one keeps this instance. */
     private var lastWorking: WorkingRow? = null
@@ -82,7 +95,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
         reopenReferencedTurns(entries)
 
         val region = Region(state, frozenEnd)
-        val nextBodies = IdentityHashMap<ChatEntry.ToolResult, Body>()
+        val nextBodies = Bodies()
         val keys = HashSet<String>()
         val end = if (state.turn == null) turnEnd(entries) else null
         var previous = frozenRows.lastOrNull()
@@ -102,8 +115,10 @@ class ChatRowsBuilder(private val options: RowOptions) {
             previous = rows.previous
             rows.rows
         }
-        bodies = nextBodies
+        bodies = nextBodies.results
+        pendingBodies = nextBodies.pending
         live = turnRows.flatten().associateBy { it.key }
+        liveCalls = callsOf(live.values)
 
         val all = frozenRows.mutate { list ->
             turnRows.forEach(list::addAll)
@@ -192,6 +207,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
             frozenRows.forEach { rows[it.key] = it }
             rows.putAll(live)
             live = rows
+            liveCalls = callsOf(rows.values)
         }
         frozen.clear()
         frozenRows = persistentListOf()
@@ -225,6 +241,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
                 }
             }
             live = rows
+            liveCalls = callsOf(rows.values)
             reopened.clear()
         }
     }
@@ -316,7 +333,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
         entry: ChatEntry,
         context: TurnContext,
         region: Region,
-        nextBodies: IdentityHashMap<ChatEntry.ToolResult, Body>,
+        nextBodies: Bodies,
         rows: Rows,
     ) {
         val turnOpen = context.turnOpen
@@ -346,7 +363,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
         entry: ChatEntry.Assistant,
         turnOpen: Boolean,
         region: Region,
-        nextBodies: IdentityHashMap<ChatEntry.ToolResult, Body>,
+        nextBodies: Bodies,
         rows: Rows,
         thinking: Boolean,
     ) {
@@ -382,7 +399,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
     }
 
     /** One tool call with its state, labels, body and, for an Agent call, its subagent's rows and progress. */
-    private fun call(block: AssistantBlock.ToolUse, turnOpen: Boolean, region: Region, nextBodies: IdentityHashMap<ChatEntry.ToolResult, Body>): ToolCall {
+    private fun call(block: AssistantBlock.ToolUse, turnOpen: Boolean, region: Region, nextBodies: Bodies): ToolCall {
         val result = region.results[block.id]
         val state = ToolStates.of(block, result, block.id in region.pending, turnOpen)
         val named = ToolKinds.of(block.name)
@@ -391,6 +408,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
         val kind = if (named == ToolKind.CREATE && ToolBodies.isWriteUpdate(shown)) ToolKind.EDIT else named
         var body: ToolBody = ToolBody.None
         var stats: DiffStats? = null
+        val input = block.input
         if (result != null) {
             val built = bodies[result]?.takeIf { it.input === block.input }
                 ?: Body(
@@ -400,10 +418,14 @@ class ChatRowsBuilder(private val options: RowOptions) {
                     },
                     ToolBodies.stats(named, block.input, shown),
                 )
-            nextBodies[result] = built
+            nextBodies.results[result] = built
             body = built.body
             if (state == ToolState.DONE) stats = built.stats
             if (state == ToolState.DENIED) body = deniedBody(named, result, body)
+        } else if (input != null && (state == ToolState.RUNNING || state == ToolState.WAITING)) {
+            // The body so far (polish spec 2.1), built once per input instance: the lookup reads the previous build's map, so the
+            // deltas that rebuild the live turn reuse it. A PENDING call, whose input still streams, and an INTERRUPTED one keep None.
+            body = (pendingBodies[input] ?: ToolBodies.pending(named, input)).also { nextBodies.pending[input] = it }
         }
         var children: ImmutableList<ChatRow> = persistentListOf()
         var progress: String? = null
@@ -417,7 +439,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
             ToolKind.SHELL -> block.input?.string("command")?.let(ToolLabels::oneLine)
             else -> null
         }
-        return ToolCall(block.id, block.name, kind, state, label, stats, body, children, progress, subject)
+        val built = ToolCall(block.id, block.name, kind, state, label, stats, body, children, progress, subject)
+        return liveCalls[block.id]?.takeIf { it == built } ?: built
     }
 
     /**
@@ -446,7 +469,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
     }
 
     /** The rows of the subagent of Agent call [agentId]: its text and its tool calls, ungrouped; its thinking is not shown. */
-    private fun childRows(agentId: String, turnOpen: Boolean, region: Region, nextBodies: IdentityHashMap<ChatEntry.ToolResult, Body>): ImmutableList<ChatRow> {
+    private fun childRows(agentId: String, turnOpen: Boolean, region: Region, nextBodies: Bodies): ImmutableList<ChatRow> {
         val entries = region.children[agentId] ?: return persistentListOf()
         val keys = HashSet<String>()
         val rows = Rows(null, grouped = false) { row ->
@@ -575,6 +598,22 @@ internal fun saidByFooter(notice: String, footer: String): Boolean {
     val match = TURN_FAILED.matchEntire(notice) ?: return false
     val kind = match.groups[1]?.value
     return (kind == null || kind in footer) && match.groupValues[2] in footer
+}
+
+/** The calls of the tool rows among [rows] and, recursively, of the tool rows nested in their Agent calls, by id. */
+private fun callsOf(rows: Collection<ChatRow>): Map<String, ToolCall> {
+    val calls = HashMap<String, ToolCall>()
+    fun add(rows: Collection<ChatRow>) {
+        for (row in rows) {
+            if (row !is ToolRow) continue
+            for (call in row.calls) {
+                calls[call.id] = call
+                if (call.children.isNotEmpty()) add(call.children)
+            }
+        }
+    }
+    add(rows)
+    return calls
 }
 
 /** The call a subagent's entry belongs to, if any. */

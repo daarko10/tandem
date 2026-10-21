@@ -47,7 +47,7 @@ import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.jetbrains.jewel.ui.component.Link
 import org.jetbrains.jewel.ui.component.Text
 
-/** A body shows this many lines until `Show all` (spec 4.7). */
+/** A body shows this many lines until `Show more` (spec 4.7, polish spec 2.2). */
 private const val CLAMP_LINES = 20
 
 /** ... or this much height, whichever comes first. */
@@ -56,41 +56,49 @@ private val CLAMP_HEIGHT: Dp = 240.dp
 /** A clamped body's bottom fades out over about this many lines (spec 4.7). */
 private const val FADE_LINES = 3
 
-/** `Show all` opens a body up to this many lines; the rest is counted in `… N more lines` (spec 4.7, 5.3). */
+/** `Show more` opens a body up to this many lines; the rest is counted in `… N more lines` (spec 4.7, 5.3). */
 private const val MAX_LINES = 400
 
 /**
  * An opened call's body (spec 4.7), drawn from pre-built data: lines in the editor font in a filled box, a command's `$` line in its
  * box and its output on the page, Markdown from [blocks] (parsed by the presenter; nothing until they arrive), result links, question
  * answers, JSON input and output, an edit's lines, an image's size. Every body, the command's box included, is clamped at 20 lines
- * or 240 dp, whichever comes first, faded, with `Show all N lines`; past the 400 lines a body keeps, `… N more lines` says how many
- * were left out. Markdown cannot be cut by line, so its bodies clamp by height alone. Everything is selectable; nothing scrolls
- * inside the row.
+ * or 240 dp, whichever comes first, faded, with `Show more`, and `Show less` clamps it again (polish spec 2.2); past the 400 lines a
+ * body keeps, `… N more lines` says how many were left out. Markdown cannot be cut by line, so its bodies clamp by height alone.
+ * The clamps are the call's (`c:<call id>`, [ChatUiState.clampOpen]) wherever the body renders, so collapsing the row above clamps
+ * them again. [framed]: a lone row's body (a top-level row, a row nested in an Agent body), not a group sub-row's. Everything is
+ * selectable; nothing scrolls inside the row.
  */
 @Composable
-internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?, ui: ChatUiState) {
+internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?, ui: ChatUiState, framed: Boolean) {
     val colors = JewelTheme.globalColors.text
     val mono = monoTextStyle()
     val onUrl = LocalUrlHandler.current
+    val owner = "c:${call.id}"
     SelectionContainer {
         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             when (val body = call.body) {
                 ToolBody.None -> Unit
-                is ToolBody.Mono -> Clamped("all:${call.id}", body.lines.size, body.totalLines, ui) { shown, modifier ->
+                is ToolBody.Mono -> Clamped(owner, "body", body.lines.size, body.totalLines, ui) { shown, modifier ->
                     MonoBox(modifier) { MonoLines(body.lines.take(shown), body.firstLineError) }
                 }
                 is ToolBody.Command -> {
                     val command = remember(body) { kept("$ ${body.command}") }
-                    Clamped("all:${call.id}:command", command.lines.size, command.total, ui) { shown, modifier ->
-                        MonoBox(modifier) { MonoLines(command.lines.take(shown), false) }
-                    }
-                    Clamped("all:${call.id}", body.output.size, body.totalLines, ui) { shown, modifier ->
-                        Box(modifier.fillMaxWidth().padding(top = 4.dp)) { MonoLines(body.output.take(shown), body.firstLineError) }
+                    commandParts(body, framed).forEach { part ->
+                        when (part) {
+                            CommandPart.HEADER -> Unit
+                            CommandPart.COMMAND -> Clamped(owner, "command", command.lines.size, command.total, ui) { shown, modifier ->
+                                MonoBox(modifier) { MonoLines(command.lines.take(shown), false) }
+                            }
+                            CommandPart.OUTPUT -> Clamped(owner, "output", body.output.size, body.totalLines, ui) { shown, modifier ->
+                                Box(modifier.fillMaxWidth().padding(top = 4.dp)) { MonoLines(body.output.take(shown), body.firstLineError) }
+                            }
+                        }
                     }
                 }
                 is ToolBody.Markdown -> {
                     val count = remember(body) { body.markdown.lines().size + (if (body.title != null) 1 else 0) }
-                    Clamped("all:${call.id}", count, count, ui, byLines = false) { _, modifier ->
+                    Clamped(owner, "body", count, count, ui, byLines = false) { _, modifier ->
                         Column(modifier.fillMaxWidth()) {
                             body.title?.let { Text(it, color = colors.info) }
                             blocks?.let {
@@ -101,7 +109,7 @@ internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?,
                 }
                 is ToolBody.Links -> {
                     val count = remember(body) { body.links.size + body.markdown.lines().size }
-                    Clamped("all:${call.id}", count, count, ui, byLines = false) { _, modifier ->
+                    Clamped(owner, "body", count, count, ui, byLines = false) { _, modifier ->
                         Column(modifier.fillMaxWidth()) {
                             body.links.forEach { link -> Link(link.title, onClick = { openWebLink(link.url) }) }
                             blocks?.let {
@@ -110,7 +118,7 @@ internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?,
                         }
                     }
                 }
-                is ToolBody.Pairs -> Clamped("all:${call.id}", body.pairs.size, body.pairs.size, ui) { shown, modifier ->
+                is ToolBody.Pairs -> Clamped(owner, "body", body.pairs.size, body.pairs.size, ui) { shown, modifier ->
                     Column(modifier.fillMaxWidth()) {
                         body.pairs.take(shown).forEach { (first, second) -> Text("$first: $second", color = colors.normal) }
                     }
@@ -119,19 +127,19 @@ internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?,
                     val input = remember(body) { kept(body.input) }
                     val output = remember(body) { body.output?.let(::kept) }
                     Text("INPUT", color = colors.info)
-                    Clamped("all:${call.id}:input", input.lines.size, input.total, ui) { shown, modifier ->
+                    Clamped(owner, "input", input.lines.size, input.total, ui) { shown, modifier ->
                         MonoBox(modifier) { MonoLines(input.lines.take(shown), false) }
                     }
                     output?.let { out ->
                         Text("OUTPUT", color = colors.info, modifier = Modifier.padding(top = 4.dp))
-                        Clamped("all:${call.id}:output", out.lines.size, out.total, ui) { shown, modifier ->
+                        Clamped(owner, "output", out.lines.size, out.total, ui) { shown, modifier ->
                             MonoBox(modifier) { MonoLines(out.lines.take(shown), false) }
                         }
                     }
                 }
                 is ToolBody.Diff -> {
                     val lines = remember(body) { body.hunks.flatMap { it.lines } }
-                    Clamped("all:${call.id}", lines.size, lines.size, ui) { shown, modifier ->
+                    Clamped(owner, "body", lines.size, lines.size, ui) { shown, modifier ->
                         MonoBox(modifier, padded = false) { DiffLines(lines.take(shown), body.truncated) }
                     }
                 }
@@ -168,6 +176,17 @@ private fun DiffLines(lines: List<DiffLine>, truncated: Boolean) {
     }
 }
 
+/** The parts of a command body (polish spec 2.4): a header, the `$` command box, the output. */
+internal enum class CommandPart { HEADER, COMMAND, OUTPUT }
+
+/**
+ * The parts [body] draws, in order: its command box, then its output only when it printed something (a running call, or one that
+ * printed nothing, shows the command alone, polish spec 2.1). [framed] is a lone row's body; it draws no header yet.
+ */
+@Suppress("UNUSED_PARAMETER")
+internal fun commandParts(body: ToolBody.Command, framed: Boolean): List<CommandPart> =
+    if (body.output.isEmpty()) listOf(CommandPart.COMMAND) else listOf(CommandPart.COMMAND, CommandPart.OUTPUT)
+
 /** A text's first [MAX_LINES] [lines] and how many it has in [total]. */
 private class Kept(val lines: List<String>, val total: Int)
 
@@ -185,24 +204,26 @@ internal fun imageLine(image: ToolBody.Image): String {
 
 /**
  * A body of [lineCount] lines under the one clamp rule (spec 4.7): more than 20 lines, or taller than 240 dp, is clamped. [content]
- * then draws the first `shown` lines (20 at most) at most 240 dp tall, clipped, with its bottom faded out, and a `Show all N lines`
- * link opens it in place ([key] remembers it). [total] beyond the lines kept ends the opened body with `… N more lines`. Without
- * [byLines] (a body that cannot be cut by line, such as Markdown, whose content ignores `shown`) only the measured height decides,
- * so a short rendering of many source lines is neither faded nor offered a `Show all` that reveals nothing.
+ * then draws the first `shown` lines (20 at most) at most 240 dp tall, clipped, with its bottom faded out, and a `Show more` link
+ * opens it in place; opened, a `Show less` link clamps it again (polish spec 2.2). The state is [part] of the call [owner]'s
+ * ([ChatUiState.clampOpen]), which collapsing a row above resets. [total] beyond the lines kept ends the opened body with
+ * `… N more lines`. Without [byLines] (a body that cannot be cut by line, such as Markdown, whose content ignores `shown`) only the
+ * measured height decides, so a short rendering of many source lines is neither faded nor offered a `Show more` that reveals nothing.
  */
 @Composable
 private fun Clamped(
-    key: String,
+    owner: String,
+    part: String,
     lineCount: Int,
     total: Int,
     ui: ChatUiState,
     byLines: Boolean = true,
     content: @Composable (shown: Int, modifier: Modifier) -> Unit,
 ) {
-    val showAllState = ui.expanded(key)
-    val showAll by showAllState
-    if (showAll) {
+    val openState = ui.clampOpen(owner, part)
+    if (openState.value) {
         content(lineCount, Modifier)
+        Link("Show less", onClick = { openState.value = false })
         if (total > lineCount) Text("… ${total - lineCount} more lines", color = JewelTheme.globalColors.text.info)
         return
     }
@@ -214,7 +235,7 @@ private fun Clamped(
     val modifier = Modifier.clipToBounds().thenIf(clamped) { bottomFade(fade) }.capHeight(CLAMP_HEIGHT) { if (tall != it) tall = it }
     content(if (tooManyLines) CLAMP_LINES else lineCount, modifier)
     if (clamped) {
-        Link("Show all ${maxOf(total, lineCount)} lines", onClick = { showAllState.value = true })
+        Link("Show more", onClick = { openState.value = true })
     } else if (total > lineCount) {
         Text("… ${total - lineCount} more lines", color = JewelTheme.globalColors.text.info)
     }

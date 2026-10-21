@@ -38,5 +38,5 @@ internal fun AgentBody(rowKey: String, call: ToolCall, bodies: ImmutableMap<Stri
             }
         }
     }
-    if (call.body !is ToolBody.None) ToolBodyView(call, bodies[rowKey], ui)
+    if (call.body !is ToolBody.None) ToolBodyView(call, bodies[rowKey], ui, framed = true)
 }

@@ -54,6 +54,23 @@ object ToolBodies {
         }
     }
 
+    /**
+     * The body so far of a live call (a `RUNNING` or `WAITING` one, polish spec 2.1) of [kind] with its complete [input]: a shell call's
+     * command with no output yet, the input JSON of an MCP, task or unknown tool, nothing for every other kind (a read or a search
+     * has nothing to show before its result, an Agent's nested rows are its body, a question or a plan has its card). Nothing while the
+     * input still streams ([input] null): no body is built from partial JSON.
+     */
+    fun pending(kind: ToolKind, input: JsonObject?): ToolBody {
+        if (input == null) return ToolBody.None
+        return when (kind) {
+            ToolKind.SHELL -> ToolBody.Command(cut(input.string("command").orEmpty()), persistentListOf(), 0, firstLineError = false)
+            ToolKind.MCP, ToolKind.TASKS, ToolKind.OTHER -> json(input, null, "")
+            ToolKind.READ, ToolKind.FIND, ToolKind.SEARCH, ToolKind.WEB_FETCH, ToolKind.WEB_SEARCH, ToolKind.AGENT, ToolKind.QUESTION,
+            ToolKind.PLAN, ToolKind.PLAN_ENTER, ToolKind.TOOL_SEARCH, ToolKind.EDIT, ToolKind.CREATE,
+            -> ToolBody.None
+        }
+    }
+
     /** `+A -B` of an edit (from `structuredPatch`) or of a write: an update's patch, else the lines it created. Null for other tools. */
     fun stats(kind: ToolKind, input: JsonObject?, result: JsonElement?): DiffStats? = when (kind) {
         ToolKind.EDIT -> patchStats(result as? JsonObject)
@@ -94,13 +111,18 @@ object ToolBodies {
         return ToolBody.Mono(lines, total, firstLineError = !denial && lines.isNotEmpty())
     }
 
-    /** A shell call's command, then its output with escapes stripped; nothing when the command printed nothing. */
+    /**
+     * A shell call's command, then its output with escapes stripped; a command that printed nothing keeps its command with no output
+     * (polish spec 2.1), so an opened running call keeps its body when the result lands.
+     */
     private fun shell(input: JsonObject?, text: String, fields: JsonObject?): ToolBody {
+        val command = cut(input?.string("command").orEmpty())
         val stdout = fields?.string("stdout").orEmpty()
         val output = stdout.ifEmpty { text.takeIf { it.trim() != NO_OUTPUT }.orEmpty() }
-        if (output.isBlank() && fields?.string("stderr").isNullOrBlank()) return ToolBody.None
-        val (lines, total) = clamp(ToolLabels.stripAnsi(output.ifBlank { fields?.string("stderr").orEmpty() }))
-        return ToolBody.Command(cut(input?.string("command").orEmpty()), lines, total, firstLineError = false)
+        val printed = output.ifBlank { fields?.string("stderr").orEmpty() }
+        if (printed.isBlank()) return ToolBody.Command(command, persistentListOf(), 0, firstLineError = false)
+        val (lines, total) = clamp(ToolLabels.stripAnsi(printed))
+        return ToolBody.Command(command, lines, total, firstLineError = false)
     }
 
     /** A read file's lines, numbered from its `startLine`, without system reminders; null without `content`. */

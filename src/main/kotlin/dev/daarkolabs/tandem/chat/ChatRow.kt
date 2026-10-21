@@ -75,9 +75,11 @@ data class WorkingRow(
 data class RowLabel(val text: String, val spans: ImmutableList<IntRange>)
 
 /**
- * One tool call as a row shows it: its own [label] in its own tense, its diff [stats] once done, and its [body], [ToolBody.None]
- * until its result. [children] and [progress] belong to an Agent call: the subagent's rows and its sub-line. [subject] is what a
- * group sentence names: the path relative to the session's directory (reads, edits, writes) or the one-line command (shell).
+ * One tool call as a row shows it: its own [label] in its own tense, its diff [stats] once done, and its [body]: the one its result
+ * built; else, while it runs or waits, its body so far ([ToolBodies.pending], polish spec 2.1); else [ToolBody.None], which a call
+ * whose input still streams always has. [children] and [progress] belong to an Agent call: the subagent's rows and its sub-line.
+ * [subject] is what a group sentence names: the path relative to the session's directory (reads, edits, writes) or the one-line
+ * command (shell).
  */
 data class ToolCall(
     val id: String,
@@ -103,7 +105,7 @@ data class DiffStats(val added: Int, val removed: Int)
 
 /** What a tool row shows when it is opened (spec 4.7): pre-built text, at most 400 lines and 50,000 characters. */
 sealed interface ToolBody {
-    /** Nothing to open: the call has no result yet, or the result is empty. */
+    /** Nothing to open: the call's input still streams, it shows nothing before its result, or the result is empty. */
     data object None : ToolBody
 
     /** Lines in the editor font: a file read, file names, matches, written content, an error. */

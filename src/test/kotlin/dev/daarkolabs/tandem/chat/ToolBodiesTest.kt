@@ -48,10 +48,39 @@ class ToolBodiesTest {
     }
 
     @Test
-    fun `bash no output gives no body`() {
+    fun `a shell call that printed nothing keeps its command`() {
         val r = toolResultAt("misc-state-action", 25)
         val input = buildJsonObject { put("command", "touch x") }
-        assertEquals(ToolBody.None, ToolBodies.body(ToolKind.SHELL, input, r.content, labelResult(r), r.isError))
+        assertEquals(
+            ToolBody.Command("touch x", persistentListOf(), 0, firstLineError = false),
+            ToolBodies.body(ToolKind.SHELL, input, r.content, labelResult(r), r.isError),
+        )
+    }
+
+    @Test
+    fun `a running shell call has its command and no output`() {
+        assertEquals(
+            ToolBody.Command("npm test", persistentListOf(), 0, firstLineError = false),
+            ToolBodies.pending(ToolKind.SHELL, buildJsonObject { put("command", "npm test") }),
+        )
+    }
+
+    @Test
+    fun `a running MCP, task or other call shows its input`() {
+        val input = buildJsonObject { put("a", 1) }
+        for (kind in listOf(ToolKind.MCP, ToolKind.TASKS, ToolKind.OTHER)) {
+            val json = assertIs<ToolBody.Json>(ToolBodies.pending(kind, input), kind.name)
+            assertNull(json.output, kind.name)
+            assertTrue("\"a\": 1" in json.input, json.input)
+        }
+    }
+
+    @Test
+    fun `a running read, grep, glob, agent, edit or write has no body`() {
+        val input = buildJsonObject { put("file_path", "/x") }
+        val shown = setOf(ToolKind.SHELL, ToolKind.MCP, ToolKind.TASKS, ToolKind.OTHER)
+        for (kind in ToolKind.entries.filter { it !in shown }) assertEquals(ToolBody.None, ToolBodies.pending(kind, input), kind.name)
+        assertEquals(ToolBody.None, ToolBodies.pending(ToolKind.SHELL, null))
     }
 
     @Test

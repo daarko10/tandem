@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -42,6 +43,7 @@ import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.ui.ChatUiState
 import dev.daarkolabs.tandem.ui.RenderedRow
+import dev.daarkolabs.tandem.ui.TandemColors
 import dev.daarkolabs.tandem.ui.chatColumn
 import dev.daarkolabs.tandem.ui.chatPalette
 import dev.daarkolabs.tandem.ui.monoTextStyle
@@ -52,20 +54,44 @@ import org.jetbrains.jewel.ui.component.Icon
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
 
-/** The states in which a call has no result yet: its row is drawn running and does not open. */
-private val RUNNING: Set<ToolState> = setOf(ToolState.PENDING, ToolState.RUNNING, ToolState.WAITING)
-
 /**
- * Whether [row] opens (spec 4.6.1): once it is no longer running, a group always does and a lone call does when its body has
- * something to show. A running row or group draws its chevron disabled, with no click, until its result arrives; except a lone Agent
- * call whose subagent has rows, which opens while it runs to show them (spec 4.8, 4.9).
+ * Whether [row] opens (polish spec 2.1): a group always does, in every state, to list its calls; a lone call does when its body has
+ * something to show (a live call's body so far included) or, for an Agent call, when its subagent has rows (spec 4.8, 4.9).
  */
 internal fun canExpand(row: ToolRow): Boolean =
-    row.state !in RUNNING && (row.calls.size > 1 || row.calls.single().body !is ToolBody.None) ||
-        (row.calls.size == 1 && row.calls.single().children.isNotEmpty())
+    row.calls.size > 1 || row.calls.single().let { it.body !is ToolBody.None || it.children.isNotEmpty() }
 
-/** Whether a group's sub-row for [call] opens: the rule of [canExpand] for one call. */
-internal fun canExpand(call: ToolCall): Boolean = call.state !in RUNNING && call.body !is ToolBody.None
+/** Whether a group's sub-row for [call] opens: when its body, live or finished, has something to show. */
+internal fun canExpand(call: ToolCall): Boolean = call.body !is ToolBody.None
+
+/**
+ * The owners (`c:<call id>`) of the clamped bodies beneath [row] (polish spec 2.2): each of its calls and, for an Agent call, each
+ * call of the rows nested in its body, recursively. Collapsing the row clamps them all again.
+ */
+internal fun clampOwners(row: ToolRow): List<String> {
+    val owners = ArrayList<String>()
+    fun add(row: ToolRow) {
+        for (call in row.calls) {
+            owners += "c:${call.id}"
+            if (call.kind == ToolKind.AGENT) call.children.forEach { child -> if (child is ToolRow) add(child) }
+        }
+    }
+    add(row)
+    return owners
+}
+
+/** The dot before a live call's label (polish spec 2.1): spark-coloured while it runs, amber while it waits for the user. */
+internal enum class Marker { NONE, RUNNING, WAITING }
+
+/** The marker of [call]: [Marker.RUNNING] while its input streams or it runs, [Marker.WAITING] while it waits, else none. */
+internal fun marker(call: ToolCall): Marker = when (call.state) {
+    ToolState.PENDING, ToolState.RUNNING -> Marker.RUNNING
+    ToolState.WAITING -> Marker.WAITING
+    ToolState.DONE, ToolState.FAILED, ToolState.DENIED, ToolState.INTERRUPTED -> Marker.NONE
+}
+
+/** The marker of [row]'s own line: its call's for a lone row; none for a group, whose open box marks the live call. */
+internal fun headerMarker(row: ToolRow): Marker = row.calls.singleOrNull()?.let(::marker) ?: Marker.NONE
 
 /** Whether [body] is Markdown the presenter parses when the body is first opened. */
 internal fun parsedOnOpen(body: ToolBody): Boolean = body is ToolBody.Markdown || body is ToolBody.Links
@@ -88,13 +114,16 @@ internal fun annotated(label: RowLabel, mono: SpanStyle): AnnotatedString = buil
 @Composable
 internal fun ToolRowItem(rendered: RenderedRow, ui: ChatUiState) {
     val row = rendered.row as ToolRow
-    val expandedState = ui.expanded(row.key)
-    val expanded by expandedState
+    val expanded by ui.expanded(row.key)
     val opens = canExpand(row)
     val lone = row.calls.singleOrNull()
     val needsParse = lone != null && parsedOnOpen(lone.body) && rendered.bodies[row.key] == null
     Column(Modifier.chatColumn().padding(top = row.gap.dp.dp)) {
-        ToolLine(row.label, row.state, row.stats, opens, expanded && opens, minHeight = 24.dp) { expandedState.value = !expandedState.value }
+        ToolLine(row.label, row.state, row.stats, opens, expanded && opens, minHeight = 24.dp, marker = headerMarker(row)) {
+            // A lone row opens its call's sub-row too, so it stays open if the row becomes a group (polish spec 2.1); closing either
+            // clamps every body beneath it again (2.2).
+            ui.toggle(row.key, clampOwners(row), opensWith = lone?.let { "c:${it.id}" })
+        }
         // An agent's sub-line: `Done (2 tool uses · 21.8k tokens · 5.8s)` (spec 4.8).
         lone?.progress?.takeIf { lone.kind == ToolKind.AGENT }?.let { Text(it, style = smallTextStyle(), color = JewelTheme.globalColors.text.info) }
         if (expanded && opens) {
@@ -109,17 +138,17 @@ internal fun ToolRowItem(rendered: RenderedRow, ui: ChatUiState) {
                 // The one place that asks for the body's Markdown: on the click that opens it, and again for a row that was already
                 // open when its presenter was made. The presenter ignores a key it already has.
                 if (needsParse) LaunchedEffect(row.key) { ui.onExpand(row.key) }
-                ToolBodyView(lone, rendered.bodies[row.key], ui)
+                ToolBodyView(lone, rendered.bodies[row.key], ui, framed = true)
             }
         }
     }
 }
 
 /**
- * One tool line, a row's or a group's sub-row's: [label] in the colour of [state], [stats] before the chevron, the chevron that turns
- * when [open], in the label's colour (a failed row is red to its end, spec 4.2). The whole line is the click target when [opens]; a
- * running call draws its chevron disabled. Assistive technology
- * knows it as a button named by [description], its label unless the caller says otherwise (a streaming thinking row).
+ * One tool line, a row's or a group's sub-row's: the [marker] dot of a live call, [label] in the colour of [state], [stats] before
+ * the chevron, the chevron that turns when [open], in the label's colour (a failed row is red to its end, spec 4.2). The chevron is
+ * drawn exactly when the line [opens], live or finished (polish spec 2.1), and the whole line is then the click target. Assistive
+ * technology knows it as a button named by [description], its label unless the caller says otherwise (a streaming thinking row).
  */
 @Composable
 internal fun ToolLine(
@@ -131,6 +160,7 @@ internal fun ToolLine(
     minHeight: Dp,
     modifier: Modifier = Modifier,
     description: String = label.text,
+    marker: Marker = Marker.NONE,
     onClick: () -> Unit,
 ) {
     val colors = JewelTheme.globalColors.text
@@ -159,13 +189,17 @@ internal fun ToolLine(
             },
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // No leading dot in any state (spec 4.6.1).
+        // A live call's dot, 8 dp before its label (polish spec 2.1, amending spec 4.6.1 and 4.2 for this dot).
+        val dot = when (marker) {
+            Marker.NONE -> null
+            Marker.RUNNING -> TandemColors.spark
+            Marker.WAITING -> colors.warning
+        }
+        if (dot != null) Box(Modifier.padding(end = 8.dp).size(6.dp).background(dot, RoundedCornerShape(50)))
         Text(text, color = tone, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         stats?.let { DiffStatsText(it) }
         if (opens) {
             Icon(AllIconsKeys.General.ChevronRight, null, Modifier.padding(start = 8.dp).size(16.dp).rotate(angle), tint = tone)
-        } else if (state in RUNNING) {
-            Icon(AllIconsKeys.General.ChevronRight, null, Modifier.padding(start = 8.dp).size(16.dp), tint = colors.disabled)
         }
     }
 }

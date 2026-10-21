@@ -21,6 +21,7 @@ import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotSame
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -129,6 +130,66 @@ class ChatUiStateTest {
 
         assertFalse(change.pin)
         assertNull(change.appended)
+    }
+
+    @Test
+    fun `an opened lone call that joins a group stays open as its sub-row`() {
+        val ui = ChatUiState()
+        ui.toggle("tool:1", listOf("c:1"), opensWith = "c:1")
+        assertTrue(ui.expanded("tool:1").value)
+        assertTrue(ui.expanded("c:1").value)
+        val clamp = ui.clampOpen("c:1", "body")
+        clamp.value = true
+
+        // The row is now a group under the same key: its box and its sub-row read the same states, which nothing else changed.
+        assertTrue(ui.expanded("tool:1").value)
+        assertTrue(ui.expanded("c:1").value)
+        assertSame(clamp, ui.clampOpen("c:1", "body"))
+        assertTrue(ui.clampOpen("c:1", "body").value)
+    }
+
+    @Test
+    fun `collapsing a row resets its show more`() {
+        val ui = ChatUiState()
+        ui.toggle("tool:1", listOf("c:1"), opensWith = "c:1")
+        ui.clampOpen("c:1", "body").value = true
+
+        ui.toggle("tool:1", listOf("c:1"))
+
+        assertFalse(ui.expanded("tool:1").value)
+        assertFalse(ui.clampOpen("c:1", "body").value)
+    }
+
+    @Test
+    fun `collapsing a group resets its sub-rows' show more`() {
+        val ui = ChatUiState()
+        ui.toggle("tool:1", listOf("c:1", "c:2"))
+        assertTrue(ui.expanded("tool:1").value)
+        ui.expanded("c:2").value = true
+        ui.clampOpen("c:1", "body").value = true
+        ui.clampOpen("c:2", "command").value = true
+
+        ui.toggle("tool:1", listOf("c:1", "c:2"))
+
+        assertFalse(ui.expanded("tool:1").value)
+        assertFalse(ui.clampOpen("c:1", "body").value)
+        assertFalse(ui.clampOpen("c:2", "command").value)
+        assertTrue(ui.expanded("c:2").value)
+    }
+
+    @Test
+    fun `show more and show less flip one clamp`() {
+        val ui = ChatUiState()
+        val body = ui.clampOpen("c:1", "body")
+        val output = ui.clampOpen("c:1", "output")
+        assertNotSame(body, output)
+
+        body.value = true
+        assertFalse(output.value)
+        body.value = false
+        output.value = true
+        assertFalse(body.value)
+        assertTrue(ui.clampOpen("c:1", "output").value)
     }
 
     private fun rendered(row: ChatRow): RenderedRow = RenderedRow(row, blocks = null)

@@ -20,8 +20,9 @@ import org.jetbrains.jewel.ui.Orientation
 import org.jetbrains.jewel.ui.component.Divider
 
 /**
- * An opened group (spec 4.6.1): a bordered box with one 36 dp sub-row per call, each with its own label, colour and chevron, and
- * dividers between them. A sub-row opens its call's body inside the box; its key is `c:<call id>`.
+ * An opened group (spec 4.6.1): a bordered box with one 36 dp sub-row per call, each with its own label, colour, live marker and
+ * chevron, and dividers between them; a running group opens too (polish spec 2.1). A sub-row opens its call's body inside the box;
+ * its key is `c:<call id>`.
  */
 @Composable
 internal fun ToolGroupBox(calls: ImmutableList<ToolCall>, bodies: ImmutableMap<String, ImmutableList<MarkdownBlock>>, ui: ChatUiState) {
@@ -34,19 +35,24 @@ internal fun ToolGroupBox(calls: ImmutableList<ToolCall>, bodies: ImmutableMap<S
     }
 }
 
+/**
+ * One call of an open group: its line with its own label, colour, live marker and chevron (polish spec 2.1), and its body below it
+ * when opened, without a frame (2.4). Closing it clamps its body again (2.2).
+ */
 @Composable
 private fun SubRow(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?, ui: ChatUiState) {
     val key = "c:${call.id}"
-    val expandedState = ui.expanded(key)
-    val expanded by expandedState
+    val expanded by ui.expanded(key)
     val opens = canExpand(call)
     val needsParse = parsedOnOpen(call.body) && blocks == null
     Column(Modifier.fillMaxWidth()) {
-        ToolLine(call.label, call.state, call.stats, opens, expanded && opens, minHeight = 36.dp) { expandedState.value = !expandedState.value }
+        ToolLine(call.label, call.state, call.stats, opens, expanded && opens, minHeight = 36.dp, marker = marker(call)) {
+            ui.toggle(key, listOf(key))
+        }
         if (expanded && opens) {
             // Asks for the body's Markdown once it is open, as ToolRowItem does.
             if (needsParse) LaunchedEffect(key) { ui.onExpand(key) }
-            ToolBodyView(call, blocks, ui)
+            ToolBodyView(call, blocks, ui, framed = false)
         }
     }
 }

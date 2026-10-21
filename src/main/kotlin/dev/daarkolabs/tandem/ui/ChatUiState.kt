@@ -19,6 +19,33 @@ internal class ChatUiState {
     /** Whether the row (or group sub-row `c:<call id>`) keyed [key] is open; closed until opened. */
     fun expanded(key: String): MutableState<Boolean> = expanded.getOrPut(key) { mutableStateOf(false) }
 
+    // One snapshot state per body part of each call (`c:<call id>`), so that a click on `Show more` recomposes that body only and
+    // a collapse writes the collapsed row's owners' states only (polish spec 2.2, 6).
+    private val clamps = HashMap<String, HashMap<String, MutableState<Boolean>>>()
+
+    /**
+     * Whether the clamped body part [part] (`body`, `command`, `input` or `output`) of the call [owner] (`c:<call id>`, wherever
+     * the body renders: a lone row, a group's sub-row, a row nested in an Agent body) shows in full; clamped until `Show more`.
+     */
+    fun clampOpen(owner: String, part: String): MutableState<Boolean> =
+        clamps.getOrPut(owner) { HashMap() }.getOrPut(part) { mutableStateOf(false) }
+
+    /**
+     * Opens or closes the row keyed [key] (polish spec 2.1, 2.2). Opening it also opens [opensWith]: a lone row passes its call's
+     * `c:<call id>`, so that when the next call joins it and it becomes a group under the same key, the call's sub-row is already
+     * open. Closing it clamps again every body part of each of [owners] (`clampOwners(row)`), so the next open shows them clamped.
+     */
+    fun toggle(key: String, owners: Collection<String> = emptyList(), opensWith: String? = null) {
+        val state = expanded(key)
+        val open = !state.value
+        state.value = open
+        if (open) {
+            if (opensWith != null) expanded(opensWith).value = true
+        } else {
+            owners.forEach { owner -> clamps[owner]?.values?.forEach { it.value = false } }
+        }
+    }
+
     /** Asks for the parsed Markdown of the body keyed [key]: [ChatPresenter.expandBody]. It never parses on the calling thread. */
     var onExpand: (String) -> Unit = {}
 

@@ -16,6 +16,7 @@ import dev.daarkolabs.tandem.session.TurnEnd
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import kotlinx.collections.immutable.persistentListOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -31,6 +32,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNotSame
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -77,11 +79,119 @@ class ChatRowsBuilderTest {
             listOf("Ran Create empty fixture file" to ToolState.DONE, "Remove fixture file · Denied" to ToolState.DENIED),
             rows.content().labels(),
         )
-        assertEquals(ToolBody.None, tools[0].calls.single().body)
+        assertEquals(ToolBody.Command("touch tandem-fixture.txt", persistentListOf(), 0, false), tools[0].calls.single().body)
         val denial = assertIs<ToolBody.Mono>(tools[1].calls.single().body)
         assertEquals(listOf("The user denied this command."), denial.lines)
         assertFalse(denial.firstLineError)
         assertEquals(listOf("done.", "denied."), rows.content().filterIsInstance<TextRow>().map { it.markdown })
+    }
+
+    @Test
+    fun `a pending call has no body`() {
+        var checked = 0
+        replay("tools-read") { line, _, rows ->
+            val call = rows.content().toolRows().singleOrNull()?.calls?.singleOrNull()
+            when (line) {
+                12 -> {
+                    assertEquals(ToolState.PENDING to ToolBody.None, call!!.state to call.body)
+                    checked++
+                }
+                17 -> {
+                    assertEquals(ToolState.RUNNING to ToolBody.None, call!!.state to call.body)
+                    checked++
+                }
+            }
+        }
+        assertEquals(2, checked)
+    }
+
+    @Test
+    fun `a waiting plan has no body`() {
+        var checked = false
+        replay("plan-approve") { line, _, rows ->
+            if (line == 88) {
+                val plan = rows.content().toolRows().flatMap { it.calls }.last { it.kind == ToolKind.PLAN }
+                assertEquals(ToolState.WAITING to ToolBody.None, plan.state to plan.body)
+                checked = true
+            }
+        }
+        assertTrue(checked)
+    }
+
+    @Test
+    fun `an interrupted call keeps no body`() {
+        var running: ChatState? = null
+        replay("permission") { line, state, rows ->
+            if (line == 19) {
+                val call = rows.content().toolRows().single().calls.single()
+                assertEquals(ToolState.RUNNING, call.state)
+                assertIs<ToolBody.Command>(call.body)
+                running = state
+            }
+        }
+        val result = Fixtures.decode("interrupt").filterIsInstance<CliMessage.Result>().single()
+        val interrupted = reduce(running!!, SessionEvent.Cli(result))
+        val call = ChatRowsBuilder(options).build(interrupted).content().toolRows().single().calls.single()
+        assertEquals(ToolState.INTERRUPTED to ToolBody.None, call.state to call.body)
+    }
+
+    @Test
+    fun `a call's body appears once its input completes`() {
+        var started: Int? = null
+        var complete = false
+        replay("permission") { line, _, rows ->
+            val call = rows.content().toolRows().firstOrNull()?.calls?.single()
+            val event = (fixtureLine("permission", line) as? CliMessage.StreamEvent)?.event
+            if (line > 8 && started == null && event is StreamEvent.ContentBlockStart) {
+                started = line
+                assertEquals(ToolState.PENDING to ToolBody.None, call!!.state to call.body)
+            }
+            if (line == 19) {
+                assertEquals(
+                    ToolState.RUNNING to ToolBody.Command("touch tandem-fixture.txt", persistentListOf(), 0, false),
+                    call!!.state to call.body,
+                )
+                complete = true
+            }
+        }
+        assertNotNull(started)
+        assertTrue(complete)
+    }
+
+    @Test
+    fun `unchanged calls of a live group keep their instances across a result`() {
+        var at46: List<ToolCall>? = null
+        var at50: List<ToolCall>? = null
+        replay("tools-read") { line, _, rows ->
+            val calls = rows.content().toolRows().flatMap { it.calls }
+            if (line == 46) at46 = calls
+            if (line == 50) at50 = calls
+        }
+        val before = at46!!
+        val after = at50!!
+        val reads = before.filter { it.kind == ToolKind.READ }
+        assertEquals(2, reads.size, before.toString())
+        reads.forEach { read -> assertSame(read, after.single { it.id == read.id }, read.id) }
+        val glob = before.single { it.kind == ToolKind.FIND }
+        val done = after.single { it.id == glob.id }
+        assertNotSame(glob, done)
+        assertEquals(ToolState.DONE, done.state)
+    }
+
+    @Test
+    fun `a running call's body is built once per input`() {
+        val states = HashMap<Int, ChatState>()
+        replay("permission") { line, state, _ -> if (line == 19 || line == 21) states[line] = state }
+        fun input(state: ChatState): JsonObject? = state.entries.filterIsInstance<ChatEntry.Assistant>()
+            .flatMap { it.blocks }.filterIsInstance<AssistantBlock.ToolUse>().single().input
+        assertSame(input(states.getValue(19)), input(states.getValue(21)))
+        val b = ChatRowsBuilder(RowOptions(true))
+        val call19 = b.build(states.getValue(19)).content().toolRows().single().calls.single()
+        val call21 = b.build(states.getValue(21)).content().toolRows().single().calls.single()
+        assertEquals(ToolState.RUNNING, call19.state)
+        assertEquals(ToolState.WAITING, call21.state)
+        assertNotSame(call19, call21)
+        assertSame(call19.body, call21.body)
     }
 
     @Test
