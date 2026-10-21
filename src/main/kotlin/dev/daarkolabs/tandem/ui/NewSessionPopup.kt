@@ -27,8 +27,8 @@ import org.jetbrains.jewel.ui.component.Text
 /** The effort picker's first entry: the CLI's default effort, picked by passing none. */
 private const val DEFAULT_EFFORT_LABEL: String = "Default effort"
 
-/** The efforts the popup offers after the default, as `--effort` takes them. */
-private val EFFORT_LEVELS: List<String> = listOf("low", "medium", "high", "max")
+/** The efforts the popup offers after the default, as `--effort` takes them; the footer's effort page lists them too until the CLI lists its models. */
+internal val EFFORT_LEVELS: List<String> = listOf("low", "medium", "high", "max")
 
 /**
  * What [NewSessionPopup] offers and where its picks go: [models] lists the models the CLI offers, as an open session was told them

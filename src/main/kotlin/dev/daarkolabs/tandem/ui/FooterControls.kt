@@ -59,6 +59,7 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.MenuScope
 import org.jetbrains.jewel.ui.component.PopupMenu
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.copyWithSize
 import org.jetbrains.jewel.ui.component.separator
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
@@ -73,15 +74,12 @@ private const val NO_MODEL_LABEL: String = "Model"
 /** What the mode control reads before the first `system/init` or a pick. */
 private const val NO_MODE_LABEL: String = "Mode"
 
-/** The efforts the effort submenu lists while the CLI has not listed its models yet, for a known effort (spec 5, edge 1). */
-private val EFFORTS_BEFORE_MODELS: List<String> = listOf("low", "medium", "high", "max")
-
 /** The footer's model control: [model] in the secondary tier, then [effort] in the dim tier when there is one. */
 internal data class ModelLabel(val model: String, val effort: String?)
 
 /**
  * What the model control reads (spec 2.3, `<Model>` and `<Effort>`): the shown model's display name ([shownModel]), else the model the
- * CLI reports, else "Model"; and the effort, unless there is none or the effort submenu would not list it ([effortMenu]: a shown model
+ * CLI reports, else "Model"; and the effort, unless there is none or the effort page would not list it ([effortMenu]: a shown model
  * without effort levels).
  */
 internal fun modelLabel(composer: ComposerModel): ModelLabel {
@@ -133,14 +131,14 @@ internal fun modeMenu(composer: ComposerModel): List<ModeItem> =
         ModeItem(mode, Modes.label(mode), Modes.description(mode), checked = mode == composer.permissionMode, digit = Modes.digit(mode))
     }
 
-/** An item of the effort submenu: a [level], its [label], whether it is the session's ([checked]), and whether it can be picked. */
+/** An item of the effort page: a [level], its [label], whether it is the session's ([checked]), and whether it can be picked. */
 internal data class EffortItem(val level: String, val label: String, val checked: Boolean, val enabled: Boolean)
 
-/** The effort submenu: its [trailing] text, the current level's label or "Default", and its [items]. */
+/** The effort page: the `Effort` row's [trailing] text, the current level's label or "Default", and its [items]. */
 internal data class EffortMenu(val trailing: String, val items: List<EffortItem>)
 
 /**
- * The effort submenu (spec 2.3), or null when the model menu has none: the shown model's levels, the current one checked. While the
+ * The effort page (spec 2.3), or null when the model menu has none: the shown model's levels, the current one checked. While the
  * CLI has not listed its models, a known effort lists low, medium, high and max (edge 1). A current level the shown model does not
  * list comes last, checked and disabled: the CLI decides at the next turn.
  */
@@ -148,7 +146,7 @@ internal fun effortMenu(composer: ComposerModel): EffortMenu? {
     val effort = composer.effort
     val levels = when {
         composer.effortLevels.isNotEmpty() -> composer.effortLevels
-        composer.models.isEmpty() && effort != null -> EFFORTS_BEFORE_MODELS
+        composer.models.isEmpty() && effort != null -> EFFORT_LEVELS
         else -> return null
     }
     val items = levels.map { EffortItem(it, Modes.effortLabel(it), checked = it == effort, enabled = true) }
@@ -232,10 +230,10 @@ internal fun ModeControl(composer: ComposerModel, onPick: (PermissionMode) -> Un
         alignEnd = false,
         digitPick = { digit -> byDigit(items, digit, ModeItem::digit)?.let(::pick) != null },
         label = { Text(modeLabel(composer), style = smallTextStyle(), color = palette.secondary, maxLines = 1) },
-    ) { close ->
+    ) { menu ->
         passiveItem { Text("Mode", style = smallTextStyle(), color = palette.dim) }
         for (item in items) {
-            selectableItem(selected = false, onClick = { close(); pick(item) }) {
+            selectableItem(selected = false, onClick = { menu.close(); pick(item) }) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column {
                         Text(item.label)
@@ -256,9 +254,9 @@ internal fun ModeControl(composer: ComposerModel, onPick: (PermissionMode) -> Un
 
 /**
  * The footer's model · effort control (spec 2.3): the shown model in the secondary tier and the effort in the dim tier ([modelLabel]),
- * which opens the model menu above it, right-aligned: the models ([modelMenu]), then the effort submenu ([effortMenu]). A model pick
- * other than the checked one calls [onPickModel] with what `set_model` sends; an effort pick other than the current one calls
- * [onPickEffort].
+ * which opens the model menu above it, right-aligned: the models ([modelMenu]), then the `Effort` row, which turns the menu to its
+ * effort page ([effortMenu]): `‹ Effort`, which leads back, then the levels. A model pick other than the checked one calls
+ * [onPickModel] with what `set_model` sends; an effort pick other than the current one calls [onPickEffort].
  */
 @Composable
 internal fun ModelControl(composer: ComposerModel, onPickModel: (String?) -> Unit, onPickEffort: (String) -> Unit) {
@@ -277,52 +275,76 @@ internal fun ModelControl(composer: ComposerModel, onPickModel: (String?) -> Uni
         description = "Model",
         alignEnd = true,
         opens = models.isNotEmpty() || efforts != null,
+        pages = if (efforts != null) 2 else 1,
         digitPick = { digit -> byDigit(models, digit, ModelItem::digit)?.let(::pick) != null },
         label = { Text(text, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-    ) { close ->
-        for (item in models) {
-            selectableItem(selected = false, onClick = { close(); pick(item) }) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(item.label)
-                    if (item.isDefault) {
-                        Spacer(Modifier.width(6.dp))
-                        DefaultChip(palette)
+    ) { menu ->
+        if (efforts != null && menu.page == EFFORT_PAGE) {
+            effortPage(efforts, palette, menu) { level -> currentOnPickEffort(level) }
+        } else {
+            for (item in models) {
+                selectableItem(selected = false, onClick = { menu.close(); pick(item) }) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(item.label)
+                        if (item.isDefault) {
+                            Spacer(Modifier.width(6.dp))
+                            DefaultChip(palette)
+                        }
+                        Spacer(Modifier.weight(1f))
+                        Spacer(Modifier.width(24.dp))
+                        if (item.checked) Text("✓", color = palette.accent) else item.digit?.let { Text("$it", color = palette.dim) }
                     }
-                    Spacer(Modifier.weight(1f))
-                    Spacer(Modifier.width(24.dp))
-                    if (item.checked) Text("✓", color = palette.accent) else item.digit?.let { Text("$it", color = palette.dim) }
+                }
+            }
+            if (efforts != null) {
+                if (models.isNotEmpty()) separator()
+                // Tandem's own row, not Jewel's `submenu`: that one opens on hover, and this last row is the first one a pointer
+                // moving up from the control crosses on its way to a model (open item 13).
+                selectableItem(selected = false, onClick = { menu.show(EFFORT_PAGE) }) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Effort")
+                        Spacer(Modifier.weight(1f))
+                        Spacer(Modifier.width(24.dp))
+                        Text(efforts.trailing, color = palette.dim)
+                        Spacer(Modifier.width(6.dp))
+                        Text("›", color = palette.dim)
+                    }
                 }
             }
         }
-        if (efforts != null) {
-            if (models.isNotEmpty()) separator()
-            submenu(
-                submenu = {
-                    for (effort in efforts.items) {
-                        selectableItem(
-                            selected = false,
-                            enabled = effort.enabled,
-                            onClick = {
-                                close()
-                                if (!effort.checked) currentOnPickEffort(effort.level)
-                            },
-                        ) {
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text(effort.label)
-                                Spacer(Modifier.weight(1f))
-                                Spacer(Modifier.width(24.dp))
-                                if (effort.checked) Text("✓", color = palette.accent)
-                            }
-                        }
-                    }
-                },
-            ) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Effort")
-                    Spacer(Modifier.weight(1f))
-                    Spacer(Modifier.width(24.dp))
-                    Text(efforts.trailing, color = palette.dim)
-                }
+    }
+}
+
+/** The model menu's second page, the effort levels. */
+private const val EFFORT_PAGE: Int = 1
+
+/**
+ * The model menu's effort page (spec 2.3): `‹ Effort`, which leads back to the models, a separator, then the levels, the current one
+ * checked. A pick other than the current level closes the menu and calls [onPick] with it.
+ */
+private fun MenuScope.effortPage(efforts: EffortMenu, palette: ChatPalette, menu: FooterMenu, onPick: (String) -> Unit) {
+    selectableItem(selected = false, onClick = { menu.show(FIRST_PAGE) }) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("‹", color = palette.dim)
+            Spacer(Modifier.width(6.dp))
+            Text("Effort")
+        }
+    }
+    separator()
+    for (effort in efforts.items) {
+        selectableItem(
+            selected = false,
+            enabled = effort.enabled,
+            onClick = {
+                menu.close()
+                if (!effort.checked) onPick(effort.level)
+            },
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(effort.label)
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.width(24.dp))
+                if (effort.checked) Text("✓", color = palette.accent)
             }
         }
     }
@@ -354,19 +376,42 @@ private fun modelText(label: ModelLabel, style: TextStyle, palette: ChatPalette)
 private fun DefaultChip(palette: ChatPalette) {
     val small = smallTextStyle()
     Box(Modifier.background(palette.bubbleFill, RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp)) {
-        Text("Default", style = small.copy(fontSize = (small.fontSize.value - 1).sp), color = palette.secondary, maxLines = 1)
+        Text("Default", style = small.copyWithSize((small.fontSize.value - 1).sp), color = palette.secondary, maxLines = 1)
+    }
+}
+
+/** The page a footer menu opens on, the one its digits pick from. */
+private const val FIRST_PAGE: Int = 0
+
+/**
+ * What a footer menu's items get: the [page] the menu shows, [close], which closes the menu, and [show], which turns it to another
+ * page in place, the menu staying open.
+ */
+internal class FooterMenu(val page: Int, val close: () -> Unit, val show: (Int) -> Unit)
+
+/**
+ * The page the arrow key of an AWT key press turns to from [page], or null for any other key or a press with Shift, Ctrl, Alt or
+ * Meta: → the next page, ← the one before, as Jewel's submenus open and close on them.
+ */
+private fun pageTurn(event: AwtKeyEvent, page: Int): Int? {
+    if (event.id != AwtKeyEvent.KEY_PRESSED || event.isShiftDown || event.isControlDown || event.isAltDown || event.isMetaDown) return null
+    return when (event.keyCode) {
+        AwtKeyEvent.VK_RIGHT -> page + 1
+        AwtKeyEvent.VK_LEFT -> page - 1
+        else -> null
     }
 }
 
 /**
  * One footer control (spec 2.3): [label] on a pill that fills while hovered or while its menu is open and is outlined while focused,
  * semantically a drop-down named [description]. A click, Enter or Space opens its menu above it (left- or right-aligned by
- * [alignEnd]), unless it has nothing to list ([opens]); [menu] fills it and closes it with the function it is given. While the menu is
- * open a digit picks through [digitPick], which says whether it picked, and the menu closes when it did.
+ * [alignEnd]) on its first page, unless it has nothing to list ([opens]); [menu] fills the page it is given and closes the menu, or
+ * turns it to another of its [pages], with the [FooterMenu] it is given. While the first page is open a digit picks through
+ * [digitPick], which says whether it picked, and the menu closes when it did; → and ← turn the pages.
  *
- * The digits are taken from AWT's key dispatch while the menu is open, not from a Compose key handler (open item 13): in the IDE the
- * menu is a focusable popup layer of the tool window's own Compose scene (the IDE leaves Jewel's `JBPopupRenderer` off), which takes
- * the keys with no Compose node focused in it, so neither a handler on the menu nor one on the control gets them.
+ * The digits and the arrows are taken from AWT's key dispatch while the menu is open, not from a Compose key handler (open item 13):
+ * in the IDE the menu is a focusable popup layer of the tool window's own Compose scene (the IDE leaves Jewel's `JBPopupRenderer`
+ * off), which takes the keys with no Compose node focused in it, so neither a handler on the menu nor one on the control gets them.
  *
  * The menu is placed in the control's outer box, which has no padding of its own, so that [AboveAnchor] measures from the pill's
  * edges: placed inside the pill's padding, it sat 5 dp above the pill and 7 dp inside its right edge.
@@ -376,25 +421,44 @@ private fun FooterControl(
     description: String,
     alignEnd: Boolean,
     opens: Boolean = true,
+    pages: Int = 1,
     digitPick: (Int) -> Boolean,
     label: @Composable () -> Unit,
-    menu: MenuScope.(close: () -> Unit) -> Unit,
+    menu: MenuScope.(FooterMenu) -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
     val focused by source.collectIsFocusedAsState()
     var open by remember { mutableStateOf(false) }
-    val close = { open = false }
+    var page by remember { mutableStateOf(FIRST_PAGE) }
+    // Jewel asks to close the menu after every item's click; a page turn holds it open through that one request.
+    val turning = remember { mutableStateOf(false) }
+    val currentPages by rememberUpdatedState(pages)
     val currentDigitPick by rememberUpdatedState(digitPick)
+    fun openMenu() {
+        page = FIRST_PAGE
+        turning.value = false
+        open = opens
+    }
+    val close = { open = false }
+    val show = { next: Int ->
+        page = next
+        turning.value = true
+    }
     val panel = LocalComponent.current
     if (open) {
         DisposableEffect(panel) {
             // Every event of a digit key in this window or its menu is taken while the menu is open, so that its typed character lands
-            // nowhere; the press picks.
+            // nowhere; the press picks. An arrow's press is taken when it turns a page.
             val dispatcher = KeyEventDispatcher { event ->
-                val digit = digitOf(event) ?: return@KeyEventDispatcher false
                 if (!inWindowOf(event, SwingUtilities.getWindowAncestor(panel))) return@KeyEventDispatcher false
-                if (event.id == AwtKeyEvent.KEY_PRESSED && currentDigitPick(digit)) open = false
+                val digit = digitOf(event)
+                if (digit != null) {
+                    if (event.id == AwtKeyEvent.KEY_PRESSED && page == FIRST_PAGE && currentDigitPick(digit)) open = false
+                    return@KeyEventDispatcher true
+                }
+                val next = pageTurn(event, page)?.takeIf { it in 0 until currentPages } ?: return@KeyEventDispatcher false
+                page = next
                 true
             }
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
@@ -412,7 +476,7 @@ private fun FooterControl(
             .onPreviewKeyEvent { event ->
                 when {
                     !open && event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.Spacebar) -> {
-                        open = opens
+                        openMenu()
                         true
                     }
                     open && event.type == KeyEventType.KeyDown && event.key == Key.Escape -> {
@@ -423,22 +487,28 @@ private fun FooterControl(
                 }
             }
             .hoverable(source)
-            .clickable(interactionSource = source, indication = null, role = Role.DropdownList) { open = !open && opens },
+            .clickable(interactionSource = source, indication = null, role = Role.DropdownList) { if (open) open = false else openMenu() },
     ) {
         Box(Modifier.footerPill(filled = hovered || open, focused = focused)) { label() }
         if (open) {
             PopupMenu(
                 onDismissRequest = { mode ->
-                    // A click on the control itself closes the menu through the control (its click toggles it).
-                    if (mode == InputMode.Touch && hovered) {
-                        false
-                    } else {
-                        open = false
-                        true
+                    when {
+                        // A page turn: the item's click asks to close, the menu stays on its new page.
+                        turning.value -> {
+                            turning.value = false
+                            false
+                        }
+                        // A click on the control itself closes the menu through the control (its click toggles it).
+                        mode == InputMode.Touch && hovered -> false
+                        else -> {
+                            open = false
+                            true
+                        }
                     }
                 },
                 popupPositionProvider = remember(alignEnd, gap) { AboveAnchor(alignEnd, gap) },
-            ) { menu(close) }
+            ) { menu(FooterMenu(page, close, show)) }
         }
     }
 }

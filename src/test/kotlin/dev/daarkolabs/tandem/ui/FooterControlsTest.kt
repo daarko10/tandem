@@ -165,6 +165,7 @@ class FooterControlsTest {
             ),
             effortMenu(composer(models = emptyList(), effort = "high")),
         )
+        assertEquals(ModelLabel("Model", "High"), modelLabel(composer(models = emptyList(), effort = "high")), "the label shows the known effort")
         assertNull(effortMenu(composer(models = emptyList(), effort = null)), "with neither, no Effort item")
     }
 

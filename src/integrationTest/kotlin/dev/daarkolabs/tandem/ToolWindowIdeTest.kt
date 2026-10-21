@@ -325,18 +325,14 @@ class ToolWindowIdeTest {
             }
             ui.keyboard { escape() }
             waitFor("Escape closed the popup", 30.seconds) { !button("Create").present() }
-            val modelControl = modelControl(defaultModelName("permission-mode"))
-            modelControl.click(Point(10, 10))
+            modelControl(defaultModelName("permission-mode")).click(Point(10, 10))
             waitFor("the model menu open", 30.seconds) { menuItemContaining("Opus").present() }
             // Kept as a test artifact: the menu 8 dp above the pill and right-aligned with it.
             takeScreenshot("footer-model-menu")
-            // Picked with the pointer, which reaches Opus round the menu's left side: first left under the menu, then up beside it.
-            // The menu's last row is Jewel's `Effort` submenu, which opens as soon as the pointer crosses it; the menus are popup
-            // layers of the tool window's own Compose scene, which gives the pointer to an open submenu alone, so after a straight
-            // move up from the control the click on Opus would only close the menus. That is a defect of the product, not of Xvfb
-            // (spec open item 13).
-            modelControl.moveMouse(Point(-200, 5))
-            menuItemContaining("Opus").moveMouse(Point(-40, 10))
+            // Picked with the pointer straight from the control: on its way up it crosses the menu's last row, `Effort`, which turns
+            // the menu to its effort page on a click alone, never on hover (spec open item 13). The menus are popup layers of the tool
+            // window's own Compose scene, which gives the pointer to the topmost one alone, so a row that opened a popup on hover
+            // would take the pointer from the models and the click on Opus would only close the menus.
             menuItemContaining("Opus").click(Point(10, 10))
             // The fake CLI answers set_model with the next acknowledgement it recorded, set_permission_mode's acceptEdits one, and
             // that one's status line: so the session ends in Accept edits. Wait for the frame itself before the IDE closes.
