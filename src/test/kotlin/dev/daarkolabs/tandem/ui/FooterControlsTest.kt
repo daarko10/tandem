@@ -11,12 +11,20 @@ import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.reduce
+import org.junit.jupiter.api.Assumptions.assumeFalse
 import org.junit.jupiter.api.Test
+import java.awt.GraphicsEnvironment
+import java.awt.event.KeyEvent
+import javax.swing.JDialog
+import javax.swing.JFrame
+import javax.swing.JPanel
+import javax.swing.JTextField
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** What the footer's mode and model controls show and list (spec 2.3), and where their menus open. */
+/** What the footer's mode and model controls show and list (spec 2.3), where their menus open, and which keys the menus take. */
 class FooterControlsTest {
     /** The models of agent-sync's `initialize` response: its `default` entry resolves to Fable 5.1, while init reports Sonnet 5.5. */
     private val models: List<ModelOption> = reduce(ChatState(), SessionEvent.Cli(fixtureLine("agent-sync", 2))).models
@@ -57,6 +65,7 @@ class FooterControlsTest {
         assertEquals("Fable 5.1", menu.single { it.isDefault }.label)
         assertTrue(menu.none { it.checked })
         assertEquals(listOf(1, 2, 3, 4, 5, 6, 7, 8, 9, null, null, null), menu.map { it.digit })
+        assertEquals(ModelLabel("claude-unknown-9", null), modelLabel(composer(activeModel = "claude-unknown-9")), "the label reads the wire id")
     }
 
     @Test
@@ -214,5 +223,81 @@ class FooterControlsTest {
         assertEquals(IntOffset(194, 392), aboveAnchor(IntRect(300, 500, 360, 523), window, IntSize(166, 100), alignEnd = true, gapPx = 8))
         assertEquals(IntOffset(234, 392), aboveAnchor(IntRect(380, 500, 400, 523), window, IntSize(166, 100), alignEnd = false, gapPx = 8))
         assertEquals(IntOffset(100, 0), aboveAnchor(IntRect(100, 50, 140, 73), window, IntSize(166, 100), alignEnd = false, gapPx = 8))
+    }
+
+    /** A headless Swing source for the AWT key events the footer menus read. */
+    private val source = JPanel()
+
+    private fun pressed(keyCode: Int, modifiers: Int = 0): KeyEvent = KeyEvent(source, KeyEvent.KEY_PRESSED, 0L, modifiers, keyCode, KeyEvent.CHAR_UNDEFINED)
+
+    private fun released(keyCode: Int): KeyEvent = KeyEvent(source, KeyEvent.KEY_RELEASED, 0L, 0, keyCode, KeyEvent.CHAR_UNDEFINED)
+
+    private fun typed(char: Char, modifiers: Int = 0): KeyEvent = KeyEvent(source, KeyEvent.KEY_TYPED, 0L, modifiers, KeyEvent.VK_UNDEFINED, char)
+
+    @Test
+    fun `a digit is read from the number row, the keypad or the typed character, never with a modifier`() {
+        assertEquals(3, digitOf(pressed(KeyEvent.VK_3)))
+        assertEquals(3, digitOf(pressed(KeyEvent.VK_NUMPAD3)))
+        assertEquals(3, digitOf(released(KeyEvent.VK_3)), "every event of the key is taken, so the release reads the same")
+        assertEquals(3, digitOf(typed('3')))
+        assertEquals(1, digitOf(pressed(KeyEvent.VK_1)))
+        assertEquals(9, digitOf(pressed(KeyEvent.VK_NUMPAD9)))
+        assertNull(digitOf(pressed(KeyEvent.VK_0)), "0 picks nothing")
+        assertNull(digitOf(pressed(KeyEvent.VK_3, KeyEvent.SHIFT_DOWN_MASK)))
+        assertNull(digitOf(pressed(KeyEvent.VK_3, KeyEvent.CTRL_DOWN_MASK)))
+        assertNull(digitOf(pressed(KeyEvent.VK_3, KeyEvent.ALT_DOWN_MASK)))
+        assertNull(digitOf(pressed(KeyEvent.VK_3, KeyEvent.META_DOWN_MASK)))
+        assertNull(digitOf(typed('3', KeyEvent.CTRL_DOWN_MASK)))
+        assertNull(digitOf(typed('a')))
+        assertNull(digitOf(pressed(KeyEvent.VK_RIGHT)))
+    }
+
+    @Test
+    fun `the arrows turn the pages on their press alone, never with a modifier`() {
+        assertEquals(1, pageTurn(pressed(KeyEvent.VK_RIGHT), 0))
+        assertEquals(0, pageTurn(pressed(KeyEvent.VK_LEFT), 1))
+        assertEquals(-1, pageTurn(pressed(KeyEvent.VK_LEFT), 0), "the control clamps the page to the ones it has")
+        assertNull(pageTurn(released(KeyEvent.VK_RIGHT), 0))
+        assertNull(pageTurn(pressed(KeyEvent.VK_LEFT, KeyEvent.ALT_DOWN_MASK), 1))
+        assertNull(pageTurn(pressed(KeyEvent.VK_RIGHT, KeyEvent.SHIFT_DOWN_MASK), 0))
+        assertNull(pageTurn(pressed(KeyEvent.VK_RIGHT, KeyEvent.CTRL_DOWN_MASK), 0))
+        assertNull(pageTurn(pressed(KeyEvent.VK_RIGHT, KeyEvent.META_DOWN_MASK), 0))
+        assertNull(pageTurn(pressed(KeyEvent.VK_UP), 0))
+        assertNull(pageTurn(pressed(KeyEvent.VK_3), 0))
+    }
+
+    @Test
+    fun `a footer menu takes keys from its own panel alone and closes when the focus leaves it`() {
+        val panel = JPanel()
+        val inner = JPanel().also(panel::add)
+        val field = JTextField().also(inner::add)
+        val sibling = JPanel()
+        val editor = JTextField().also(sibling::add)
+        assertTrue(takesKey(field, panel))
+        assertTrue(takesKey(panel, panel))
+        assertFalse(takesKey(editor, panel), "a key typed in another component is left alone")
+        assertFalse(takesKey(null, panel))
+        assertFalse(focusLeft(field, panel))
+        assertFalse(focusLeft(null, panel), "no focus owner: the window lost the focus, the menu stays")
+        assertTrue(focusLeft(editor, panel))
+    }
+
+    @Test
+    fun `a footer menu takes no keys from a dialog its own window owns`() {
+        assumeFalse(GraphicsEnvironment.isHeadless(), "a JFrame and a JDialog need a display")
+        val frame = JFrame()
+        try {
+            val panel = JPanel().also { frame.contentPane.add(it) }
+            val dialog = JDialog(frame)
+            try {
+                val field = JTextField().also { dialog.contentPane.add(it) }
+                assertFalse(takesKey(field, panel))
+                assertTrue(focusLeft(field, panel))
+            } finally {
+                dialog.dispose()
+            }
+        } finally {
+            frame.dispose()
+        }
     }
 }
