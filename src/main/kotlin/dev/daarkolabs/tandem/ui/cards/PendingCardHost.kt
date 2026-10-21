@@ -6,7 +6,6 @@ import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.Cards
-import dev.daarkolabs.tandem.chat.Payload
 import dev.daarkolabs.tandem.chat.PendingCard
 import dev.daarkolabs.tandem.chat.PermissionCard
 import dev.daarkolabs.tandem.chat.PlanCard
@@ -18,8 +17,10 @@ import dev.daarkolabs.tandem.session.PermissionAnswers
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.ui.RenderedChat
+import dev.daarkolabs.tandem.ui.openInEditor
 import kotlinx.collections.immutable.ImmutableList
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
+import org.jetbrains.jewel.intui.markdown.bridge.ProvideMarkdownStyling
 import org.jetbrains.jewel.markdown.MarkdownBlock
 
 /** What the docked card shows: the oldest pending request's [card], how many more wait, and a plan card's plan, parsed. */
@@ -31,8 +32,9 @@ internal fun RenderedChat.pendingCard(): PendingCardModel = PendingCardModel(car
 /**
  * The card of the request [model] holds, docked above the composer (spec 4.12–4.14), answered through [manager] for [handle]'s
  * session. A click reads the request from the session's state as it is then ([answerFor]): one that is no longer pending (answered,
- * cancelled, its turn ended) is not answered. [feedback] is the plan card's feedback, which Esc in the composer sends too. The card
- * takes the focus when it opens only if [takeFocus] says so then ([CardFrame]).
+ * cancelled, its turn ended) is not answered. [feedback] is the plan card's feedback, which Esc in the composer sends too; `Open plan
+ * file` opens in [project]'s editor ([openInEditor]). The card takes the focus when it opens only if [takeFocus] says so then
+ * ([CardFrame]).
  */
 @Composable
 internal fun PendingCardHost(
@@ -63,27 +65,20 @@ internal fun PendingCardHost(
             onSubmit = { picks -> answer { PermissionAnswers.questionAnswers(it, Cards.answers(card, picks)) } },
             onCancel = { answer { PermissionAnswers.cancelQuestion() } },
         )
-        // Until the plan card: the generic card, whose Deny and Esc send what Esc in the composer sends.
-        else -> PermissionCardView(
-            genericCard(card),
-            model.moreWaiting,
-            takeFocus,
-            onAllowOnce = { answer(PermissionAnswers::allowOnce) },
-            onAllowForSession = {},
-            onDeny = { answer(escapeAnswer(card, feedback.text.toString())) },
-        )
+        is PlanCard -> ProvideMarkdownStyling(project) {
+            PlanCardView(
+                card,
+                model.planBlocks,
+                model.moreWaiting,
+                feedback,
+                takeFocus,
+                onApprove = { startCoding -> answer { PermissionAnswers.approvePlan(it, startCoding) } },
+                onKeepPlanning = { answer { PermissionAnswers.keepPlanning(feedback.text.toString()) } },
+                onOpenPlanFile = { planFileToOpen(card)?.let { openInEditor(project, it) } },
+            )
+        }
     }
 }
-
-/** [card] as the generic permission card `Allow Claude to Use <tool>?`, for a card without a view of its own. */
-internal fun genericCard(card: PendingCard): PermissionCard = when (card) {
-    is PermissionCard -> card
-    is QuestionCard -> useTool(card, "AskUserQuestion")
-    is PlanCard -> useTool(card, "ExitPlanMode")
-}
-
-private fun useTool(card: PendingCard, tool: String): PermissionCard =
-    PermissionCard(card.requestId, card.toolUseId, card.agentDescription, "Use", tool, null, Payload.None, canAlwaysAllow = false)
 
 /** The answer [build] makes of the pending request [requestId] in [state]; null when no such request is pending any more. */
 internal fun answerFor(state: ChatState, requestId: String, build: (PendingPermission) -> PermissionAnswer): PermissionAnswer? =

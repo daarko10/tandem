@@ -9,7 +9,6 @@ import dev.daarkolabs.tandem.ui.cards.agentLine
 import dev.daarkolabs.tandem.ui.cards.answerFor
 import dev.daarkolabs.tandem.ui.cards.editLines
 import dev.daarkolabs.tandem.ui.cards.escapeAnswer
-import dev.daarkolabs.tandem.ui.cards.genericCard
 import dev.daarkolabs.tandem.ui.cards.moreWaitingText
 import dev.daarkolabs.tandem.ui.cards.payloadLineCount
 import dev.daarkolabs.tandem.ui.cards.permissionTitle
@@ -61,9 +60,6 @@ class PendingCardHostTest {
         assertEquals("Allow Claude to Run an agent?", permissionTitle(Cards.permission(agent, null)))
         assertEquals("From the agent \"Count lines in seed.txt\"", agentLine(Cards.pending(stateAt("agent-sync", 43)).first!!))
         assertNull(agentLine(Cards.permission(pendingAt("permission", 21), null)))
-        assertEquals("Allow Claude to Use AskUserQuestion?", permissionTitle(genericCard(Cards.question(pendingAt("ask-single", 22))!!)))
-        val plan = stateAt("plan-approve", 88)
-        assertEquals("Allow Claude to Use ExitPlanMode?", permissionTitle(genericCard(Cards.plan(plan.pendingPermissions.single(), plan))))
         assertNull(moreWaitingText(0))
         assertEquals("1 more waiting", moreWaitingText(1))
         assertEquals("3 more waiting", moreWaitingText(3))

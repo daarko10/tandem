@@ -3,10 +3,12 @@ package dev.daarkolabs.tandem.ui
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import dev.daarkolabs.tandem.ui.cards.CardKey
+import dev.daarkolabs.tandem.ui.cards.PlanKey
 import dev.daarkolabs.tandem.ui.cards.QuestionKey
 import dev.daarkolabs.tandem.ui.cards.cardButtonSwallows
 import dev.daarkolabs.tandem.ui.cards.cardKey
 import dev.daarkolabs.tandem.ui.cards.cmdEnterCap
+import dev.daarkolabs.tandem.ui.cards.planFeedbackKey
 import dev.daarkolabs.tandem.ui.cards.questionKey
 import dev.daarkolabs.tandem.ui.cards.questionSwallows
 import org.junit.jupiter.api.Test
@@ -71,6 +73,16 @@ class CardKeysTest {
             assertFalse(cardButtonSwallows(key(AwtKeyEvent.VK_TAB), primary))
             assertFalse(cardButtonSwallows(key(AwtKeyEvent.VK_A), primary))
         }
+    }
+
+    @Test
+    fun `Enter in the feedback field keeps planning`() {
+        assertEquals(PlanKey.KEEP_PLANNING, planFeedbackKey(key(AwtKeyEvent.VK_ENTER), KeyEventType.KeyDown, shift = false))
+        assertEquals(PlanKey.KEEP_PLANNING, planFeedbackKey(key(AwtKeyEvent.VK_ENTER, numPad = true), KeyEventType.KeyDown, shift = false))
+        assertNull(planFeedbackKey(key(AwtKeyEvent.VK_ENTER), KeyEventType.KeyDown, shift = true))
+        assertNull(planFeedbackKey(key(AwtKeyEvent.VK_ENTER), KeyEventType.KeyUp, shift = false))
+        // The frame never approves while the field has focus.
+        assertNull(press(AwtKeyEvent.VK_ENTER, textField = true))
     }
 
     @Test

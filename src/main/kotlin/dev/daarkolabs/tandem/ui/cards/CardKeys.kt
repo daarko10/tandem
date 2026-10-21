@@ -69,6 +69,19 @@ internal fun cardButtonSwallows(key: Key, primary: Boolean): Boolean = when (key
 /** The key cap of a card's Cmd/Ctrl+Enter answer: `⌘↩` on macOS ([mac]), `Ctrl↩` elsewhere (spec 4.12, 4.20). */
 internal fun cmdEnterCap(mac: Boolean = SystemInfo.isMac): String = if (mac) "⌘↩" else "Ctrl↩"
 
+/** What a key typed in the plan card's feedback field does (spec 4.14). */
+enum class PlanKey { KEEP_PLANNING }
+
+/** What [event] does in the plan card's feedback field ([planFeedbackKey] with Shift read from the event). */
+fun planFeedbackKey(event: KeyEvent): PlanKey? = planFeedbackKey(event.key, event.type, event.isShiftPressed)
+
+/**
+ * What [key] going [type] does in the plan card's feedback field (spec 4.14): Enter without [shift] is [PlanKey.KEEP_PLANNING], since
+ * the feedback is what the user is typing; null leaves the key to the field. Only a key press counts.
+ */
+internal fun planFeedbackKey(key: Key, type: KeyEventType, shift: Boolean): PlanKey? =
+    PlanKey.KEEP_PLANNING.takeIf { type == KeyEventType.KeyDown && !shift && (key == Key.Enter || key == Key.NumPadEnter) }
+
 /** What a key typed on the question card does (spec 4.13, 4.18), before [cardKey] sees it. */
 sealed interface QuestionKey {
     /** Picks or toggles the option at [index] of the active question (the `Other` row is the index after the last option). */
