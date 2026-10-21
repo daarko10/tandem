@@ -249,6 +249,27 @@ class ChatPresenterTest {
     }
 
     @Test
+    fun `rows the builder kept stay the same rendered rows, and the rest match a fresh build`() = runBlocking {
+        val options = RowOptions(showThinking = true)
+        val first = replay("tools-read").first
+        val state = MutableStateFlow(first)
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(options))
+            val before = withTimeout(TIMEOUT) { presenter.chat.first { it.rows.isNotEmpty() } }
+            // A new prompt: the footer goes, a user row and the working row follow, and the rows above stay as they were.
+            state.value = reduce(first, SessionEvent.UserSent("u9", "again"))
+            val after = withTimeout(TIMEOUT) { presenter.chat.first { chat -> chat.rows.any { it.row.key == "u:u9" } } }
+            assertEquals(ChatRowsBuilder(options).build(state.value).rows, after.rows.map { it.row })
+            val kept = before.rows.indexOfFirst { it.row is TurnEndRow }
+            assertTrue(kept > 0, before.rows.toString())
+            for (i in 0 until kept) assertSame(before.rows[i], after.rows[i])
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `an expanded agent row returns the working row to the turn's verb`() {
         val row = WorkingRow(turnUuid = "u1", startedAtMillis = 0L, step = "Running x", outputTokens = 0, waiting = false, expandedStep = "Pondering")
         assertEquals(row.expandedStep, shownWorkingRow(row, true).step)

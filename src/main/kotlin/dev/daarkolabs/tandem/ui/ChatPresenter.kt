@@ -24,6 +24,7 @@ import dev.daarkolabs.tandem.session.NoticeLevel
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.ImmutableMap
 import kotlinx.collections.immutable.PersistentList
+import kotlinx.collections.immutable.mutate
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.collections.immutable.toImmutableList
@@ -112,9 +113,13 @@ internal class ChatPresenter(
     private val parsed = HashMap<String, Parsed>()
     private var failed = false
 
-    /** The last chat that rendered, and its rows: an unchanged row keeps its rendered row ([render]). */
+    /** The last chat that rendered, and its rows: the rows the builder keeps as the same instances keep theirs ([render]). */
     private var good: RenderedChat = rendered.value
     private var goodRows: PersistentList<RenderedRow> = persistentListOf()
+
+    /** Whether a body was opened since the last full pass, and how many renders ago that pass was ([render]). */
+    private var requestsChanged = false
+    private var sinceFull = 0
 
     private class Parsed(val markdown: String, val blocks: ImmutableList<MarkdownBlock>)
 
@@ -131,7 +136,7 @@ internal class ChatPresenter(
             while (true) {
                 if (stale) renderSafely(input)
                 stale = select {
-                    expandRequests.onReceive { key -> requested.add(key) }
+                    expandRequests.onReceive { key -> requested.add(key).also { if (it) requestsChanged = true } }
                     inputs.onReceive {
                         input = it
                         true
@@ -184,28 +189,49 @@ internal class ChatPresenter(
 
     /**
      * The rows with their Markdown (spec 5.6). A parsed key stays cached, and is attached again on every render, while it names a
-     * row, a group's sub-row `c:<call id>` or a subagent's row (at any depth) of the latest rows, or the open plan card's plan; the
-     * rest of the cache goes, and so do the opened keys whose rows went.
+     * row, a group's sub-row `c:<call id>` or a subagent's row (at any depth) of the latest rows, or the open plan card's plan.
+     *
+     * A streamed delta changes only the last rows: the builder hands back the rows before them as the same instances, and those keep
+     * their rendered rows unvisited, so a render costs the rows that changed. A full pass renders every row and then drops the rest
+     * of the cache, and the opened keys whose rows went: after a new builder, after a body was opened (its row may be anywhere), when
+     * the list got shorter, and every [FULL_EVERY] renders.
      */
     private fun render(input: Input): RenderedChat {
+        val kept = builder?.takeIf { builderOptions == input.options }
         val rows = buildRows(
-            builder?.takeIf { builderOptions == input.options } ?: ChatRowsBuilder(input.options).also {
+            kept ?: ChatRowsBuilder(input.options).also {
                 builder = it
                 builderOptions = input.options
             },
             input.state,
         )
-        val previous = goodRows.associateBy { it.row.key }
+        val chatRows = rows.rows
+        val before = goodRows
+        val full = kept == null || requestsChanged || chatRows.size < before.size || ++sinceFull >= FULL_EVERY
+        var same = 0
+        if (!full) {
+            val common = minOf(chatRows.size, before.size)
+            while (same < common && chatRows[same] === before[same].row) same++
+        }
+        val previous = HashMap<String, RenderedRow>()
+        for (i in same until before.size) previous[before[i].row.key] = before[i]
         val live = HashSet<String>()
-        val out = rows.rows.mapTo(persistentListOf<RenderedRow>().builder()) { renderRow(it, previous, live) }.build()
-        requested.retainAll(live)
+        val out = (if (same == 0) persistentListOf() else before).mutate { list ->
+            for (i in list.lastIndex downTo same) list.removeAt(i)
+            for (i in same until chatRows.size) list += renderRow(chatRows[i], previous, live)
+        }
         val card = rows.card
         val planBlocks = (card as? PlanCard)?.plan?.let { plan ->
             val key = "plan:${card.requestId}"
             live += key
             blocks(key, plan)
         }
-        parsed.keys.retainAll(live)
+        if (full) {
+            requested.retainAll(live)
+            parsed.keys.retainAll(live)
+            requestsChanged = false
+            sinceFull = 0
+        }
         goodRows = out
         return RenderedChat(out, card, rows.moreWaiting, planBlocks)
     }
@@ -274,6 +300,9 @@ internal class ChatPresenter(
 
     private companion object {
         val LOG: Logger = logger<ChatPresenter>()
+
+        /** Renders between two full passes ([render]). */
+        const val FULL_EVERY = 256
     }
 }
 
