@@ -41,6 +41,12 @@ object HostMessages {
     fun setPermissionMode(requestId: String, mode: PermissionMode): JsonObject =
         request(requestId, "set_permission_mode") { put("mode", mode.wire) }
 
+    /** Asks the CLI to give the session a custom title. */
+    fun renameSession(requestId: String, title: String): JsonObject = request(requestId, "rename_session") {
+        put("title", title)
+        put("source", "host")
+    }
+
     /** Allows a `can_use_tool` request. Always echo the (possibly edited) input. */
     fun allow(requestId: String, toolUseId: String?, updatedInput: JsonObject, updatedPermissions: List<JsonObject> = emptyList()): JsonObject =
         success(requestId) {

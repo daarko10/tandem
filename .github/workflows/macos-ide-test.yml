@@ -1,0 +1,54 @@
+# The IDE test (IDE Starter + UI Driver: a real IDE with the built plugin installed, driven like a person would) on a Mac.
+# A macOS runner costs about ten times a Linux one, so it does not run on every push; build.yml runs the unit, fixture and
+# platform tests on a Mac for every push, and the IDE test on Linux.
+# Runs nightly on the default branch, by hand (Actions > macOS IDE test > Run workflow, or
+# `gh workflow run macos-ide-test.yml --ref <branch>`, once this file is on the default branch), and on a pull request
+# when it gets the `macos-ide-test` label.
+name: macOS IDE test
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    types: [ labeled ]
+
+jobs:
+  ide-test:
+    name: IDE test (macOS)
+    runs-on: macos-latest
+    # Nightly only in the repository itself, not in forks; by hand anywhere; on a pull request only for the label.
+    if: >-
+      ${{ (github.event_name == 'schedule' && !github.event.repository.fork)
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request' && github.event.label.name == 'macos-ide-test') }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+      # A macOS runner has a display: no xvfb-run here.
+      - name: Run the IDE test
+        shell: bash
+        run: python3 --version && set -o pipefail && ./gradlew integrationTest 2>&1 | tee integration.log
+      - name: Report IDE test failures
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          grep -ho 'failure message="[^"]*' build/test-results/integrationTest/*.xml 2>/dev/null \
+            | sed -E 's/^failure message="//; s/&#10;/ /g; s/\x1b\[[0-9;]*m//g; s/\?\[[0-9;]*m//g' \
+            | cut -c1-400 | head -n 10 \
+            | while IFS= read -r line; do echo "::error title=IDE test (macOS)::${line}"; done
+          find out/ide-tests -name idea.log -print0 2>/dev/null | xargs -0 grep -h 'Plugin: dev.daarkolabs.tandem' \
+            | sort -u | head -n 10 | while IFS= read -r line; do echo "::error title=IDE log (macOS)::${line}"; done
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: ide-test-logs-macos
+          path: |
+            out/ide-tests/tests/**/log/**
+            build/reports/tests/integrationTest

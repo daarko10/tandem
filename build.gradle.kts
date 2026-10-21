@@ -1,3 +1,6 @@
+import kotlinx.kover.gradle.plugin.dsl.AggregationType
+import kotlinx.kover.gradle.plugin.dsl.CoverageUnit
+import kotlinx.kover.gradle.plugin.dsl.GroupingEntityType
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.models.ProductRelease
@@ -6,6 +9,8 @@ plugins {
     id("org.jetbrains.kotlin.jvm")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.intellij.platform")
+    // Coverage of the unit, fixture and platform tests; build-time only, nothing of it goes into the plugin.
+    id("org.jetbrains.kotlinx.kover")
 }
 
 kotlin {
@@ -14,12 +19,12 @@ kotlin {
 
 // IDE Starter tests: boot a real IDE with the built plugin installed and drive it with the UI Driver.
 // Slow (downloads and starts an IDE), so they run in their own task: xvfb-run ./gradlew integrationTest
-val integrationTest: SourceSet by sourceSets.creating {
+val integrationTest: SourceSet = sourceSets.create("integrationTest") {
     compileClasspath += sourceSets.main.get().output
     runtimeClasspath += sourceSets.main.get().output
 }
-val integrationTestImplementation: Configuration by configurations.getting
-val integrationTestRuntimeOnly: Configuration by configurations.getting
+val integrationTestImplementation: Configuration = configurations.getByName("integrationTestImplementation")
+val integrationTestRuntimeOnly: Configuration = configurations.getByName("integrationTestRuntimeOnly")
 
 dependencies {
     // Tree API only (JsonElement). No serialization compiler plugin, so unknown fields never break parsing.
@@ -82,6 +87,46 @@ intellijPlatform {
     }
 }
 
+// Coverage of protocol/ and session/ (with session/transcript), whose target is 90% of lines (CLAUDE.md):
+// ./gradlew koverLog prints it per package; koverHtmlReport and koverXmlReport write build/reports/kover/; koverVerify, part of check,
+// holds each package to it.
+kover {
+    currentProject {
+        // Measures the test task only: the IDE Starter tests run the plugin in another JVM, and reports must never start them.
+        instrumentation {
+            disabledForTestTasks.add("integrationTest")
+            // Only Tandem's classes: by default the agent instruments every class the test JVM loads, the whole IntelliJ Platform.
+            includedClasses.add("dev.daarkolabs.tandem.*")
+        }
+    }
+    reports {
+        filters {
+            includes {
+                packages("dev.daarkolabs.tandem.protocol", "dev.daarkolabs.tandem.session")
+            }
+        }
+        total {
+            // Part of check: fails the build when a package falls below 90% of lines.
+            verify {
+                rule("90% of lines in each package of protocol/ and session/") {
+                    groupBy = GroupingEntityType.PACKAGE
+                    bound {
+                        minValue = 90
+                        coverageUnits = CoverageUnit.LINE
+                        aggregationForGroup = AggregationType.COVERED_PERCENTAGE
+                    }
+                }
+            }
+            log {
+                groupBy = GroupingEntityType.PACKAGE
+                coverageUnits = CoverageUnit.LINE
+                aggregationForGroup = AggregationType.COVERED_PERCENTAGE
+                format = "<entity> line coverage: <value>%"
+            }
+        }
+    }
+}
+
 tasks {
     runIde {
         // Development-only runs, also usable headless under xvfb-run (see ui/dev/):
@@ -108,10 +153,17 @@ tasks {
         useJUnitPlatform()
         // Protocol tests run against recorded CLI transcripts; they never spawn a real `claude`.
         systemProperty("tandem.fixtures", layout.projectDirectory.dir("src/test/resources/fixtures").asFile.path)
-        // Platform tests start TandemChat against a fake CLI that replays a fixture, never a real `claude`.
+        // Platform tests start sessions against a fake CLI that replays a fixture, never a real `claude`.
         systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path)
         // Set by the nightly CLI contract workflow: a directory of freshly recorded live transcripts.
         systemProperty("tandem.contractDir", providers.systemProperty("tandem.contractDir").getOrElse(""))
+        // A GC log, which CI uploads with the test IDE's logs when the build fails: it shows what the test JVM's heap did, such as
+        // the platform's leak check filling the heap when the test application closes. Quoted: a Windows path has a colon.
+        jvmArgs("-Xlog:gc*:file=\"${layout.buildDirectory.file("test-gc.log").get().asFile.path}\":time,uptime")
+        // The platform's leak check, when the test application closes, fills the whole heap to flush soft references: with the
+        // platform's default of 2 GB that alone took 18 s of the close's 20 s on a 2-CPU CI runner. The tests need far less: the
+        // heap holds about 150 MB live and grows to about 600 MB during a run.
+        maxHeapSize = "1g"
     }
 
     register<Test>("integrationTest") {

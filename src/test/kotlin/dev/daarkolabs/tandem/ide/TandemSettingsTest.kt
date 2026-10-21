@@ -1,0 +1,401 @@
+package dev.daarkolabs.tandem.ide
+
+import com.intellij.configurationStore.saveSettings
+import com.intellij.openapi.application.EDT
+import com.intellij.openapi.options.Configurable
+import com.intellij.openapi.ui.TextFieldWithBrowseButton
+import com.intellij.openapi.util.JDOMUtil
+import com.intellij.testFramework.common.timeoutRunBlocking
+import com.intellij.testFramework.junit5.TestApplication
+import com.intellij.testFramework.junit5.fixture.tempPathFixture
+import com.intellij.testFramework.openProjectAsync
+import com.intellij.testFramework.useProjectAsync
+import com.intellij.ui.components.JBTextField
+import com.intellij.util.ui.UIUtil
+import com.intellij.util.xmlb.XmlSerializer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Test
+import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import javax.swing.JButton
+import javax.swing.JComponent
+import javax.swing.JLabel
+import kotlin.io.path.createDirectories
+import kotlin.io.path.createFile
+import kotlin.io.path.writeText
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.seconds
+
+/**
+ * [TandemSettings], its page in Settings | Tools | Tandem ([TandemSettingsConfigurable]) and [TandemWorkspaceState], in a headless
+ * IDE. The test task passes the fake CLI as `tandem.claudePath`.
+ */
+@TestApplication
+class TandemSettingsTest {
+    companion object {
+        private val tempDir = tempPathFixture()
+    }
+
+    /** The settings are the application's, shared with every other test: each test leaves the defaults behind. */
+    @AfterEach
+    fun restoreDefaults() {
+        TandemSettings.getInstance().loadState(TandemSettings.State())
+    }
+
+    /** A shell script named [name] in a directory of its own, running [body]. */
+    private fun script(name: String, body: String): String =
+        tempDir.get().resolve(name).createDirectories().resolve("claude").also {
+            it.writeText("#!/bin/sh\n$body\n")
+            it.toFile().setExecutable(true)
+        }.toString()
+
+    /** A `PATH` that finds [executable] first, then the system's tools, for a check that detects by the login shell's `PATH`. */
+    private fun pathFinding(executable: String): String = File(executable).parent + File.pathSeparator + System.getenv("PATH")
+
+    /**
+     * Runs [block] with detection by the login shell's `PATH` alone: without the `tandem.claudePath` hook, which would win, so that
+     * a check that answers shows it by the executable it detects.
+     */
+    private suspend fun <T> withoutHook(block: suspend () -> T): T {
+        val hook = System.getProperty("tandem.claudePath")
+        System.clearProperty("tandem.claudePath")
+        try {
+            return block()
+        } finally {
+            if (hook != null) System.setProperty("tandem.claudePath", hook)
+            ShellEnvironment.reset()
+        }
+    }
+
+    /** The text of every label on [page], read on the EDT. */
+    private suspend fun labels(page: JComponent): List<String> =
+        withContext(Dispatchers.EDT) { UIUtil.findComponentsOfType(page, JLabel::class.java).map { it.text } }
+
+    @Test
+    fun `settings round-trip and the path override wins`() {
+        // tandem.claudePath names an executable already, so the override has to be another one to show that it wins.
+        val custom = tempDir.get().resolve("custom").createDirectories().resolve("my-claude").also {
+            it.writeText("#!/bin/sh\n")
+            it.toFile().setExecutable(true)
+        }.toString()
+        val settings = TandemSettings.getInstance()
+        settings.loadState(
+            TandemSettings.State().apply {
+                claudePath = custom
+                maxLiveSessions = 2
+            },
+        )
+        assertEquals(custom, ClaudeBinary.find())
+        assertEquals(custom, settings.state.claudePath)
+        assertEquals(2, settings.state.maxLiveSessions)
+        assertEquals(2, settings.maxLiveSessions())
+    }
+
+    @Test
+    fun `a blank path falls back to the test hook and the cap stays in range`() {
+        val settings = TandemSettings.getInstance()
+        settings.loadState(
+            TandemSettings.State().apply {
+                claudePath = "  "
+                maxLiveSessions = 40
+            },
+        )
+        assertEquals(System.getProperty("tandem.claudePath"), ClaudeBinary.find())
+        assertEquals(16, settings.maxLiveSessions(), "a hand-edited file cannot raise the cap past 16")
+        settings.state.maxLiveSessions = 0
+        assertEquals(1, settings.maxLiveSessions())
+        assertEquals(4, TandemSettings.State().maxLiveSessions, "the default cap")
+    }
+
+    @Test
+    fun `detect ignores the saved path, which find tries first`() {
+        val saved = script("saved", "exit 0")
+        TandemSettings.getInstance().loadState(TandemSettings.State().apply { claudePath = saved })
+        assertEquals(saved, ClaudeBinary.find())
+        assertEquals(System.getProperty("tandem.claudePath"), ClaudeBinary.detect()?.path)
+        // One that cannot run: sessions use the detected one.
+        TandemSettings.getInstance().state.claudePath = tempDir.get().resolve("missing").toString()
+        assertEquals(ClaudeBinary.detect()?.path, ClaudeBinary.find())
+        // Nor can a directory, though its execute bit is set: the page says it is not executable, and no session starts it.
+        val directory = tempDir.get().resolve("a-directory").createDirectories().toString()
+        TandemSettings.getInstance().state.claudePath = directory
+        assertFalse(ClaudeBinary.isExecutable(directory))
+        assertEquals(ClaudeBinary.detect()?.path, ClaudeBinary.find())
+    }
+
+    @Test
+    fun `the page shows what Tandem detects, warns about a saved path that cannot run and tests the detected one`() =
+        timeoutRunBlocking(30.seconds) {
+            val detected = script("detected", "echo 'detected 2.0'")
+            val saved = script("saved", "echo 'saved 1.0'")
+            val notExecutable = tempDir.get().resolve("plain").createDirectories().resolve("claude").also { it.writeText("") }
+            TandemSettings.getInstance().loadState(TandemSettings.State().apply { claudePath = notExecutable.toString() })
+            val hook = System.getProperty("tandem.claudePath")
+            System.setProperty("tandem.claudePath", detected) // what Tandem detects, in place of the fake CLI
+            val configurable = TandemSettingsConfigurable()
+            try {
+                val page = withContext(Dispatchers.EDT) {
+                    configurable.createComponent().also { configurable.reset() }
+                }
+                while (labels(page).let { detected !in it || "Configured path is not executable" !in it }) delay(20)
+
+                // A path that runs, applied: the warning goes.
+                withContext(Dispatchers.EDT) {
+                    assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = saved
+                    configurable.apply()
+                }
+                while ("Configured path is not executable" in labels(page)) delay(20)
+                assertTrue(detected in labels(page))
+
+                // Test with an empty field runs the detected executable, not the saved one.
+                withContext(Dispatchers.EDT) {
+                    assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = ""
+                    UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+                }
+                while ("detected 2.0" !in labels(page)) delay(20)
+            } finally {
+                // First, and without suspending: a test that timed out is cancelled, and every other test needs the fake CLI back.
+                if (hook == null) System.clearProperty("tandem.claudePath") else System.setProperty("tandem.claudePath", hook)
+                withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+            }
+        }
+
+    @Test
+    fun `a check that answers after a later Test does not overwrite the Test's answer`() = timeoutRunBlocking(30.seconds) {
+        val answering = script("answering", "echo 'answer 1.0'")
+        val fake = System.getProperty("tandem.claudePath")
+        // The page's first look at the login shell's environment, the detection that check() runs, waits until released.
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val first = AtomicBoolean(true)
+        ShellEnvironment.source = {
+            if (first.getAndSet(false)) {
+                entered.countDown()
+                release.await()
+            }
+            System.getenv()
+        }
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val page = withContext(Dispatchers.EDT) { configurable.createComponent() }
+            while (entered.count > 0) delay(20) // the check is under way
+            withContext(Dispatchers.EDT) {
+                assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = answering
+                UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+            }
+            while ("answer 1.0" !in labels(page)) delay(20)
+            release.countDown()
+            // The check shows what it detected and, in the same step, its status, which is older than the Test's.
+            while (fake !in labels(page)) delay(20)
+            assertTrue("answer 1.0" in labels(page), labels(page).toString())
+        } finally {
+            release.countDown()
+            ShellEnvironment.reset()
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+    }
+
+    @Test
+    fun `Apply during a Test keeps the Test's answer`() = timeoutRunBlocking(30.seconds) {
+        // It answers only once the test lets it, so that Apply's check certainly comes while the Test runs.
+        val gate = tempDir.get().resolve("gate")
+        val slow = script("slow", "while [ ! -e '$gate' ]; do sleep 0.05; done; echo 'slow 1.0'")
+        // The page's own check detects the first; Apply's, the second: which one shows says that Apply's check has answered.
+        val before = script("detected-before-apply", "exit 0")
+        val after = script("detected-after-apply", "exit 0")
+        val applied = AtomicBoolean(false)
+        withoutHook {
+            ShellEnvironment.source = { System.getenv() + ("PATH" to pathFinding(if (applied.get()) after else before)) }
+            val configurable = TandemSettingsConfigurable()
+            try {
+                val page = withContext(Dispatchers.EDT) { configurable.createComponent().also { configurable.reset() } }
+                while (before !in labels(page)) delay(20) // the page's own check is done
+                withContext(Dispatchers.EDT) {
+                    assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = slow
+                    UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+                    applied.set(true)
+                    configurable.apply() // saves the slow path, which runs: its check finds nothing to warn about
+                }
+                while (after !in labels(page)) delay(20) // Apply's check has answered, while the Test runs
+                assertTrue("Testing…" in labels(page), labels(page).toString())
+                gate.createFile()
+                withTimeoutOrNull(10.seconds) { while ("slow 1.0" !in labels(page)) delay(20) }
+                assertTrue("slow 1.0" in labels(page), labels(page).toString())
+            } finally {
+                withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+            }
+        }
+    }
+
+    @Test
+    fun `a check asked during a Test that answers after it does not overwrite the Test's answer`() = timeoutRunBlocking(30.seconds) {
+        val gate = tempDir.get().resolve("gate-during")
+        val slow = script("slow-during", "while [ ! -e '$gate' ]; do sleep 0.05; done; echo 'slow 2.0'")
+        val before = script("detected-before-check", "exit 0")
+        val after = script("detected-by-check", "exit 0")
+        // The third look at the login shell's environment, Apply's check after the page's own and the Test's, waits, and detects
+        // the second executable: when it shows, the check has answered.
+        val calls = AtomicInteger()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        withoutHook {
+            ShellEnvironment.source = {
+                val call = calls.incrementAndGet()
+                if (call == 3) {
+                    entered.countDown()
+                    release.await()
+                }
+                System.getenv() + ("PATH" to pathFinding(if (call >= 3) after else before))
+            }
+            val configurable = TandemSettingsConfigurable()
+            try {
+                val page = withContext(Dispatchers.EDT) { configurable.createComponent().also { configurable.reset() } }
+                while (before !in labels(page)) delay(20) // the page's own check is done
+                withContext(Dispatchers.EDT) {
+                    assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = slow
+                    UIUtil.findComponentsOfType(page, JButton::class.java).single { it.text == "Test" }.doClick()
+                }
+                while (calls.get() < 2) delay(20) // the Test runs
+                withContext(Dispatchers.EDT) { configurable.apply() } // its check is asked for during the Test
+                while (entered.count > 0) delay(20)
+                gate.createFile()
+                while ("slow 2.0" !in labels(page)) delay(20) // the Test has answered
+                release.countDown() // and only now does the check
+                while (after !in labels(page)) delay(20) // the check has answered
+                assertTrue("slow 2.0" in labels(page), labels(page).toString())
+            } finally {
+                release.countDown()
+                withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+            }
+        }
+    }
+
+    @Test
+    fun `the stored path is trimmed whoever writes it`() {
+        val state = TandemSettings.State()
+        state.claudePath = "  /opt/claude/bin/claude \n"
+        assertEquals("/opt/claude/bin/claude", state.claudePath)
+        state.claudePath = " \t "
+        assertNull(state.claudePath, "a blank path is no path")
+        state.claudePath = "/usr/local/bin/claude"
+        assertEquals("/usr/local/bin/claude", state.claudePath)
+        // Still saved and read back under its name, as tandem.xml holds it.
+        val saved = XmlSerializer.serialize(state)
+        assertTrue("claudePath" in JDOMUtil.write(saved), JDOMUtil.write(saved))
+        assertEquals("/usr/local/bin/claude", XmlSerializer.deserialize(saved, TandemSettings.State::class.java).claudePath)
+    }
+
+    @Test
+    fun `a saved path with spaces around it is stored trimmed, and the page has nothing to apply`() = timeoutRunBlocking {
+        val settings = TandemSettings.getInstance()
+        settings.loadState(TandemSettings.State().apply { claudePath = "  /opt/claude/bin/claude \t" }) // as hand-edited
+        assertEquals("/opt/claude/bin/claude", settings.state.claudePath)
+        assertEquals("/opt/claude/bin/claude", ClaudeBinary.configured())
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val modified = withContext(Dispatchers.EDT) {
+                configurable.createComponent()
+                configurable.reset()
+                configurable.isModified
+            }
+            assertFalse(modified, "the field shows the stored path as it is")
+        } finally {
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+        settings.loadState(TandemSettings.State().apply { claudePath = "   " })
+        assertNull(settings.state.claudePath, "a blank path is no path")
+    }
+
+    @Test
+    fun `the page is registered under Tools`() {
+        val pages = Configurable.APPLICATION_CONFIGURABLE.extensionList
+        val page = assertNotNull(pages.singleOrNull { it.id == "dev.daarkolabs.tandem.settings" })
+        assertEquals("tools", page.parentId)
+        assertEquals(TandemSettingsConfigurable::class.java.name, page.instanceClass)
+    }
+
+    @Test
+    fun `the settings page writes the path and cap`() = timeoutRunBlocking {
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val (before, after, applied) = withContext(Dispatchers.EDT) {
+                val page = configurable.createComponent()
+                configurable.reset()
+                val unchanged = configurable.isModified
+                val path = assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java))
+                val cap = UIUtil.findComponentsOfType(page, JBTextField::class.java).single { it !== path.textField }
+                path.text = "  /opt/claude/bin/claude " // as pasted, with spaces around it
+                // A 1 typed in front of the 4: replacing the text would empty the field for a moment, which headless mode logs as invalid.
+                cap.document.insertString(0, "1", null)
+                val changed = configurable.isModified
+                configurable.apply()
+                Triple(unchanged, changed, configurable.isModified)
+            }
+            assertFalse(before, "nothing to apply right after reset")
+            assertTrue(after)
+            assertFalse(applied, "nothing left to apply once applied")
+            val state = TandemSettings.getInstance().state
+            assertEquals("/opt/claude/bin/claude", state.claudePath)
+            assertEquals(14, state.maxLiveSessions)
+        } finally {
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+    }
+
+    @Test
+    fun `the page shows the executable it detects`() = timeoutRunBlocking {
+        val fake = System.getProperty("tandem.claudePath")
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val page = withContext(Dispatchers.EDT) { configurable.createComponent() }
+            // Found on a background thread, then shown: the label starts as "Detecting…".
+            suspend fun shown(): Boolean =
+                withContext(Dispatchers.EDT) { UIUtil.findComponentsOfType(page, JLabel::class.java).any { it.text == fake } }
+            while (!shown()) delay(20)
+            // And where it was found: here the test hook, on a Mac whose IDE was started from the Dock the login shell's PATH, say.
+            while (Where.OVERRIDE.description !in labels(page)) delay(20)
+        } finally {
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+    }
+
+    @Test
+    fun `workspace state round-trips`() = timeoutRunBlocking(60.seconds) {
+        val dir = tempDir.get().resolve("workspace").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            TandemWorkspaceState.getInstance(project).state.apply {
+                openSessionIds = mutableListOf("one", "two")
+                selectedSessionId = "two"
+                sidebarCollapsed = true
+                lastModel = "opus"
+                lastEffort = "high"
+                lastPermissionMode = "plan"
+            }
+            saveSettings(project, forceSavingAllSettings = true)
+        }
+        // Read back from the workspace file, as the next IDE run does.
+        val loaded = openProjectAsync(dir).useProjectAsync { project ->
+            val state = TandemWorkspaceState.getInstance(project).state
+            listOf(
+                state.openSessionIds.toList(),
+                state.selectedSessionId,
+                state.sidebarCollapsed,
+                state.lastModel,
+                state.lastEffort,
+                state.lastPermissionMode,
+            )
+        }
+        assertEquals(listOf(listOf("one", "two"), "two", true, "opus", "high", "plan"), loaded)
+    }
+}

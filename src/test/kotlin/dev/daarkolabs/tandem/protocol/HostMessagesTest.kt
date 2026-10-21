@@ -42,6 +42,10 @@ class HostMessagesTest {
             """{"type":"control_request","request_id":"a4","request":{"subtype":"set_permission_mode","mode":"acceptEdits"}}""",
             wire(HostMessages.setPermissionMode("a4", PermissionMode.ACCEPT_EDITS)),
         )
+        assertEquals(
+            """{"type":"control_request","request_id":"a5","request":{"subtype":"rename_session","title":"Alpha","source":"host"}}""",
+            wire(HostMessages.renameSession("a5", "Alpha")),
+        )
     }
 
     @Test

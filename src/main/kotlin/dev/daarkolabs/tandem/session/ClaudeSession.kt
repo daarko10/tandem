@@ -7,8 +7,10 @@ import dev.daarkolabs.tandem.protocol.HostMessages
 import dev.daarkolabs.tandem.protocol.InboundRequest
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -17,6 +19,8 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,15 +39,32 @@ import java.util.concurrent.atomic.AtomicLong
 
 private val LOG = logger<ClaudeSession>()
 
-/** How to start the CLI for one chat. */
+/**
+ * How to start the CLI for one chat: a new session ([sessionId]), an existing one ([resumeSessionId]), or a fork of an existing one
+ * ([resumeSessionId] with [forkSession], and optionally [sessionId] as the fork's own id). Only a fork may set both ids: the CLI
+ * refuses `--session-id` with `--resume` unless `--fork-session` is given too.
+ */
 data class SessionConfig(
     val binary: String,
     val workingDirectory: Path,
+    /** A new session, or with [forkSession] the fork: passed as `--session-id`, so its id is known before the CLI reports it. */
+    val sessionId: String? = null,
+    /** An existing session: passed as `--resume`. */
+    val resumeSessionId: String? = null,
     /** Null lets the CLI pick its default. */
     val model: String? = null,
+    val effort: String? = null,
     val permissionMode: PermissionMode? = null,
-    val resumeSessionId: String? = null,
+    /** With [resumeSessionId]: continue as a new session (`--fork-session`), leaving the original untouched. */
+    val forkSession: Boolean = false,
 ) {
+    init {
+        require(!forkSession || resumeSessionId != null) { "A fork needs the resumeSessionId of the session it forks." }
+        require((sessionId == null) != (resumeSessionId == null) || (sessionId != null && forkSession)) {
+            "Pass sessionId for a new session or resumeSessionId for an existing one; both only for a fork, never neither."
+        }
+    }
+
     /** argv per docs/protocol.md 1.1. Built-in edit tools stay disabled: edits go through the IDE (hard rule 4). */
     fun argv(): List<String> = buildList {
         add(binary)
@@ -51,23 +72,34 @@ data class SessionConfig(
         add("--include-partial-messages")
         add("--permission-prompt-tool=stdio")
         model?.let { addAll(listOf("--model", it)) }
+        effort?.let { addAll(listOf("--effort", it)) }
         permissionMode?.let { addAll(listOf("--permission-mode", it.wire)) }
         addAll(listOf("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"))
-        resumeSessionId?.let { addAll(listOf("--resume", it)) }
+        resumeSessionId?.let {
+            addAll(listOf("--resume", it))
+            if (forkSession) add("--fork-session")
+        }
+        sessionId?.let { addAll(listOf("--session-id", it)) }
     }
 }
 
 /** Starts a process. Replaced in tests by a fake CLI. */
 fun interface ProcessLauncher {
     fun launch(argv: List<String>, workingDirectory: Path): Process
+}
 
-    companion object {
-        val Default: ProcessLauncher = ProcessLauncher { argv, dir ->
-            ProcessBuilder(argv).directory(dir.toFile()).apply {
-                environment().remove("NODE_OPTIONS")
-                environment()["CLAUDE_CODE_ENTRYPOINT"] = "sdk-tandem"
-            }.start()
+/**
+ * Starts the real CLI. The child gets [cliEnvironment] of [parentEnvironment] and nothing else, so variables that identify
+ * the session or hosted environment Tandem itself runs in never reach a chat's CLI.
+ */
+class DefaultProcessLauncher(private val parentEnvironment: () -> Map<String, String> = System::getenv) : ProcessLauncher {
+    override fun launch(argv: List<String>, workingDirectory: Path): Process {
+        val builder = ProcessBuilder(argv).directory(workingDirectory.toFile())
+        builder.environment().run {
+            clear()
+            putAll(cliEnvironment(parentEnvironment()))
         }
+        return builder.start()
     }
 }
 
@@ -77,18 +109,48 @@ fun interface ProcessLauncher {
  * stops the process and its children: nothing outlives the session.
  *
  * All methods are safe to call from any thread, including the EDT: they only enqueue work.
+ *
+ * [initialState] is the chat so far when a transcript is resumed; the picks in [config] win over what it recorded.
  */
 class ClaudeSession(
     parentScope: CoroutineScope,
     private val config: SessionConfig,
-    private val launcher: ProcessLauncher = ProcessLauncher.Default,
+    private val launcher: ProcessLauncher = DefaultProcessLauncher(),
+    initialState: ChatState = ChatState(),
 ) {
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext.job) + CoroutineName("ClaudeSession"))
-    private val _state = MutableStateFlow(ChatState(requestedModel = config.model, permissionMode = config.permissionMode))
+    private val _state = MutableStateFlow(
+        initialState.copy(
+            requestedModel = config.model ?: initialState.requestedModel,
+            permissionMode = config.permissionMode ?: initialState.permissionMode,
+            effort = config.effort ?: initialState.effort,
+        ),
+    )
     private val outbox = Channel<JsonObject>(Channel.UNLIMITED)
     private val nextId = AtomicLong()
 
+    /** Set once Tandem ends the process ([terminate], [killNow]): from then on, its output failing under a read is no failure. */
+    @Volatile
+    private var stopping = false
+
+    /** Set by [killNow]: Tandem ended the process at once, as when the IDE exits, so the turn in progress did not fail. */
+    @Volatile
+    private var killed = false
+
+    private val _reportedSessionId = MutableStateFlow<String?>(null)
+
     val state: StateFlow<ChatState> = _state.asStateFlow()
+
+    /** Completes once this session is over and its process gone: after [close], or after its parent scope was cancelled. */
+    internal val job: Job
+        get() = scope.coroutineContext.job
+
+    /**
+     * The `session_id` of the CLI's latest `system/init` in this process: null until the first, which the CLI sends with the first
+     * prompt (a turn's start), not when it starts. Unlike [ChatState.sessionId], a `result` never sets it: the `result` of a start
+     * that fails carries a session id as well.
+     */
+    val reportedSessionId: StateFlow<String?> = _reportedSessionId.asStateFlow()
 
     /** The running process, for tests and diagnostics. */
     @Volatile
@@ -104,18 +166,26 @@ class ClaudeSession(
     private suspend fun run() {
         val p = try {
             launcher.launch(config.argv(), config.workingDirectory)
-        } catch (e: IOException) {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Not only an IOException: ProcessBuilder.start also throws for arguments it cannot pass, and a launcher can fail.
             LOG.warn("could not start claude", e)
-            dispatch(SessionEvent.Ended("Could not start `${config.binary}`: ${e.message}. Is Claude Code installed?", isError = true))
+            val reason = e.message ?: e.javaClass.simpleName
+            val text = "Could not start `${config.binary}`: $reason. Is the claude CLI (Claude Code) installed?"
+            dispatch(SessionEvent.Ended(text, isError = true))
             return
         }
         process = p
         LOG.info("claude started, pid=${p.pid()}")
         coroutineScope {
-            // Cancellation of the session cannot interrupt a blocking readLine; ending the process does.
-            launch { try { awaitCancellation() } finally { withContext(NonCancellable) { terminate(p) } } }
+            // Cancellation of the session cannot interrupt a blocking readLine; ending the process does. Undispatched, so that it
+            // runs even when the session was cancelled while the process started: a coroutine cancelled before it starts never runs.
+            launch(start = CoroutineStart.UNDISPATCHED) {
+                try { awaitCancellation() } finally { withContext(NonCancellable) { terminate(p) } }
+            }
             val writer = launch { writeLoop(p) }
-            val stderr = launch { runInterruptible { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } } }
+            val stderr = launch { readOutput(p) { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } } }
             readLoop(p)
             val code = runInterruptible { p.waitFor() }
             stderr.join()
@@ -140,7 +210,21 @@ class ClaudeSession(
         send(HostMessages.setModel(newRequestId(), model))
     }
 
-    fun setPermissionMode(mode: PermissionMode): Unit = send(HostMessages.setPermissionMode(newRequestId(), mode))
+    /**
+     * Asks for another permission mode. It shows at once; the answer to the request, `system/status` or the next `system/init`
+     * confirms it, and a rejection puts back the mode shown before ([reduce]).
+     */
+    fun setPermissionMode(mode: PermissionMode) {
+        val requestId = newRequestId()
+        dispatch(SessionEvent.PermissionModeRequested(mode, requestId))
+        send(HostMessages.setPermissionMode(requestId, mode))
+    }
+
+    /** Asks the CLI to give the session a custom title (`rename_session`). */
+    fun rename(title: String): Unit = send(HostMessages.renameSession(newRequestId(), title))
+
+    /** Shows [text] in this chat as a notice of [level]: something Tandem itself tells the user about this process. */
+    internal fun notice(level: NoticeLevel, text: String): Unit = dispatch(SessionEvent.HostNotice(level, text))
 
     fun allow(permission: PendingPermission, always: Boolean = false) {
         val updates = if (always) permission.suggestions.map(::forSession) else emptyList()
@@ -164,6 +248,8 @@ class ClaudeSession(
      */
     fun killNow() {
         val p = process ?: return
+        stopping = true
+        killed = true
         val children = p.descendants().toList()
         p.destroyForcibly()
         children.forEach { it.destroyForcibly() }
@@ -185,7 +271,7 @@ class ClaudeSession(
     private suspend fun readLoop(p: Process) {
         val reader = p.inputStream.bufferedReader(Charsets.UTF_8)
         while (true) {
-            val line = runInterruptible { reader.readLine() } ?: return
+            val line = readOutput(p) { reader.readLine() } ?: return
             if (line.isBlank()) continue
             val message = Ndjson.decode(line)
             when (message) {
@@ -197,8 +283,26 @@ class ClaudeSession(
                 else -> {}
             }
             dispatch(SessionEvent.Cli(message))
+            if (message is CliMessage.SystemInit && message.sessionId.isNotEmpty()) _reportedSessionId.value = message.sessionId
         }
     }
+
+    /**
+     * [read], a blocking read of [p]'s stdout or stderr; null if the output failed because the process is over. The JDK can close
+     * the pipe of a process that exits under a waiting read: when Tandem ended the process, or it ended by itself, its output is
+     * over and the exit code tells the rest. A failure while it runs on, and Tandem did not end it, is one, and is thrown.
+     *
+     * Cancelling this interrupts the reading thread ([runInterruptible]): a stream that can be interrupted then throws
+     * `InterruptedIOException`, an [IOException], and runInterruptible interrupts only once the cancellation has begun. While this is
+     * being cancelled, that, or any I/O failure, is the cancellation, never a failure to show.
+     */
+    private suspend fun <T> readOutput(p: Process, read: () -> T): T? =
+        try {
+            runInterruptible(block = read)
+        } catch (e: IOException) {
+            currentCoroutineContext().ensureActive() // being cancelled: this is the cancellation, thrown as such
+            if (stopping || !p.isAlive) null else throw e
+        }
 
     private suspend fun writeLoop(p: Process) {
         val writer = p.outputStream.bufferedWriter(Charsets.UTF_8)
@@ -215,13 +319,20 @@ class ClaudeSession(
         }
     }
 
+    /** How the process ended with [code]; ended by the host when Tandem killed it at once ([killNow]), as when the IDE exits. */
     private fun exitEvent(code: Int): SessionEvent.Ended {
-        if (code == 0) return SessionEvent.Ended("Claude Code exited.", isError = false)
+        val byHost = killed
+        if (code == 0) return SessionEvent.Ended("The claude CLI exited.", isError = false, endedByHost = byHost)
         val tail = stderrTail.text()
-        return SessionEvent.Ended("Claude Code exited with code $code." + if (tail.isEmpty()) "" else "\n$tail", isError = true)
+        return SessionEvent.Ended(
+            "The claude CLI exited with code $code." + if (tail.isEmpty()) "" else "\n$tail",
+            isError = true,
+            endedByHost = byHost,
+        )
     }
 
     private fun terminate(p: Process) {
+        stopping = true
         val children = p.descendants().toList()
         if (p.isAlive) {
             runCatching { p.outputStream.close() } // end of input: the CLI shuts down on its own

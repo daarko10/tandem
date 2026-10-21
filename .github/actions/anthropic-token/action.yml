@@ -1,0 +1,46 @@
+# Exchanges the run's GitHub OIDC token for a short-lived Anthropic access token through Workload Identity
+# Federation and exports it as ANTHROPIC_AUTH_TOKEN for the steps that follow. The workflow needs
+# `id-token: write` and the four ANTHROPIC_* identifiers below in its environment; they name the federation
+# rule, organization, service account and workspace, and are not secrets. Each GitHub token is single use and
+# lives about five minutes, and the Anthropic token lives ten, so run this right before the step that needs it.
+name: Anthropic access token
+description: Mints a short-lived Anthropic access token from the run's GitHub OIDC token and exports it as ANTHROPIC_AUTH_TOKEN.
+runs:
+  using: composite
+  steps:
+    - name: Exchange the GitHub OIDC token for an Anthropic access token
+      shell: bash
+      run: |
+        set -euo pipefail
+        for v in ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do
+          if [ -z "${!v:-}" ]; then
+            echo "::error title=Workload Identity Federation::$v is not set in the workflow environment."
+            exit 1
+          fi
+        done
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "::error title=Workload Identity Federation::No OIDC token endpoint: the job needs the id-token: write permission."
+          exit 1
+        fi
+        jwt="$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r '.value // empty')"
+        if [ -z "$jwt" ]; then
+          echo "::error title=Workload Identity Federation::GitHub returned no OIDC token."
+          exit 1
+        fi
+        echo "::add-mask::$jwt"
+        response="$(jq -n --arg jwt "$jwt" \
+          --arg rule "$ANTHROPIC_FEDERATION_RULE_ID" --arg org "$ANTHROPIC_ORGANIZATION_ID" \
+          --arg svac "$ANTHROPIC_SERVICE_ACCOUNT_ID" --arg wrkspc "$ANTHROPIC_WORKSPACE_ID" \
+          '{grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: $jwt, federation_rule_id: $rule,
+            organization_id: $org, service_account_id: $svac, workspace_id: $wrkspc}' \
+          | curl -sS https://api.anthropic.com/v1/oauth/token -H "content-type: application/json" --data @-)"
+        token="$(jq -r '.access_token // empty' <<< "$response" 2>/dev/null || true)"
+        if [ -z "$token" ]; then
+          detail="$(jq -c 'del(.access_token)' <<< "$response" 2>/dev/null || printf '%s' "$response" | head -c 500)"
+          echo "::error title=Workload Identity Federation::Token exchange failed: $detail. The deny reason is on the Claude Console's Workload identity page, History tab."
+          exit 1
+        fi
+        echo "::add-mask::$token"
+        echo "ANTHROPIC_AUTH_TOKEN=$token" >> "$GITHUB_ENV"
+        echo "Minted an Anthropic access token for service account $ANTHROPIC_SERVICE_ACCOUNT_ID, expires in $(jq -r '.expires_in // "?"' <<< "$response") s."

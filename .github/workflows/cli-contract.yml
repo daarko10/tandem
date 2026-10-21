@@ -1,11 +1,24 @@
-# Nightly: parse the stream-json output of the newest `claude` CLI with Tandem's protocol decoder.
-# Catches protocol drift before users do. Needs an ANTHROPIC_API_KEY repository secret (a low-budget key).
+# Nightly: parse the stream-json output of the newest `claude` CLI with Tandem's protocol decoder, and load the
+# transcripts it writes to disk with Tandem's transcript reader. Catches protocol drift before users do.
+# Authenticates with Workload Identity Federation (.github/actions/anthropic-token): the run's GitHub OIDC token is
+# exchanged for a ten-minute Anthropic access token bound to the tandem-ci service account, so no API key is stored
+# in the repository. The federation rule in the Claude Console admits only runs on main of daarko10/tandem.
 name: CLI contract
 
 on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+
+permissions:
+  id-token: write # the job fetches its GitHub OIDC token
+  contents: read
+
+env:
+  ANTHROPIC_FEDERATION_RULE_ID: fdrl_019BGJmAMDiAL6DmAQENbhfk
+  ANTHROPIC_ORGANIZATION_ID: 8336fe5f-a7f7-4255-9fe0-7f594d5a8ec8
+  ANTHROPIC_SERVICE_ACCOUNT_ID: svac_01F45vdtRBnPSRZHXY8ek1fn
+  ANTHROPIC_WORKSPACE_ID: wrkspc_012JJzfEG8tDKeta7pe3CCa5
 
 jobs:
   contract:
@@ -23,11 +36,37 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
       - name: Install latest Claude Code
         run: npm install -g @anthropic-ai/claude-code && claude --version
+      - name: Mint an Anthropic access token
+        uses: ./.github/actions/anthropic-token
       - name: Record live transcripts
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           mkdir -p build/contract
           ./scripts/record-fixture.sh contract-hello "Reply with the single word: pong" build/contract
-      - name: Decode with Tandem's protocol layer
+      # Tandem names every new session with --session-id and drops inherited session variables (docs/protocol.md 1.2).
+      # This checks that the id passed with --session-id names the session and its transcript while one is inherited.
+      # Measured with 2.1.301: CLAUDE_CODE_SESSION_ID on its own is ignored; the CLI used an inherited id only inside a
+      # hosted session, whose other variables a runner does not have.
+      - name: Mint a fresh Anthropic access token
+        uses: ./.github/actions/anthropic-token
+      - name: Check --session-id with an inherited CLAUDE_CODE_SESSION_ID
+        env:
+          CLAUDE_CODE_SESSION_ID: bogus
+        run: |
+          session_id=11111111-1111-4111-8111-111111111111
+          work="$(mktemp -d)"
+          (cd "$work" && claude -p "Reply with the single word: pong" --output-format stream-json --verbose --safe-mode --session-id "$session_id" < /dev/null > raw.ndjson)
+          # system/init must report the id passed with --session-id. Lines that are not JSON are skipped, as Tandem skips them.
+          python3 -I - "$work/raw.ndjson" "$session_id" <<'PY'
+          import json, sys
+          def parsed(line):
+              try:
+                  return json.loads(line)
+              except ValueError:
+                  return None
+          init = next((m for m in map(parsed, open(sys.argv[1], encoding="utf-8"))
+                       if isinstance(m, dict) and m.get("type") == "system" and m.get("subtype") == "init"), {})
+          assert init.get("session_id") == sys.argv[2], f"system/init session_id is {init.get('session_id')!r}"
+          PY
+          python3 -I scripts/copy_transcript.py "$work" "$work/raw.ndjson" build/contract/transcripts session-id
+      - name: Decode with Tandem's protocol layer and load the transcripts with its reader
         run: ./gradlew test --tests '*ContractTest*' -Dtandem.contractDir=build/contract

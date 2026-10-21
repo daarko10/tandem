@@ -3,11 +3,21 @@
 How Tandem talks to the user's `claude` binary (Claude Code 2.1.x) over stdin/stdout NDJSON.
 
 Sources, in order of authority:
-1. Recorded transcripts in `src/test/resources/fixtures/` (CLI 2.1.300): `plain-reply`, `permission`, `interrupt`,
-   `model-switch`. Re-record with `scripts/record-fixture.sh` (one-shot prompt) or `scripts/record-scenario.sh`
-   (bidirectional scenarios).
-2. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads).
-3. `claude --help` output.
+1. Recorded transcripts in `src/test/resources/fixtures/`: `plain-reply`, `permission`, `interrupt`, `model-switch`
+   (CLI 2.1.300); `history-reply`, `history-permission`, `history-interrupt`, `permission-mode`, `fork` (CLI 2.1.301).
+   The `history-*` and `fork` recordings come with the CLI's own on-disk transcript of the same session in
+   `fixtures/transcripts/` (section 11). Re-record with `scripts/record-fixture.sh` (one-shot prompt) or
+   `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too.
+2. Measurements with CLI 2.1.301 where a section says so: headless runs in an empty scratch folder with the variables
+   of section 1.2 removed. Most send only `initialize`, so no model is used; those that needed a prompt say so. The
+   checks of `--session-id X` and `--resume X` on their own (1.1) ran signed in, with the usual config directory. Those
+   of forks, of `--session-id` together with `--resume`, of the failed starts' `result` ids and of an early
+   `rename_session` (1.1, 4.4) ran without sign-in: a scratch `CLAUDE_CONFIG_DIR` and no variable whose name contains
+   `TOKEN`, `API_KEY` or `OAUTH`. Such a run writes nothing before its `initialize` response, where a signed-in run first
+   writes a `system/ui_invalidate` line with the session id (1.1). The fork probe without sign-in forked a session that
+   had no title line, so its missing `system/session_title_changed` (1.1) says nothing about sign-in.
+3. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads).
+4. `claude --help` output.
 
 Anything marked **(inferred)** is not directly shown by those sources. The CLI changes weekly: validate every field, and
 parse unknown `type`/`subtype` values to `Unknown(raw)` instead of throwing.
@@ -29,13 +39,13 @@ then appends optional flags in this order (only those Tandem cares about are lis
 | Flag | When the SDK adds it | Tandem |
 |---|---|---|
 | `--thinking=adaptive` / `--thinking=disabled` / `--max-thinking-tokens N` | `thinking` option | optional |
-| `--effort <low\|medium\|high\|xhigh\|max>` | `effort` option | optional |
+| `--effort <low\|medium\|high\|xhigh\|max>` | `effort` option | yes, picked when a session is created |
 | `--max-turns N`, `--max-budget-usd X` | limits | no |
 | `--model <id>` | `model` option | yes, user's pick |
 | `--permission-prompt-tool=stdio` | a `canUseTool` callback is set | **yes, always** |
 | `--permission-prompt-tool <mcp tool>` | `permissionPromptToolName` (mutually exclusive with the above) | no |
 | `--permission-prompts <host\|none>` | option | no (default `host`) |
-| `--continue` / `--resume <session-id>` | resume options | see section 8 |
+| `--continue` / `--resume <session-id>` | resume options | `--resume` for an existing session (section 8); no `--continue` |
 | `--allowedTools a,b` / `--disallowedTools a,b` | options | `--disallowedTools Edit,Write,MultiEdit,NotebookEdit` (hard rule 4) |
 | `--tools a,b` / `--tools=default` | `tools` option | optional |
 | `--mcp-config <json>` | non-SDK MCP servers given | yes: our IDE MCP server (see 1.4) |
@@ -48,9 +58,9 @@ then appends optional flags in this order (only those Tandem cares about are lis
 | `--include-partial-messages` | option | **yes** (streaming text) |
 | `--add-dir <dir>` (repeat) | `additionalDirectories` | for extra content roots |
 | `--plugin-dir <path>` or `--await-initialize` | plugins | no |
-| `--fork-session` | `forkSession` | see section 8 |
+| `--fork-session` | `forkSession` | with `--resume` and `--session-id` for a fork (section 8) |
 | `--resume-session-at <uuid>` | `resumeSessionAt` | see section 8 |
-| `--session-id <uuid>` | `sessionId` | optional (pre-assign id) |
+| `--session-id <uuid>` | `sessionId` | **yes**: a new session's id, and a fork's own id (section 8) |
 | `--no-session-persistence` | `persistSession:false` | no |
 
 Notes:
@@ -58,16 +68,45 @@ Notes:
 - `--replay-user-messages` (help text) re-emits user messages from stdin as `{"type":"user",...,"isReplay":true}` acks. The SDK does not add it by default; useful for binding our sends to transcript uuids.
 - `--verbose` is required with `stream-json` output, otherwise the CLI rejects the combination (inferred from the SDK always adding it).
 
-Recommended Tandem argv:
+Recommended Tandem argv (`SessionConfig.argv()` builds it):
 
 ```
 claude --output-format stream-json --verbose --input-format stream-json \
   --include-partial-messages --permission-prompt-tool=stdio \
-  --model <picked> --permission-mode <mode> \
+  --model <picked> --effort <level> --permission-mode <mode> \
   --mcp-config '{"mcpServers":{"tandem":{...}}}' \
   --disallowedTools Edit,Write,MultiEdit,NotebookEdit \
-  [--resume <session-id> [--fork-session]]
+  <session flags>
 ```
+
+`--model`, `--effort` and `--permission-mode` are left out when there is no pick, so the CLI's default applies;
+`--mcp-config` comes with Milestone 2 and is not passed yet. `<session flags>` is exactly one of these, never none:
+
+| Session | Flags |
+|---|---|
+| new | `--session-id <uuid>`, an id Tandem generates |
+| existing, once its `<id>.jsonl` exists | `--resume <id>` |
+| fork of `<id>`, until the fork's own transcript exists | `--resume <id> --fork-session --session-id <new uuid>` |
+
+Measured with CLI 2.1.301, sending only `initialize` (conditions in Sources item 2; these facts also sit on
+`SessionSpawner.configFor`):
+- `--session-id X` without a prompt writes no transcript, not even the project folder: the CLI writes `X.jsonl` with
+  the session's first prompt.
+- `--resume X` before that fails: exit code 1, a `result` with subtype `error_during_execution`, and on stderr
+  "No conversation found with session ID: X". That `result` still carries a `session_id`: X for a plain resume, the
+  `--session-id` value for a fork that has one, a fresh UUID for `--fork-session` alone.
+- `--session-id X` once `X.jsonl` exists fails: exit code 1, "Error: Session ID X is already in use."
+- `--resume X --session-id Z` without `--fork-session` exits with code 1: "Error: --session-id can only be used with
+  --continue or --resume if --fork-session is also specified." (`sdk.d.ts` documents the same for `sessionId`.)
+- `--resume X` and `--resume X --fork-session` answer `initialize` but emit no `system/init` until the first prompt.
+  A signed-in run names the session's id before that all the same, in lines the SDK does not document:
+  `system/ui_invalidate` at start (in every recording, and in a run with `--session-id` and no prompt), and
+  `system/session_title_changed` when the original has a title (fixture `fork`: started without `--session-id`, the
+  fork names its new id in both before its `initialize` response). The run without sign-in wrote neither. Tandem
+  passes `--session-id`, a fork's too, so it never relies on those lines.
+
+So Tandem passes `--resume` exactly when `<id>.jsonl` exists, and gives every new session and every fork its id up
+front. Either mistake above would fail again on every retry.
 
 ### 1.2 Environment
 
@@ -75,15 +114,38 @@ The SDK copies the host environment (or `options.env` if given) and then:
 
 | Var | Value | Notes |
 |---|---|---|
-| `CLAUDE_CODE_ENTRYPOINT` | `sdk-ts` if unset | Tandem should set its own value, e.g. `sdk-tandem` (inferred: any string; certain values like `claude-desktop-3p`, `remote_cowork` switch CLI behaviour, avoid them) |
+| `CLAUDE_CODE_ENTRYPOINT` | `sdk-ts` if unset | Tandem sets `sdk-tandem` (inferred: any string; certain values like `claude-desktop-3p`, `remote_cowork` switch CLI behaviour, avoid them) |
 | `CLAUDE_AGENT_SDK_VERSION` | `0.3.300` if unset | do not fake this |
 | `CLAUDE_CODE_SDK_READS_SESSION_STATE` | `1` unless set (any case) | makes the CLI emit `system/session_state_changed` (inferred) |
 | `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | `true` when file checkpointing enabled | needed for `rewind_files` |
-| `NODE_OPTIONS` | deleted | |
+| `NODE_OPTIONS` | deleted | Tandem deletes it too |
 | `DEBUG` | deleted (or `1` if `DEBUG_CLAUDE_AGENT_SDK`) | |
 | `TRACEPARENT`/`TRACESTATE` | set from the active OTel context | ignore |
 
 Never set or read API keys (hard rule 3); the CLI resolves auth itself.
+
+What Tandem passes (`cliEnvironment` in `session/CliEnvironment.kt`): the login shell's environment, as the platform
+loads it (`EnvironmentUtil.getEnvironmentMap()`, read off the EDT by `ide/ShellEnvironment.kt`), without the variables
+that tie a process to a parent Claude Code session or hosted environment, without `NODE_OPTIONS`, and with
+`CLAUDE_CODE_ENTRYPOINT=sdk-tandem`. The shell's, not the IDE's own: an IDE started from the macOS Dock or Finder has
+launchd's minimal `PATH`, and the CLI should see the `PATH`, proxies and tool locations it sees in a terminal. Where the
+platform did not load the shell's environment (the IDE was started from a terminal), it is the IDE's own. Everything else passes through unchanged, notably `CLAUDE_CONFIG_DIR` (where the
+transcripts are, section 11; Tandem reads it from the same shell environment, so it looks where the CLI writes) and provider settings such as the Bedrock and Vertex variables. Removed:
+
+- `CLAUDECODE`, `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ATTENDED`:
+  the CLI sets these for the processes it starts itself (read from the 2.1.301 binary);
+- `CLAUDE_CODE_CONTAINER_ID`, `CLAUDE_CODE_WORKER_EPOCH`, `CLAUDE_SESSION_INGRESS_TOKEN_FILE`, and every name that starts
+  with `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_MESSAGING_` or `CLAUDE_CODE_ENVIRONMENT_`: a hosted session sets these.
+
+Why: a `claude` that inherits them acts on the parent session. Inside a hosted Claude Code session, every recording this
+project made before the list existed ran under the parent's session id and wrote its transcript as `<parent id>.jsonl`.
+The recording scripts remove the same list (`drive_cli.py`, `record-fixture.sh`).
+
+Measured with 2.1.301 with the hosted variables removed, as on a CI runner (one prompt each): `CLAUDE_CODE_SESSION_ID`
+on its own is ignored, as `bogus`, as a UUID, and also with `CLAUDECODE=1` and `CLAUDE_CODE_CHILD_SESSION=1`; the CLI
+picks its own id. With `--session-id X` as well, `system/init` reports X and the transcript is `X.jsonl`. The nightly
+contract run checks that with `CLAUDE_CODE_SESSION_ID=bogus` set. Which of the hosted variables make the CLI take over
+an inherited id was not measured.
 
 ### 1.3 cwd, stdio, binary lookup
 
@@ -91,8 +153,14 @@ Never set or read API keys (hard rule 3); the CLI resolves auth itself.
 - `stdio: ["pipe","pipe","pipe"]`, `windowsHide: true`. stderr is buffered as a tail for error messages only, not parsed.
 - Binary: the SDK uses `pathToClaudeCodeExecutable` or its own bundled native package
   (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>[-musl]/claude[.exe]`). If the path ends in `.js/.mjs/.ts/...` it is run with node.
-  Tandem has no bundled binary: resolve `claude` from a user setting, else `PATH` (`where claude` on Windows, also try
-  `~/.claude/local/claude`, `~/.local/bin/claude`) (inferred locations). Spawn the native binary directly.
+  Tandem has no bundled binary. It runs, in this order: the path in Settings | Tools | Tandem when it can run; each entry
+  of the login shell's `PATH` (section 1.2); then the usual install locations `~/.local/bin` (the native installer),
+  `~/.claude/local` (the older local install), and outside Windows `/opt/homebrew/bin` and `/usr/local/bin` (Homebrew,
+  and npm's global bin for a Node from Homebrew or nodejs.org), `~/.npm-global/bin`, `~/.bun/bin` and `~/.volta/bin`
+  (inferred locations). On Windows it looks for `claude.exe`, `claude.cmd`, then `claude`. The settings page shows what
+  it found and where. Spawn the native binary directly. When the binary's directory is not on the `PATH`, it goes to the
+  end of the child's `PATH`: a `claude` that npm, Volta or Bun installed is `#!/usr/bin/env node`, with `node` beside it.
+  At the end, so that the user's own `node` and system tools still come first.
 
 ### 1.4 Startup sequence
 
@@ -283,14 +351,17 @@ Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_u
 |---|---|---|
 | `interrupt` | `cancel_queued?: boolean` | `{still_queued: string[], cancelled?: string[]}` (empty `{}` on CLIs without `interrupt_receipt_v1`) |
 | `set_model` | `model?: string\|null` (`null`/`"default"` = session default) | none: the success frame has no `response` field (fixture). The CLI also emits a replayed `user` line (`isReplay:true`) with `<local-command-stdout>Set model to ...</local-command-stdout>` |
-| `set_permission_mode` | `mode: "default"\|"acceptEdits"\|"bypassPermissions"\|"plan"\|"dontAsk"\|"auto"` | `{}` |
+| `set_permission_mode` | `mode: "default"\|"acceptEdits"\|"bypassPermissions"\|"plan"\|"dontAsk"\|"auto"` | `{"mode": "<wire name>"}`, then a `system/status` line with `status: null` and the new `permissionMode`; the next `init` agrees (fixture `permission-mode`, 2.1.301) |
+| `rename_session` | `title: string`, `source: "host"` | none: no `response` field, like `set_model`. A `system/session_title_changed` line (`title`) comes just before it, and the CLI appends a `custom-title` line to the transcript (fixtures `fork`, `fork-origin`) |
 | `set_max_thinking_tokens` | `max_thinking_tokens?: number\|null`, `thinking_display?` | `{}` |
 | `list_models` | — | model catalog (`{models: ModelInfo[]}`, inferred shape) |
 | `get_context_usage` | `detail?: "summary"\|"full"` | categories `{name, tokens, kind:"used"\|"free"\|"buffer"\|"deferred"}` plus totals |
 | `rewind_files` | `user_message_id: string`, `dry_run?: boolean` | rewind result (needs file checkpointing env) |
 | `mcp_status`, `mcp_reconnect`, `mcp_toggle`, `mcp_set_servers` | per type | per type |
 | `stop_task` | `task_id` | `{}` |
-| `get_settings`, `apply_flag_settings`, `rename_session`, ... | see sdk.d.ts | |
+| `apply_flag_settings` | `settings: object`, merged into the session's flag layer | none (no `response` field); `{"effortLevel": …}` changes the effort of the next turn (below) |
+| `update_settings` | `source: "localSettings"\|"userSettings"`, `settings: object` | writes a settings file; rejected without `source` (below). Tandem does not use it |
+| `get_settings`, ... | see sdk.d.ts | |
 
 Examples:
 
@@ -300,7 +371,40 @@ Examples:
 {"type":"control_request","request_id":"a3","request":{"subtype":"set_permission_mode","mode":"acceptEdits"}}
 {"type":"control_request","request_id":"a4","request":{"subtype":"get_context_usage","detail":"summary"}}
 {"type":"control_request","request_id":"a5","request":{"subtype":"rewind_files","user_message_id":"<uuid>","dry_run":true}}
+{"type":"control_request","request_id":"a6","request":{"subtype":"rename_session","title":"Fix the login test","source":"host"}}
+{"type":"control_request","request_id":"a7","request":{"subtype":"apply_flag_settings","settings":{"effortLevel":"high"}}}
 ```
+
+`rename_session` sent before the session's first prompt (measured with 2.1.301, `initialize` and `rename_session`
+only): `system/session_title_changed` under the session's id, then success, for a new session (`--session-id`) and for
+a fork with `--session-id` alike, and nothing is written to disk yet. Whether that title reaches the transcript once a
+prompt creates it was not measured, so Tandem sends a title set before a process's first `system/init`, a fork's or a
+rename's, only with that init. A session whose transcript exists already also gets the `custom-title` line from Tandem
+at once (11.5), since the process may never get a prompt. The CLI also keeps the title in `<id>/custom-title.json`
+beside the transcript (seen in the `fork` recording, not committed).
+
+Effort on a live session, probed once with `scripts/drive_cli.py settings` against CLI 2.1.301 (not a fixture): one
+turn at the default effort, then two requests, then a second turn.
+- `{"subtype":"update_settings","settings":{"effortLevel":"high"}}` is rejected:
+  `{"subtype":"error","request_id":…,"error":"update_settings: unsupported source undefined"}`. Its schema in the CLI's
+  binary requires `source`: `localSettings` takes only `outputStyle`, and `userSettings` only `effortLevel`, which it
+  saves in the user's settings file as the default for the current model rather than setting the running session's
+  level. Writing the user's settings is not Tandem's to do.
+- `{"subtype":"apply_flag_settings","settings":{"effortLevel":"high"}}` succeeds, with no `response` field, and the next
+  turn ran at `high`: in the transcript the first turn's `assistant` line has `"effort":"medium"` and the second's
+  `"effort":"high"` (`perTurnEffort` likewise).
+- Neither turn's `system/init` names an effort (section 5.1), so only the transcript confirms the change. The models in
+  the `initialize` response list `supportsEffort` and `supportedEffortLevels` (`low` to `max`).
+
+Tandem passes effort only at spawn (`--effort`) for now; `apply_flag_settings` is the way to let a live session change it.
+
+From the 2.1.301 binary's strings, not measured: a `CLAUDE_CODE_EFFORT_LEVEL` environment variable overrides the
+session's effort, and `apply_flag_settings` then refuses an effort change ("apply_flag_settings: CLAUDE_CODE_EFFORT_LEVEL
+overrides effort for this session"); a `maxEffort` setting or an organization's cap also clamps `--effort`. The variable
+passes through `cliEnvironment` (1.2), so the effort badge, which shows what Tandem passed, can disagree with the level
+the CLI runs at. The transcript's `assistant` lines should show the real level (their `effort` followed
+`apply_flag_settings` in the probe above). The effort picker of Phase 4 (the sessions spec's numbering: dialogs and
+control panels) has to handle both cases.
 
 ### 4.5 Other CLI → host requests
 
@@ -344,6 +448,10 @@ Emitted **at the start of every turn** (not only once). Fixture line (truncated)
 | `effort`, `betas`, `output_style`, `fast_mode_state` | display |
 
 Extra fixture fields not in types: `product_feedback_disabled`, `analytics_disabled`, `scratchpad_path`, `messaging_socket_path`, `per_turn_effort_active`, `startup_timing{...}`. Ignore unknown fields.
+
+`effort` is typed in the SDK but missing from every recorded `init` (2.1.300 and 2.1.301), which carry only
+`per_turn_effort_active: true`. So Tandem shows the effort it passed with `--effort`, which for a session loaded from
+disk is the last `assistant` line's `effort` in its transcript (section 11).
 
 ### 5.2 Other typed subtypes
 
@@ -495,6 +603,13 @@ Success only: `result`, `ttft_ms`, `ttft_stream_ms`, `time_to_request_ms`, `stru
 Error only: `errors: string[]`, `startup_failure_reason?`.
 The fixture also has `api_error_status`, `subagent_stats`, `safety_stops`, `turn_start_resume_kind`, many `process_*` timing fields: ignore.
 
+API error (fixture `invalid-model`, 2.1.302, run with `--model claude-nonexistent-0`): no stream frames; the CLI writes an
+`assistant` line itself, `message.model:"<synthetic>"`, with `error:"model_not_found"`, `is_api_error_message:true`,
+`api_error_status:404` and the error text as its one text block, then
+`result{subtype:"success", is_error:true, terminal_reason:"api_error", stop_reason:"stop_sequence", result:<that text>}`.
+The subtype says nothing here: Tandem names the failure by `terminal_reason`, and the rejected model by the model picked
+or reported, never `<synthetic>`.
+
 Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session_state_changed{state:"idle"}` when available.
 
 ---
@@ -503,16 +618,39 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 
 | Goal | How |
 |---|---|
-| New session | no flag; read id from `system/init.session_id` (or pre-assign with `--session-id <uuid>`) |
-| Resume | `--resume <session-id>` (new process; transcript is loaded by the CLI, history is **not** re-streamed to stdout (inferred): load past messages from the session JSONL if needed) |
-| Continue latest in cwd | `--continue` |
-| Fork | `--resume <id> --fork-session` → new `session_id` in `init` |
-| Resume at a point | `--resume <id> --resume-session-at <message uuid>` |
+| New session | `--session-id <uuid>` with an id Tandem generates. The first prompt's `system/init` reports it, and the CLI writes `<uuid>.jsonl` from that prompt on (section 1.1) |
+| Resume | `--resume <id>` once `<id>.jsonl` exists, else `--session-id <id>` again. The CLI loads the transcript itself and does not stream the history to stdout (fixture `fork`: the second process streams only its own turn); Tandem loads it from the transcript (section 11). Without `--model` the session ran the model it was started with (`--model` at the start), not the default (below); a model switched mid-session with `set_model` was not measured |
+| Continue latest in cwd | `--continue` (not used) |
+| Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, and no `system/init` reports it before the fork's first prompt (only undocumented lines do, section 1.1) |
+| Resume at a point | `--resume <id> --resume-session-at <message uuid>` (not used) |
 | Switch model mid-session | `control_request{set_model, model}`; next turn's `system/init.model` must equal it. `--model` on resume also works |
-| Switch permission mode | `control_request{set_permission_mode}`; confirmed by `system/status.permissionMode` / next `init.permissionMode` |
+| Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`). Tandem shows the new mode at once; an `error` response to that request (envelope 4.1; fixture `permission-mode-rejected`, 2.1.302: `bypassPermissions` to a process not launched with `--dangerously-skip-permissions` gets `{"subtype":"error","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions","error_code":"bypass_not_launched"}`, and the session goes on) puts back the mode shown before it, unless a later pick replaced it, with an error notice naming the rejected mode |
+| Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4); Tandem picks effort only when a session is created |
+| Rename | a live process that has reported its first `system/init`: `control_request{rename_session}` (section 4.4); otherwise append a `custom-title` line (section 11.5) if the transcript exists. A live process that has not reported it yet also gets `rename_session` with that init, and so does the next process of a session renamed without a transcript or while an earlier title still waited for an init; only the last title is sent |
+| Delete | remove `<id>.jsonl` and `<id>/` (section 11.5) |
 | Rewind files | `rewind_files{user_message_id}` (needs `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` at spawn) |
 
 The `session_id` on every line is authoritative; it changes after fork.
+
+Model on resume, measured with 2.1.301 (one short prompt each, signed in, from an empty scratch folder, spawned as
+`drive_cli.py` spawns the CLI: the parent-session variables of section 1.2 removed, `--safe-mode`): a session started
+with `--model sonnet --session-id <uuid>` ran `claude-sonnet-5-5`; `--resume <uuid>` without `--model` then reported
+`init.model` `claude-sonnet-5-5`, while that run's `initialize` response listed `default` as `claude-opus-5-5`. The
+transcript's `assistant` lines carry `requestedModel` `claude-sonnet-5-5` for both turns. So the CLI restores the
+model a session was started with itself. Not measured: whether a resume restores a model switched mid-session with
+`set_model` rather than the start-time one; the badge corrects itself either way once `init` reports the model.
+Tandem relies only on the measured case: Tandem passes `--model` on resume only for a model picked in Tandem, a loaded session's
+`requestedModel` stays null, and the badge shows the transcript's last model until `init` confirms it.
+
+Resume-id mismatch: the `session_id` of a process's first `system/init` must be the id Tandem started it with
+(`--session-id`, `--resume`, or a fork's own id). If it is another id, Tandem never relabels the session: the process and
+its chat move to a new row for the reported id with the warning "Resumed as a new session <id>", and the original row
+goes back to its chat from before that start and shows stopped. If the reported id is already open in another row, the
+process is stopped instead (`SessionSpawner.takeOver`).
+
+Fork title: the CLI writes no "(fork)" title. A fork's transcript only inherits the original's `custom-title` and
+`ai-title` lines (fixture `fork`, and the measurement above). Tandem shows "<original title> (fork)" at once and sends
+`rename_session` with that title when the fork's first `system/init` arrives, which is with its first prompt.
 
 ---
 
@@ -521,7 +659,8 @@ The `session_id` on every line is authoritative; it changes after fork.
 | Topic | Detail |
 |---|---|
 | Version gating | Use `init.capabilities` first, `claude_code_version` second. `pending_permission_requests` on initialize from 2.1.268; `interrupt_receipt_v1` for `still_queued`; `scope` on refusal fallback is new (absent = `session`). Refuse to start below a minimum tested version and say so. |
-| Interrupt | Fixture `interrupt`: the receipt `{still_queued:[]}` arrives, then the partial `assistant`, a synthetic `user` text `[Request interrupted by user]`, the remaining stream frames, and `result{subtype:"error_during_execution", is_error:true, terminal_reason:"aborted_streaming", stop_reason:null}`. Treat that result as "stopped", not as a failure. |
+| Interrupt | Fixture `interrupt`: the receipt `{still_queued:[]}` arrives, then the partial `assistant`, a synthetic `user` text `[Request interrupted by user]`, the remaining stream frames, and `result{subtype:"error_during_execution", is_error:true, terminal_reason:"aborted_streaming", stop_reason:null}`. Treat that result as "stopped", not as a failure. Recorded again with 2.1.301 as `history-interrupt`, with its transcript (section 11): the same order; closing stdin afterwards ended the process with exit code 1. |
+| API error | Fixture `invalid-model`: a synthetic `assistant` line (`model:"<synthetic>"`, `error:"model_not_found"`, `api_error_status:404`), then `result{subtype:"success", is_error:true, terminal_reason:"api_error"}` (section 7). A failed turn, named by `terminal_reason`, not by the subtype. |
 | Undocumented stdout types | See section 10. The SDK passes them through untouched. |
 | Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init`. Do not assume `init` is first. |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
@@ -541,7 +680,8 @@ The `session_id` on every line is authoritative; it changes after fork.
 
 ## 10. Fixture fields and types the SDK does not document
 
-Seen in `plain-reply.ndjson` (CLI 2.1.300) but absent from `sdk.d.ts` 0.3.300, or typed differently there.
+Seen in the fixtures (`plain-reply.ndjson` and the others, CLI 2.1.300 and 2.1.301) but absent from `sdk.d.ts` 0.3.300,
+or typed differently there.
 Parse them leniently; any of them can change without notice.
 
 | Where | What | Notes |
@@ -553,10 +693,140 @@ Parse them leniently; any of them can change without notice.
 | `message_start.message` | `container, stop_details, input_transformations, diagnostics, context_management` | API-level fields, not in the SDK types |
 | `system/init` | `analytics_disabled, product_feedback_disabled, scratchpad_path, messaging_socket_path, per_turn_effort_active, startup_timing` | not in `SDKSystemMessage` |
 | `result` | `api_error_status, subagent_stats, safety_stops, turn_start_resume_kind, process_*` timings | not in `SDKResultMessage` |
-| `rate_limit_event.rate_limit_info` | `overageDisabledReason, unifiedWindows{five_hour,seven_day}` | beyond the typed fields || top-level `command_lifecycle` | `{command_uuid, state:"queued"\|"started"\|"completed"\|"cancelled"}` | not in `sdk.d.ts`. `command_uuid` is the `uuid` the host sent with the user message |
+| `rate_limit_event.rate_limit_info` | `overageDisabledReason, unifiedWindows{five_hour,seven_day}` | beyond the typed fields |
+| top-level `command_lifecycle` | `{command_uuid, state:"queued"\|"started"\|"completed"\|"cancelled"}` | not in `sdk.d.ts`. `command_uuid` is the `uuid` the host sent with the user message |
 | `system/ui_invalidate` | `{event:"ui.render"}` | not in `sdk.d.ts`; before `init` |
 | `system/task_summary` | `{detail: string\|null}` | not in `sdk.d.ts`; short status line while a tool runs, `null` when done |
+| `system/session_title_changed` | `{title}` | not in `sdk.d.ts`. Just before the success of a `rename_session` (section 4.4); a fork of a renamed session also emits it, before its `initialize` response (fixture `fork`, 2.1.301) |
 | `assistant.wire_tool_inputs` | `{<tool_use id>: input}` | not in `sdk.d.ts` |
 | `user.tool_result_meta` | `[{id, permission_decision:{decision, source}, non_execution_kind?}]` | not in `sdk.d.ts` |
 | initialize `control_response` | `pid, current_permission_mode, session_state, feedback_mode, remote_control_*, user_output_styles_dir` | beyond `SDKControlInitializeResponse` |
 
+---
+
+## 11. Transcripts on disk
+
+The CLI keeps each session as a JSONL file that it only ever appends to. Tandem has no session store of its own: the
+sidebar lists these files and a session's history loads from its file (`session/transcript/`), so sessions started in a
+terminal show up too. Sources: SDK 0.3.300 (`sdk.mjs` reads and writes the same files), the transcript fixtures in
+`src/test/resources/fixtures/transcripts/` (CLI 2.1.301), and measurements where noted.
+
+### 11.1 Where they are
+
+- Config directory: `$CLAUDE_CONFIG_DIR` when it is set and not blank, else `~/.claude`.
+- Folder: `<config>/projects/<key>/`. `<key>` is the project path with every character outside `A–Z a–z 0–9` replaced
+  by `-`, one dash per UTF-16 unit as the CLI's JavaScript `replace(/[^a-zA-Z0-9]/g, "-")` does (an emoji gives `--`),
+  cut to 200 characters: `/home/u/my proj.v2` gives `-home-u-my-proj-v2`, `C:\Users\dev\app` gives `C--Users-dev-app`.
+- The path is the CLI's physical working directory (`/private/tmp/…` for `/tmp/…` on macOS), so Tandem resolves the
+  project path's links before computing the key, off the EDT.
+- A key cut at 200 characters gets `-<hash>` appended, from the CLI's own hash, which Tandem does not reproduce. For such
+  a project Tandem lists every folder whose name starts with the 200-character key and keeps the transcripts whose `cwd`
+  is the project path (or that name none).
+- On a case-insensitive volume (macOS by default) `~/Code/App` and `~/code/app` are one directory, and the CLI may have
+  keyed or recorded it in other case than the path Tandem resolved. A short key needs nothing for that: the volume finds
+  the folder whatever the case. For a cut key, a folder whose name starts with the key in other case only is taken, and a
+  `cwd` that is another string is kept, when the file system says it is the same directory (`Files.isSameFile`); case is
+  never folded otherwise, so on a case-sensitive volume they stay another project's. Not measured on a Mac yet: which
+  case the CLI records for a working directory entered in other case.
+- One file per session: `<session id>.jsonl`, the id a lower-case UUID. Other files in the folder, such as a subagent's
+  `agent-*.jsonl` or temporary files, are not sessions.
+- `<session id>/` beside it holds what else the CLI keeps for the session: a `custom-title.json` after a rename (seen in
+  a 2.1.301 recording) and, per the SDK, subagent transcripts and tool results.
+- The file appears with the session's first prompt (section 1.1). A running CLI may be appending to it while Tandem
+  reads: a last line the CLI is still writing is not a JSON object yet and is skipped.
+- Tandem watches the folders, so a session started elsewhere shows up within a few seconds on Linux and Windows. On
+  macOS the JDK's `WatchService` polls, by default every 10 s; Tandem registers the folders with the JDK's
+  `SensitivityWatchEventModifier.HIGH` (looked up by name, since it is deprecated for removal), which makes it poll every
+  2 s, so a session shows up within about 3 s there. A runtime without that modifier, or a watch service that rejects
+  it, watches without it, at the default rate (the sidebar also lists the folders again whenever it appears). For the list, a transcript that only grew since it was read is not read in full
+  again: the lines appended since are scanned for title lines (11.4). It is read in full when it shrank, or when the
+  part read before had no prompt yet or did not end with a whole line.
+
+### 11.2 Line types
+
+Each line is one JSON object with a `type`. Most lines also have `sessionId`, `timestamp`, `cwd`, `version`,
+`gitBranch` and `entrypoint`. Tandem takes `cwd` from the first line that has one, whatever its type (lines off the
+current history aside), to tell apart projects that share a folder (11.1). The lines that make up the conversation
+have `uuid` and `parentUuid` (11.3).
+
+| `type` | Fields Tandem reads | Use |
+|---|---|---|
+| `user` | `uuid`, `parentUuid`, `isSidechain`, `isMeta`, `isCompactSummary`, `permissionMode`, `message.content` | prompts (a string or text blocks) and tool results (`tool_result` blocks); the last `permissionMode` is the session's mode |
+| `assistant` | `uuid`, `parentUuid`, `isSidechain`, `effort`, `message.id`, `message.model`, `message.content` | one line per content block, sharing `message.id`, as on stdout (6.1); the last model and effort |
+| `custom-title` | `customTitle` | the title the user or `rename_session` set |
+| `ai-title` | `aiTitle` | a generated title |
+| `summary` | `summary` | a generated summary, a title like `ai-title` |
+| `last-prompt` | none | `lastPrompt`, `leafUuid`: not used |
+| `system` | `uuid`, `parentUuid`, `subtype` | links of the chain; `subtype: compact_boundary` marks a compaction (11.3) |
+| `attachment`, `queue-operation`, `cost-state`, `atis-latch`, `mode`, `agent-name`, `file-history-snapshot`, `progress`, any other type | `uuid`, `parentUuid` when present | skipped, except as links of the chain |
+
+The 2.1.301 fixtures show every type above except `summary`, `system`, `file-history-snapshot` and `progress`, which
+come from the SDK's reader. Also recorded: a prompt's `user` line has the `uuid` the host sent with the prompt
+(`history-interrupt`); `assistant` lines also carry `requestedModel`, `perTurnEffort` and `requestId`; a reply cut off
+by an interrupt has `isAbortedMidStream: true` where its stdout line has `aborted: true`.
+
+### 11.3 The current history
+
+A rewind or an edited prompt leaves the abandoned turns in the file, so the history is not simply every line. A first
+pass (`TranscriptChain`) works out which conversational lines (`user` or `assistant`, neither `isSidechain` nor
+`isMeta`) belong to it:
+
+1. The current history is the `parentUuid` chain that ends at the last conversational line with a `uuid`. The chain runs through lines
+   of any type (in the fixtures every `assistant` line's parent is an `attachment` line), so every line with a `uuid` is
+   indexed. A line whose parent is not in the file is a root.
+2. If that chain starts at a compaction root, a `user` line with `isCompactSummary` or a `system` line with
+   `subtype: compact_boundary`, the chain before the compaction is kept as well, and so on back to the first compaction. A
+   `compact_boundary` line has a null `parentUuid` and points back with `logicalParentUuid` (inferred: no fixture); that
+   chain starts at the line it names when it names an earlier line, else at the last conversational line with a `uuid`
+   before the root.
+3. Parallel tool calls branch off the chain. An off-chain `assistant` line with the `message.id` of a kept `assistant`
+   line joins the history, and so does an off-chain `user` line that holds only `tool_result` blocks and whose parent is
+   kept, until nothing changes. A `user` line with text never joins this way: a rewound branch starts with one.
+4. A conversational line without a `uuid` is always kept. A line that was not a JSON object in the first pass (one the
+   CLI was still writing) is left out of the second, even if it is complete by then.
+
+The second pass reads the kept lines the way the live stream would have shown them; title lines count wherever they
+are. The SDK's reader (`getSessionMessages`, 0.3.300) also walks the chain and re-attaches such off-chain lines. No
+fixture has a rewind, a compaction or parallel tool calls yet; `TranscriptReaderTest` pins them with hand-written lines.
+
+### 11.4 What Tandem shows
+
+- Title, the first that applies: the last `custom-title`; the last `ai-title` or `summary`, whichever comes last; the
+  first prompt of the current history, slash commands aside, as its first line trimmed and cut to 80 characters; the
+  session id. A blank title does not count. The SDK's `listSessions` (0.3.300) differs: it joins the prompt's lines,
+  cuts at 200 characters and prefers `aiTitle` over `summary`.
+- Model: `message.model` of the last `assistant` line, except models that start with `<`, such as `<synthetic>` on the
+  lines the CLI writes itself for API errors. Effort: the last `effort` present. Permission mode: the last `user` line's
+  `permissionMode` that names a known mode; compact summaries do not count. All three from the current history only.
+- Skipped: `isMeta` lines (context the CLI adds), `isSidechain` lines (subagents) and `isCompactSummary` lines.
+- User lines that the CLI writes itself, told apart by how the text starts, as the CLI does:
+
+| Text starts with | Written for | Tandem shows |
+|---|---|---|
+| `[Request interrupted` (`by user`, `by user for tool use`) | an interrupt | the "Stopped." notice, as live |
+| `<command-name>` or `<command-message>`, with `<command-args>` | a slash command | `/name args`, never as the title |
+| `<local-command-stdout>`, `<local-command-stderr>` | a command's output | nothing |
+| `<bash-input>` | a `!command` shell escape | `!command` |
+| `<bash-stdout>`, `<bash-stderr>` | its output | nothing |
+| `<task-notification>` | a background task | nothing |
+
+Only the interrupt line is recorded (`history-interrupt`, 2.1.301):
+`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"parentUuid":<the cut-off reply>,…}`,
+the shape the hand-written test uses. The others come from the CLI's binary and the SDK and are pinned with hand-written
+lines in `TranscriptReaderTest`.
+
+A loaded chat is settled whatever the file ends with: not busy, no pending permission, no streaming entry.
+
+### 11.5 What Tandem writes
+
+- Rename of a session without a live process, or whose process has not reported its first `system/init` yet: one line
+  appended, the one the SDK's `renameSession` appends:
+  `{"type":"custom-title","customTitle":<title>,"sessionId":<id>,"uuid":<random UUID>,"timestamp":<ISO-8601 UTC, ms>}`.
+  A file that ends inside a line gets its newline first. A live session is renamed with `rename_session` (4.4), and the
+  CLI appends the line itself; a process that has not reported its `system/init` gets `rename_session` with it.
+- Delete: `<id>.jsonl` and the `<id>/` folder beside it, which is what the SDK's `deleteSession` removes. Links are
+  deleted, never followed.
+
+Apart from the binary lookup, which also looks for `claude` in `~/.claude/local` (section 1.3), Tandem reads and writes
+nothing else under the config directory: credentials (`.credentials*`) and settings files are out of bounds (hard
+rule 3).

@@ -1,12 +1,24 @@
 package dev.daarkolabs.tandem.protocol
 
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import org.junit.Test
+import kotlin.io.path.readLines
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class FixtureDecodeTest {
+    @Test
+    fun `a transcript fixture that is not there fails at once, naming it`() {
+        val failure = assertFailsWith<IllegalArgumentException> { Fixtures.transcript("no-such-fixture") }
+        assertTrue("no-such-fixture" in failure.message.orEmpty(), failure.message)
+    }
+
     @Test
     fun `every fixture line decodes and core types are never Unknown`() {
         val core = setOf("assistant", "user", "result", "stream_event", "control_request", "control_response")
@@ -97,6 +109,51 @@ class FixtureDecodeTest {
         val setModelAck = messages.filterIsInstance<CliMessage.ControlResponse>().last()
         assertTrue(setModelAck.isSuccess)
         assertNull(setModelAck.payload, "set_model succeeds without a payload")
+    }
+
+    @Test
+    fun `permission mode fixture shows how the CLI acknowledges set_permission_mode`() {
+        val messages = Fixtures.decode("permission-mode")
+
+        val responses = messages.filterIsInstance<CliMessage.ControlResponse>()
+        assertEquals(3, responses.count { it.isSuccess }) // initialize + two acks
+        assertEquals(
+            listOf(PermissionMode.DEFAULT, PermissionMode.PLAN, PermissionMode.ACCEPT_EDITS),
+            messages.filterIsInstance<CliMessage.SystemInit>().map { it.permissionMode },
+        )
+
+        // Each ack echoes the mode, and a system/status line with that mode comes right after it.
+        val acks = responses.drop(1)
+        assertEquals(listOf("plan", "acceptEdits").map { mode -> buildJsonObject { put("mode", mode) } }, acks.map { it.payload })
+        for ((ack, mode) in acks.zip(listOf(PermissionMode.PLAN, PermissionMode.ACCEPT_EDITS))) {
+            val status = assertIs<CliMessage.SystemStatus>(messages[messages.indexOf(ack) + 1])
+            assertEquals(mode, status.permissionMode)
+        }
+    }
+
+    @Test
+    fun `fork fixture resumes under a new session id`() {
+        val ids = Fixtures.decode("fork").filterIsInstance<CliMessage.SystemInit>().map { it.sessionId }
+
+        assertEquals(2, ids.size)
+        assertNotEquals(ids[0], ids[1])
+    }
+
+    @Test
+    fun `transcript fixtures decode line by line without throwing`() {
+        for (name in listOf("history-reply", "history-permission", "history-interrupt", "fork", "fork-origin")) {
+            val lines = Fixtures.transcript(name).readLines().filter { it.isNotBlank() }
+            assertTrue(lines.isNotEmpty(), "$name: empty transcript")
+            lines.forEach(Ndjson::decode)
+        }
+    }
+
+    @Test
+    fun `the original session's transcript keeps the title the host's rename_session gave it`() {
+        val titles = Fixtures.transcript("fork-origin").readLines().filter { it.isNotBlank() }.map(Ndjson::decode)
+            .filterIsInstance<CliMessage.Unknown>().filter { it.type == "custom-title" }
+            .map { it.raw?.get("customTitle")?.jsonPrimitive?.content }
+        assertEquals(listOf("Renamed by host"), titles)
     }
 
     @Test

@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonObject
 
 /** Everything the chat UI renders for one session. Produced only by [reduce]. */
 data class ChatState(
+    /** The history, oldest first. [reduce] keeps it in a persistent list, so that an event never copies a long history. */
     val entries: List<ChatEntry> = emptyList(),
     val sessionId: String? = null,
     /** What the user picked; null means the CLI's default. */
@@ -13,14 +14,61 @@ data class ChatState(
     val activeModel: String? = null,
     /** Shown prominently while set: the CLI is not running the model the user picked. */
     val modelWarning: String? = null,
+    /** The models the CLI offers, in its order, from the `models` of its `initialize` response; empty until it answers. */
+    val models: List<ModelOption> = emptyList(),
     val permissionMode: PermissionMode? = null,
+    /**
+     * The `set_permission_mode` requests the CLI has not answered yet, by request id: [permissionMode] shows the mode each asked
+     * for at once, and goes back to the mode before it if the CLI rejects it. Empty once a state is [settled].
+     */
+    val permissionModeChanges: Map<String, PermissionModeChange> = emptyMap(),
+    /** What Tandem passed with `--effort`, or what a loaded transcript recorded: the recorded `system/init` carries no effort. */
+    val effort: String? = null,
     val claudeCodeVersion: String? = null,
     val busy: Boolean = false,
     val pendingPermissions: List<PendingPermission> = emptyList(),
+    /** How the last turn ended, from its `result` line; null before the first. */
+    val lastTurnEnd: TurnEnd? = null,
+    /**
+     * How many turns have ended: with a result, or with a process that failed during one. A permission answered outside a turn ends
+     * none. Only grows while a process runs, so that whoever follows it sees every turn end, which [busy] alone, a state, may hide.
+     */
+    val turnsEnded: Int = 0,
+    /** Whether the CLI marked the turn in progress as interrupted ("[Request interrupted by user]"); cleared when a turn starts or ends. */
+    val turnInterrupted: Boolean = false,
     val ended: Boolean = false,
     /** Monotonic id source for notices; entry ids must stay unique even after retractions shrink [entries]. */
     val noticeCount: Int = 0,
+    /**
+     * A cache of each entry's position in [entries] by id (the last position, should an id repeat), so that [reduce] finds an
+     * entry without scanning a long history. [reduce] keeps it in a persistent map and in step with [entries]: an append adds
+     * the new position, a replacement keeps the id at its position, and a removal rebuilds it. A state built by hand may leave
+     * it empty: [reduce] checks every position it reads, scans [entries] while the index is empty or out of step, and
+     * re-indexes them on its first append. It tells "out of step" only by the last entry, so whoever changes [entries] other
+     * than by appending through [reduce] (inserting, removing or moving entries while the last one stays) must reset this to
+     * empty, or an entry may not be found. It takes part in equality: two states with the same entries, one indexed and one
+     * not, are not equal.
+     */
+    val entryIndex: Map<String, Int> = emptyMap(),
 )
+
+/** How a turn ended, as its `result` line says. */
+enum class TurnEnd {
+    /** It ran to its end. */
+    COMPLETED,
+
+    /** It was interrupted (Stop): the result's terminal reason is `aborted_streaming`, or the CLI marked the turn as interrupted. */
+    INTERRUPTED,
+
+    /** It failed: any other result that is an error, or the process exited with an error during the turn. */
+    FAILED,
+}
+
+/** A `set_permission_mode` request still to be answered: the mode it asks for, and the mode shown before it. */
+data class PermissionModeChange(val requested: PermissionMode, val previous: PermissionMode?)
+
+/** A model the CLI offers: [value] is what `--model` and `set_model` take, [displayName] and [description] are for people. */
+data class ModelOption(val value: String, val displayName: String, val description: String?)
 
 sealed interface ChatEntry {
     val id: String
@@ -68,4 +116,17 @@ data class PendingPermission(
     val toolUseId: String?,
     val description: String?,
     val suggestions: List<JsonObject>,
+)
+
+/**
+ * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming.
+ * A transcript loaded by `TranscriptReader` comes back settled.
+ */
+internal fun ChatState.settled(): ChatState = copy(
+    entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it },
+    busy = false,
+    pendingPermissions = emptyList(),
+    permissionModeChanges = emptyMap(),
+    ended = false,
+    turnInterrupted = false,
 )
