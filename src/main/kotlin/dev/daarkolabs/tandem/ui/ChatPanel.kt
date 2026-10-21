@@ -76,7 +76,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
-import org.jetbrains.jewel.intui.markdown.bridge.ProvideMarkdownStyling
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.VerticallyScrollableContainer
@@ -188,7 +187,7 @@ internal fun ChatPanel(
     val density = LocalDensity.current
     val currentOnFocusComposer by rememberUpdatedState(onFocusComposer)
     val listFocus = remember { FocusRequester() }
-    ProvideMarkdownStyling(project) {
+    TandemMarkdownStyling(project) {
         VerticallyScrollableContainer(listState, Modifier.fillMaxSize(), scrollbarInteractionSource = thumb) {
             LazyColumn(
                 state = listState,

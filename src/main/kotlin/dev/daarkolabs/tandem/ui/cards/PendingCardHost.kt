@@ -17,10 +17,10 @@ import dev.daarkolabs.tandem.session.PermissionAnswers
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.ui.RenderedChat
+import dev.daarkolabs.tandem.ui.TandemMarkdownStyling
 import dev.daarkolabs.tandem.ui.openInEditor
 import kotlinx.collections.immutable.ImmutableList
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
-import org.jetbrains.jewel.intui.markdown.bridge.ProvideMarkdownStyling
 import org.jetbrains.jewel.markdown.MarkdownBlock
 
 /** What the docked card shows: the oldest pending request's [card], how many more wait, and a plan card's plan, parsed. */
@@ -65,7 +65,7 @@ internal fun PendingCardHost(
             onSubmit = { picks -> answer { PermissionAnswers.questionAnswers(it, Cards.answers(card, picks)) } },
             onCancel = { answer { PermissionAnswers.cancelQuestion() } },
         )
-        is PlanCard -> ProvideMarkdownStyling(project) {
+        is PlanCard -> TandemMarkdownStyling(project) {
             PlanCardView(
                 card,
                 model.planBlocks,

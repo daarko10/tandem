@@ -1,6 +1,5 @@
 package dev.daarkolabs.tandem.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,7 +18,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -39,6 +37,7 @@ import dev.daarkolabs.tandem.session.SessionHandle
 import kotlinx.coroutines.flow.StateFlow
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Icon
+import org.jetbrains.jewel.ui.component.InlineWarningBanner
 import org.jetbrains.jewel.ui.component.IconButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
@@ -168,15 +167,8 @@ private fun TitleField(title: String, onConfirm: (String) -> Unit, onCancel: () 
  */
 @Composable
 private fun StatusLine(model: ComposerModel) {
-    val warning = model.modelWarning
-    if (warning != null) {
-        Text(
-            "⚠ $warning",
-            color = Color.White,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.fillMaxWidth().background(Color(0xFFB3261E)).padding(horizontal = 12.dp, vertical = 6.dp),
-        )
-    }
+    // The theme's warning banner (spec 4.2: theme tokens only, no literal colours).
+    model.modelWarning?.let { InlineWarningBanner(text = it, modifier = Modifier.fillMaxWidth()) }
     model.claudeCodeVersion?.let { version ->
         Text("claude $version", color = JewelTheme.globalColors.text.info, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
     }

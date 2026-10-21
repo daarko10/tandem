@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.chat.TextRow
+import dev.daarkolabs.tandem.ui.LocalUrlHandler
 import dev.daarkolabs.tandem.ui.RenderedRow
 import dev.daarkolabs.tandem.ui.chatColumn
 import kotlinx.collections.immutable.persistentListOf
@@ -20,6 +21,12 @@ import org.jetbrains.jewel.markdown.Markdown
 internal fun TextRowItem(rendered: RenderedRow) {
     val row = rendered.row as TextRow
     Box(Modifier.chatColumn().padding(top = row.gap.dp.dp)) {
-        Markdown(rendered.blocks ?: persistentListOf(), row.markdown, modifier = Modifier.fillMaxWidth(), selectable = true)
+        Markdown(
+            rendered.blocks ?: persistentListOf(),
+            row.markdown,
+            modifier = Modifier.fillMaxWidth(),
+            selectable = true,
+            onUrlClick = LocalUrlHandler.current,
+        )
     }
 }

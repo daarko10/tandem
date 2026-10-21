@@ -34,6 +34,7 @@ import dev.daarkolabs.tandem.chat.DiffLine
 import dev.daarkolabs.tandem.chat.ToolBody
 import dev.daarkolabs.tandem.chat.ToolCall
 import dev.daarkolabs.tandem.ui.ChatUiState
+import dev.daarkolabs.tandem.ui.LocalUrlHandler
 import dev.daarkolabs.tandem.ui.bottomFade
 import dev.daarkolabs.tandem.ui.chatPalette
 import dev.daarkolabs.tandem.ui.monoTextStyle
@@ -70,6 +71,7 @@ private const val MAX_LINES = 400
 internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?, ui: ChatUiState) {
     val colors = JewelTheme.globalColors.text
     val mono = monoTextStyle()
+    val onUrl = LocalUrlHandler.current
     SelectionContainer {
         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             when (val body = call.body) {
@@ -91,7 +93,9 @@ internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?,
                     Clamped("all:${call.id}", count, count, ui, byLines = false) { _, modifier ->
                         Column(modifier.fillMaxWidth()) {
                             body.title?.let { Text(it, color = colors.info) }
-                            blocks?.let { Markdown(it, body.markdown, modifier = Modifier.fillMaxWidth(), selectable = true) }
+                            blocks?.let {
+                                Markdown(it, body.markdown, Modifier.fillMaxWidth(), selectable = true, onUrlClick = onUrl)
+                            }
                         }
                     }
                 }
@@ -100,7 +104,9 @@ internal fun ToolBodyView(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?,
                     Clamped("all:${call.id}", count, count, ui, byLines = false) { _, modifier ->
                         Column(modifier.fillMaxWidth()) {
                             body.links.forEach { link -> Link(link.title, onClick = { openWebLink(link.url) }) }
-                            blocks?.let { Markdown(it, body.markdown, modifier = Modifier.fillMaxWidth(), selectable = true) }
+                            blocks?.let {
+                                Markdown(it, body.markdown, Modifier.fillMaxWidth(), selectable = true, onUrlClick = onUrl)
+                            }
                         }
                     }
                 }

@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.chat.Cards
 import dev.daarkolabs.tandem.chat.PlanCard
 import dev.daarkolabs.tandem.chat.PlanSource
+import dev.daarkolabs.tandem.ui.LocalUrlHandler
 import dev.daarkolabs.tandem.ui.bottomFade
 import kotlinx.collections.immutable.ImmutableList
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -116,6 +117,7 @@ internal fun PlanCardView(
                         .wrapContentHeight(Alignment.Top, unbounded = true)
                         .onSizeChanged { overflows = it.height > clamp },
                     selectable = true,
+                    onUrlClick = LocalUrlHandler.current,
                 )
                 if (expanded) {
                     Box(Modifier.matchParentSize()) {

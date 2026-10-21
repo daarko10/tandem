@@ -60,6 +60,9 @@ dependencies {
         bundledModule("intellij.platform.jewel.markdown.core")
         bundledModule("intellij.platform.jewel.markdown.ideLafBridgeStyling")
         bundledModule("intellij.platform.jewel.markdown.extensions.autolink")
+        // GFM tables and strikethrough (spec 4.4); also bundled, so declared here and in plugin.xml, never shipped.
+        bundledModule("intellij.platform.jewel.markdown.extensions.gfmTables")
+        bundledModule("intellij.platform.jewel.markdown.extensions.gfmStrikethrough")
         testFramework(TestFrameworkType.Platform)
         testFramework(TestFrameworkType.JUnit5)
         testFramework(TestFrameworkType.Starter, configurationName = integrationTestImplementation.name)

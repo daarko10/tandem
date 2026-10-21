@@ -41,8 +41,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.markdown.MarkdownBlock
-import org.jetbrains.jewel.markdown.extensions.autolink.AutolinkProcessorExtension
-import org.jetbrains.jewel.markdown.processing.MarkdownProcessor
 
 /**
  * A chat row as the list draws it (spec 5.6): the [row], the parsed Markdown of a [TextRow] in [blocks], and in [bodies] the parsed
@@ -79,8 +77,8 @@ internal class ChatPresenter(
     options: StateFlow<RowOptions>,
     parse: ((String) -> ImmutableList<MarkdownBlock>)? = null,
 ) {
-    // One processor with the autolink extension, so bare URLs stay links (spec 4.0, 4.4).
-    private val processor = MarkdownProcessor(listOf(AutolinkProcessorExtension))
+    // One processor per presenter: bare URLs stay links, GFM tables and strikethrough parse (spec 4.0, 4.4).
+    private val processor = tandemMarkdownProcessor()
     private val parseMarkdown: (String) -> ImmutableList<MarkdownBlock> = parse ?: { processor.processMarkdownDocument(it).toImmutableList() }
 
     /** Body keys from [expandBody], read by the rendering coroutine only. */
