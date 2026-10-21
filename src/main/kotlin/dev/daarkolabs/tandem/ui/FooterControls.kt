@@ -53,6 +53,7 @@ import dev.daarkolabs.tandem.chat.ComposerModel
 import dev.daarkolabs.tandem.chat.Modes
 import dev.daarkolabs.tandem.chat.shownModel
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import org.jetbrains.jewel.foundation.LocalComponent
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.MenuScope
 import org.jetbrains.jewel.ui.component.PopupMenu
@@ -60,10 +61,16 @@ import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.separator
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
+import java.awt.Window
+import java.awt.event.KeyEvent as AwtKeyEvent
+import javax.swing.SwingUtilities
 import kotlin.math.max
 
 /** What the model control reads while nothing is known about the model yet. */
 private const val NO_MODEL_LABEL: String = "Model"
+
+/** The value of the CLI's own `default` entry in its model list: the model menu lists it as the Default-badged model instead. */
+private const val DEFAULT_MODEL_ENTRY: String = "default"
 
 /** What the mode control reads before the first `system/init` or a pick. */
 private const val NO_MODE_LABEL: String = "Mode"
@@ -105,12 +112,13 @@ internal fun modelMenu(composer: ComposerModel): List<ModelItem> {
     val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
     val default = composer.defaultModel
     val defaultRuns = composer.activeModel == null || composer.activeModel == default
-    val entries = composer.models.filter { it.value != "default" }
+    val entries = composer.models.filter { it.value != DEFAULT_MODEL_ENTRY }
     val items = entries.map { option ->
         val isDefault = default != null && option.resolvedModel == default
         Triple(if (isDefault && defaultRuns) null else option.value, option.displayName, isDefault) to (option == shown)
     }
-    val requested = composer.requestedModel
+    // The new-session popup can pick the CLI's own `default` entry: that one is the Default-badged item, not an item of its own.
+    val requested = composer.requestedModel?.takeIf { it != DEFAULT_MODEL_ENTRY }
     val extra = if (requested != null && entries.none { it.value == requested }) listOf(Triple(requested, requested, false) to false) else emptyList()
     return (items + extra).mapIndexed { index, (item, checked) ->
         val (value, label, isDefault) = item
@@ -170,17 +178,41 @@ internal class AboveAnchor(val alignEnd: Boolean, val gapPx: Int) : PopupPositio
 }
 
 /**
- * The digit 1 to 9 that an AWT key event stands for, from the number row or the keypad, without Ctrl, Alt or Meta; null for any other
- * key. A typed event has it as its character, a pressed or released one as its key code.
+ * The digit 1 to 9 that an AWT key event stands for, from the number row or the keypad, without Shift, Ctrl, Alt or Meta; null for
+ * any other key. A typed event has it as its character, a pressed or released one as its key code.
  */
-private fun digitOf(event: java.awt.event.KeyEvent): Int? {
-    if (event.isControlDown || event.isAltDown || event.isMetaDown) return null
-    if (event.id == java.awt.event.KeyEvent.KEY_TYPED) return event.keyChar.takeIf { it in '1'..'9' }?.digitToInt()
+private fun digitOf(event: AwtKeyEvent): Int? {
+    if (event.isShiftDown || event.isControlDown || event.isAltDown || event.isMetaDown) return null
+    if (event.id == AwtKeyEvent.KEY_TYPED) return event.keyChar.takeIf { it in '1'..'9' }?.digitToInt()
     return when (event.keyCode) {
-        in java.awt.event.KeyEvent.VK_1..java.awt.event.KeyEvent.VK_9 -> event.keyCode - java.awt.event.KeyEvent.VK_0
-        in java.awt.event.KeyEvent.VK_NUMPAD1..java.awt.event.KeyEvent.VK_NUMPAD9 -> event.keyCode - java.awt.event.KeyEvent.VK_NUMPAD0
+        in AwtKeyEvent.VK_1..AwtKeyEvent.VK_9 -> event.keyCode - AwtKeyEvent.VK_0
+        in AwtKeyEvent.VK_NUMPAD1..AwtKeyEvent.VK_NUMPAD9 -> event.keyCode - AwtKeyEvent.VK_NUMPAD0
         else -> null
     }
+}
+
+/**
+ * Whether a key event goes to [home] (the window the control is in) or to a window it owns, such as the open menu's popup: a
+ * footer menu takes no digits from another IDE window. With no [home] known, every window counts.
+ */
+private fun inWindowOf(event: AwtKeyEvent, home: Window?): Boolean {
+    if (home == null) return true
+    val component = event.component ?: return false
+    val window = component as? Window ?: SwingUtilities.getWindowAncestor(component) ?: return false
+    return generateSequence(window) { it.owner }.any { it === home }
+}
+
+/**
+ * A footer control's pill (spec 2.3): the bubble fill at a 6 dp radius when [filled] (hovered, or its menu open), a 1 dp focus
+ * outline when [focused], then 7 dp by 3 dp inside. P4's context ring takes the same.
+ */
+@Composable
+internal fun Modifier.footerPill(filled: Boolean, focused: Boolean): Modifier {
+    val shape = RoundedCornerShape(6.dp)
+    return this
+        .then(if (filled) Modifier.background(chatPalette().bubbleFill, shape) else Modifier)
+        .then(if (focused) Modifier.border(1.dp, JewelTheme.globalColors.outlines.focused, shape) else Modifier)
+        .padding(horizontal = 7.dp, vertical = 3.dp)
 }
 
 /**
@@ -229,12 +261,7 @@ internal fun ModeControl(composer: ComposerModel, onPick: (PermissionMode) -> Un
  * [onPickEffort].
  */
 @Composable
-internal fun ModelControl(
-    composer: ComposerModel,
-    modifier: Modifier = Modifier,
-    onPickModel: (String?) -> Unit,
-    onPickEffort: (String) -> Unit,
-) {
+internal fun ModelControl(composer: ComposerModel, onPickModel: (String?) -> Unit, onPickEffort: (String) -> Unit) {
     val palette = chatPalette()
     val models = remember(composer) { modelMenu(composer) }
     val efforts = remember(composer) { effortMenu(composer) }
@@ -249,7 +276,6 @@ internal fun ModelControl(
     FooterControl(
         description = "Model",
         alignEnd = true,
-        modifier = modifier,
         opens = models.isNotEmpty() || efforts != null,
         digitPick = { digit -> byDigit(models, digit, ModelItem::digit)?.let(::pick) != null },
         label = { Text(text, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -346,26 +372,26 @@ private fun DefaultChip(palette: ChatPalette) {
 private fun FooterControl(
     description: String,
     alignEnd: Boolean,
-    modifier: Modifier = Modifier,
     opens: Boolean = true,
     digitPick: (Int) -> Boolean,
     label: @Composable () -> Unit,
     menu: MenuScope.(close: () -> Unit) -> Unit,
 ) {
-    val palette = chatPalette()
-    val colors = JewelTheme.globalColors
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
     val focused by source.collectIsFocusedAsState()
     var open by remember { mutableStateOf(false) }
     val close = { open = false }
     val currentDigitPick by rememberUpdatedState(digitPick)
+    val panel = LocalComponent.current
     if (open) {
-        DisposableEffect(Unit) {
-            // Every event of a digit key is taken while the menu is open, so that its typed character lands nowhere; the press picks.
+        DisposableEffect(panel) {
+            // Every event of a digit key in this window or its menu is taken while the menu is open, so that its typed character lands
+            // nowhere; the press picks.
             val dispatcher = KeyEventDispatcher { event ->
                 val digit = digitOf(event) ?: return@KeyEventDispatcher false
-                if (event.id == java.awt.event.KeyEvent.KEY_PRESSED && currentDigitPick(digit)) open = false
+                if (!inWindowOf(event, SwingUtilities.getWindowAncestor(panel))) return@KeyEventDispatcher false
+                if (event.id == AwtKeyEvent.KEY_PRESSED && currentDigitPick(digit)) open = false
                 true
             }
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
@@ -373,10 +399,9 @@ private fun FooterControl(
             onDispose { focusManager.removeKeyEventDispatcher(dispatcher) }
         }
     }
-    val shape = RoundedCornerShape(6.dp)
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
     Box(
-        modifier
+        Modifier
             .semantics(mergeDescendants = true) {
                 role = Role.DropdownList
                 contentDescription = description
@@ -396,9 +421,7 @@ private fun FooterControl(
             }
             .hoverable(source)
             .clickable(interactionSource = source, indication = null, role = Role.DropdownList) { open = !open && opens }
-            .then(if (hovered || open) Modifier.background(palette.bubbleFill, shape) else Modifier)
-            .then(if (focused) Modifier.border(1.dp, colors.outlines.focused, shape) else Modifier)
-            .padding(horizontal = 7.dp, vertical = 3.dp),
+            .footerPill(filled = hovered || open, focused = focused),
     ) {
         label()
         if (open) {

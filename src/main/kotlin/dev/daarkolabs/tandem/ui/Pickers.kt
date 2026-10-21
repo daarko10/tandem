@@ -198,20 +198,14 @@ internal fun <T> Picker(
 }
 
 /**
- * The model picker: "Default model", then the models the CLI offers, or the one it runs while it has not listed them
- * ([modelEntries]). It shows [model], the one picked (null: the CLI's default); a pick calls [onPick] with its value, null for
- * "Default model".
+ * The new-session popup's model picker: "Default model", then the models the CLI offers ([modelEntries]; no session runs yet, so
+ * there is no running model to list while it has not listed them). It shows [model], the one picked (null: the CLI's default); a
+ * pick calls [onPick] with its value, null for "Default model".
  */
 @Composable
-internal fun ModelPicker(
-    models: List<ModelOption>,
-    model: String?,
-    active: String?,
-    modifier: Modifier = Modifier,
-    onPick: (String?) -> Unit,
-) {
-    val entries = remember(models, model, active) { modelEntries(models, model, active) }
-    Picker(entries, model, "Model", modifier, onPick)
+internal fun ModelPicker(models: List<ModelOption>, model: String?, onPick: (String?) -> Unit) {
+    val entries = remember(models, model) { modelEntries(models, model, active = null) }
+    Picker(entries, model, "Model", onPick = onPick)
 }
 
 /**

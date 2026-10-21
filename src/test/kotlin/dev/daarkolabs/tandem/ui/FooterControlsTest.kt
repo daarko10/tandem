@@ -94,6 +94,18 @@ class FooterControlsTest {
     }
 
     @Test
+    fun `the popup's Default (recommended) pick is the Default-badged model, not an item of its own`() {
+        // The new-session popup lists the CLI's own `default` entry, so a session can start with requestedModel "default".
+        val beforeInit = composer(requestedModel = "default")
+        assertEquals("Fable 5.1", modelLabel(beforeInit).model)
+        val menu = modelMenu(beforeInit)
+        assertEquals(12, menu.size)
+        assertTrue(menu.none { it.label == "default" })
+        assertEquals(listOf("Fable 5.1"), menu.filter { it.checked }.map { it.label })
+        assertEquals("Sonnet 5.5", modelLabel(composer(activeModel = sonnet, requestedModel = "default")).model)
+    }
+
+    @Test
     fun `a pick made during a turn is shown until the next init, not the reply's model`() {
         val composer = composer(busy = true, activeModel = sonnet, requestedModel = "opus", modelSwitchPending = true)
         assertEquals("Opus 5.5", modelLabel(composer).model)

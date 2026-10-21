@@ -54,7 +54,7 @@ internal fun NewSessionPopup(choices: NewSessionChoices, onCreate: (NewSessionOp
         var picks by remember { mutableStateOf(lastPicks(last.lastModel, last.lastEffort, last.lastPermissionMode)) }
         val focus = remember { FocusRequester() }
         Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            ModelPicker(models, picks.model, active = null) { model -> picks = picks.copy(model = model) }
+            ModelPicker(models, picks.model) { model -> picks = picks.copy(model = model) }
             EffortPicker(picks.effort) { effort -> picks = picks.copy(effort = effort) }
             PermissionModePicker(picks.permissionMode) { mode -> picks = picks.copy(permissionMode = mode) }
             DefaultButton(

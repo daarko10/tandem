@@ -61,12 +61,14 @@ fun composerModel(state: ChatState): ComposerModel {
  * 2. else, once the CLI has reported the [active] model, the entry other than `default` that resolves to it (its `resolvedModel`, or its
  *    value without one): of several, the requested one, else the first;
  * 3. before that, the requested entry, else the entry the `default` entry resolves to.
- * Null when no entry stands for it (4: the footer then shows the wire id).
+ * Null when no entry stands for it (4: the footer then shows the wire id). A [requested] `default` (the new-session popup lists the
+ * CLI's own `default` entry) counts as no request: the entry it resolves to stands for it.
  */
 internal fun shownModel(models: List<ModelOption>, requested: String?, active: String?, switchPending: Boolean): ModelOption? {
     val choices = models.filter { it.value != DEFAULT_ENTRY }
-    fun requestedOrDefault(): ModelOption? = if (requested != null) {
-        choices.firstOrNull { it.value == requested }
+    val picked = requested?.takeIf { it != DEFAULT_ENTRY }
+    fun requestedOrDefault(): ModelOption? = if (picked != null) {
+        choices.firstOrNull { it.value == picked }
     } else {
         val resolved = models.firstOrNull { it.value == DEFAULT_ENTRY }?.resolvedModel ?: return null
         choices.firstOrNull { it.resolvesTo() == resolved }
@@ -75,7 +77,7 @@ internal fun shownModel(models: List<ModelOption>, requested: String?, active: S
         switchPending || active == null -> requestedOrDefault()
         else -> {
             val running = choices.filter { it.resolvesTo() == active }
-            running.firstOrNull { it.value == requested } ?: running.firstOrNull()
+            running.firstOrNull { it.value == picked } ?: running.firstOrNull()
         }
     }
 }
