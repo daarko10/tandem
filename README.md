@@ -1,14 +1,16 @@
 # Tandem
 
-A fast, native Claude Code chat for JetBrains IDEs. Free and open source.
+A fast, native JetBrains plugin for Claude Code. Free and open source.
 
-> Status: early development. Not on the JetBrains Marketplace yet.
+> Status: early development. macOS and Linux today; Windows in progress. Not on the JetBrains Marketplace yet.
+> IDE-native edits are the next milestone; until then the CLI's Edit and Write tools are disabled in Tandem.
 
 ## Why
 - **Native UI.** Built with Jewel (Compose), not an embedded browser. No black screens after IDE updates.
 - **No Node, no bundled SDK.** Tandem drives the `claude` CLI you already have, so new models and features
   work the day the CLI ships them.
-- **Edits through the IDE.** Changes land via the editor, so undo, unsaved buffers and the native diff viewer work.
+- **Edits through the IDE** (next milestone, not in `main` yet). Changes will land via the editor, so undo, unsaved
+  buffers and the native diff viewer work.
 - **Honest status.** If your model is unavailable and the CLI falls back to another, you see it.
 - **Your sign-in stays with the CLI.** Tandem never reads credentials or API keys.
 
