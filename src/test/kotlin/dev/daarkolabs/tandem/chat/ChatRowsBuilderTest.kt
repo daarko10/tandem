@@ -13,6 +13,7 @@ import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.TurnEnd
 import dev.daarkolabs.tandem.session.reduce
+import dev.daarkolabs.tandem.session.settled
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -608,6 +609,48 @@ class ChatRowsBuilderTest {
         assertEquals("e:${marker.id}", footer.key)
         assertTrue(rows.none { it is NoticeRow && it.text == "Stopped." })
         assertTrue(rows.none { it is WorkingRow })
+    }
+
+    @Test
+    fun `a reloaded transcript builds the same tool rows as its stream`() {
+        val probe = Fixtures.names().filter { it.substringBefore("-") in setOf("ask", "plan", "think", "tools", "agent", "misc") }
+        assertEquals(29, probe.size)
+
+        fun build(s: ChatState): ChatRows = ChatRowsBuilder(RowOptions(showThinking = true)).build(s)
+        fun stream(name: String): ChatState = replay(name).first.settled()
+        fun reload(name: String): ChatState = runBlocking { TranscriptReader.read(Fixtures.transcript(name)) }.state
+
+        // Children are left out (5.5: a subagent's lines are not in the transcript); thinking counts by presence. The Agent body
+        // follows its children: a forwarded TextRow child makes it None live, its absence on disk makes it Markdown.
+        fun sig(rows: List<ChatRow>): List<Any> = rows.mapNotNull {
+            when (it) {
+                is ToolRow -> listOf(
+                    it.label.text,
+                    it.state,
+                    it.stats,
+                    it.calls.map { c -> listOf(c.label.text, c.state, c.stats, if (c.kind == ToolKind.AGENT) null else c.body::class, c.progress) },
+                )
+                is ThinkingRow -> "thinking"
+                else -> null
+            }
+        }
+
+        for (name in probe) {
+            assertEquals(sig(build(stream(name)).rows), sig(build(reload(name)).rows), name)
+            val reloaded = build(reload(name)).rows
+            assertTrue(reloaded.none { it is WorkingRow || (it is TurnEndRow && it.end == TurnEnd.COMPLETED) }, "$name: $reloaded")
+        }
+
+        for (rows in listOf(build(stream("think-default")), build(reload("think-default")))) {
+            assertEquals("Thought for 2s", rows.rows.filterIsInstance<ThinkingRow>().single().label)
+        }
+        for (rows in listOf(build(stream("agent-sync")), build(reload("agent-sync")))) {
+            assertEquals("Done (2 tool uses · 21.8k tokens · 5.8s)", agent(rows).calls.single().progress)
+        }
+        assertTrue(agent(build(reload("agent-sync"))).calls.single().children.isEmpty())
+        val forwarded = agent(build(reload("agent-forwarded"))).calls.single()
+        assertEquals(ToolBody.Markdown("7", null), forwarded.body)
+        assertTrue(forwarded.children.isEmpty())
     }
 
     @Test

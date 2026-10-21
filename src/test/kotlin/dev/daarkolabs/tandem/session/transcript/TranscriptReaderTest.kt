@@ -13,8 +13,12 @@ import dev.daarkolabs.tandem.session.settled
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
@@ -26,6 +30,7 @@ import java.util.BitSet
 import kotlin.io.path.appendText
 import kotlin.io.path.bufferedWriter
 import kotlin.io.path.fileSize
+import kotlin.io.path.readLines
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 import kotlin.system.measureTimeMillis
@@ -771,5 +776,85 @@ class TranscriptReaderTest {
             ),
             running.settled(),
         )
+    }
+
+    private fun read(name: String): ChatState = runBlocking { TranscriptReader.read(Fixtures.transcript(name)) }.state
+
+    private fun result(state: ChatState, id: String): ChatEntry.ToolResult =
+        state.entries.filterIsInstance<ChatEntry.ToolResult>().single { it.toolUseId == id }
+
+    /** The id of the call to [tool] in [state]. */
+    private fun callId(state: ChatState, tool: String): String =
+        state.entries.filterIsInstance<ChatEntry.Assistant>().flatMap { it.blocks }.filterIsInstance<AssistantBlock.ToolUse>().single { it.name == tool }.id
+
+    @Test
+    fun `a recorded question session reloads with its answers and decision`() {
+        val single = result(read("ask-single"), "<id-12>")
+        assertEquals("Blue", single.result!!.jsonObject["answers"]!!.jsonObject["Which colour?"]!!.jsonPrimitive.content)
+        assertFalse(single.isError)
+
+        val deny = read("ask-deny")
+        val denied = result(deny, callId(deny, "AskUserQuestion"))
+        assertTrue(denied.isError)
+        assertEquals("reject", denied.decision!!.decision)
+        assertTrue(denied.decision.nonExecutionKind != null, denied.decision.toString())
+    }
+
+    @Test
+    fun `a recorded edit reloads with its patch`() {
+        val state = read("tools-edit")
+        val results = state.entries.filterIsInstance<ChatEntry.ToolResult>()
+        assertTrue(results.any { (it.result as? JsonObject)?.get("structuredPatch")?.jsonArray?.isNotEmpty() == true }, results.toString())
+        val write = result(state, callId(state, "Write"))
+        assertEquals("create", write.result!!.jsonObject["type"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `a recorded thinking block reloads with its duration`() {
+        val thinking = read("think-default").entries.filterIsInstance<ChatEntry.Assistant>().flatMap { it.blocks }.filterIsInstance<AssistantBlock.Thinking>()
+        assertTrue(thinking.any { it.text == "" && it.durationMs == 2143L }, thinking.toString())
+    }
+
+    @Test
+    fun `a recorded agent session reloads the agent result without children`() {
+        val state = read("agent-sync")
+        val agent = result(state, "<id-12>").result!!.jsonObject
+        assertEquals(2, agent["totalToolUseCount"]!!.jsonPrimitive.content.toInt())
+        assertEquals(21781, agent["totalTokens"]!!.jsonPrimitive.content.toInt())
+        assertEquals(5829, agent["totalDurationMs"]!!.jsonPrimitive.content.toInt())
+        // The subagent's own lines live in <id>/subagents/, which the reader does not read.
+        assertTrue(state.entries.none { it is ChatEntry.Assistant && it.parentToolUseId != null })
+        assertTrue(state.entries.none { it is ChatEntry.ToolResult && it.parentToolUseId != null })
+    }
+
+    @Test
+    fun `timestamps and cwd are read from the lines`() {
+        val state = read("ask-single")
+        assertEquals("<path>", state.cwd)
+        val users = state.entries.filterIsInstance<ChatEntry.User>()
+        assertTrue(users.isNotEmpty())
+        assertTrue(users.all { (it.sentAtMillis ?: 0L) > 0L }, users.toString())
+        val results = state.entries.filterIsInstance<ChatEntry.ToolResult>()
+        assertTrue(results.isNotEmpty())
+        assertTrue(results.all { (it.atMillis ?: 0L) > 0L }, results.toString())
+    }
+
+    @Test
+    fun `a transcript without timestamps or cwd still loads`(@TempDir dir: Path) = runBlocking<Unit> {
+        // history-reply's prompt (line 3) and reply (line 18), as an older CLI would write them: no timestamp, no cwd. The reply's
+        // recorded parent, <uuid-27>, is an attachment line left out, so it names the prompt instead.
+        val lines = Fixtures.transcript("history-reply").readLines()
+        val prompt = Json.parseToJsonElement(lines[2]).jsonObject
+        val reply = Json.parseToJsonElement(lines[17]).jsonObject
+        assertEquals("<uuid-17>", prompt["uuid"]!!.jsonPrimitive.content)
+        val file = dir.resolve("old-cli.jsonl")
+        file.writeLines(
+            JsonObject(prompt - "timestamp" - "cwd").toString(),
+            JsonObject(reply - "timestamp" - "cwd" + ("parentUuid" to JsonPrimitive("<uuid-17>"))).toString(),
+        )
+        val state = TranscriptReader.read(file).state
+        assertEquals(listOf("user: Reply with the single word: pong", "assistant: pong"), state.shape())
+        assertNull(state.cwd)
+        assertEquals(0L, state.entries.filterIsInstance<ChatEntry.User>().single().sentAtMillis ?: 0L)
     }
 }

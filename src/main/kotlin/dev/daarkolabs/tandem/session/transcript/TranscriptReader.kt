@@ -93,7 +93,8 @@ data class LoadedTranscript(
  * what each line says about the meta until the first pass has placed it.
  *
  * Prompts (`user` text), tool results (`user` `tool_result` blocks) and `assistant` lines make the history: an interrupt
- * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`. `custom-title`,
+ * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`. Each goes to the reducer
+ * stamped with its line's `timestamp` (0 when it has none), and [TranscriptMeta.cwd] becomes the state's `cwd`. `custom-title`,
  * `ai-title` and `summary` lines make the title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the
  * output of commands and shell escapes, background-task notifications, every other type, and lines that are not a JSON object
  * (such as a last line the CLI is still writing) are skipped. Bad input never throws.
@@ -185,6 +186,8 @@ object TranscriptReader {
         return LoadedTranscript(
             state.copy(
                 sessionId = meta.sessionId,
+                // The live source is system/init, which a transcript does not keep: its lines' own cwd stands in.
+                cwd = meta.cwd ?: state.cwd,
                 activeModel = meta.lastModel ?: state.activeModel,
                 permissionMode = meta.lastPermissionMode ?: state.permissionMode,
                 effort = meta.lastEffort ?: state.effort,
@@ -358,7 +361,9 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
         meta.take(factsOf(message, raw))
         when (raw.string("type")) {
             "user" -> if (!raw.isSet("isMeta") && !raw.isSet("isSidechain") && !raw.isSet("isCompactSummary")) userLine(message)
-            "assistant" -> if (!raw.isSet("isSidechain")) state = reduce(state, SessionEvent.Cli(message))
+            "assistant" -> if (!raw.isSet("isSidechain")) {
+                state = reduce(state, SessionEvent.Cli(message, atMillis = (message as? CliMessage.Assistant)?.timestampMillis ?: 0L))
+            }
         }
     }
 
@@ -367,9 +372,11 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
         val shown = userLineOf(user)
         // Tool results and an interrupt marker go through the reducer, as they do live; once per line, since it handles both.
         // The API puts a user message's tool_result blocks first and any text after them, so a prompt comes after its results.
-        if (shown.interrupted || user.content.any { it is ContentBlock.ToolResult }) state = reduce(state, SessionEvent.Cli(user))
+        // Both are stamped with the line's own timestamp, 0 (unknown) when it has none, as an older CLI writes it.
+        val atMillis = user.timestampMillis ?: 0L
+        if (shown.interrupted || user.content.any { it is ContentBlock.ToolResult }) state = reduce(state, SessionEvent.Cli(user, atMillis))
         val typed = shown.typed ?: return
-        state = reduce(state, SessionEvent.UserSent(user.uuid ?: "line-$lineCount", typed.text))
+        state = reduce(state, SessionEvent.UserSent(user.uuid ?: "line-$lineCount", typed.text, atMillis))
     }
 }
 
