@@ -117,7 +117,8 @@ internal fun ToolRowItem(rendered: RenderedRow, ui: ChatUiState) {
 
 /**
  * One tool line, a row's or a group's sub-row's: [label] in the colour of [state], [stats] before the chevron, the chevron that turns
- * when [open]. The whole line is the click target when [opens]; a running call draws its chevron disabled. Assistive technology
+ * when [open], in the label's colour (a failed row is red to its end, spec 4.2). The whole line is the click target when [opens]; a
+ * running call draws its chevron disabled. Assistive technology
  * knows it as a button named by [description], its label unless the caller says otherwise (a streaming thinking row).
  */
 @Composable
@@ -162,7 +163,7 @@ internal fun ToolLine(
         Text(text, color = tone, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         stats?.let { DiffStatsText(it) }
         if (opens) {
-            Icon(AllIconsKeys.General.ChevronRight, null, Modifier.padding(start = 8.dp).size(16.dp).rotate(angle), tint = colors.info)
+            Icon(AllIconsKeys.General.ChevronRight, null, Modifier.padding(start = 8.dp).size(16.dp).rotate(angle), tint = tone)
         } else if (state in RUNNING) {
             Icon(AllIconsKeys.General.ChevronRight, null, Modifier.padding(start = 8.dp).size(16.dp), tint = colors.disabled)
         }
