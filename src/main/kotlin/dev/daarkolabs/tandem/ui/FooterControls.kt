@@ -161,7 +161,8 @@ internal fun <T> byDigit(items: List<T>, digit: Int, digitOf: (T) -> Int?): T? =
 
 /**
  * Where a footer menu goes (spec 2.3, "Menu placement"): its bottom [gapPx] above the [anchor]'s top, its left edge on the anchor's,
- * or its right edge on the anchor's when [alignEnd], clamped into the [window].
+ * or its right edge on the anchor's when [alignEnd], clamped into the [window]. The anchor is the layout the popup is placed in, so a
+ * control places its popup in a box whose bounds are the pill's, not inside the pill's padding (see `FooterControl`).
  */
 internal fun aboveAnchor(anchor: IntRect, window: IntSize, popup: IntSize, alignEnd: Boolean, gapPx: Int): IntOffset {
     val x = (if (alignEnd) anchor.right - popup.width else anchor.left).coerceIn(0, max(0, window.width - popup.width))
@@ -202,7 +203,8 @@ private fun inWindowOf(event: AwtKeyEvent, home: Window?): Boolean {
 
 /**
  * A footer control's pill (spec 2.3): the bubble fill at a 6 dp radius when [filled] (hovered, or its menu open), a 1 dp focus
- * outline when [focused], then 7 dp by 3 dp inside. P4's context ring takes the same.
+ * outline when [focused], then 7 dp by 3 dp inside. P4's context ring takes the same, and places its popover beside the pill, not
+ * inside it, as `FooterControl` does.
  */
 @Composable
 internal fun Modifier.footerPill(filled: Boolean, focused: Boolean): Modifier {
@@ -363,8 +365,11 @@ private fun DefaultChip(palette: ChatPalette) {
  * open a digit picks through [digitPick], which says whether it picked, and the menu closes when it did.
  *
  * The digits are taken from AWT's key dispatch while the menu is open, not from a Compose key handler (open item 13): in the IDE the
- * menu is a popup window of its own (`JBPopupRenderer`), focused with no Compose node focused in it, so neither a handler on the menu
- * nor one on the control gets the key.
+ * menu is a focusable popup layer of the tool window's own Compose scene (the IDE leaves Jewel's `JBPopupRenderer` off), which takes
+ * the keys with no Compose node focused in it, so neither a handler on the menu nor one on the control gets them.
+ *
+ * The menu is placed in the control's outer box, which has no padding of its own, so that [AboveAnchor] measures from the pill's
+ * edges: placed inside the pill's padding, it sat 5 dp above the pill and 7 dp inside its right edge.
  */
 @Composable
 private fun FooterControl(
@@ -418,10 +423,9 @@ private fun FooterControl(
                 }
             }
             .hoverable(source)
-            .clickable(interactionSource = source, indication = null, role = Role.DropdownList) { open = !open && opens }
-            .footerPill(filled = hovered || open, focused = focused),
+            .clickable(interactionSource = source, indication = null, role = Role.DropdownList) { open = !open && opens },
     ) {
-        label()
+        Box(Modifier.footerPill(filled = hovered || open, focused = focused)) { label() }
         if (open) {
             PopupMenu(
                 onDismissRequest = { mode ->
