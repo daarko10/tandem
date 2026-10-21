@@ -3,7 +3,10 @@ package dev.daarkolabs.tandem.ui
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.ui.graphics.ImageBitmap
 import dev.daarkolabs.tandem.chat.FollowState
 
 /**
@@ -54,6 +57,12 @@ internal class ChatUiState {
 
     /** The prompt being typed in the composer (spec 4.15). */
     val draft: TextFieldState = TextFieldState()
+
+    /** The images attached to the prompt being typed, in order (polish spec 2.7); sent and cleared with it. */
+    val attachments: SnapshotStateList<PendingImage> = mutableStateListOf()
+
+    /** Why the last image was not attached, shown above the composer until the next send or its close (polish spec 2.7). */
+    val composerNotice: MutableState<String?> = mutableStateOf(null)
 
     val listState: LazyListState = LazyListState()
 
@@ -112,3 +121,10 @@ internal class ChatUiState {
  * last row did not change, and on the very first emission, which only records).
  */
 internal data class ListChange(val pin: Boolean, val appended: Int?)
+
+/**
+ * An image attached to the prompt being typed (polish spec 2.7): [id] is the composer's own, [name] the file's (or `Pasted image.png`),
+ * [mediaType] from its first bytes, [bytes] its raw bytes, encoded only when the prompt is sent, and [thumbnail] its decoded thumbnail,
+ * null when it could not be decoded.
+ */
+internal class PendingImage(val id: String, val name: String, val mediaType: String, val bytes: ByteArray, val thumbnail: ImageBitmap?)

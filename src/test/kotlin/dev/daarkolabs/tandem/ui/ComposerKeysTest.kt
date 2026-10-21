@@ -6,13 +6,17 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.text.TextRange
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import java.awt.event.KeyEvent as AwtKeyEvent
 
 /** What a key typed in the composer does (spec 4.15, 4.18). */
 class ComposerKeysTest {
     private val enter = key(AwtKeyEvent.VK_ENTER)
     private val escape = key(AwtKeyEvent.VK_ESCAPE)
+    private val v = key(AwtKeyEvent.VK_V)
+    private val backspace = key(AwtKeyEvent.VK_BACK_SPACE)
 
     private fun composer(
         key: Key,
@@ -22,7 +26,10 @@ class ComposerKeysTest {
         ctrlOrMeta: Boolean = false,
         busy: Boolean = false,
         cardOpen: Boolean = false,
-    ): ComposerAction? = composerKey(key, type, shift, alt, ctrlOrMeta, busy, cardOpen)
+        draftEmpty: Boolean = false,
+        hasAttachments: Boolean = false,
+        clipboardHasImage: () -> Boolean = { false },
+    ): ComposerAction? = composerKey(key, type, shift, alt, ctrlOrMeta, busy, cardOpen, draftEmpty, hasAttachments, clipboardHasImage)
 
     @Test
     fun `Enter sends`() {
@@ -101,6 +108,45 @@ class ComposerKeysTest {
     fun `Esc with a card open routes to the card`() {
         assertEquals(ComposerAction.CardEscape, composer(escape, busy = true, cardOpen = true))
         assertEquals(ComposerAction.CardEscape, composer(escape, busy = false, cardOpen = true))
+    }
+
+    @Test
+    fun `Enter sends with an attachment and blank text`() {
+        assertTrue(canSend("  ", 1))
+        assertFalse(canSend("  ", 0))
+        assertTrue(canSend("x", 0))
+        assertFalse(canSend("", 0))
+    }
+
+    @Test
+    fun `Cmd-V with an image on the clipboard is a paste, with text it is left to the text area`() {
+        assertEquals(ComposerAction.PasteImage, composer(v, ctrlOrMeta = true, clipboardHasImage = { true }))
+        assertEquals(ComposerAction.PasteImage, composer(v, ctrlOrMeta = true, busy = true, clipboardHasImage = { true }))
+        assertNull(composer(v, ctrlOrMeta = true, clipboardHasImage = { false }))
+        assertNull(composer(v, ctrlOrMeta = true, shift = true, clipboardHasImage = { true }))
+        assertNull(composer(v, ctrlOrMeta = true, alt = true, clipboardHasImage = { true }))
+        assertNull(composer(v, clipboardHasImage = { true }))
+        assertNull(composer(v, type = KeyEventType.KeyUp, ctrlOrMeta = true, clipboardHasImage = { true }))
+        // The clipboard is asked only for Ctrl/Cmd+V: no other key queries its flavours.
+        var asked = 0
+        composer(enter, clipboardHasImage = { asked++; true })
+        composer(v, clipboardHasImage = { asked++; true })
+        assertEquals(0, asked)
+    }
+
+    @Test
+    fun `Backspace in an empty composer removes the last image`() {
+        assertEquals(ComposerAction.RemoveLastImage, composer(backspace, draftEmpty = true, hasAttachments = true))
+        assertNull(composer(backspace, draftEmpty = false, hasAttachments = true))
+        assertNull(composer(backspace, draftEmpty = true, hasAttachments = false))
+        assertNull(composer(backspace, type = KeyEventType.KeyUp, draftEmpty = true, hasAttachments = true))
+    }
+
+    @Test
+    fun `Enter does nothing while a prompt is being encoded`() {
+        // PromptBox passes busy || sending as busy (polish spec 2.7).
+        assertNull(composer(enter, busy = true, hasAttachments = true))
+        assertEquals(ComposerFallback.Swallow, fallback(enter, busy = true))
     }
 
     private fun fallback(

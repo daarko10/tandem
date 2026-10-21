@@ -86,7 +86,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val open by manager.sessions.collectAsState()
     val selectedId by manager.selected.collectAsState()
     val selected = open.firstOrNull { it.id == selectedId }
-    val presenters = rememberChatPresenters(open, sessions.rowOptions)
+    val presenters = rememberChatPresenters(manager, open, sessions.rowOptions)
     var collapsed by remember { mutableStateOf(workspace.state.sidebarCollapsed) }
     // The sidebar over the chat, in a window too narrow to dock it.
     var drawerOpen by remember { mutableStateOf(false) }
@@ -200,6 +200,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                         key(selected.id) {
                             val presenter = remember(selected) { presenters.presenter(selected) }
                             val ui = remember(selected.id) { presenters.ui(selected.id) }
+                            val sender = remember(selected) { presenters.sender(selected) }
                             // When the session's card closes (answered, cancelled, the turn ended), the focus goes back to the
                             // composer (spec 4.12) while the chat holds it; a card that follows another keeps it on the card.
                             LaunchedEffect(presenter) {
@@ -218,6 +219,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                     presenter,
                                     ui,
                                     actions,
+                                    sender,
                                     focusPrompt = promptFocusFor == selected.id,
                                     onPromptFocused = { promptFocusFor = null },
                                     onFocusComposer = { promptFocusFor = selected.id },

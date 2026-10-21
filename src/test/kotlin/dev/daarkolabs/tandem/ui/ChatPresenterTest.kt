@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.ui.graphics.ImageBitmap
 import dev.daarkolabs.tandem.chat.ChatRowsBuilder
 import dev.daarkolabs.tandem.chat.ForkState
 import dev.daarkolabs.tandem.chat.NoticeRow
@@ -10,16 +11,22 @@ import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.chat.TurnEndRow
+import dev.daarkolabs.tandem.chat.UserRow
 import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.chat.forkState
 import dev.daarkolabs.tandem.chat.replay
-import dev.daarkolabs.tandem.ui.rows.shownWorkingRow
+import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ContentBlock
+import dev.daarkolabs.tandem.protocol.Fixtures
+import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.reduce
+import dev.daarkolabs.tandem.ui.rows.shownWorkingRow
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.CoroutineScope
@@ -39,9 +46,12 @@ import org.jetbrains.jewel.markdown.extensions.autolink.AutolinkProcessorExtensi
 import org.jetbrains.jewel.markdown.processing.MarkdownProcessor
 import org.junit.jupiter.api.Test
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.SwingUtilities
+import kotlin.io.path.readLines
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
@@ -51,6 +61,13 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ChatPresenterTest {
+    init {
+        // Decoding loads Skia, whose JVM-wide "Reference Cleaner" thread starts with its first object and lives as long as the JVM
+        // (TandemPluginTest). Started here, before the platform's thread-leak check takes its snapshot for the test, it is no leak of
+        // whichever test decodes first.
+        checkNotNull(decodeUserImage(UserImage("warm-up#0", "image/png", fixturePng())))
+    }
+
     @Test
     fun `expanding a markdown body parses it once off the EDT and re-emits the row`() = runBlocking {
         val processor = MarkdownProcessor(listOf(AutolinkProcessorExtension))
@@ -323,6 +340,83 @@ class ChatPresenterTest {
         val plain = row.copy(expandedStep = null)
         assertSame(plain, shownWorkingRow(plain, true))
     }
+
+    @Test
+    fun `the presenter decodes a user image once off the EDT and caches it by id`() = runBlocking {
+        val threads: MutableList<String> = Collections.synchronizedList(ArrayList())
+        val calls = AtomicInteger()
+        val decode: (UserImage) -> ImageBitmap? = {
+            threads += Thread.currentThread().name
+            calls.incrementAndGet()
+            decodeUserImage(it)
+        }
+        val user = ChatEntry.User("u1", "What colour?", images = listOf(UserImage("u1#0", "image/png", fixturePng())))
+        val state = MutableStateFlow(ChatState(entries = listOf(user)))
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)), decode = decode)
+            val first = withTimeout(TIMEOUT) { presenter.chat.first { it.rows.firstOrNull()?.images?.isNotEmpty() == true } }
+            val bitmap = assertNotNull(first.rows[0].images["u1#0"])
+            assertEquals(2, bitmap.width)
+            assertEquals(2, bitmap.height)
+
+            state.value = state.value.copy(entries = state.value.entries + ChatEntry.Notice("n1", NoticeLevel.INFO, "noted"))
+            val after = withTimeout(TIMEOUT) { presenter.chat.first { chat -> chat.rows.any { it.row is NoticeRow } } }
+            assertSame(bitmap, after.rows[0].images["u1#0"])
+            delay(SETTLE_MS)
+            assertEquals(1, calls.get())
+            assertTrue(threads.none { it.startsWith("AWT-EventQueue") }, threads.toString())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a user row renders before its thumbnails and gains them once decoded`() = runBlocking {
+        val latch = CountDownLatch(1)
+        val decode: (UserImage) -> ImageBitmap? = {
+            latch.await(TIMEOUT, TimeUnit.MILLISECONDS)
+            decodeUserImage(it)
+        }
+        val user = ChatEntry.User("u1", "", images = listOf(UserImage("u1#0", "image/png", fixturePng())))
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenter = ChatPresenter(scope, MutableStateFlow(ChatState(entries = listOf(user))), MutableStateFlow(RowOptions(showThinking = true)), decode = decode)
+            val before = withTimeout(TIMEOUT) { presenter.chat.first { it.rows.isNotEmpty() } }
+            assertIs<UserRow>(before.rows[0].row)
+            assertTrue(before.rows[0].images.isEmpty())
+            latch.countDown()
+            val after = withTimeout(TIMEOUT) { presenter.chat.first { it.rows.firstOrNull()?.images?.get("u1#0") != null } }
+            assertEquals(before.rows[0].row, after.rows[0].row)
+        } finally {
+            latch.countDown()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a redacted image yields no bitmap and no exception`() = runBlocking {
+        assertNull(decodeUserImage(UserImage("u1#0", "image/png", "<base64>")))
+        val user = ChatEntry.User("u1", "", images = listOf(UserImage("u1#0", "image/png", "<base64>")))
+        val state = MutableStateFlow(ChatState(entries = listOf(user)))
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)), logFailure = { throw AssertionError("render failed", it) })
+            withTimeout(TIMEOUT) { presenter.chat.first { it.rows.isNotEmpty() } }
+            // Another state after the decode had time to fail: still no bitmap, no failure row.
+            delay(SETTLE_MS)
+            state.value = state.value.copy(entries = state.value.entries + ChatEntry.Notice("n1", NoticeLevel.INFO, "noted"))
+            val chat = withTimeout(TIMEOUT) { presenter.chat.first { c -> c.rows.any { it.row is NoticeRow } } }
+            assertTrue(chat.rows[0].images.isEmpty())
+            assertTrue(chat.rows.none { it.row.key == RENDER_FAILURE_KEY })
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    /** The 2 x 2 PNG the `user-image` fixture sent, as its transcript line holds it. */
+    private fun fixturePng(): String = Fixtures.transcript("user-image").readLines().filter { it.isNotBlank() }.map(Ndjson::decode)
+        .filterIsInstance<CliMessage.User>().first().content.filterIsInstance<ContentBlock.Image>().single().data
 
     /** The key of the Agent row's forwarded text row, once it has one. */
     private fun childText(agent: RenderedRow): String? =

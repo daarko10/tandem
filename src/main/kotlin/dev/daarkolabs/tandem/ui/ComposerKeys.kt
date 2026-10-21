@@ -14,16 +14,27 @@ internal enum class ComposerAction {
 
     /** The open card's Esc action: Deny, Cancel or Keep planning. */
     CardEscape,
+
+    /** Reads the images on the clipboard and attaches them (polish spec 2.7). */
+    PasteImage,
+
+    /** Removes the last attached image: Backspace in an empty composer (polish spec 2.7). */
+    RemoveLastImage,
 }
 
 /**
  * What the composer does with [key] going [type], with Shift ([shift]), Alt ([alt]) and Ctrl or Cmd ([ctrlOrMeta]) held, while a
- * turn runs ([busy]) and while a card waits for an answer ([cardOpen]); null leaves the key to the text area.
+ * turn runs or a prompt is still being encoded ([busy]) and while a card waits for an answer ([cardOpen]); null leaves the key to the
+ * text area.
  *
  * Enter alone sends, and does nothing while a turn runs (the Stop button stands in for Send) or a card is open (until it is answered,
  * spec 4.15), whether or not the reducer still counts the turn as running. Shift+Enter is a newline, which the
  * composer types itself ([composerFallback]), and Alt+Enter and Ctrl/Cmd+Enter do nothing yet. Esc goes to the open card first, then
  * stops a running turn.
+ *
+ * Ctrl/Cmd+V pastes images, busy or not, when [clipboardHasImage] says the clipboard holds a file list or an image without text
+ * ([ComposerImages.clipboardHasImage]); it is asked for that key only, and otherwise the text area pastes. Backspace removes the last
+ * attached image while the draft is empty ([draftEmpty]) and an image is attached ([hasAttachments]) (polish spec 2.7).
  */
 internal fun composerKey(
     key: Key,
@@ -33,6 +44,9 @@ internal fun composerKey(
     ctrlOrMeta: Boolean,
     busy: Boolean,
     cardOpen: Boolean,
+    draftEmpty: Boolean = false,
+    hasAttachments: Boolean = false,
+    clipboardHasImage: () -> Boolean = { false },
 ): ComposerAction? {
     if (type != KeyEventType.KeyDown) return null
     return when (key) {
@@ -42,9 +56,14 @@ internal fun composerKey(
             busy -> ComposerAction.Stop
             else -> null
         }
+        Key.V -> if (ctrlOrMeta && !shift && !alt && clipboardHasImage()) ComposerAction.PasteImage else null
+        Key.Backspace -> if (draftEmpty && hasAttachments) ComposerAction.RemoveLastImage else null
         else -> null
     }
 }
+
+/** Whether Enter sends: some text, or an attached image with blank text (polish spec 2.7). */
+internal fun canSend(text: String, attachmentCount: Int): Boolean = text.isNotBlank() || attachmentCount > 0
 
 /** What the composer does itself with an Enter that [composerKey] leaves to the text area (spec 4.15). */
 internal enum class ComposerFallback {

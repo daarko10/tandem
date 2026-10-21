@@ -316,7 +316,7 @@ internal fun RowItem(
 ) {
     if (RenderingSpike.enabled) SideEffect { RecompositionCounter.hit(rendered.row.key) }
     when (val row = rendered.row) {
-        is UserRow -> UserBubble(row)
+        is UserRow -> UserBubble(rendered)
         is TextRow -> TextRowItem(rendered, reply)
         is ToolRow -> ToolRowItem(rendered, ui)
         is NoticeRow -> NoticeItem(row)

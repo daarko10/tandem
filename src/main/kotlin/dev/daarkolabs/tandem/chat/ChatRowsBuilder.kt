@@ -310,6 +310,10 @@ class ChatRowsBuilder(private val options: RowOptions) {
         return if (key == row.key) row else row.withKey(key)
     }
 
+    /** The images of [entry], by id, in the order sent (polish spec 2.7); the shared empty list for a prompt without any. */
+    private fun imageRefs(entry: ChatEntry.User): ImmutableList<ImageRef> =
+        if (entry.images.isEmpty()) persistentListOf() else entry.images.mapIndexed { i, image -> ImageRef(image.id, image.mediaType, i) }.toImmutableList()
+
     /** The previous build's instance of [row] when it is equal. */
     private fun reuse(row: ChatRow): ChatRow = live[row.key]?.takeIf { it == row } ?: row
 
@@ -368,7 +372,13 @@ class ChatRowsBuilder(private val options: RowOptions) {
         val turnOpen = context.turnOpen
         when (entry) {
             is ChatEntry.User -> rows.add {
-                UserRow("u:${entry.id}", entry.text, entry.text.startsWith("/") || entry.text.startsWith("!"), gap(Kind.USER, it))
+                UserRow(
+                    "u:${entry.id}",
+                    entry.text,
+                    entry.text.startsWith("/") || entry.text.startsWith("!"),
+                    gap(Kind.USER, it),
+                    imageRefs(entry),
+                )
             }
             // Thinking rows are the main thread's; a subagent message of an unknown agent shows its text and calls only.
             is ChatEntry.Assistant ->

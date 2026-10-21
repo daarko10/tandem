@@ -247,6 +247,8 @@ Images (base64 content block, Anthropic format):
   {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0..."}}]}}
 ```
 
+Tandem sends this shape for attachments (`HostMessages.userMessage`): the text block, left out when blank, then one image block per attachment; the CLI does not echo the frame (`user-image.ndjson`), its on-disk line is `transcripts/user-image.jsonl`.
+
 Fixture `user-image` (CLI 2.1.306) sends exactly this with a 2 × 2 PNG. The transcript's user line keeps both blocks, the
 image's `data` verbatim, under the uuid the host sent; the CLI adds an `isMeta` user line after it naming where it cached the
 image, which the reader skips as it skips every `isMeta` line (section 11). Tandem omits the text block when the text is blank.

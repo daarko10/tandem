@@ -13,6 +13,7 @@ import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.TurnEnd
+import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
@@ -45,6 +46,15 @@ class ChatRowsBuilderTest {
 
     /** The row of the lone Agent call. */
     private fun agent(rows: ChatRows): ToolRow = rows.rows.toolRows().single { it.calls.singleOrNull()?.kind == ToolKind.AGENT }
+
+    @Test
+    fun `a user row lists its images in order`() {
+        val images = listOf(UserImage("u1#0", "image/png", "A"), UserImage("u1#1", "image/jpeg", "B"))
+        val state = ChatState(entries = listOf(ChatEntry.User("u1", "", images = images)))
+        val user = assertIs<UserRow>(ChatRowsBuilder(options).build(state).rows.first())
+        assertEquals(listOf(ImageRef("u1#0", "image/png", 0), ImageRef("u1#1", "image/jpeg", 1)), user.images)
+        assertEquals("", user.text)
+    }
 
     @Test
     fun `plain-reply`() {

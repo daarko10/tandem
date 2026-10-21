@@ -3,6 +3,7 @@ package dev.daarkolabs.tandem.chat
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.TurnEnd
 import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.persistentListOf
 
 /**
  * One item of the chat list (spec 5.3). [key] is unique in the list and stays the same while the thing the row shows exists (one
@@ -25,8 +26,20 @@ enum class RowGap(val dp: Int) {
     TURN(24),
 }
 
-/** What the user sent, `u:<entry id>`. [mono]: a slash command or a `!` shell line, drawn in the editor font. */
-data class UserRow(override val key: String, val text: String, val mono: Boolean, override val gap: RowGap = RowGap.TURN) : ChatRow
+/**
+ * What the user sent, `u:<entry id>`. [mono]: a slash command or a `!` shell line, drawn in the editor font. [images]: the images
+ * sent with it, in order, by id only (polish spec 2.7); an images-only prompt has a blank [text].
+ */
+data class UserRow(
+    override val key: String,
+    val text: String,
+    val mono: Boolean,
+    override val gap: RowGap = RowGap.TURN,
+    val images: ImmutableList<ImageRef> = persistentListOf(),
+) : ChatRow
+
+/** One image of a [UserRow]: the id of its [dev.daarkolabs.tandem.session.UserImage], its media type and its [index] in the message. */
+data class ImageRef(val id: String, val mediaType: String, val index: Int)
 
 /**
  * One text block of a reply, `t:<entry id>:<block index>`. [actions] is set on the last text block of each ended turn's reply, which
