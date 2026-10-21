@@ -87,7 +87,7 @@ class ToolWindowIdeTest {
             waitForText("Reply with the single word: pong")
             waitForText("pong")
             waitFor("turn footer", 1.minutes) { ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'Worked for')]").present() }
-            waitFor("model shown in the model picker", 1.minutes) { picker("Model", "Default model").present() }
+            waitFor("the running model shown in the footer", 1.minutes) { modelControl(defaultModelName("plain-reply")).present() }
             waitFor("Send is offered again", 1.minutes) { iconButton("Send").present() }
         }
         val prompt = sent.single { it.type == "user" }
@@ -289,47 +289,48 @@ class ToolWindowIdeTest {
     }
 
     @Test
-    fun `the pickers send set_permission_mode and set_model`() {
+    fun `the footer menus send set_permission_mode and set_model`() {
         val log = Files.createTempFile("tandem-sent", ".ndjson")
-        val sent = runChat("pickers", fixtures = listOf("permission-mode"), sentLog = log) {
+        val sent = runChat("footer-menus", fixtures = listOf("permission-mode"), sentLog = log) {
             newSession()
             typePrompt("Reply with the single word: one")
             waitForText("one")
-            // From the keyboard the open list only moves its highlight: Down goes to Accept edits, and Escape picks nothing.
-            ui.x("//div[@class='ComposeNode' and @visible_text='Default']").click(Point(10, 10))
-            waitFor("the permission modes listed", 30.seconds) { menuItem("Plan").present() }
-            ui.keyboard { down() }
+            // The mode menu lists each mode with its description, a string only the open menu shows; Escape picks nothing.
+            picker("Permission mode", "Manual").click(Point(10, 10))
+            waitFor("the mode menu open", 30.seconds) { menuItemContaining(PLAN_DESCRIPTION).present() }
             ui.keyboard { escape() }
-            waitFor("Escape closed the list, Default kept", 30.seconds) {
-                !menuItem("Plan").present() && picker("Permission mode", "Default").present()
+            waitFor("Escape closed the menu, Manual kept", 30.seconds) {
+                !menuItemContaining(PLAN_DESCRIPTION).present() && picker("Permission mode", "Manual").present()
             }
-            // Down twice passes Accept edits on the way to Plan, and Enter picks Plan: one request.
-            picker("Permission mode", "Default").click(Point(10, 10))
-            waitFor("the permission modes listed again", 30.seconds) { menuItem("Plan").present() }
-            ui.keyboard {
-                down()
-                down()
-                enter()
-            }
-            waitFor("Enter closed the list on Plan", 30.seconds) {
-                !menuItem("Accept edits").present() && picker("Permission mode", "Plan").present()
+            // 4 is Plan's digit: one request.
+            picker("Permission mode", "Manual").click(Point(10, 10))
+            waitFor("the mode menu open again", 30.seconds) { menuItemContaining(PLAN_DESCRIPTION).present() }
+            ui.keyboard { key(KeyEvent.VK_4) }
+            waitFor("4 picked Plan and closed the menu", 30.seconds) {
+                !menuItemContaining(PLAN_DESCRIPTION).present() && picker("Permission mode", "Plan").present()
             }
             typePrompt("Reply with the single word: two")
             waitForText("two")
-            waitFor("the picker shows plan", 1.minutes) { picker("Permission mode", "Plan").present() }
-            // A pick in the prompt bar is the project's last one: the new-session popup starts from it. Escape closes the popup
+            waitFor("the mode control shows plan", 1.minutes) { picker("Permission mode", "Plan").present() }
+            // A pick in the footer is the project's last one: the new-session popup starts from it. Escape closes the popup
             // and creates nothing.
             newSessionButton().click(Point(10, 10))
-            // The prompt bar's picker shows Plan too: the popup's is the second one.
+            // The footer's mode control shows Plan too: the popup's is the second one.
             waitFor("the popup, on the last pick", 30.seconds) {
                 button("Create").present() &&
-                    ui.xx("//div[@class='ComposeNode' and @role='DropdownList' and @contentdescription='Permission mode' and @visible_text='Plan']")
-                        .list().size == 2
+                    ui.xx(
+                        "//div[@class='ComposeNode' and @role='DropdownList' and @contentdescription='Permission mode' and " +
+                            "(@visible_text='Plan' or @text='Plan')]",
+                    ).list().size == 2
             }
             ui.keyboard { escape() }
             waitFor("Escape closed the popup", 30.seconds) { !button("Create").present() }
-            ui.x("//div[@class='ComposeNode' and @visible_text='Default model']").click(Point(10, 10))
-            menuItem(modelName(1)).click(Point(10, 10))
+            modelControl(defaultModelName("permission-mode")).click(Point(10, 10))
+            waitFor("the model menu open", 30.seconds) { menuItemContaining("Opus").present() }
+            // Picked by its digit, its place among the models other than `default`: Sonnet (checked), Fable 2, Opus 3, Haiku 4. A
+            // click on the item is not used: the Driver places it from the menu's popup window, which under Xvfb is not always where
+            // it is drawn, and a click elsewhere closes the menu.
+            ui.keyboard { key(KeyEvent.VK_3) }
             // The fake CLI answers set_model with the next acknowledgement it recorded, set_permission_mode's acceptEdits one, and
             // that one's status line: so the session ends in Accept edits. Wait for the frame itself before the IDE closes.
             waitFor("set_model reached the CLI", 30.seconds) { "\"subtype\":\"set_model\"" in log.readText() }
@@ -337,9 +338,9 @@ class ToolWindowIdeTest {
         val requests = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject }
         val modes = requests.filter { it["subtype"]!!.jsonPrimitive.content == "set_permission_mode" }
             .map { it["mode"]!!.jsonPrimitive.content }
-        assertEquals(listOf("plan"), modes, "Escape picked nothing, and Enter picked Plan alone")
+        assertEquals(listOf("plan"), modes, "Escape picked nothing, and 4 picked Plan alone")
         val setModel = requests.single { it["subtype"]!!.jsonPrimitive.content == "set_model" }
-        assertEquals("sonnet", setModel["model"]!!.jsonPrimitive.content)
+        assertEquals("opus", setModel["model"]!!.jsonPrimitive.content)
         assertEquals(1, sent.count { it.type == "__spawn__" }, "the popup closed with Escape started no session")
     }
 
@@ -619,15 +620,21 @@ class ToolWindowIdeTest {
     }
 
     /**
-     * The display name of model [index] in the CLI's `initialize` response recorded in `fixtures/permission-mode.ndjson`, next to the
-     * fake CLI: the first control_response that lists models.
+     * What the footer's model control reads for [fixture] (`fixtures/<fixture>.ndjson`, next to the fake CLI) with no model picked
+     * (spec 2.3, `<Model>`): the display name of the entry other than `default`, in its first control_response that lists models,
+     * whose `resolvedModel` is the model its first `system/init` reports; else that model's wire id.
      */
-    private fun modelName(index: Int): String {
-        val fixture = Path.of(fakeClaude).resolveSibling("fixtures/permission-mode.ndjson")
-        val models = fixture.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
-            .filter { it.type == "control_response" }
-            .firstNotNullOf { it["response"]?.jsonObject?.get("response")?.jsonObject?.get("models")?.jsonArray }
-        return models[index].jsonObject["displayName"]!!.jsonPrimitive.content
+    private fun defaultModelName(fixture: String): String {
+        val lines = Path.of(fakeClaude).resolveSibling("fixtures/$fixture.ndjson").readLines().filter { it.isNotBlank() }
+            .map { Json.parseToJsonElement(it).jsonObject }
+        val running = lines.first { it.type == "system" && it["subtype"]?.jsonPrimitive?.content == "init" }["model"]!!.jsonPrimitive.content
+        val models = lines.filter { it.type == "control_response" }
+            .firstNotNullOfOrNull { it["response"]?.jsonObject?.get("response")?.jsonObject?.get("models")?.jsonArray }
+            .orEmpty().map { it.jsonObject }
+        val entry = models.firstOrNull {
+            it["value"]?.jsonPrimitive?.content != "default" && it["resolvedModel"]?.jsonPrimitive?.content == running
+        }
+        return entry?.get("displayName")?.jsonPrimitive?.content ?: running
     }
 
     /**
@@ -762,9 +769,29 @@ class ToolWindowIdeTest {
 
     private fun Driver.menuItem(text: String): UiComponent = ui.x("//div[@class='ComposeNode' and @visible_text='$text']")
 
-    /** The picker that assistive technology knows as [description], if it shows [text]. */
-    private fun Driver.picker(description: String, text: String): UiComponent =
-        ui.x("//div[@class='ComposeNode' and @role='DropdownList' and @contentdescription='$description' and @visible_text='$text']")
+    /**
+     * A footer menu's item whose text contains [text]. An item merges its label, description, check and digit into one node
+     * (`Plan || Create a plan before making changes || 4`), which may expose that text as `@text` or as `@visible_text` (base
+     * 10.6); it is the node with a `selected` state, since the menu's popup has a node of its own whose visible text holds every
+     * item's.
+     */
+    private fun Driver.menuItemContaining(text: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @selected and (contains(@visible_text,'$text') or contains(@text,'$text'))]")
+
+    /**
+     * The picker or footer control that assistive technology knows as [description], if it shows [text]. A footer control is a
+     * clickable box whose merged node may expose its text as `@text` (base 10.6).
+     */
+    private fun Driver.picker(description: String, text: String): UiComponent = ui.x(
+        "//div[@class='ComposeNode' and @role='DropdownList' and @contentdescription='$description' and " +
+            "(@visible_text='$text' or @text='$text')]",
+    )
+
+    /** The footer's model control, if its text starts with the model [name]. */
+    private fun Driver.modelControl(name: String): UiComponent = ui.x(
+        "//div[@class='ComposeNode' and @role='DropdownList' and @contentdescription='Model' and " +
+            "(starts-with(@visible_text,'$name') or starts-with(@text,'$name'))]",
+    )
 
     /** An icon button, found by what it says to assistive technology. */
     private fun Driver.iconButton(description: String): UiComponent =
@@ -886,6 +913,9 @@ class ToolWindowIdeTest {
 
         /** A turn's footer. */
         const val FOOTER = "//div[@class='ComposeNode' and starts-with(@visible_text, 'Worked for')]"
+
+        /** The Plan item's description: a string only the open mode menu shows (the footer itself can read `Plan`). */
+        const val PLAN_DESCRIPTION = "Create a plan before making changes"
 
         /** The transcript, the chat's list of rows. */
         const val TRANSCRIPT = "//div[@class='ComposeNode' and @contentdescription='Transcript']"

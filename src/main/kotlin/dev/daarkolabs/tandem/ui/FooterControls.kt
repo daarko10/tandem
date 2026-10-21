@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,7 +26,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -58,6 +58,8 @@ import org.jetbrains.jewel.ui.component.MenuScope
 import org.jetbrains.jewel.ui.component.PopupMenu
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.separator
+import java.awt.KeyEventDispatcher
+import java.awt.KeyboardFocusManager
 import kotlin.math.max
 
 /** What the model control reads while nothing is known about the model yet. */
@@ -167,19 +169,16 @@ internal class AboveAnchor(val alignEnd: Boolean, val gapPx: Int) : PopupPositio
         aboveAnchor(anchorBounds, windowSize, popupContentSize, alignEnd, gapPx)
 }
 
-/** The digit 1 to 9 of a key pressed, from the number row or the keypad; null for any other key or event. */
-private fun digitOf(event: KeyEvent): Int? {
-    if (event.type != KeyEventType.KeyDown) return null
-    return when (event.key) {
-        Key.One, Key.NumPad1 -> 1
-        Key.Two, Key.NumPad2 -> 2
-        Key.Three, Key.NumPad3 -> 3
-        Key.Four, Key.NumPad4 -> 4
-        Key.Five, Key.NumPad5 -> 5
-        Key.Six, Key.NumPad6 -> 6
-        Key.Seven, Key.NumPad7 -> 7
-        Key.Eight, Key.NumPad8 -> 8
-        Key.Nine, Key.NumPad9 -> 9
+/**
+ * The digit 1 to 9 that an AWT key event stands for, from the number row or the keypad, without Ctrl, Alt or Meta; null for any other
+ * key. A typed event has it as its character, a pressed or released one as its key code.
+ */
+private fun digitOf(event: java.awt.event.KeyEvent): Int? {
+    if (event.isControlDown || event.isAltDown || event.isMetaDown) return null
+    if (event.id == java.awt.event.KeyEvent.KEY_TYPED) return event.keyChar.takeIf { it in '1'..'9' }?.digitToInt()
+    return when (event.keyCode) {
+        in java.awt.event.KeyEvent.VK_1..java.awt.event.KeyEvent.VK_9 -> event.keyCode - java.awt.event.KeyEvent.VK_0
+        in java.awt.event.KeyEvent.VK_NUMPAD1..java.awt.event.KeyEvent.VK_NUMPAD9 -> event.keyCode - java.awt.event.KeyEvent.VK_NUMPAD0
         else -> null
     }
 }
@@ -336,9 +335,12 @@ private fun DefaultChip(palette: ChatPalette) {
 /**
  * One footer control (spec 2.3): [label] on a pill that fills while hovered or while its menu is open and is outlined while focused,
  * semantically a drop-down named [description]. A click, Enter or Space opens its menu above it (left- or right-aligned by
- * [alignEnd]), unless it has nothing to list ([opens]); [menu] fills it and closes it with the function it is given. A digit picks
- * through [digitPick], which says whether it picked: in the menu, and on the control itself while the menu is open, in case the
- * open menu does not get the key (open item 13).
+ * [alignEnd]), unless it has nothing to list ([opens]); [menu] fills it and closes it with the function it is given. While the menu is
+ * open a digit picks through [digitPick], which says whether it picked, and the menu closes when it did.
+ *
+ * The digits are taken from AWT's key dispatch while the menu is open, not from a Compose key handler (open item 13): in the IDE the
+ * menu is a popup window of its own (`JBPopupRenderer`), focused with no Compose node focused in it, so neither a handler on the menu
+ * nor one on the control gets the key.
  */
 @Composable
 private fun FooterControl(
@@ -357,10 +359,19 @@ private fun FooterControl(
     val focused by source.collectIsFocusedAsState()
     var open by remember { mutableStateOf(false) }
     val close = { open = false }
-    fun picked(event: KeyEvent): Boolean {
-        val digit = digitOf(event) ?: return false
-        if (digitPick(digit)) open = false
-        return true
+    val currentDigitPick by rememberUpdatedState(digitPick)
+    if (open) {
+        DisposableEffect(Unit) {
+            // Every event of a digit key is taken while the menu is open, so that its typed character lands nowhere; the press picks.
+            val dispatcher = KeyEventDispatcher { event ->
+                val digit = digitOf(event) ?: return@KeyEventDispatcher false
+                if (event.id == java.awt.event.KeyEvent.KEY_PRESSED && currentDigitPick(digit)) open = false
+                true
+            }
+            val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            focusManager.addKeyEventDispatcher(dispatcher)
+            onDispose { focusManager.removeKeyEventDispatcher(dispatcher) }
+        }
     }
     val shape = RoundedCornerShape(6.dp)
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
@@ -372,7 +383,6 @@ private fun FooterControl(
             }
             .onPreviewKeyEvent { event ->
                 when {
-                    open && picked(event) -> true
                     !open && event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.Spacebar) -> {
                         open = opens
                         true
@@ -403,7 +413,6 @@ private fun FooterControl(
                     }
                 },
                 popupPositionProvider = remember(alignEnd, gap) { AboveAnchor(alignEnd, gap) },
-                modifier = Modifier.onPreviewKeyEvent { event -> picked(event) },
             ) { menu(close) }
         }
     }
