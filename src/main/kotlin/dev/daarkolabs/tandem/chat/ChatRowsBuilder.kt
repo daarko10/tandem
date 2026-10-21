@@ -395,7 +395,9 @@ class ChatRowsBuilder(private val options: RowOptions) {
             val built = bodies[result]?.takeIf { it.input === block.input }
                 ?: Body(
                     block.input,
-                    ToolBodies.body(named, block.input, result.content, shown, result.isError),
+                    ToolBodies.body(named, block.input, result.content, shown, result.isError).let { body ->
+                        if (named == ToolKind.PLAN && !result.isError && body !is ToolBody.Markdown) draftedPlan(block, region) ?: body else body
+                    },
                     ToolBodies.stats(named, block.input, shown),
                 )
             nextBodies[result] = built
@@ -416,6 +418,17 @@ class ChatRowsBuilder(private val options: RowOptions) {
             else -> null
         }
         return ToolCall(block.id, block.name, kind, state, label, stats, body, children, progress, subject)
+    }
+
+    /**
+     * The plan an answered main-thread `ExitPlanMode` [block] carried no text for (spec 4.6.2): the plan its card showed, drafted
+     * earlier in its turn ([Cards.draftedPlan]), as Markdown; null when there is none. Built once per result, as the body is.
+     */
+    private fun draftedPlan(block: AssistantBlock.ToolUse, region: Region): ToolBody.Markdown? {
+        val entries = region.entries
+        val at = entries.indexOfLast { entry -> entry is ChatEntry.Assistant && entry.parentToolUseId == null && entry.blocks.any { it === block } }
+        if (at < 0) return null
+        return Cards.draftedPlan(entries, at + 1, block.id).first?.let { ToolBody.Markdown(it, null) }
     }
 
     /** A denied call's body: the denial is the user's, not an error; a plan sent back shows the feedback. */

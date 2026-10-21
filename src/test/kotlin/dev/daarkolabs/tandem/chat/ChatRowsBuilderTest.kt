@@ -5,6 +5,7 @@ import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.StreamEvent
+import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
@@ -180,6 +181,33 @@ class ChatRowsBuilderTest {
         val disallowed = replay("plan-disallowed").second.content().labels()
         assertEquals("Failed to use Write" to ToolState.FAILED, disallowed[0])
         assertEquals("Plan approved" to ToolState.DONE, disallowed[1])
+    }
+
+    @Test
+    fun `an approved plan without plan text shows the plan its card showed`() {
+        // plan-disallowed with line 102's Write aimed at a plans directory: the card's plan is that draft (spec 4.14), and so is the
+        // body of the `Plan approved` row, whose result carries `plan: null` (spec 4.6.2).
+        val lines = Fixtures.lines("plan-disallowed").mapIndexed { i, text ->
+            if (i == 101) text.replace("\"file_path\":\"<path>\"", "\"file_path\":\"/home/u/.claude/plans/x.md\"") else text
+        }
+        val draft = assertNotNull(inputAt("plan-disallowed", 102).string("content"))
+        val approved = replay("plan-disallowed", lines = lines).second.content().toolRows().single { it.label.text == "Plan approved" }
+        assertEquals(ToolBody.Markdown(draft, null), approved.calls.single().body)
+        // Without a draft the body is the CLI's answer, as before.
+        val unpatched = replay("plan-disallowed").second.content().toolRows().single { it.label.text == "Plan approved" }
+        assertIs<ToolBody.Mono>(unpatched.calls.single().body)
+
+        // No plan file: Claude's last text before the call, as the card's ASSISTANT_TEXT source.
+        val exit = AssistantBlock.ToolUse("x1", "ExitPlanMode", JsonObject(emptyMap()), "")
+        val state = ChatState(
+            entries = listOf(
+                ChatEntry.User("u1", "plan it"),
+                assistant("a1", AssistantBlock.Text("## Plan\n1. Do it"), exit),
+                ChatEntry.ToolResult("r1", "x1", "User has approved exiting plan mode. You can now proceed.", isError = false),
+            ),
+        )
+        val row = ChatRowsBuilder(options).build(state).rows.toolRows().single()
+        assertEquals(ToolBody.Markdown("## Plan\n1. Do it", null), row.calls.single().body)
     }
 
     @Test

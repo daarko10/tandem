@@ -228,7 +228,7 @@ object Cards {
         val (plan, source) = planText(state, p)
         val path = when (source) {
             PlanSource.EXIT_PLAN_INPUT -> p.input.string("planFilePath")?.takeIf { it.isNotBlank() }
-            PlanSource.PLAN_FILE_DRAFT -> draftWrite(state, p)?.input?.string("file_path")
+            PlanSource.PLAN_FILE_DRAFT -> draftWrite(beforeCall(state.entries, state.entries.size, p.toolUseId))?.input?.string("file_path")
             PlanSource.ASSISTANT_TEXT, PlanSource.NONE -> null
         }
         return PlanCard(p.requestId, p.toolUseId, agentDescription = null, plan, source, path)
@@ -240,14 +240,24 @@ object Cards {
      */
     fun planText(state: ChatState, p: PendingPermission): Pair<String?, PlanSource> {
         p.input.string("plan")?.takeIf { it.isNotBlank() }?.let { return it to PlanSource.EXIT_PLAN_INPUT }
-        draftWrite(state, p)?.let { write -> return write.input?.string("content") to PlanSource.PLAN_FILE_DRAFT }
-        val text = beforeCall(state, p).firstNotNullOfOrNull { block -> (block as? AssistantBlock.Text)?.text?.takeIf { it.isNotBlank() } }
+        return draftedPlan(state.entries, state.entries.size, p.toolUseId)
+    }
+
+    /**
+     * The plan drafted before the `ExitPlanMode` call [toolUseId] in the turn that ends before [end] (spec 4.14): the content of the
+     * failed Write of the plan file in that turn (a path with a `plans` segment), else the last text Claude wrote in that turn before
+     * the call, else none. The plan card reads it when the request carries no plan, and so does the call's row once it is answered.
+     */
+    internal fun draftedPlan(entries: List<ChatEntry>, end: Int, toolUseId: String?): Pair<String?, PlanSource> {
+        val before = beforeCall(entries, end, toolUseId)
+        draftWrite(before)?.let { write -> return write.input?.string("content") to PlanSource.PLAN_FILE_DRAFT }
+        val text = before.firstNotNullOfOrNull { block -> (block as? AssistantBlock.Text)?.text?.takeIf { it.isNotBlank() } }
         return if (text != null) text to PlanSource.ASSISTANT_TEXT else null to PlanSource.NONE
     }
 
-    /** The most recent main-thread Write of this turn before [p]'s call whose path has a `plans` segment and which carries content. */
-    private fun draftWrite(state: ChatState, p: PendingPermission): AssistantBlock.ToolUse? =
-        beforeCall(state, p).firstNotNullOfOrNull { block ->
+    /** The most recent Write of [before] (blocks latest first) whose path has a `plans` segment and which carries content. */
+    private fun draftWrite(before: List<AssistantBlock>): AssistantBlock.ToolUse? =
+        before.firstNotNullOfOrNull { block ->
             (block as? AssistantBlock.ToolUse)?.takeIf { write ->
                 val input = write.input ?: return@takeIf false
                 write.name == "Write" && input.string("content") != null &&
@@ -256,18 +266,17 @@ object Cards {
         }
 
     /**
-     * The main thread's blocks of the turn [p] belongs to that come before its call, latest first: from the call (or, when its block
-     * is not in the state, the end) back to the last user message.
+     * The main thread's blocks of the turn that ends before [end] that come before call [toolUseId], latest first: from the call (or,
+     * when its block is not in that turn, the turn's end) back to the turn's user message.
      */
-    private fun beforeCall(state: ChatState, p: PendingPermission): List<AssistantBlock> {
-        val entries = state.entries
+    private fun beforeCall(entries: List<ChatEntry>, end: Int, toolUseId: String?): List<AssistantBlock> {
         val turn = ArrayList<AssistantBlock>()
-        for (i in entries.indices.reversed()) {
+        for (i in end - 1 downTo 0) {
             val entry = entries[i]
             if (entry is ChatEntry.User) break
             if (entry is ChatEntry.Assistant && entry.parentToolUseId == null) turn.addAll(entry.blocks.asReversed())
         }
-        val call = turn.indexOfFirst { it is AssistantBlock.ToolUse && it.id == p.toolUseId }
+        val call = turn.indexOfFirst { it is AssistantBlock.ToolUse && it.id == toolUseId }
         return if (call < 0) turn else turn.subList(call + 1, turn.size)
     }
 
