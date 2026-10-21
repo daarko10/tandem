@@ -2,8 +2,11 @@ package dev.daarkolabs.tandem.ui
 
 import dev.daarkolabs.tandem.chat.Cards
 import dev.daarkolabs.tandem.chat.PermissionCard
+import dev.daarkolabs.tandem.ui.cards.QuestionPrimary.Next
+import dev.daarkolabs.tandem.ui.cards.QuestionPrimary.Submit
 import dev.daarkolabs.tandem.ui.cards.permissionTitle
 import dev.daarkolabs.tandem.ui.cards.picksOf
+import dev.daarkolabs.tandem.ui.cards.questionPrimary
 import dev.daarkolabs.tandem.ui.cards.tabLabel
 import dev.daarkolabs.tandem.ui.cards.togglePick
 import kotlinx.collections.immutable.toImmutableList
@@ -60,6 +63,32 @@ class QuestionCardTest {
     fun `an unanswered tab carries the marker`() {
         assertEquals("Colour ·", tabLabel("Colour", false))
         assertEquals("Colour", tabLabel("Colour", true))
+    }
+
+    @Test
+    fun `Next goes to the next unanswered question after the shown one and wraps`() {
+        assertEquals(Next(1), questionPrimary(listOf(false, false), 0))
+        assertEquals(Next(1), questionPrimary(listOf(true, false), 0))
+        assertEquals(Next(2), questionPrimary(listOf(false, false, false), 1))
+        assertEquals(Next(0), questionPrimary(listOf(false, true, false), 2))
+        assertEquals(Next(0), questionPrimary(listOf(false, true, true), 2))
+        // Skips an answered question forward.
+        assertEquals(Next(2), questionPrimary(listOf(true, true, false), 0))
+        // Wraps past an answered first question.
+        assertEquals(Next(1), questionPrimary(listOf(true, false, true), 2))
+        assertEquals("Next", Next(1).label)
+    }
+
+    @Test
+    fun `Submit answers is offered once every other question is answered and enabled once all are`() {
+        assertEquals(Submit(false), questionPrimary(listOf(false, true), 0))
+        assertEquals(Submit(true), questionPrimary(listOf(true, true), 0))
+        assertEquals(Submit(false), questionPrimary(listOf(true, false), 1))
+        assertEquals(Submit(false), questionPrimary(listOf(true, false, true), 1))
+        // One question: never Next.
+        assertEquals(Submit(false), questionPrimary(listOf(false), 0))
+        assertEquals(Submit(true), questionPrimary(listOf(true), 0))
+        assertEquals("Submit answers", Submit(true).label)
     }
 
     @Test

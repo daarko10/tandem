@@ -15,6 +15,7 @@ import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -60,10 +61,13 @@ private const val DIGIT_ROWS = 9
 /**
  * The question card of an `AskUserQuestion` request (spec 4.13): one tab per question when there are several (an unanswered one
  * marked ` ·`), the active question, its options as radio buttons (one answer) or checkboxes (several), each with its number key and
- * description, then `Other` and its field, then `Cancel` (Esc) and `Submit answers` (Enter, enabled once every question has an
- * answer), and how many more requests wait behind it ([moreWaiting]). `1`–`9` pick the active question's options outside the `Other`
- * field, `←`/`→` switch questions while the tabs have the focus, Enter in the field submits ([questionKey]) and Shift+Enter types a
- * newline there. The first option takes the focus when the card opens if [takeFocus] says so then ([CardFrame]).
+ * description, then `Other` and its field, then `Cancel` (Esc) and the primary button, and how many more requests wait behind it
+ * ([moreWaiting]). The primary ([questionPrimary], spec 2.8 of the polish) reads `Next` while another question is unanswered and
+ * `Submit answers` once every other one is (enabled once every question has an answer); Enter runs it from anywhere on the card, the
+ * `Other` field included ([QuestionKey.Primary]), and `Next` shows the next unanswered question and moves the focus to its first row.
+ * `1`–`9` pick the active question's options outside the `Other` field, `←`/`→` switch questions while the tabs have the focus, and
+ * Shift+Enter types a newline in the field. The first option takes the focus when the card opens if [takeFocus] says so then
+ * ([CardFrame]).
  */
 @Composable
 internal fun QuestionCardView(
@@ -81,18 +85,37 @@ internal fun QuestionCardView(
     val defaultFocus = remember(card.requestId) { FocusRequester() }
     var otherFocused by remember(card.requestId) { mutableStateOf(false) }
     var stripFocused by remember(card.requestId) { mutableStateOf(false) }
-    // The previous key event was a pick's press, so this one may be the character it types ([questionSwallows]). Read in no
-    // composition.
+    // The previous key event was a press the card handled (a pick, or the Enter that showed the next question), so this one may be
+    // the character it types ([questionSwallows]). Read in no composition.
     var afterPick by remember(card.requestId) { mutableStateOf(false) }
+    // Set by `Next` only, so that a tab clicked with the mouse leaves the focus where it was (spec 2.8 of the polish, edge 6).
+    var focusNext by remember(card.requestId) { mutableStateOf(false) }
 
     fun othersNow(): Map<Int, String> = otherStates.withIndex().associate { (i, state) -> i to state.text.toString() }
     // Read in composition, so that typing in a field recomposes the card (Submit's state, the radio of Other, the tab marker).
     val others = othersNow()
-    val picks = picksOf(card, picked, others)
     fun answered(i: Int): Boolean = !others[i].isNullOrBlank() || picked[i].orEmpty().isNotEmpty()
     val submit: () -> Unit = { picksOf(card, picked, othersNow())?.let(onSubmit) }
     val active = tab.coerceIn(0, questions.lastIndex)
     val question = questions[active]
+    val primary = questionPrimary(questions.indices.map(::answered), active)
+    val act: () -> Unit = {
+        when (primary) {
+            is QuestionPrimary.Next -> {
+                tab = primary.tab
+                focusNext = true
+                afterPick = true
+            }
+            is QuestionPrimary.Submit -> submit()
+        }
+    }
+    // After the recomposition that shows the question, so that the request lands on the row the requester is then attached to.
+    LaunchedEffect(active) {
+        if (focusNext) {
+            focusNext = false
+            defaultFocus.requestFocus()
+        }
+    }
 
     // The `Other` row's index focuses its field; an option's toggles it (in a one-answer question it also clears `Other`, so that one
     // radio is selected at a time); a digit past the `Other` row changes nothing.
@@ -129,7 +152,7 @@ internal fun QuestionCardView(
                 }
                 QuestionKey.PrevTab -> tab = (active - 1).coerceAtLeast(0)
                 QuestionKey.NextTab -> tab = (active + 1).coerceAtMost(questions.lastIndex)
-                QuestionKey.Submit -> submit()
+                QuestionKey.Primary -> act()
             }
             true
         },
@@ -141,7 +164,7 @@ internal fun QuestionCardView(
             textFieldFocused = otherFocused,
             defaultFocus = defaultFocus,
             takeFocus = takeFocus,
-            onEnter = submit,
+            onEnter = act,
             onCmdEnter = null,
             onEscape = onCancel,
         ) {
@@ -200,11 +223,44 @@ internal fun QuestionCardView(
             ) {
                 Spacer(Modifier.weight(1f))
                 CardButton("Cancel", "Esc", primary = false, onClick = onCancel)
-                CardButton("Submit answers", "↩", primary = true, enabled = picks != null, onClick = submit)
+                CardButton(
+                    primary.label,
+                    "↩",
+                    primary = true,
+                    enabled = (primary as? QuestionPrimary.Submit)?.enabled ?: true,
+                    onClick = act,
+                )
             }
             MoreWaiting(moreWaiting)
         }
     }
+}
+
+/** The question card's primary button (spec 2.8 of the polish): `Next` or `Submit answers`, as [questionPrimary] decides. */
+internal sealed interface QuestionPrimary {
+    val label: String
+
+    /** `Next`: shows question [tab], the next unanswered one after the shown one. Always enabled. */
+    data class Next(val tab: Int) : QuestionPrimary {
+        override val label: String get() = "Next"
+    }
+
+    /** `Submit answers`: every other question has an answer; [enabled] once the shown one has too. */
+    data class Submit(val enabled: Boolean) : QuestionPrimary {
+        override val label: String get() = "Submit answers"
+    }
+}
+
+/**
+ * The primary button of a question card whose questions are [answered] (a non-blank `Other` text or a picked option, the rule of
+ * [picksOf] and [tabLabel]) while question [tab] is shown: [QuestionPrimary.Next] to the first unanswered question after [tab] in
+ * tab order, wrapping to the first, while any question other than the shown one is unanswered; else [QuestionPrimary.Submit],
+ * enabled when every question is answered. [tab] is coerced into the questions' indices; one question never gives `Next`.
+ */
+internal fun questionPrimary(answered: List<Boolean>, tab: Int): QuestionPrimary {
+    val shown = tab.coerceIn(0, (answered.size - 1).coerceAtLeast(0))
+    val next = ((shown + 1 until answered.size) + (0 until shown)).firstOrNull { !answered[it] }
+    return if (next != null) QuestionPrimary.Next(next) else QuestionPrimary.Submit(answered.all { it })
 }
 
 /**

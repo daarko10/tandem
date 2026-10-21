@@ -100,9 +100,16 @@ class CardKeysTest {
         assertEquals(QuestionKey.Pick(1), q(AwtKeyEvent.VK_NUMPAD2, numPad = true))
         assertNull(q(AwtKeyEvent.VK_0))
         assertNull(q(AwtKeyEvent.VK_1, other = true))
-        assertEquals(QuestionKey.Submit, q(AwtKeyEvent.VK_ENTER, other = true))
+    }
+
+    @Test
+    fun `Enter in the Other field is the card's primary action`() {
+        assertEquals(QuestionKey.Primary, q(AwtKeyEvent.VK_ENTER, other = true))
+        assertEquals(QuestionKey.Primary, q(AwtKeyEvent.VK_ENTER, other = true, numPad = true))
+        // Shift+Enter is the field's newline; Cmd/Ctrl+Enter does nothing (4.18).
         assertNull(q(AwtKeyEvent.VK_ENTER, other = true, shift = true))
         assertNull(q(AwtKeyEvent.VK_ENTER, other = true, cmd = true))
+        // Outside the field Enter is cardKey's.
         assertNull(q(AwtKeyEvent.VK_ENTER))
     }
 
