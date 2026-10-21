@@ -231,6 +231,11 @@ class ToolWindowIdeTest {
             // The first bubble is in the viewport (only visible rows are in the tree).
             waitForText("Prompt 1 of the seeded history")
             Thread.sleep(3_000)
+            // The streamed paragraphs are below the viewport: following the stream would bring them into the tree.
+            assertFalse(
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'Paragraph ')]").present(),
+                "the viewport followed the streamed rows while paused",
+            )
             assertFalse(ui.x("//div[@class='ComposeNode' and @visible_text='pong']").present(), "the viewport moved while paused")
             assertTrue(iconButton("Stop").present(), "the turn is still streaming")
             assertTrue(
