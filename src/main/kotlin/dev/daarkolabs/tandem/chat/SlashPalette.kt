@@ -124,7 +124,9 @@ sealed interface SlashIntercept {
 /**
  * The interception table of spec 3.4 on [text], trimmed: `/mcp` opens the panel, `/model` the model menu, `/model <name>` picks the
  * model of [models] whose value or display name is the whole of `<name>` (ignoring case), `/permissions` and `/mode` open the
- * permission-mode menu; anything else, `/mcp <args>` included, is sent as typed.
+ * permission-mode menu; anything else, `/mcp <args>` included, is sent as typed. The composer passes [ComposerModel.models], which
+ * falls back to the CLI's aliases ([dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES]), so a session that has not listed its models
+ * still intercepts `/model <alias>`.
  */
 fun slashIntercept(text: String, models: List<ModelOption>): SlashIntercept {
     val trimmed = text.trim()

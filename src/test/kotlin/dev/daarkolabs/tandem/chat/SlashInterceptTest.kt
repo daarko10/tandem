@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.chat
 
+import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ModelOption
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -39,6 +40,15 @@ class SlashInterceptTest {
     fun `a draft Tandem intercepts is one the table does not send`() {
         for (draft in listOf("/mcp", " /model ", "/model opus", "/permissions", "/mode\n")) assertTrue(intercepts(draft, models), draft)
         for (draft in listOf("/model nosuch", "/mcp x", "/hello", "! /mcp", "hello", "")) assertFalse(intercepts(draft, models), draft)
+    }
+
+    @Test
+    fun `a session that has not listed its models intercepts a CLI alias`() {
+        // Restored with no process: the composer offers the CLI's aliases, so `/model opus` picks as the footer's menu would.
+        val composer = composerModel(ChatState())
+        assertEquals(SlashIntercept.SetModel("opus"), slashIntercept("/model opus", composer.models))
+        assertTrue(intercepts("/model opus", composer.models))
+        assertEquals(SlashIntercept.Send("/model nosuch"), slashIntercept("/model nosuch", composer.models))
     }
 
     @Test
