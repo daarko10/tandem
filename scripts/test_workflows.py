@@ -1,8 +1,8 @@
-"""Tests for the drift loop's workflows and the skill they run. Run from scripts/: python3 -m unittest
+"""Tests for the workflows: the drift loop's and the skill they run, and build.yml's jobs. Run from scripts/: python3 -m unittest
 
-They read .github/workflows/drift-fix.yml (and cli-contract.yml) with PyYAML, which reads the `on` key as the boolean
-True. Without PyYAML they skip, except under GITHUB_ACTIONS, where a missing PyYAML is an error: these are the only
-tests pinning the workflows, and build.yml's "Script tests" step must never skip them silently.
+They read .github/workflows/drift-fix.yml (and cli-contract.yml, build.yml) with PyYAML, which reads the `on` key as the
+boolean True. Without PyYAML they skip, except under GITHUB_ACTIONS, where a missing PyYAML is an error: these are the
+only tests pinning the workflows, and build.yml's "Script tests" job must never skip them silently.
 
 The outcome tests (StepOutcomeTest) run a step's `run:` block under bash as GitHub does: `bash -e {0}` for a step
 without `shell:` (no pipefail; every multi-command step sets its own), `-o pipefail` added for `shell: bash`, with a stub
@@ -853,6 +853,39 @@ class NightlyStepOutcomeTest(unittest.TestCase):
 
 
 BUILD = os.path.join(ROOT, ".github/workflows/build.yml")
+FILTER = "Decide whether the Gradle jobs run"
+GRADLE_JOBS = ("build", "build-macos", "verify", "ide-test")
+BASE = {"README.md": "x\n", "src/main/kotlin/A.kt": "a\n", "docs/a.md": "a\n"}
+
+
+def run_filter(head: dict, event: str = "pull_request") -> tuple[int, str, str]:
+    """Runs build.yml's filter step under bash (`shell: bash`) in a git repository whose HEAD^1 holds BASE and whose HEAD
+    changes it by `head` (a path to its new text, or None to delete it), as a pull request's merge commit has the base as
+    its first parent. Returns (exit code, stdout and stderr, GITHUB_OUTPUT's text)."""
+    s = step(load(BUILD), "changes", FILTER)
+    with tempfile.TemporaryDirectory() as tmp:
+        work, script, output = os.path.join(tmp, "work"), os.path.join(tmp, "step.sh"), os.path.join(tmp, "output")
+        os.mkdir(work)
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": tmp, "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+        subprocess.run(["git", "init", "-q"], cwd=work, env=env, check=True)
+        for commit in (BASE, head):
+            for path, text in commit.items():
+                if text is None:
+                    os.remove(os.path.join(work, path))
+                    continue
+                os.makedirs(os.path.dirname(os.path.join(work, path)) or work, exist_ok=True)
+                with open(os.path.join(work, path), "w", encoding="utf-8") as f:
+                    f.write(text)
+            subprocess.run(["git", "add", "-A"], cwd=work, env=env, check=True)
+            subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "commit"], cwd=work, env=env, check=True)
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(s["run"])
+        open(output, "w").close()
+        proc = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", script], cwd=work, capture_output=True, text=True, timeout=60,
+                              env={**env, "EVENT": event, "GITHUB_OUTPUT": output})
+        with open(output, encoding="utf-8") as f:
+            return proc.returncode, proc.stdout + proc.stderr, f.read()
 
 
 @unittest.skipUnless(yaml, "PyYAML is not installed")
@@ -863,6 +896,20 @@ class BuildWorkflowTest(unittest.TestCase):
         jobs = load(BUILD)["jobs"]
         for name in ("verify", "ide-test"):
             self.assertNotIn("build", jobs[name].get("needs", []), name)               # each builds its own plugin ZIP; waiting only lengthened the critical path
+        for name in GRADLE_JOBS:
+            self.assertEqual((["changes"], "needs.changes.outputs.gradle == 'true'"), (jobs[name]["needs"], jobs[name]["if"]), name)
+        self.assertEqual(["changes", "scripts", *GRADLE_JOBS], list(jobs))            # no job is left out of the filter
+        self.assertEqual("${{ steps.filter.outputs.gradle }}", jobs["changes"]["outputs"]["gradle"])
+        checkout = jobs["changes"]["steps"][0]
+        self.assertEqual(("actions/checkout@v7", 2), (checkout["uses"], checkout["with"]["fetch-depth"]))   # the merge commit and its first parent, the base
+        self.assertEqual("${{ github.event_name }}", step(load(BUILD), "changes", FILTER)["env"]["EVENT"])
+        self.assertNotIn("${{", step(load(BUILD), "changes", FILTER)["run"])
+        scripts = jobs["scripts"]
+        self.assertEqual("Script tests", scripts["name"])
+        self.assertNotIn("needs", scripts)                                             # every change runs the script tests, a docs-only one included
+        self.assertNotIn("if", scripts)
+        self.assertEqual("cd scripts && python3 -m unittest -v", step(load(BUILD), "scripts", "Script tests")["run"])
+        self.assertEqual([], [s.get("name") for s in jobs["build"]["steps"] if "unittest" in s.get("run", "")])   # once, in its own job
         self.assertIn("plugin-distribution", [s.get("with", {}).get("name") for s in jobs["build"]["steps"]])   # the ZIP people download stays Build and test's
 
     def test_the_ide_test_runs_in_three_shards(self):
@@ -878,6 +925,58 @@ class BuildWorkflowTest(unittest.TestCase):
         self.assertEqual(["ide-test-logs-${{ matrix.shard }}"], [s["with"]["name"] for s in uploads])   # an artifact name must be unique in the run
         with open(os.path.join(ROOT, "build.gradle.kts"), encoding="utf-8") as f:
             self.assertIn('systemProperty("tandem.ideTestShard", providers.systemProperty("tandem.ideTestShard").getOrElse(""))', f.read())   # reaches the test JVM
+
+
+
+@unittest.skipUnless(yaml and BASH and shutil.which("git"), "PyYAML, bash 4, jq and git are needed to run the filter step")
+class BuildFilterOutcomeTest(unittest.TestCase):
+    """build.yml's filter step under bash in a real git repository: which changes skip the Gradle jobs."""
+
+    def assertGradle(self, expected: str, head: dict, event: str = "pull_request"):
+        rc, out, output = run_filter(head, event)
+        self.assertEqual(0, rc, out)
+        self.assertEqual(f"gradle={expected}\n", output, (head, event, out))
+
+    def test_docs_scripts_skills_and_the_other_workflows_skip_gradle(self):
+        for head in ({"docs/a.md": "b\n"}, {"docs/superpowers/specs/new.md": "b\n"}, {"scripts/test_x.py": "b\n"},
+                     {".claude/skills/s/SKILL.md": "b\n"}, {".github/actions/anthropic-token/action.yml": "b\n"},
+                     {".github/workflows/drift-fix.yml": "b\n"}, {".github/workflows/cli-contract.yml": "b\n"},
+                     {".github/workflows/macos-ide-test.yml": "b\n"}, {".github/CODEOWNERS": "* @x\n"},
+                     {"README.md": "y\n", "CLAUDE.md": "y\n", "LICENSE": "y\n", "docs/a.md": None}):
+            self.assertGradle("false", head)
+
+    def test_code_the_build_files_and_build_yml_run_gradle(self):
+        for head in ({"src/main/kotlin/A.kt": "b\n"}, {"src/test/resources/fixtures/x.ndjson": "{}\n"}, {"build.gradle.kts": "b\n"},
+                     {"settings.gradle.kts": "b\n"}, {"gradle.properties": "b\n"}, {"gradle/wrapper/gradle-wrapper.properties": "b\n"},
+                     {"gradlew": "b\n"}, {".gitignore": "b\n"}, {".github/workflows/build.yml": "b\n"}, {"src/main/kotlin/A.kt": None},
+                     {"src/docs/a.md": "b\n"}, {"README.md.orig": "b\n"}, {"LICENSE.txt": "b\n"},       # anchored: a near miss runs everything
+                     {".github/workflows/drift-fix.yml.bak": "b\n"}, {".github/workflows/new.yml": "b\n"}, {"new-top-level-file": "b\n"}):
+            self.assertGradle("true", head)
+
+    def test_a_mix_runs_gradle(self):
+        self.assertGradle("true", {"docs/a.md": "b\n", "scripts/x.py": "b\n", "src/main/kotlin/A.kt": "b\n"})
+
+    def test_a_move_out_of_src_runs_gradle(self):
+        self.assertGradle("true", {"src/main/kotlin/A.kt": None, "docs/A.kt": "a\n"})   # --no-renames: the deleted source counts, not only the new path
+
+    def test_no_change_runs_gradle(self):
+        self.assertGradle("true", {})
+
+    def test_a_push_runs_gradle_whatever_changed(self):
+        for event in ("push", "workflow_dispatch"):
+            self.assertGradle("true", {"docs/a.md": "b\n"}, event)
+
+    def test_a_failed_diff_fails_the_job(self):
+        s = step(load(BUILD), "changes", FILTER)
+        with tempfile.TemporaryDirectory() as tmp:
+            script, output = os.path.join(tmp, "step.sh"), os.path.join(tmp, "output")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(s["run"])
+            open(output, "w").close()
+            proc = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", script], cwd=tmp, capture_output=True, text=True, timeout=60,
+                                  env={"PATH": os.environ.get("PATH", ""), "HOME": tmp, "GIT_CEILING_DIRECTORIES": tmp, "EVENT": "pull_request", "GITHUB_OUTPUT": output})
+            with open(output, encoding="utf-8") as f:
+                self.assertEqual((True, ""), (proc.returncode != 0, f.read()), proc.stdout + proc.stderr)   # no repository: red, and no verdict for the Gradle jobs
 
 
 if __name__ == "__main__":

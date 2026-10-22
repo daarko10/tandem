@@ -1,6 +1,6 @@
 # The IDE test (IDE Starter + UI Driver: a real IDE with the built plugin installed, driven like a person would) on a Mac.
 # A macOS runner costs about ten times a Linux one, so it does not run on every push; build.yml runs the unit, fixture and
-# platform tests on a Mac for every push, and the IDE test on Linux.
+# platform tests on a Mac for every push that changes what Gradle reads, and the IDE test on Linux.
 # Runs nightly on the default branch, by hand (Actions > macOS IDE test > Run workflow, or
 # `gh workflow run macos-ide-test.yml --ref <branch>`, once this file is on the default branch), and on a pull request
 # when it gets the `macos-ide-test` label.
