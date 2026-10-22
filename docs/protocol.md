@@ -276,9 +276,12 @@ string, not a block array, and every frame carries `client_composed:true` (`Host
 
 stderr is merged into stdout in order, so `<bash-stderr>` is empty, as in the 2.1.306 terminal; Tandem's note for a stopped or capped
 command (`Stopped after 3.0s`, `Killed after 10 minutes`) is the last line of `<bash-stdout>`. The CLI echoes none of these frames.
-Tandem never writes two of them back to back (the CLI batches the sends queued before it starts processing): the output frame waits
-for the command frame's zero-turn result, and an escape sent behind a prompt waits for that prompt's result. A `result` whose
-`user_message_uuids` names only quiet sends ends no turn and draws no footer.
+The CLI batches the sends queued before it starts processing, so Tandem keeps the recorded order: the output frame waits for the
+command frame's zero-turn result, and an escape sent behind a prompt waits for that prompt's result. Two quiet frames can still go
+out back to back (a context-only escape and the escape held behind the same prompt), the recorded shape of `bash-mode.ndjson:3-8`.
+Nothing holds a prompt: one sent before a context-only escape's zero-turn result, or one queued behind an escape while the process
+starts, goes out right after the quiet frame, and what the CLI makes of that quiet + querying batch is **unrecorded**. A `result`
+whose `user_message_uuids` names only quiet sends ends no turn and draws no footer.
 
 ---
 
