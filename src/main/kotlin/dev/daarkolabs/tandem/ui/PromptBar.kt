@@ -144,7 +144,7 @@ internal fun PromptBar(
             composer.cardOpen,
             focus,
             onFocused,
-            onAdd = { ComposerImages.chooseImagesLater(project, attachFiles) },
+            onAdd = { ComposerImages.chooseImagesLater(project, onChosen = attachFiles) },
             onDrop = attachFiles,
             onAction = { action ->
                 when (action) {

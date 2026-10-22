@@ -101,11 +101,11 @@ internal object ComposerImages {
     fun chooseImages(project: Project): List<Path> = FileChooser.chooseFiles(descriptor(), project, null).map { it.toNioPath() }
 
     /**
-     * Opens [project]'s image chooser ([chooseImages]) as an EDT event of its own, after the current one, in the default modality, and
-     * passes the images picked to [onChosen]; see [chooseLater]. Nothing opens once [project] is disposed.
+     * Opens [project]'s image chooser ([choose], [chooseImages] but in tests) as an EDT event of its own, after the current one, in the
+     * default modality, and passes the images picked to [onChosen]; see [chooseLater]. Nothing opens once [project] is disposed.
      */
-    fun chooseImagesLater(project: Project, onChosen: (List<Path>) -> Unit): Unit =
-        chooseLater({ chooseImages(project) }, onChosen) { task ->
+    fun chooseImagesLater(project: Project, choose: () -> List<Path> = { chooseImages(project) }, onChosen: (List<Path>) -> Unit): Unit =
+        chooseLater(choose, onChosen) { task ->
             ApplicationManager.getApplication().invokeLater(task, ModalityState.defaultModalityState(), project.disposed)
         }
 
