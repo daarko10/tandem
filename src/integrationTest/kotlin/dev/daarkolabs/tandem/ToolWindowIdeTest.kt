@@ -1012,10 +1012,18 @@ class ToolWindowIdeTest {
     /** The header's "+". */
     private fun Driver.newSessionButton(): UiComponent = iconButton("New session")
 
-    /** Creates a session with the header's "+" and the popup's defaults; it is selected. */
+    /**
+     * Creates a session with the header's "+" and the popup's defaults; it is selected. The popup is a window of its own, and a
+     * click that lands while it is still being placed moves nothing (seen once on a loaded CI runner: the popup open, no session),
+     * so a Create that leaves the popup open is pressed once more, and the helper returns only with the new session's prompt box.
+     */
     private fun Driver.newSession() {
         newSessionButton().click(Point(10, 10))
+        waitFor("the new-session popup", 30.seconds) { button("Create").present() }
         clickButton("Create")
+        val closed = runCatching { waitFor("the popup closed", 5.seconds) { !button("Create").present() } }.isSuccess
+        if (!closed) clickButton("Create")
+        waitFor("the new session's prompt box", 30.seconds) { promptBox().present() }
     }
 
     /**
