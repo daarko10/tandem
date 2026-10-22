@@ -62,8 +62,11 @@ class ShellRunnerTest {
 
     private fun unix() = assumeTrue(!System.getProperty("os.name").lowercase().contains("windows"))
 
-    private fun runner(timeoutMillis: Long = Shells.TIMEOUT_MILLIS, env: Map<String, String> = environment, launcher: ShellLauncher = Shells.defaultLauncher()) =
-        ShellRunner(launcher, environment = { env }, timeoutMillis = timeoutMillis)
+    private fun runner(
+        timeoutMillis: Long = Shells.TIMEOUT_MILLIS,
+        env: Map<String, String> = environment,
+        launcher: ShellLauncher = Shells.defaultLauncher(),
+    ) = ShellRunner(launcher, environment = { env }, timeoutMillis = timeoutMillis)
 
     private fun sleeps(): List<ProcessHandle> = ProcessHandle.current().descendants()
         .filter { it.isAlive && it.info().command().orElse("").substringAfterLast('/') == "sleep" }.toList()
@@ -187,7 +190,7 @@ class ShellRunnerTest {
 
     @Test
     fun `the shell argv is the login shell with -lc and ComSpec on Windows`() {
-        assertEquals(listOf("/bin/zsh", "-lc", "x"), Shells.argv("x", mapOf("SHELL" to "/bin/zsh")))
+        assertEquals(listOf("/bin/zsh", "-lc", "x"), Shells.argv("x", mapOf("SHELL" to "/bin/zsh"), os = "Linux"))
         assertEquals(listOf("/bin/zsh", "-lc", "x"), Shells.argv("x", emptyMap(), os = "Mac OS X"))
         assertEquals(listOf("/bin/zsh", "-lc", "x"), Shells.argv("x", mapOf("SHELL" to " "), os = "Mac OS X"))
         assertEquals(listOf("/bin/sh", "-lc", "x"), Shells.argv("x", emptyMap(), os = "Linux"))

@@ -80,8 +80,8 @@ class SessionHandle internal constructor(
     internal val spawnLock: Mutex = Mutex()
 
     /**
-     * Guards [attachment], [mirror], [queued], [closed], [renameOnInit], [replaced], [shellJob] and what the [title] is worked out from, and
-     * makes each change of the chat ([publishLocked]) one step with them: a pick or a prompt is either in the state a process
+     * Guards [attachment], [mirror], [queued], [closed], [renameOnInit], [replaced], [shellJob] and what the [title] is worked out
+     * from, and makes each change of the chat ([publishLocked]) one step with them: a pick or a prompt is either in the state a process
      * starts from, or goes to that process. Only held for steps that never wait.
      */
     private val lock = Any()
@@ -601,7 +601,10 @@ internal sealed interface Outbound {
     /** A prompt: [text] and the [images] attached to it. */
     data class Prompt(val text: String, val images: List<ImageBlock> = emptyList()) : Outbound
 
-    /** Shell escape [id]'s frames: its [command] and [output] (with Tandem's note for a stopped or capped one), and whether Claude replies. */
+    /**
+     * Shell escape [id]'s frames: its [command] and [output] (with Tandem's note for a stopped or capped one), and whether Claude
+     * replies.
+     */
     data class ShellEscape(val id: String, val command: String, val output: String, val respond: Boolean) : Outbound
 }
 

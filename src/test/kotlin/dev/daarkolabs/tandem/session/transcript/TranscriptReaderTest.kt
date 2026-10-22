@@ -712,8 +712,9 @@ class TranscriptReaderTest {
     @Test
     fun `the first prompt of a shell escape session is the command`(@TempDir dir: Path) = runBlocking<Unit> {
         for (name in listOf("bash-mode", "bash-mode-respond")) {
-            assertEquals("! echo bash-mode-probe && printf err >&2", TranscriptReader.meta(Fixtures.transcript(name)).firstPrompt, name)
-            assertEquals("! echo bash-mode-probe && printf err >&2", TranscriptReader.read(Fixtures.transcript(name)).meta.firstPrompt, name)
+            val prompt = "! echo bash-mode-probe && printf err >&2"
+            assertEquals(prompt, TranscriptReader.meta(Fixtures.transcript(name)).firstPrompt, name)
+            assertEquals(prompt, TranscriptReader.read(Fixtures.transcript(name)).meta.firstPrompt, name)
         }
         val f = dir.resolve("20202020-2020-4202-8202-202020202020.jsonl")
         f.writeLines(

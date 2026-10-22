@@ -2022,8 +2022,11 @@ class SessionManagerTest {
     @Test
     fun `a shell escape that cannot start sends nothing`() = test {
         unix()
-        val launcher = ShellLauncher { _, _, _ -> throw IOException("Cannot run program", IOException("error=2, No such file or directory")) }
-        val manager = manager(fixtures = "bash-mode-respond", shell = ShellRunner(launcher, environment = { mapOf("SHELL" to "/opt/none/zsh") }))
+        val launcher = ShellLauncher { _, _, _ ->
+            throw IOException("Cannot run program", IOException("error=2, No such file or directory"))
+        }
+        val runner = ShellRunner(launcher, environment = { mapOf("SHELL" to "/opt/none/zsh") })
+        val manager = manager(fixtures = "bash-mode-respond", shell = runner)
         val handle = manager.create(NewSessionOptions())
         awaitLog { spawns().size == 1 }
         manager.runShell(handle.id, "echo hi")
@@ -2194,7 +2197,9 @@ class SessionManagerTest {
         val handle = manager.create(NewSessionOptions())
         manager.runShell(handle.id, "sleep 30")
         manager.stopShell(handle.id)
-        val ended = withTimeout(2_000) { handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } && s.runningShell == null } }
+        val ended = withTimeout(2_000) {
+            handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } && s.runningShell == null }
+        }
         assertEquals(ShellEnd.Stopped, ended.shell().end)
         assertNull(ended.runningShell)
         assertFalse(handle.shellJob!!.isActive)

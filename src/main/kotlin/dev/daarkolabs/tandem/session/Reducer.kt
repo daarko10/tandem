@@ -133,7 +133,8 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.McpServersListed -> state.copy(mcp = state.mcp.copy(servers = event.servers, detailed = true))
     is SessionEvent.LocalCommandOutput -> state.localCommandNotice(event.text, event.runCommand)
     is SessionEvent.ShellStarted ->
-        state.append(ChatEntry.Shell(event.id, event.command, "", running = true, startedAtMillis = event.atMillis)).copy(runningShell = event.id)
+        state.append(ChatEntry.Shell(event.id, event.command, "", running = true, startedAtMillis = event.atMillis))
+            .copy(runningShell = event.id)
     is SessionEvent.ShellOutput -> state.updateShell(event.id) { it.copy(output = it.output + event.text) }
     is SessionEvent.ShellEnded -> state.updateShell(event.id) { it.copy(running = false, end = event.end, durationMs = event.durationMs) }
         .let { if (it.runningShell == event.id) it.copy(runningShell = null) else it }
@@ -146,7 +147,9 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
             sent.copy(
                 busy = true,
                 turnInterrupted = false,
-                turn = TurnProgress(event.query, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
+                turn = TurnProgress(
+                    event.query, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0,
+                ),
             )
         }
     }

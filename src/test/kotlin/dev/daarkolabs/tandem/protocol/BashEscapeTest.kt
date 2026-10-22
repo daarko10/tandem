@@ -12,7 +12,8 @@ import kotlin.test.assertNull
 class BashEscapeTest {
     /** The `message.content` of line [line] (1-based) of the transcript fixture [name]. */
     private fun content(name: String, line: Int): String =
-        Json.parseToJsonElement(Fixtures.transcript(name).readLines()[line - 1]).jsonObject["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
+        Json.parseToJsonElement(Fixtures.transcript(name).readLines()[line - 1])
+            .jsonObject["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
 
     @Test
     fun `parse reads the merged line`() {
@@ -53,7 +54,10 @@ class BashEscapeTest {
     fun `input, output and context wrap as recorded`() {
         assertEquals("<bash-input>c</bash-input>", BashEscape.input("c"))
         assertEquals("<bash-stdout>o</bash-stdout><bash-stderr>e</bash-stderr>", BashEscape.output("o", "e"))
-        assertEquals("<bash-input>c</bash-input>\n<bash-stdout>o</bash-stdout><bash-stderr></bash-stderr>", BashEscape.context("c", "o", ""))
+        assertEquals(
+            "<bash-input>c</bash-input>\n<bash-stdout>o</bash-stdout><bash-stderr></bash-stderr>",
+            BashEscape.context("c", "o", ""),
+        )
         assertEquals(content("bash-mode", 5), BashEscape.context("echo bash-mode-probe && printf err >&2", "bash-mode-probe\nerr", ""))
     }
 

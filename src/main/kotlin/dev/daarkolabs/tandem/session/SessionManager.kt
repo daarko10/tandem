@@ -355,7 +355,8 @@ class SessionManager internal constructor(
         handle.shellEvent(SessionEvent.ShellEnded(shellId, result.end, result.durationMs))
         // Not started: nothing ran. Stopped here means killAllNow killed it (the IDE exits): no claude may start now.
         if (result.end is ShellEnd.NotStarted || result.end is ShellEnd.Stopped || shuttingDown) return
-        sendShellFrames(handle, shellId, command, if (result.end is ShellEnd.TimedOut) withNote(result.output, "Killed after 10 minutes") else result.output)
+        val output = if (result.end is ShellEnd.TimedOut) withNote(result.output, "Killed after 10 minutes") else result.output
+        sendShellFrames(handle, shellId, command, output)
     }
 
     /** Sends a shell escape's frames to [handle]'s process, or queues them and starts one. */

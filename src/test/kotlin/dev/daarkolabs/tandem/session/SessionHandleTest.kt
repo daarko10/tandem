@@ -127,13 +127,17 @@ class SessionHandleTest {
         SessionHandle("33333333-3333-4333-8333-333333333333", scope, ChatState(), MutableStateFlow(emptyList()), createdAt = 0)
 
     /** Attaches a process to [handle] that reads its input and says nothing, started from the chat [create] is handed. */
-    private fun attachQuiet(handle: SessionHandle, processes: CoroutineScope, start: (ChatState) -> ChatState = { it.settled() }): ClaudeSession {
+    private fun attachQuiet(
+        handle: SessionHandle,
+        processes: CoroutineScope,
+        start: (ChatState) -> ChatState = { it.settled() },
+    ): ClaudeSession {
         var started: ClaudeSession? = null
         handle.attach(
             create = { chat ->
                 val process = ScriptedProcess.quiet()
-                ClaudeSession(processes, SessionConfig("claude", tmp, sessionId = handle.id), ProcessLauncher { _, _ -> process }, start(chat))
-                    .also { started = it }
+                val config = SessionConfig("claude", tmp, sessionId = handle.id)
+                ClaudeSession(processes, config, ProcessLauncher { _, _ -> process }, start(chat)).also { started = it }
             },
             onFirstInit = { _, _ -> },
         )
@@ -166,7 +170,8 @@ class SessionHandleTest {
             assertTrue(handle.isIdle())
             session.event(SessionEvent.ShellSent("shell-1", listOf("a"), null, 0))
             assertFalse(handle.isIdle(), "a quiet send waits for its result")
-            session.event(SessionEvent.Cli(Ndjson.decode("""{"type":"result","subtype":"success","num_turns":0,"user_message_uuids":["a"]}""")))
+            val result = """{"type":"result","subtype":"success","num_turns":0,"user_message_uuids":["a"]}"""
+            session.event(SessionEvent.Cli(Ndjson.decode(result)))
             assertTrue(handle.isIdle())
         } finally {
             processes.coroutineContext.job.cancelAndJoin()
