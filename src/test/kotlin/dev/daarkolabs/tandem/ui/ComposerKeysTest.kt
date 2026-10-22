@@ -5,6 +5,8 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.text.TextRange
+import dev.daarkolabs.tandem.chat.intercepts
+import dev.daarkolabs.tandem.session.ModelOption
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -44,6 +46,7 @@ class ComposerKeysTest {
         hasAttachments: Boolean = false,
         paletteOpen: Boolean = false,
         panelOpen: Boolean = false,
+        interceptable: () -> Boolean = { false },
         clipboardHasImage: () -> Boolean = { false },
     ): ComposerAction? = composerKey(
         key,
@@ -57,6 +60,7 @@ class ComposerKeysTest {
         hasAttachments = hasAttachments,
         paletteOpen = paletteOpen,
         panelOpen = panelOpen,
+        interceptable = interceptable,
         clipboardHasImage = clipboardHasImage,
     )
 
@@ -74,6 +78,28 @@ class ComposerKeysTest {
     fun `Enter does nothing while busy`() {
         assertNull(composer(enter, busy = true))
         assertNull(composer(enter, busy = true, cardOpen = true))
+    }
+
+    // MCP spec 3.4: the interception table runs palette or not, so a busy Enter on `/mcp` (the palette closed by Esc) or on
+    // `/model opus` (closed by the space) still runs it; the send path then sends nothing.
+    @Test
+    fun `Enter on a draft Tandem intercepts runs it while busy or while a card is open`() {
+        val models = listOf(ModelOption("opus", "Opus", null))
+        for (draft in listOf("/mcp", "/model opus", "/permissions")) {
+            val interceptable = { intercepts(draft, models) }
+            assertEquals(ComposerAction.Send, composer(enter, busy = true, interceptable = interceptable), draft)
+            assertEquals(ComposerAction.Send, composer(enter, cardOpen = true, interceptable = interceptable), draft)
+            assertEquals(ComposerAction.Send, composer(key(AwtKeyEvent.VK_ENTER, numPad = true), busy = true, interceptable = interceptable))
+            // Modifiers keep their own rules: Shift+Enter stays a newline, Cmd-Enter does nothing.
+            assertNull(composer(enter, shift = true, busy = true, interceptable = interceptable))
+            assertNull(composer(enter, ctrlOrMeta = true, busy = true, interceptable = interceptable))
+        }
+        for (draft in listOf("/model nosuch", "/hello", "hello")) {
+            assertNull(composer(enter, busy = true, interceptable = { intercepts(draft, models) }), draft)
+        }
+        // Asked only for a busy plain Enter: an idle Enter sends without it.
+        assertEquals(ComposerAction.Send, composer(enter, interceptable = { error("not asked") }))
+        assertNull(composer(escape, interceptable = { error("not asked") }))
     }
 
     @Test

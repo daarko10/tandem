@@ -48,7 +48,9 @@ internal enum class ComposerAction {
  * text area.
  *
  * Enter alone sends, and does nothing while a turn runs (the Stop button stands in for Send) or a card is open (until it is answered,
- * spec 4.15), whether or not the reducer still counts the turn as running. Shift+Enter is a newline, which the
+ * spec 4.15), whether or not the reducer still counts the turn as running, unless the draft is one of Tandem's own commands
+ * ([interceptable], asked for a plain Enter only): the interception table runs then, palette or not, busy or not, and sends nothing
+ * (MCP spec 3.4). Shift+Enter is a newline, which the
  * composer types itself ([composerFallback]), and Alt+Enter and Ctrl/Cmd+Enter do nothing yet. Esc goes to the open card first, then
  * stops a running turn.
  *
@@ -73,13 +75,19 @@ internal fun composerKey(
     hasAttachments: Boolean = false,
     paletteOpen: Boolean = false,
     panelOpen: Boolean = false,
+    interceptable: () -> Boolean = { false },
     clipboardHasImage: () -> Boolean = { false },
 ): ComposerAction? {
     if (type != KeyEventType.KeyDown) return null
     if (key == Key.Escape && panelOpen) return ComposerAction.ClosePanel
     if (paletteOpen) paletteKey(key, modified = shift || alt || ctrlOrMeta)?.let { return it }
     return when (key) {
-        Key.Enter, Key.NumPadEnter -> if (!shift && !alt && !ctrlOrMeta && !busy && !cardOpen) ComposerAction.Send else null
+        Key.Enter, Key.NumPadEnter -> when {
+            shift || alt || ctrlOrMeta -> null
+            !busy && !cardOpen -> ComposerAction.Send
+            interceptable() -> ComposerAction.Send
+            else -> null
+        }
         Key.Escape -> when {
             cardOpen -> ComposerAction.CardEscape
             busy -> ComposerAction.Stop

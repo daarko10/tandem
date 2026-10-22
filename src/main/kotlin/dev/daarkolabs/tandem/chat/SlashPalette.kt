@@ -142,6 +142,12 @@ fun slashIntercept(text: String, models: List<ModelOption>): SlashIntercept {
     }
 }
 
+/**
+ * Whether sending [draft] runs one of Tandem's own commands of [slashIntercept]'s table instead of going to the CLI: a plain Enter
+ * runs it while a turn runs or a card is open too, as a palette pick of its row does (spec 3.4).
+ */
+fun intercepts(draft: String, models: List<ModelOption>): Boolean = slashIntercept(draft.trim(), models) !is SlashIntercept.Send
+
 /** What a palette pick does; the composer only executes it. */
 sealed interface PaletteOutcome {
     data class Intercept(val intercept: SlashIntercept) : PaletteOutcome

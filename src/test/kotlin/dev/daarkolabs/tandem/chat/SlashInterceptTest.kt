@@ -3,6 +3,8 @@ package dev.daarkolabs.tandem.chat
 import dev.daarkolabs.tandem.session.ModelOption
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /** What a sent slash command does (spec 3.4's interception table), on the trimmed text, palette or not. */
 class SlashInterceptTest {
@@ -31,6 +33,12 @@ class SlashInterceptTest {
         for (text in listOf("/hello", "/help", "/usage", "/context", "/nosuch", "/models", "/mcpx", "hello /mcp", "")) {
             assertEquals(SlashIntercept.Send(text), slashIntercept(text, models), text)
         }
+    }
+
+    @Test
+    fun `a draft Tandem intercepts is one the table does not send`() {
+        for (draft in listOf("/mcp", " /model ", "/model opus", "/permissions", "/mode\n")) assertTrue(intercepts(draft, models), draft)
+        for (draft in listOf("/model nosuch", "/mcp x", "/hello", "! /mcp", "hello", "")) assertFalse(intercepts(draft, models), draft)
     }
 
     @Test

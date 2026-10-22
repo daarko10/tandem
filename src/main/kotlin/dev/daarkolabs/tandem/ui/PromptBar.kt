@@ -81,6 +81,7 @@ import dev.daarkolabs.tandem.chat.SlashIntercept
 import dev.daarkolabs.tandem.chat.SlashPalette
 import dev.daarkolabs.tandem.chat.StopTarget
 import dev.daarkolabs.tandem.chat.committedDraft
+import dev.daarkolabs.tandem.chat.intercepts
 import dev.daarkolabs.tandem.chat.moved
 import dev.daarkolabs.tandem.chat.paletteFor
 import dev.daarkolabs.tandem.chat.pick
@@ -252,6 +253,7 @@ internal fun PromptBar(
             onFocused,
             inputFocused = inputFocused,
             palette = { palette.value },
+            interceptable = { intercepts(ui.draft.text.toString(), composer.models) },
             onPalettePick = { item -> pickFrom(paletteOf(true), item, false) },
             onAdd = { scope.launch { attachFiles(ComposerImages.chooseImages(project)) } },
             onDrop = attachFiles,
@@ -310,7 +312,8 @@ internal fun PromptBar(
 /**
  * The text area, `+` and Send or Stop in one filled rounded box, as wide as the footer under it, with the attached images above them
  * ([AttachmentStrip]): Stop while [busy]. Keys go through [composerKey] with [busy] or [sending] (a prompt still being encoded),
- * [cardOpen] and whether the slash palette is open ([palette], read at each key, so never a frame-old one), and Send is disabled
+ * [cardOpen], whether the slash palette is open ([palette], read at each key, so never a frame-old one) and whether the draft is one
+ * of Tandem's own commands ([interceptable], which Enter runs even while busy), and Send is disabled
  * while [sending]; [onAction] does what they return. `+` opens a menu whose `Add files or photos` calls [onAdd] and whose
  * `Slash commands` puts `/` in an empty draft and focuses the text area; files dropped on the box go to [onDrop], and the box draws
  * its focused border while a drag of files hovers it. With [focus] the text area takes the focus, and then [onFocused] is called;
@@ -328,6 +331,7 @@ private fun PromptBox(
     onFocused: () -> Unit,
     inputFocused: MutableState<Boolean>,
     palette: () -> SlashPalette?,
+    interceptable: () -> Boolean,
     onPalettePick: (PaletteItem) -> Unit,
     onAdd: () -> Unit,
     onDrop: (List<Path>) -> Unit,
@@ -422,7 +426,9 @@ private fun PromptBox(
                             imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
                         }
                     }
-                    .onPreviewKeyEvent { event -> composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, onAction) },
+                    .onPreviewKeyEvent { event ->
+                        composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, interceptable, onAction)
+                    },
                 lineLimits = TextFieldLineLimits.MultiLine(1, 8),
                 undecorated = true,
                 placeholder = { Text("Type / for commands", color = colors.text.info) },
@@ -478,7 +484,7 @@ private class ImagePasteProvider(private val onPaste: () -> Unit) : PasteProvide
  * Hands [event] to [composerKey] and runs what it returns, else to [composerFallback]: a newline in [ui]'s draft ([insertNewline]),
  * which the text area would not type, or nothing at all (spec 4.15). Every other key goes to the text area. With the slash palette
  * open ([paletteOpen]) its keys come first (MCP spec 3.4); a pick that does nothing still takes the key, so a busy Enter types no
- * newline. Ctrl/Cmd+V asks the clipboard for its flavours only (polish spec 2.7): the data is read later, off the EDT.
+ * newline. With the palette closed, a busy Enter on one of Tandem's own commands ([interceptable]) still runs it. Ctrl/Cmd+V asks the clipboard for its flavours only (polish spec 2.7): the data is read later, off the EDT.
  */
 private fun composerKeyEvent(
     event: KeyEvent,
@@ -486,6 +492,7 @@ private fun composerKeyEvent(
     cardOpen: Boolean,
     ui: ChatUiState,
     paletteOpen: Boolean,
+    interceptable: () -> Boolean,
     onAction: (ComposerAction) -> Unit,
 ): Boolean {
     val draft = ui.draft
@@ -502,6 +509,7 @@ private fun composerKeyEvent(
         hasAttachments = ui.attachments.isNotEmpty(),
         paletteOpen = paletteOpen,
         panelOpen = ui.mcpPanelOpen.value,
+        interceptable = interceptable,
         clipboardHasImage = { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } },
     )
     if (action != null) {
