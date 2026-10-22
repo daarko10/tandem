@@ -27,8 +27,11 @@ import kotlinx.coroutines.delay
 private const val LIGHT_OFFSET = 0.35f
 private const val SHADE_RADIUS = 1.4f
 
-/** How much lighter than the tint the light centre is, and how much darker the far edge, from 0 (the tint) to 1. */
-private const val LIGHTER = 0.4f
+/**
+ * How much lighter than the tint the light centre is, and how much darker the far edge, from 0 (the tint) to 1: barely lighter, since
+ * the desktop app's orbs are flat coral discs with a soft edge, their brightest point the tint itself, without a highlight.
+ */
+private const val LIGHTER = 0.1f
 private const val DARKER = 0.18f
 
 /**
@@ -39,7 +42,7 @@ private const val FRAME_PAUSE_MS = 33L
 
 /**
  * The working row's indicator (spec 4.9.1): the desktop app's coral orbs turning in 3D ([OrbIndicator]), on a square as tall as a line
- * of the row's text, each a sphere shaded from a lighter centre up and to the left through [tint] to a darker edge, drawn far to near.
+ * of the row's text, each a disc of [tint], barely lighter up and to the left of its middle and darker towards its edge, drawn far to near.
  * While [animated] a frame-clock loop moves a time that only the draw phase reads, at most about 30 times a second ([FRAME_PAUSE_MS]),
  * so the row redraws but never recomposes, and in a layer of its own, so that only the indicator's small picture is drawn again, not
  * the chat's; the loop ends when the row leaves the composition. Otherwise it shows [OrbIndicator.STILL], in [tint]: the warning or
@@ -83,7 +86,7 @@ private class Shades(tint: Color) {
     )
 }
 
-/** [orb] on this square: a disc whose radial shading has its light centre up and to the left, at the orb's alpha. */
+/** [orb] on this square: a disc whose radial shading has its lightest point up and to the left, at the orb's alpha. */
 private fun DrawScope.drawOrb(orb: Orb, shades: Shades) {
     val side = size.minDimension
     val radius = orb.radius * side
