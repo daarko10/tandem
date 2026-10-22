@@ -1,7 +1,7 @@
 ---
 name: fix-contract-drift
 description: "Turn a red nightly CLI contract run into a pull request carrying the recording as a fixture and the minimal decoder or reader change. Arguments: run=<url> recording=<dir> classification=<file> rehearsal=<true|false> date=<YYYY-MM-DD>."
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(./gradlew check), Bash(./gradlew test:*), Bash(python3 -I scripts/classify_drift.py:*), Bash(python3 -I scripts/redact_fixture.py:*), Bash(python3 -m unittest discover -s scripts -t scripts), Bash(gh pr create:*), Bash(gh issue list:*), Bash(gh issue create:*), Bash(gh issue comment:*), Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git switch:*), Bash(git clean:*), Bash(git push -u origin HEAD), Bash(cp build/drift/recording/* src/test/resources/fixtures/*), Bash(grep:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(./gradlew check), Bash(./gradlew test:*), Bash(python3 -I scripts/classify_drift.py:*), Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*), Bash(python3 -m unittest discover -s scripts -t scripts), Bash(gh pr create:*), Bash(gh issue list:*), Bash(gh issue create:*), Bash(gh issue comment:*), Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git switch:*), Bash(git clean:*), Bash(git push -u origin HEAD), Bash(cp build/drift/recording/* src/test/resources/fixtures/*), Bash(grep:*)
 ---
 
 # Fix contract drift
@@ -40,10 +40,12 @@ the committed ones pin recorded facts (`plain-reply` pins 2.1.300 and one "pong"
 
 ## 3. Run the redactor's safety net
 `python3 -I scripts/redact_fixture.py <copy> <copy>` for each copied file (onto itself; redacted input changes
-nothing). Any `unredacted id` or `<leaked-N>` on stderr is a stop: remove the copies with `git clean -f -- <copies>`,
-open no PR, and comment on the open issue titled "CLI contract: the CLI did not answer" (`gh issue list --label
-contract-drift --state open --json number,title`; `gh issue create` with that title and the label `contract-drift`
-when none is open) naming the key path the redactor printed, never the value. Then
+nothing), both paths spelled `src/test/resources/fixtures/…` exactly as you copied to (no `./`, no `..`, no flag, no
+third argument): the redactor is allowed from the fixtures onto the fixtures only. Any `unredacted id` or
+`<leaked-N>` on stderr is a stop: remove the copies with `git clean -f -- <copies>`, open no PR, and comment on the
+open issue titled "CLI contract: the CLI did not answer" (`gh issue list --label contract-drift --state open --json
+number,title`; `gh issue create` with that title and the label `contract-drift` when none is open) naming the key
+path the redactor printed, never the value. Then
 `grep -nE '@|[0-9a-f]{8}-[0-9a-f]{4}-|toolu_|msg_|fv-az|runner|<leaked-' <copies>`, over the copies and nothing else
 (never `.git/`, whose `config` holds the push credential): an e-mail address, a UUID, an API id, a hostname, an
 account name or a `<leaked-N>` placeholder (the nightly's redactor already caught a leak; your run leaves the

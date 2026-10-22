@@ -3,9 +3,10 @@
 # four identifiers as cli-contract.yml; the federation rule admits runs on main only). A run the CLI did not answer is
 # reported on the issue "CLI contract: the CLI did not answer" instead, and an open PR labelled contract-drift skips the
 # agent. Only a scheduled or dispatched run of this repository's own nightly is fixed, never a fork's or a pull request's.
-# The agent never starts unless a ruleset on main requires a pull request with an approving review from a code owner and
-# approval of the most recent push, and main's CODEOWNERS owns every file: that protection, not the tool allowlist, keeps
-# the App token off main. A second job, enforce, checks the pull request's file list on a fresh runner once the agent's
+# The agent never starts unless the repository is public (a private one of a personal account enforces a ruleset only
+# with GitHub Pro), a ruleset on main requires a pull request with an approving review from a code owner and approval of
+# the most recent push, and main's CODEOWNERS owns every file: that protection, not the tool allowlist, keeps the App
+# token off main. A second job, enforce, checks the pull request's file list on a fresh runner once the agent's
 # job has ended; a third, remind, comments on the pull request the gate found waiting. Nothing here merges or
 # publishes. Rehearsal: `gh workflow run
 # cli-contract.yml -f drift=<mode>` makes the nightly mutate its own recording, so this workflow fires as for a real red;
@@ -113,6 +114,7 @@ jobs:
         run: |
           gh label create contract-drift --force --color B60205 --description "Opened or reported by the drift loop (drift-fix.yml)"
           gh label create rehearsal --force --color FBCA04 --description "A drift-loop rehearsal: close, do not merge"
+          gh label create drift-halted --force --color 5319E7 --description "Halts the drift loop while open: remove it to re-arm"
       # Outputs: id, url and UTC date of the red run (this run itself when rehearse=true), and rehearse=true|false. The id
       # must be a number and name a failed run of this repository's CLI contract on main, scheduled or dispatched (the
       # nightly's only triggers): a branch's run carries that branch's own recording, and a fork's pull request can name a
@@ -204,7 +206,9 @@ jobs:
           if [ -z "$issue" ]; then gh issue create --title "$title" --label contract-drift --body "$body"; else gh issue comment "$issue" --body "$body"; fi
       # One open fix at a time: a red that persists for a week opens one PR, not seven. The reminder on the waiting PR
       # is the remind job's: commenting on a pull request needs pull-requests: write even through the issues endpoint
-      # (issues: write alone gets a 403), and this job's token holds none. Only the number reaches the output.
+      # (issues: write alone gets a 403), and this job's token holds none. Only the number reaches the output. First, an
+      # open issue labelled drift-halted skips the agent with no reminder (no waiting=): the enforce job sets that label
+      # when an agent run left no branch and no pull request, which nothing else would stop from recurring nightly.
       - name: Skip when a fix is already waiting
         id: gate
         if: steps.classify.outputs.kind == 'decoder' || steps.classify.outputs.kind == 'reader'
@@ -212,6 +216,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          halted="$(gh issue list --label drift-halted --state open --json number --jq '.[0].number // empty')"
+          if [[ "$halted" =~ ^[0-9]+$ ]]; then
+            echo "the loop is halted by issue #$halted; remove the drift-halted label to re-arm"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+          elif [ -n "$halted" ]; then
+            echo "::error title=Drift fix::gh issue list named an open drift-halted issue without a number; the agent is not started."; exit 1
+          fi
           pr="$(gh pr list --label contract-drift --state open --json number --jq '.[0].number // empty')"
           if [[ "$pr" =~ ^[0-9]+$ ]]; then
             echo "a fix is already waiting in PR #$pr; the remind job comments on it and the agent does not start"
@@ -237,9 +248,10 @@ jobs:
       # admin role, how the only code owner merges) is allowed. GitHub returns bypass_actors only to a caller who can
       # edit the ruleset, which the workflow token never can (it has no administration permission), so on a real run
       # the list is withheld, the step says so in its log, and keeping the App off it stays the owner's part. A ruleset on a
-      # private repository owned by a personal account is enforced only with GitHub Pro: on Free the repository goes
-      # public before the ruleset and the rehearsals, and what this endpoint lists for an unenforced ruleset is not
-      # known, so reading the rule here does not prove enforcement. The same step refuses a drift branch that already
+      # private repository owned by a personal account is enforced only with GitHub Pro, and what this endpoint lists for
+      # an unenforced ruleset is not known, so reading the rule does not prove enforcement. So the step reads the
+      # repository first and refuses unless it answers private: false (a failed read refuses too): it cannot tell Pro
+      # from Free, and the repository goes public before the ruleset. The same step refuses a drift branch that already
       # exists (a closed PR whose branch was kept, and the same run dispatched again): the agent's `git push -u origin
       # HEAD` would be rejected as non-fast-forward after the spend, and the enforce job would misread the old branch as
       # a stopped agent. Only a 404 means "no branch": gh prints the error body on stdout and exits 1 on any HTTP error,
@@ -258,6 +270,13 @@ jobs:
           BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
         run: |
           set -euo pipefail
+          if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then
+            status="$(jq -r '.status // empty' <<<"$private" 2>/dev/null || true)"
+            echo "::error title=Drift fix::Reading the repository failed (HTTP status '${status:-none}'), so whether it is public is not known; the agent is not started."; exit 1
+          fi
+          if [ "$private" != "false" ]; then
+            echo "::error title=Drift fix::The repository is private (answer '$private'): a ruleset on a private repository of a personal account is enforced only with GitHub Pro and this step cannot tell, so make the repository public first. The agent is not started."; exit 1
+          fi
           ids="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100" --jq '[.[] | select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")')"
           if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then
             echo "main requires a pull request, an approving review from a code owner and approval of the last push (ruleset $ids)"
@@ -315,10 +334,17 @@ jobs:
       # drift/:* would never match the push), `cat`, `ls` and `date` are not on it (the skill prescribes none of them),
       # and `cp` is admitted from the recording into the fixtures only, as a pattern (a `*` not in a trailing `:*`
       # matches anything, spaces included), so the deny rules `cp *..*` and `cp * * *` take back a `..` and a third
-      # argument (a target directory, `-t`). The deny rules keep the CLI's Edit and Write tools out of some of the files
-      # that run code before the push (the build scripts, gradle.properties and the wrapper, scripts/, the hooks in
-      # .claude/ and .git/), the Read tool out of .git/ (the App token is in the origin URL of .git/config) and a second
-      # CLI out; test code under src/test runs anyway, so the enforce job checks the result on a fresh runner.
+      # argument (a target directory, `-t`). The redactor, which opens and writes its output path itself (no Edit rule
+      # sees that write), is admitted the same way from the fixtures onto the fixtures only, with the same two deny
+      # rules. The `Edit(path)` deny rules keep the CLI's Edit, Write and NotebookEdit tools, and an output redirection's
+      # target, out of some of the files that run code before the push (the build scripts, gradle.properties and the
+      # wrapper, scripts/, the hooks in .claude/ and .git/): the CLI (2.1.308) matches every file-writing tool against
+      # `Edit(path)` rules and never consults a `Write(path)` rule, so none is listed. `Read(.git/**)` keeps the Read tool
+      # out of .git/ (the App token is in the origin URL of .git/config) and `claude:*` a second CLI out. Whether a
+      # redirection after a kept prefix rule (`grep … > file`, `git log … > file`) reaches its target past them rests
+      # on the CLI's parsing of the command, and test code under src/test runs anyway, so the enforce job checks the
+      # result on a fresh runner: that file list, the App token's missing workflows permission and the ruleset on main
+      # are the guard either way.
       # `attribution` empty keeps the CLI's own co-author trailer and "Generated with" line out of the commit and the PR
       # body. The action also loads the project's .claude/settings.json, whose allow rules are merged in; the deny rules
       # below take back the Gradle tasks and ktlint it allows that the skill never prescribes, every flag after
@@ -342,19 +368,20 @@ jobs:
           claude_args: |
             --model claude-opus-5-5
             --max-turns 120
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp build/drift/recording/* src/test/resources/fixtures/*),Bash(grep:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp build/drift/recording/* src/test/resources/fixtures/*),Bash(grep:*)"
           settings: |
-            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(gradle.properties)", "Write(gradle.properties)", "Edit(gradle/**)", "Write(gradle/**)", "Read(.git/**)", "Edit(.git/**)", "Write(.git/**)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, "attribution": {"commit": "", "pr": ""}}
+            {"permissions": {"deny": ["Edit(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)", "Edit(gradle.properties)", "Edit(gradle/**)", "Read(.git/**)", "Edit(.git/**)", "Edit(scripts/**)", "Edit(.claude/**)", "Edit(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, "attribution": {"commit": "", "pr": ""}}
   # The reminder on the pull request the gate found waiting, once per further red. Commenting on a pull request needs
   # pull-requests: write even through the issues endpoint (issues: write alone gets a 403), and the fix job's token must
   # hold no such write (the agent's test code can read it), so the comment is posted here, in a job that runs no agent
-  # code and has no checkout. The fix job ends green when the gate skipped, so no always() is needed; GH_REPO names the
-  # repository because no checkout is there to infer it from.
+  # code and has no checkout. The fix job ends green when the gate skipped, so no always() is needed; a gate halted by
+  # a drift-halted issue names no waiting pull request, so nothing is reminded. GH_REPO names the repository because no
+  # checkout is there to infer it from.
   remind:
     needs: fix
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: needs.fix.outputs.proceed == 'false'
+    if: needs.fix.outputs.proceed == 'false' && needs.fix.outputs.waiting != ''
     permissions:
       pull-requests: write
       issues: write
@@ -386,8 +413,10 @@ jobs:
   # commented on, left open and the run is red. It is never closed: the gate keys on an open contract-drift PR, so a
   # close (with its branch deleted) would re-arm the loop and the next nightly would produce the same fix again.
   # Once the gate proceeded, no PR is a red run: a pushed branch without one (the agent was stopped by the timeout or the
-  # turn limit) is reported on the standing issue; no branch at all is a denied command, a redactor stop, an action that
-  # skipped the agent, or an agent that gave up. The branch is read through the API with the workflow token (contents:
+  # turn limit) is reported on the standing issue, and the next nightly refuses at the stale drift/ branch; no branch at
+  # all is a denied command, a redactor stop, an action that skipped the agent, or an agent that gave up, reported on the
+  # same issue, which gets the label drift-halted: the gate skips the agent while it is open with that label, so such a
+  # night costs one run, not one per night. The branch is read through the API with the workflow token (contents:
   # read; the App token was revoked in the fix job's post step): gh prints the error body on stdout and exits 1 on any
   # HTTP error, so the read is decided by its exit status, only a 404 in the body means "no branch", and any other
   # failure (a 5xx, a rate limit) is red without a verdict rather than "pushed no branch". GH_REPO names the repository
@@ -432,7 +461,16 @@ jobs:
             if [ "$status" != "404" ]; then
               echo "::error title=Drift fix::Reading the branch $BRANCH failed (HTTP status '${status:-none}'), so whether the agent pushed it is not known; the run is red without a verdict."; exit 1
             fi
-            echo "::error title=Drift fix::The classification was $KIND but the agent pushed no branch and opened no PR (its step ended '${AGENT:-skipped}'): a denied command, a redactor stop (see the standing issue), the action skipped after a workflow-validation error, or the agent gave up; read the Fix the drift step's log."; exit 1
+            title="CLI contract: the CLI did not answer"
+            body="The drift fix for $RUN_URL (classification $KIND) pushed no branch and opened no pull request; its agent step ended '${AGENT:-skipped}': a denied command, a redactor stop, the action skipped after a workflow-validation error, or the agent gave up. Read the Fix the drift step's log. The loop is halted: the fixer does not start while this issue is open with the label drift-halted; remove the label, or close the issue, to re-arm it."
+            issue="$(gh issue list --label contract-drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+            if [ -z "$issue" ]; then
+              gh issue create --title "$title" --label contract-drift --label drift-halted --body "$body"
+            else
+              gh issue comment "$issue" --body "$body"
+              gh api "repos/$GITHUB_REPOSITORY/issues/$issue/labels" -f "labels[]=drift-halted" >/dev/null
+            fi
+            echo "::error title=Drift fix::The classification was $KIND but the agent pushed no branch and opened no PR (its step ended '${AGENT:-skipped}'): a denied command, a redactor stop (see the standing issue), the action skipped after a workflow-validation error, or the agent gave up; read the Fix the drift step's log. Reported on the standing issue, labelled drift-halted: the loop skips the agent until the label is removed."; exit 1
           fi
           red=0
           for entry in "${prs[@]}"; do

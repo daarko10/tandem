@@ -42,12 +42,21 @@ if not BASH and os.environ.get("GITHUB_ACTIONS") and os.environ.get("RUNNER_OS")
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 DRIFT = os.path.join(ROOT, ".github/workflows/drift-fix.yml")
 SKILL = os.path.join(ROOT, ".claude/skills/fix-contract-drift/SKILL.md")
-DENY = {"Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)",
-        "Write(settings.gradle.kts)", "Edit(gradle.properties)", "Write(gradle.properties)", "Edit(gradle/**)", "Write(gradle/**)",
-        "Read(.git/**)", "Edit(.git/**)", "Write(.git/**)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)",
-        "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)",
-        "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)",
-        "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"}
+# No Write(path) rule: the CLI (2.1.308) matches the Write, Edit and NotebookEdit tools against Edit(path) rules and never
+# consults a Write(path) one, so each Edit rule below covers all three.
+DENY = {"Edit(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)", "Edit(gradle.properties)", "Edit(gradle/**)",
+        "Read(.git/**)", "Edit(.git/**)", "Edit(scripts/**)", "Edit(.claude/**)", "Edit(CLAUDE.md)", "Bash(claude:*)",
+        "Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)",
+        "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)",
+        "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)",
+        "Bash(ktlint:*)"}
+# The invocations the skill prescribes, exactly: a rule added to both the skill and the action fails here.
+ALLOWED = {"Read", "Grep", "Glob", "Edit", "Write", "Bash(./gradlew check)", "Bash(./gradlew test:*)", "Bash(python3 -I scripts/classify_drift.py:*)",
+           "Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*)",
+           "Bash(python3 -m unittest discover -s scripts -t scripts)", "Bash(gh pr create:*)", "Bash(gh issue list:*)", "Bash(gh issue create:*)",
+           "Bash(gh issue comment:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)",
+           "Bash(git switch:*)", "Bash(git clean:*)", "Bash(git push -u origin HEAD)", "Bash(cp build/drift/recording/* src/test/resources/fixtures/*)",
+           "Bash(grep:*)"}
 ALLOWLIST = "'^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\\.md$)'"
 GATE_IF = "steps.classify.outputs.kind == 'decoder' || steps.classify.outputs.kind == 'reader'"
 REPORT_IF = "steps.precheck.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'unknown'"
@@ -194,6 +203,7 @@ class DriftFixWorkflowTest(unittest.TestCase):
         labels = step(wf, "fix", "Ensure the labels exist")
         self.assertIn("gh label create contract-drift --force", labels["run"])        # the gate, the report and the PR key on it
         self.assertIn("gh label create rehearsal --force", labels["run"])             # the skill's `gh pr create --label rehearsal` fails after the spend without it
+        self.assertIn("gh label create drift-halted --force", labels["run"])          # the enforce job's halt and the gate key on it
         self.assertEqual("${{ github.token }}", labels["env"]["GH_TOKEN"])
         self.assertLess(names.index("Ensure the labels exist"), names.index("Fix the drift"))
         self.assertEqual(["Enforce the edit allowlist"], [s.get("name") for s in steps(wf, "enforce")])
@@ -263,6 +273,9 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual("steps.gate.outputs.proceed == 'true'", protect["if"])
         self.assertIn("set -euo pipefail", protect["run"])                            # a failed read fails the step, and the agent never starts
         self.assertIn('repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"', protect["run"])
+        self.assertIn('if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then', protect["run"])   # a private repository of a personal account enforces a ruleset only with Pro, which no read here can tell
+        self.assertIn('if [ "$private" != "false" ]; then', protect["run"])          # fail closed: only an answer of false passes
+        self.assertLess(protect["run"].index("--jq .private"), protect["run"].index("rules/branches/main"))
         self.assertIn('select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")', protect["run"])   # an App can approve a PR it did not author: a code owner's review of the last push is what it cannot give
         self.assertNotIn(".protected", protect["run"])                                # classic protected: true accepts a direct push when no option is ticked
         self.assertIn('if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then', protect["run"])   # fail closed: only one or more ruleset ids pass
@@ -324,7 +337,7 @@ class DriftFixWorkflowTest(unittest.TestCase):
         wf = load(DRIFT)
         remind = wf["jobs"]["remind"]
         self.assertEqual("fix", remind["needs"])
-        self.assertEqual("needs.fix.outputs.proceed == 'false'", remind["if"])        # the fix job ends green when the gate skipped: no always()
+        self.assertEqual("needs.fix.outputs.proceed == 'false' && needs.fix.outputs.waiting != ''", remind["if"])   # the fix job ends green when the gate skipped: no always(); a halted gate names no PR
         self.assertEqual({"pull-requests": "write", "issues": "write"}, remind["permissions"])   # a comment on a PR needs pull-requests: write; issues: write alone is a 403
         self.assertEqual(5, remind["timeout-minutes"])
         self.assertEqual([], [s for s in remind["steps"] if "uses" in s])             # no checkout, no agent code
@@ -361,13 +374,17 @@ class DriftFixWorkflowTest(unittest.TestCase):
 
     def test_the_only_push_is_exact_and_the_broad_rules_are_gone(self):
         allowed = tools(step(load(DRIFT), "fix", "Fix the drift")["with"]["claude_args"])
+        self.assertEqual(ALLOWED, allowed)                                              # the spec's 24 entries, exactly; the checks below say why
+        self.assertEqual(24, len(ALLOWED))
         self.assertIn("Bash(git push -u origin HEAD)", allowed)                        # a :* rule matches prefix + space; drift/:* never matched the push
         self.assertEqual([], [t for t in allowed if t.startswith("Bash(git push") and t.endswith(":*)")])
         for broad in ("Bash(python3:*)", "Bash(./gradlew:*)", "Bash(gh pr:*)", "Bash(gh issue:*)", "Bash(git:*)",
-                      "Bash(cp:*)", "Bash(cat:*)", "Bash(ls:*)", "Bash(date:*)"):      # `cat <<EOF > .github/…` and `cp x scripts/…` wrote past the Edit/Write deny rules
+                      "Bash(cp:*)", "Bash(cat:*)", "Bash(ls:*)", "Bash(date:*)",       # `cat <<EOF > .github/…` and `cp x scripts/…` wrote past the Edit deny rules
+                      "Bash(python3 -I scripts/redact_fixture.py:*)"):               # the redactor writes its own output path, which no Edit rule sees
             self.assertNotIn(broad, allowed)
         for exact in ("Bash(./gradlew check)", "Bash(python3 -m unittest discover -s scripts -t scripts)",
-                      "Bash(cp build/drift/recording/* src/test/resources/fixtures/*)"):   # a `*` not in a trailing `:*` is a pattern: the recording into the fixtures only
+                      "Bash(cp build/drift/recording/* src/test/resources/fixtures/*)",   # a `*` not in a trailing `:*` is a pattern: the recording into the fixtures only
+                      "Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*)"):   # the fixtures onto the fixtures only
             self.assertIn(exact, allowed)
 
     def test_the_agent_cannot_edit_the_build_or_start_a_second_cli(self):
@@ -376,6 +393,10 @@ class DriftFixWorkflowTest(unittest.TestCase):
         deny = json.loads(agent["with"]["settings"])["permissions"]["deny"]
         self.assertEqual(DENY, set(deny))                                             # the spec's list, exactly: nothing dropped, nothing unexplained
         self.assertEqual(len(DENY), len(deny))
+        self.assertEqual(24, len(deny))
+        self.assertEqual([], [d for d in deny if d.startswith("Write(")])              # never consulted by the CLI: Edit(path) covers Write
+        for rule in ("Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)"):
+            self.assertIn(rule, deny)                                                 # each path pattern on the allowlist loses `..` and a third argument
         self.assertEqual({"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, json.loads(agent["with"]["settings"])["env"])   # ./gradlew check outlives the Bash tool's two-minute default
         self.assertEqual({"commit": "", "pr": ""}, json.loads(agent["with"]["settings"])["attribution"])   # the CLI's own co-author trailer and "Generated with" line stay out of the commit and the PR body (2.1.308: an empty string hides attribution; includeCoAuthoredBy is deprecated)
 
@@ -388,6 +409,11 @@ PR_LIST = "pr list --state open --limit 100 --json number,headRefName,labels,isC
 BRANCH_READ = f"api repos/daarko10/tandem/branches/{BRANCH} --jq .name"
 ISSUE_LIST = "issue list --label contract-drift --state open --search"
 ISSUE_CREATE = "issue create --title CLI contract: the CLI did not answer --label contract-drift --body"
+ISSUE_CREATE_HALTED = "issue create --title CLI contract: the CLI did not answer --label contract-drift --label drift-halted --body"
+HALT_LABEL = "api repos/daarko10/tandem/issues/3/labels -f labels[]=drift-halted"
+HALTED = "issue list --label drift-halted --state open --json number --jq"
+WAITING = "pr list --label contract-drift --state open --json number --jq"
+REPO = "api repos/daarko10/tandem --jq .private"
 CLEAN_FILES = "src/main/kotlin/dev/daarkolabs/tandem/protocol/Ndjson.kt\nsrc/test/resources/fixtures/drift-2026-10-22.ndjson\ndocs/protocol.md\n"
 ENFORCE_ENV = {"GH_TOKEN": "stub", "GH_REPO": "daarko10/tandem", "BRANCH": BRANCH, "RUN_URL": RUN_URL, "KIND": "decoder", "AGENT": "success"}
 RUN_VIEW = {"html_url": RUN_URL, "created_at": "2026-10-21T03:17:09Z", "name": "CLI contract", "conclusion": "failure", "head_branch": "main",
@@ -419,12 +445,19 @@ class StepOutcomeTest(unittest.TestCase):
     def enforce(self, prs: list[dict], gh: list[tuple[str, str, int]]) -> tuple[int, str, str, str]:
         return run_step(load(DRIFT), "enforce", "Enforce the edit allowlist", ENFORCE_ENV, [(PR_LIST, json.dumps(prs), 0)] + gh)
 
-    def test_enforce_with_no_pr_and_no_branch_is_red_and_says_so(self):
-        rc, out, _, calls = self.enforce([], [(BRANCH_READ, NOT_FOUND, 1)])
+    def test_enforce_with_no_pr_and_no_branch_is_red_reports_and_halts_the_loop(self):
+        rc, out, _, calls = self.enforce([], [(BRANCH_READ, NOT_FOUND, 1), (ISSUE_LIST, "", 0), (ISSUE_CREATE_HALTED, "https://github.com/daarko10/tandem/issues/9\n", 0)])
         self.assertEqual(1, rc, out)
         self.assertIn("The classification was decoder but the agent pushed no branch and opened no PR (its step ended 'success')", out)
         self.assertNotIn("but opened no PR; reported", out)                           # the old [ -n "$(gh … || true)" ] read gh's error body as a branch name
-        self.assertNotIn("issue", calls)
+        self.assertIn(f"{ISSUE_CREATE_HALTED} The drift fix for {RUN_URL} (classification decoder) pushed no branch and opened no pull request; its agent step ended 'success'", calls)   # no branch, so no stale-branch refusal: the label halts the next nightly's gate
+
+    def test_enforce_with_no_pr_and_no_branch_labels_the_open_standing_issue(self):
+        rc, out, _, calls = self.enforce([], [(BRANCH_READ, NOT_FOUND, 1), (ISSUE_LIST, "3\n", 0), ("issue comment 3 --body", "", 0), (HALT_LABEL, "{}", 0)])
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"issue comment 3 --body The drift fix for {RUN_URL} (classification decoder) pushed no branch", calls)
+        self.assertIn(HALT_LABEL + "\n", calls)
+        self.assertNotIn("issue create", calls)
 
     def test_enforce_with_a_branch_and_no_pr_reports_the_stopped_agent(self):
         rc, out, _, calls = self.enforce([], [(BRANCH_READ, BRANCH + "\n", 0), (ISSUE_LIST, "", 0), (ISSUE_CREATE, "https://github.com/daarko10/tandem/issues/9\n", 0)])
@@ -432,6 +465,7 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertIn(f"The agent pushed {BRANCH} but opened no PR; reported on the standing issue.", out)
         self.assertIn(f"{ISSUE_CREATE} The drift fix for {RUN_URL} pushed the branch {BRANCH} but opened no pull request", calls)
         self.assertIn("its step ended 'success'", calls)
+        self.assertNotIn("drift-halted", calls)                                      # the stale-branch refusal halts this case; deleting the branch re-arms it
 
     def test_enforce_comments_on_the_standing_issue_when_it_is_open(self):
         rc, out, _, calls = self.enforce([], [(BRANCH_READ, BRANCH + "\n", 0), (ISSUE_LIST, "3\n", 0), ("issue comment 3 --body", "", 0)])
@@ -477,30 +511,38 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertNotIn("pr comment", calls)
 
     def test_enforce_never_selects_or_labels_a_fork_s_pr_named_after_the_run(self):
-        rc, out, _, calls = self.enforce([pr(5, fork=True)], [(BRANCH_READ, NOT_FOUND, 1)])
+        rc, out, _, calls = self.enforce([pr(5, fork=True)], [(BRANCH_READ, NOT_FOUND, 1), (ISSUE_LIST, "", 0), (ISSUE_CREATE_HALTED, "", 0)])
         self.assertEqual(1, rc, out)
         self.assertIn("pushed no branch and opened no PR", out)                        # the fork's PR is not the loop's
         self.assertNotIn("issues/5/labels", calls)
         self.assertNotIn("pulls/5/files", calls)
 
+    def gate(self, halted: tuple[str, int], waiting: tuple[str, int]) -> tuple[int, str, str, str]:
+        return run_step(load(DRIFT), "fix", "Skip when a fix is already waiting", {"GH_TOKEN": "stub"}, [(HALTED, *halted), (WAITING, *waiting)])
+
     def test_the_gate_skips_and_names_the_waiting_pr_without_commenting(self):
-        rc, out, output, calls = run_step(load(DRIFT), "fix", "Skip when a fix is already waiting", {"GH_TOKEN": "stub"},
-                                          [("pr list --label contract-drift --state open --json number --jq", "12\n", 0)])
+        rc, out, output, calls = self.gate(("", 0), ("12\n", 0))
         self.assertEqual(0, rc, out)
         self.assertEqual("proceed=false\nwaiting=12\n", output)
-        self.assertEqual(1, len(calls.splitlines()))                                  # the comment is the remind job's: this token cannot post it
+        self.assertEqual([HALTED, WAITING], [c.split(" .[0]", 1)[0] for c in calls.splitlines()])   # the comment is the remind job's: this token cannot post it
 
     def test_the_gate_proceeds_when_no_fix_is_waiting(self):
-        rc, out, output, _ = run_step(load(DRIFT), "fix", "Skip when a fix is already waiting", {"GH_TOKEN": "stub"},
-                                      [("pr list --label contract-drift --state open --json number --jq", "", 0)])
+        rc, out, output, _ = self.gate(("", 0), ("", 0))
         self.assertEqual(0, rc, out)
         self.assertEqual("proceed=true\n", output)
 
     def test_the_gate_fails_closed_when_the_list_fails(self):
-        rc, out, output, _ = run_step(load(DRIFT), "fix", "Skip when a fix is already waiting", {"GH_TOKEN": "stub"},
-                                      [("pr list --label contract-drift --state open --json number --jq", SERVER_ERROR, 1)])
-        self.assertEqual(1, rc, out)
-        self.assertEqual("", output)
+        for halted, waiting in ((("", 0), (SERVER_ERROR, 1)), ((SERVER_ERROR, 1), ("", 0)), (("x\n", 0), ("", 0))):
+            rc, out, output, _ = self.gate(halted, waiting)
+            self.assertEqual(1, rc, out)
+            self.assertEqual("", output)                                              # no proceed=: the agent never starts
+
+    def test_the_gate_is_halted_by_an_open_drift_halted_issue(self):
+        rc, out, output, calls = self.gate(("4\n", 0), ("", 0))
+        self.assertEqual(0, rc, out)
+        self.assertEqual("proceed=false\n", output)                                    # no waiting=: the remind job does not run
+        self.assertIn("the loop is halted by issue #4; remove the drift-halted label to re-arm", out)
+        self.assertEqual(1, len(calls.splitlines()))                                  # the PR list is not read
 
     def test_the_reminder_comments_on_the_waiting_pr(self):
         env = {"GH_TOKEN": "stub", "GH_REPO": "daarko10/tandem", "WAITING": "12", "RUN_URL": RUN_URL, "DATE": "2026-10-22"}
@@ -547,19 +589,30 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertEqual("", calls)
 
     def protect(self, rules: str, owners: str | tuple[str, int], branch: tuple[str, int], ruleset: tuple[str, int] = (ROLE_ONLY, 0),
-                branches: tuple[str, int] = ("main\nci/drift-loop\n", 0), heads: tuple[str, int] = ("", 0)) -> tuple[int, str, str, str]:
+                branches: tuple[str, int] = ("main\nci/drift-loop\n", 0), heads: tuple[str, int] = ("", 0),
+                private: tuple[str, int] = ("false\n", 0)) -> tuple[int, str, str, str]:
         owners = owners if isinstance(owners, tuple) else (owners, 0)
         return run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
-                        [(RULES, rules, 0), (RULESET, ruleset[0], ruleset[1]), (CODEOWNERS, owners[0], owners[1]), (BRANCH_READ, branch[0], branch[1]),
-                         (BRANCHES, branches[0], branches[1]), (HEADS, heads[0], heads[1])])
+                        [(REPO, private[0], private[1]), (RULES, rules, 0), (RULESET, ruleset[0], ruleset[1]), (CODEOWNERS, owners[0], owners[1]),
+                         (BRANCH_READ, branch[0], branch[1]), (BRANCHES, branches[0], branches[1]), (HEADS, heads[0], heads[1])])
 
     def test_protect_passes_a_ruleset_an_owner_and_a_missing_branch(self):
         rc, out, _, calls = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1))
         self.assertEqual(0, rc, out)
         self.assertIn("main requires a pull request, an approving review from a code owner and approval of the last push (ruleset 17)", out)
         self.assertIn("ruleset 17: no App on its bypass list", out)                   # the owner's admin role is how the only code owner merges
-        self.assertEqual([RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0], BRANCHES.split(" --jq", 1)[0], HEADS.split(" --jq", 1)[0]],
-                         [c.split(" --jq", 1)[0] for c in calls.splitlines()])        # the ruleset first; the stale-branch listing last
+        self.assertEqual([REPO.split(" --jq", 1)[0], RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0], BRANCHES.split(" --jq", 1)[0], HEADS.split(" --jq", 1)[0]],
+                         [c.split(" --jq", 1)[0] for c in calls.splitlines()])        # the visibility first, then the ruleset; the stale-branch listing last
+
+    def test_protect_refuses_a_private_repository_or_a_failed_read(self):
+        for private, message in ((("true\n", 0), "The repository is private (answer 'true')"),   # a ruleset there is enforced only with Pro, which no read here tells
+                                 ((SERVER_ERROR, 1), "Reading the repository failed (HTTP status '502')"),   # red without a verdict, never "public"
+                                 (("", 1), "Reading the repository failed (HTTP status 'none')"),
+                                 (("null\n", 0), "The repository is private (answer 'null')")):   # only false passes
+            rc, out, _, calls = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), private=private)
+            self.assertEqual(1, rc, (message, out))
+            self.assertIn(message, out)
+            self.assertEqual(REPO + "\n", calls)                                       # refused before any other read
 
     def test_protect_refuses_a_drift_branch_without_an_open_pull_request(self):
         rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), branches=("main\ndrift/2026-10-20-5\ndrift/2026-10-19-4\nfeature/drift\n", 0),
@@ -567,6 +620,11 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertEqual(1, rc, out)                                                  # a stopped agent's push or a closed fix's branch: without this, the same red starts a run every night
         self.assertIn("The drift branches drift/2026-10-20-5 exist without an open pull request", out)   # the one whose PR is open is not named, nor a branch outside drift/
         self.assertIn("delete them to re-arm the loop", out)
+
+    def test_protect_refuses_a_drift_branch_when_no_pull_request_is_open_at_all(self):
+        rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), branches=("main\ndrift/2026-10-20-5\n", 0), heads=("", 0))
+        self.assertEqual(1, rc, out)                                                  # the commonest failed night: the pattern file holds one empty line, which only -x keeps from matching every branch
+        self.assertIn("The drift branches drift/2026-10-20-5 exist without an open pull request", out)
 
     def test_protect_passes_a_drift_branch_whose_pull_request_is_open(self):
         rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), branches=("main\ndrift/2026-10-19-4\n", 0), heads=("drift/2026-10-19-4\n", 0))
@@ -587,7 +645,7 @@ class StepOutcomeTest(unittest.TestCase):
 
     def test_protect_reads_every_qualifying_ruleset(self):
         rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
-                                     [(RULES, "17 23\n", 0), (RULESET, ROLE_ONLY, 0), ("api repos/daarko10/tandem/rulesets/23", APP_BYPASS, 0)])
+                                     [(REPO, "false\n", 0), (RULES, "17 23\n", 0), (RULESET, ROLE_ONLY, 0), ("api repos/daarko10/tandem/rulesets/23", APP_BYPASS, 0)])
         self.assertEqual(1, rc, out)
         self.assertIn("The ruleset 23 on main lets an App bypass it", out)
         self.assertNotIn("CODEOWNERS", calls)
