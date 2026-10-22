@@ -76,6 +76,13 @@ class ClassifyDriftTest(unittest.TestCase):
         self.assertEqual("cli-did-not-answer", out["kind"])
         self.assertEqual("The CLI did not answer (apiKeySource='none'): [\"boom\"]", out["detail"])
 
+    def test_no_assistant_line_with_an_empty_result_is_the_cli_not_answering(self):
+        # Only a non-empty result text makes a missing assistant line decoder drift.
+        out = classify_drift.classify(self.recording([INIT, {"type": "result", "is_error": False, "result": ""}]),
+                                      self.results({}))
+        self.assertEqual(("cli-did-not-answer", "The CLI did not answer (apiKeySource='none'): "),
+                         (out["kind"], out["detail"]))
+
     def test_a_result_with_text_but_no_assistant_line_is_decoder_drift(self):
         # The reply came under a type the decoder does not know.
         out = classify_drift.classify(self.recording([INIT, OK]), self.results({}))
