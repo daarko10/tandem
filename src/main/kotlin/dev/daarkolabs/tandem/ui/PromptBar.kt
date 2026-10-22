@@ -184,7 +184,7 @@ internal fun PromptBar(
     }
     val palette = remember(ui, presenter) { derivedStateOf { paletteOf(inputFocused.value) } }
     // Esc keeps the palette closed until the draft changes.
-    LaunchedEffect(ui) { snapshotFlow { committedText(ui) }.collect { ui.paletteDismissedFor.value = null } }
+    LaunchedEffect(ui) { snapshotFlow { committedText(ui) }.collect(ui::draftChanged) }
     // A pick's outcome (MCP spec 4.3): the composer only executes it.
     val execute = { outcome: PaletteOutcome ->
         when (outcome) {

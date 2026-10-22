@@ -187,6 +187,22 @@ class ChatUiStateTest {
         assertNotNull(palette("/"))
     }
 
+    // spec: Esc keeps the palette closed until the draft changes
+    @Test
+    fun `a dismissal ends on another draft and survives a late notice of its own`() {
+        val ui = ChatUiState()
+        ui.paletteDismissedFor.value = "/m"
+
+        // The notice of the keystroke Esc was queued behind arrives after it: the same draft, the palette stays closed.
+        ui.draftChanged("/m")
+        assertEquals("/m", ui.paletteDismissedFor.value)
+        // A real change ends the dismissal, and going back to the dismissed draft does not restore it.
+        ui.draftChanged("/mc")
+        assertNull(ui.paletteDismissedFor.value)
+        ui.draftChanged("/m")
+        assertNull(ui.paletteDismissedFor.value)
+    }
+
     @Test
     fun `the Slash commands row puts a slash in an empty draft only`() {
         val ui = ChatUiState()

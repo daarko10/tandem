@@ -79,6 +79,14 @@ internal class ChatUiState {
     /** The committed draft Esc closed the palette on: it stays closed until the draft changes (MCP spec 3.4, 4.4). */
     val paletteDismissedFor: MutableState<String?> = mutableStateOf(null)
 
+    /**
+     * The committed draft is now [draft]: a dismissal made on another draft ends, so the palette shows again. One made on this very
+     * draft stays, so a late notice of the keystroke that an Esc already queued behind does not reopen it.
+     */
+    fun draftChanged(draft: String) {
+        if (draft != paletteDismissedFor.value) paletteDismissedFor.value = null
+    }
+
     /** A footer menu that `/model`, `/permissions` or `/mode` asked to open; the control opens it and clears the request. */
     val menuRequest: MutableState<FooterMenu?> = mutableStateOf(null)
 
