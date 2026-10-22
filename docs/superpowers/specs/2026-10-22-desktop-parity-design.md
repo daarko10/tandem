@@ -1,0 +1,403 @@
+# Desktop parity: context breakdown, the `+` menu and the /usage card (Phase 2d)
+
+Status: draft for review, 2026-10-22. Lands on `feat/desktop-parity`, cut from `feat/mcp-controls` at `522c3e2` (MCP: `2026-10-21-mcp-controls-design.md`, its panel 3.2, slash palette 3.4, local-command notices 3.5 and request path 4.2). This spec touches the polish round's composer and footer (`2026-10-21-chat-polish-design.md`, polish: 2.3 footer controls and the context ring, 2.7 attachments and the `+` menu) through four hooks only: the ring's popover (`FooterControls.RingControl`), the `+` menu (`PromptBar.AddButton`), the local-command notice row (`NoticeItem`) and `SessionConfig.argv`.
+
+Time matters here: do not spend time that can be avoided, and the earlier a correct result is obtained, the better.
+
+Inputs: the owner's choice of three desktop-app features for this round, in their words: "Context breakdown", the "+" menu, and "Just the /usage not the entire side panel it will be too cramped for a plugin side chat"; the owner's reference frames of the desktop app (kept out of the repository; they come from a work machine, so this spec describes the UI generically and copies no name, path, number or cost from them); the probe report `docs/superpowers/research/2026-10-22-desktop-parity-probes.md` (probes; sections 2 and 3) and its fixtures `src/test/resources/fixtures/parity-context.ndjson`, `parity-usage.ndjson`, `parity-add-dir.ndjson` with their `transcripts/*.jsonl` twins; the MCP spec (MCP); the polish spec (polish); the code under `src/main/kotlin/dev/daarkolabs/tandem/` (`protocol/CliMessage.kt`, `Ndjson.kt`, `HostMessages.kt`, `Mcp.kt`; `session/ClaudeSession.kt` (`request`, `mcpRequest`, `SessionConfig.argv`), `SessionHandle.kt` (`stop`, `stopIfIdle`), `SessionManager.kt` (`send`, `refreshMcp`), `Reducer.kt` (`localCommandNotice`, `contextAfter`), `ChatState.kt`; `chat/ComposerModel.kt` (`ContextFormat`), `Text.kt` (`formatTokens`, `formatElapsed`), `ChatRow.kt` (`NoticeRow`); `ui/FooterControls.kt` (`ContextRing`, `RingControl`, `FooterControl`, `FooterMenuHandle`, `pageTurn`, `focusLeft`), `PromptBar.kt` (`AddButton`, `PromptBox`), `ComposerImages.kt`, `rows/NoticeItem.kt`, `McpPanelController.kt`) and `src/test/resources/fake-claude.py`. Every wire claim below is **recorded** (`fixture:line`) unless marked **docs only** or **unrecorded**.
+
+---
+
+## 1. Goal
+
+From the side chat, as the desktop app does but sized for a plugin's tool window: click the context ring to see what fills the context window, category by category, with the MCP tools, memory files, skills and agents behind the numbers; type `/usage` (or `/cost`) and get a card with this session's cost, times and per-model tokens and what has been using the plan's limits on this machine; open `+` for files or photos, a folder, the slash commands, the connectors and the session's plugins with their skills. Every number comes from the CLI's own output: a control response (`get_context_usage`, `get_usage`), a local command's line, `system/init` or the `initialize` answer. Tandem never reads credentials, never calls Anthropic's API and never computes an account limit (hard rule 3); a part the CLI cannot provide over stream-json is left out or deferred. Nothing runs on the EDT: every request is written and answered in the session's scope, payloads decode on `Dispatchers.Default`, file checks run on `Dispatchers.IO` (hard rule 1). Every failure shows (hard rule 5); every protocol change has a fixture test and `Unknown(raw)` never throws (hard rule 6); no string says "Claude Code" (hard rule 8).
+
+## 2. Simplest working version, and what is deferred
+
+### 2.1 This round
+
+1. **Context popover.** The existing ring's popover becomes the breakdown: header, segmented bar, one row per category, collapsible groups (MCP tools, MCP server instructions, memory files, skills, custom agents), `See detailed breakdown`. One `get_context_usage` on open, again after each `result` while open, never while closed (3.1).
+2. **/usage card.** `/usage` and `/cost` still go to the CLI as typed; the local-command notice it answers with becomes a card filled from `get_usage` (session block at once, the local history scan after), with the CLI's own text one click away. No plan-limit bars (3.2).
+3. **`+` menu.** `Add files or photos` (unchanged), `Add folder` (new: the IDE's folder chooser, the CLI's `--add-dir` on the session's next spawn, the folder shown as a pill in the composer), `Slash commands` (unchanged), `Connectors` (opens the MCP panel), `Plugins` (a page listing the session's plugins, each with a page of its skills and commands; a pick inserts the command) (3.3, 3.4).
+
+### 2.2 Deferred (with the reason)
+
+- **Plan-limit bars** (five-hour and weekly utilisation, `get_usage.rate_limits`, the assistant line's `usage_report`, `rate_limit_event.unifiedWindows`): not in the owner's frames of this card, not observable on the recorded sign-in (`get_usage` says `rate_limits_available:false`, `parity-usage:16`), **docs only**. A later round needs a subscriber recording first (probes 4 item 3). Until then a subscriber's plan rows still reach the user, inside the CLI's own text under `CLI output` (3.2).
+- **The /usage model share and "Active" time**: the desktop's basis is unknown (probes open question 5) and the CLI reports wall time, not active time; the card shows the per-model cost and `Wall` time instead.
+- **The "All" filter of the limits section**: the CLI has `day` and `week` windows only (`parity-usage:17`); there is no all-time window to filter.
+- **The fix prompt** (`behaviors.<window>.fix.messages[0]`): not in the owner's frames; it embeds names from the user's logs (probes 2.2). Not decoded.
+- **`messageBreakdown`** (tool call, tool result and attachment tokens inside Messages) and a structured `/context` card from the assistant line's `context_usage` twin (`parity-context:24`, `contextUsage` on disk at `transcripts/parity-context.jsonl:30`): `See detailed breakdown` uses the CLI's own `/context` report instead (3.1). Neither is decoded.
+- **The ring before the first turn**: the ring is still drawn only once a `result` gave the window (polish 2.3, `Reducer.contextAfter`); a `get_context_usage` at spawn would let it show earlier (`parity-context:2` answers before any turn), but costs a request on every spawn whose price is unmeasured (probes open question 1).
+- **`register_repo_root`** for a folder inside the project (it loads that folder's `CLAUDE.md`, skills and plugins live, `parity-add-dir:10`): this round says such a folder is already usable (3.4) and sends nothing.
+- **Keeping added folders across IDE restarts** (`TandemWorkspaceState`): folders live as long as the session's handle (3.4).
+- **Manage plugins, Browse plugins**: no stream-json path (no `plugin` entry in the catalogue, `parity-add-dir:1`; `/plugin` is terminal-only, docs); `claude plugin ... --json` is a second process with its own output format and no fixture, and Browse makes the CLI reach the marketplaces (probes 2.4). The Plugins page says to use `/plugin` in a terminal. `reload_plugins` and `system/commands_changed` stay undecoded with them.
+- **The Connectors submenu** (one switch per connector, browse, manage): `Connectors` opens the MCP panel, which already lists every server with Enable, Disable, Reconnect and Authenticate (MCP 3.2); a second list in a menu would duplicate its states and errors.
+- **A shortcut for `Add files or photos`**: the desktop's Cmd+U is IntelliJ's Go to Super Method (Ctrl+U elsewhere); a Tandem keymap action is its own small change.
+- **`get_session_cost`, `get_memory_dialog`, `get_skills_dialog`, `add_directory`, `detail:"summary"`** (probes 3.2): not sent. The first repeats the `/usage` text, the dialogs are undeclared internals, `add_directory` is for hosted containers (`parity-add-dir:13`), and `summary` has other numbers and no Messages row (`parity-context:18`).
+
+## 3. What the user sees
+
+### 3.1 The context popover
+
+**Opening.** The footer's context ring (polish 2.3: drawn once the tokens and the window are known, `ContextFormat.fraction`) opens its popover as today: click, Enter or Space; Esc or a second click closes it; it closes when the AWT focus leaves the tool window's panel (`focusLeft`). Placement unchanged: `AboveAnchor(alignEnd = true)` 8 dp above the ring. Width: `min(360 dp, chat column − 32 dp)`, at least today's 280 dp. Height: at most 60 % of the tool window's height (`ChatScreen` measures it and passes it down), scrolling past that. Today's one line (`Context window` and the value) becomes the header of the breakdown.
+
+**Contents, top to bottom** (desktop frames: a header, a thin segmented bar, rows per category, expandable groups, a button):
+
+1. **Header**: `Context window` (dim) at the start, the value at the end. With a breakdown: `formatTokens(totalTokens) / ContextFormat.formatWindow(maxTokens) (<percentage>%)`, `percentage` being the CLI's own integer (`parity-context:17`: `totalTokens` 38032, `maxTokens` 1000000, `percentage` 4 → `38.0k / 1M (4%)`). Before the first answer: `ContextFormat.value` of the ring, so the header never waits. While a request runs with older rows shown, the header gains ` · Updating…`; with no rows yet, a line under it reads `Loading the breakdown…`.
+2. **Segmented bar**: 4 dp high, full width, rounded, over a track in the ring's `dim` colour at 30 % alpha. One segment per `used` category, in row order, `tokens / maxTokens` of the width (at least 1 px for a non-zero row). Colours are Tandem's own (`TandemColors.contextTone`, light and dark): `messages`, `mcp_tools`, `memory_files` and `system_prompt` each get one (the desktop colours only those four); every other used row, buffer and deferred rows are the neutral grey; free space is the track. The CLI's `color` values are TUI theme keys, not colours (`promptBorder`, `purple_FOR_SUBAGENTS_ONLY`, probes 2.1), and are ignored.
+3. **Category rows**, one per category with `tokens > 0` (empty rows are absent on the wire anyway, probes 2.1): an 8 dp swatch in the row's colour (hollow for free space), the CLI's `name` verbatim, the tokens (`formatTokens`), and the share of `maxTokens` to one decimal (`0.3%`), as the CLI's own `/context` table prints it (`parity-context:24`); a deferred row (`kind == "deferred"` or `isDeferred`) shows `—` for the share, since it counts toward neither the total nor the window (probes 2.1). Order, as the desktop's: `used` rows by tokens, largest first; then `buffer`; then `free`; then `deferred` by tokens; then any other `kind` in the CLI's order (shown, never hidden: hard rule 5). Rows are matched on `id` (colour) and `kind` (order), never on `name`; an unknown `id` is grey, an unknown or missing `kind` sorts last.
+4. **Groups**, collapsed when the popover opens, each a header row with `›` (collapsed) or `⌄` (expanded), the title, the group's total tokens and its item count; Enter, Space or a click toggles it and the popover stays open. A group is drawn only when it has items:
+   - `MCP tools` (`mcpTools`, `parity-context:17`): `<server> · <tool>`, the tool part being the name with `mcp__<serverName>__` removed (the raw name when it lacks that prefix), and its tokens; a tool with `isLoaded:false` is drawn in the dim tier. The total sums every listed tool, loaded or not (the desktop's group total includes the deferred tools). The desktop shows human tool titles; the answer has none (probes 3.3), so names stay plain.
+   - `MCP server instructions` (`mcpInstructions[{serverName, tokens}]`, **docs only**).
+   - `Memory files` (`memoryFiles`, `parity-context:17`): the path with the user's home shown as `~` and a path under the project root shown relative to it (string prefixes only, no file access), one line, ellipsised in the middle; the full path and its `type` in the tooltip; tokens.
+   - `Skills` (`skills.skillFrontmatter`, `parity-context:17`): the skill's name (plugin skills keep their `<plugin>:` prefix) and tokens.
+   - `Custom agents` (`agents[{agentType, source, tokens}]`, **docs only**).
+   Items keep the CLI's order. At most 100 items are drawn per group, then a dim `and N more` (the owner's frames show a group of several hundred tools).
+5. **`See detailed breakdown`**: closes the popover and sends `/context` to the session as a prompt (`SessionManager.send(id, "/context")`; the draft and the attachment strip are untouched). The CLI answers it locally, with no model turn (`parity-context:24`, result `num_turns:0`, `duration_api_ms:0`, `:25`), and the reply is the existing local-command notice (MCP 3.5) whose `runCommand` is `context`; that one notice kind renders its text with the chat's Markdown renderer (`TandemMarkdown`, as replies are) instead of plain text, so its tables read as tables. The transcript keeps the same markdown (`transcripts/parity-context.jsonl:30`), so a reload shows the same row. While a turn runs the item is disabled and reads `See detailed breakdown (after this turn)`, as the composer takes no prompt then (base 4.15). Why `/context`: what the desktop button opens is unknown (probes open question 5); `/context` is the CLI's own detailed report, it costs no model turn, and it stays in the session's history.
+
+**Errors** (under the header, `text.error`, each with `Retry`): `Could not load the breakdown: <error>`, the CLI's text verbatim (a CLI that lacks the request answers `Unsupported control request subtype: get_context_usage`, the shape recorded for another subtype at `parity-context:19`); `Could not load the breakdown: the CLI's answer had no categories` for a success without a `categories` array; `The CLI did not answer within 30 s.` The header keeps the ring's numbers, and rows from an earlier answer stay below the error, dimmed. A stopped session (no process; the ring stays drawn from `ChatState.context`): the last breakdown if one was fetched, dimmed, and `The session is not running. The breakdown updates with the next prompt.`; no request.
+
+**When the data is fetched, and why.**
+
+- **On open**: one `get_context_usage` without `detail` (the CLI's `full`, the estimate that has a Messages row, which the desktop shows; `summary` has none and other numbers, `parity-context:17` against `:18`).
+- **After each turn, while open**: a new request whenever `ChatState.turnsEnded` changes. The numbers move at turn ends: after a turn `totalTokens` equals that turn's `message_start` input and `result.first_request_input_tokens` (`parity-context:8`, `:15`, `:17`), and the ring already follows `message_start` meanwhile; values during a running turn are not recorded, and whether the CLI answers mid-turn is unrecorded (11 item 2). A request sent mid-turn that times out shows the timeout; the refresh at the turn's end retries by itself.
+- **Never while closed**: no polling. The SDK says `full` counts each category with the token-count API; its latency and whether it counts against the plan are unmeasured (probes open question 1).
+- **One in flight per session**: a refresh asked while one runs runs once after it.
+- **Kept**: the last answer is kept in `ChatState.contextBreakdown`, so a reopened popover draws it at once and shows ` · Updating…` while the new one runs. It is not kept across a reload (the requests leave no trace on disk, `transcripts/parity-context.jsonl:22-25`).
+- **Off the EDT**: the request runs in the session's scope, its payload decodes on `Default`, the controller builds the popover model on `Default`; the popover only collects a `StateFlow`.
+
+**Reuse of the ring.** `ContextRing`, `ContextFormat.value` and `ContextFormat.fraction` keep drawing the ring and its tooltip unchanged; `ContextFormat` gains `percentOf(tokens, max)` (the one-decimal share) and the header reuses `formatWindow`. The popover replaces the `passiveItem` in `RingControl`'s `if (open)` branch; the ring's open state, keys and focus handling stay as they are.
+
+### 3.2 The /usage card
+
+**Trigger.** `/usage` is a built-in with an empty hint, so the palette (or Enter on the typed text) sends it at once (MCP 3.4); nothing new is intercepted. The CLI answers it locally: a synthetic assistant line with the text, `local_command_run:{command:"usage"}` (`parity-usage:22`), then a `result` with `local_command:"usage"`, `num_turns:0` (`:23`). `/cost` resolves to the same command (`local_command_run.command:"usage"`, `:28`). Today that line is a local-command notice (MCP 3.5). New: when a **stream** line has `local_command_run.command == "usage"` (so `/cost` too), no `parent_tool_use_id` and a `uuid`, its notice carries a usage card, and `ClaudeSession` asks the CLI for the structured numbers at once: `get_usage` with `skip_behaviors:true` (the session block, answered without the scan, `:16`), then `get_usage` (with the scan of this machine's transcripts, `:17`). The card is drawn in place of the notice's plain text.
+
+**Why send-and-enrich and not intercept** (probes 3.4, options a and b): sending keeps the command in the CLI's transcript and history (`transcripts/parity-usage.jsonl:29-30`), a resumed session shows the CLI's text (the card needs live answers; on reload the row is the plain notice of today), and a CLI that lacks `get_usage` or answers an error still leaves the user its own text. Intercepting would lose all three.
+
+**Layout.** A bordered box in the chat column (the polish cards' frame, 6 dp radius, 12 dp inside). Sections are stacked and every line wraps; nothing sits side by side, so the card reads at the tool window's narrowest width.
+
+- **`This session`**: one wrapping line of label-value pairs: `Est. cost $0.15` (`session.total_cost_usd`, which equals the last `result.total_cost_usd`, `:14`; two decimals, `<$0.01` above zero and under half a cent; "Est." because the CLI's figure is its own estimate from a bundled price table, not billing data, docs), `API 4s` (`total_api_duration_ms`, `formatElapsed`), `Wall 9s` (`total_duration_ms`: the CLI reports wall time, `Total duration (wall)` in its own text, `:18`/`:22`; the desktop's "Active" has no source). Then `Prompt cache` followed by the rest of the CLI's own `Prompt cache (main):` line from the notice text, verbatim (`1 request · 0% of input tokens from cache · no misses · ...`, `:22`): the only place the CLI states a cache share (probes 2.2); the row is left out when the text has no such line. A number derived from `model_usage` waits for a recording with a non-zero cache read (probes 3.3).
+- **`Breakdown`**: one block per model in `session.model_usage`, the session's active model first, then the CLI's order (the helper model is in the CLI's own totals, `:16`, so it is listed): the model's label (the footer's label of the `ModelOption` that resolves to it, else the wire id) and its cost (`costUSD`, same format), then `Input`, `Output`, `Cache read`, `Cache write` (`inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`, `formatTokens`). The desktop's model picker becomes this stacked list: the session's models are few and a picker is one more control in a narrow card.
+- **`What's using your limits?`**: a two-button `SegmentedControl` `24h` | `7d` (`behaviors.day`, `behaviors.week`; `:17`), `24h` selected first; the choice is per card and not saved. Under it the caveat, Tandem's words from the docs: `Last 24 hours · <session_count> sessions · approximate, overlapping measures · this machine only` (`Last 7 days` for the other window; the session count left out when absent). Then one line per behaviour, by `pct`, largest first: `<pct>%` and a label from Tandem's table (`subagent_heavy` → `came from subagent-heavy sessions`, `long_context` → `came from sessions with a long context`, `large_tool_results` → `came from sessions with large tool results`, `max_effort` → `ran at max effort`); any other key (`cron`, `workflow`, recorded at `:17`, and the docs-only `cache_miss`, `high_parallel`, `always_on_context`) shows as its own words, underscores as spaces, in the editor style: shown, never hidden. The `behaviors[]` entries carry no label (probes 2.2), so the wording is Tandem's; the percentages overlap and are never summed. Then one share row per entry of `agents`, `skills`, `plugins` and `mcp_servers`, by `pct`, largest first: the name verbatim (it comes from the user's own logs), its kind in the dim tier (`Subagent`, `Skill`, `Plugin`, `MCP`), a 4 dp bar of `pct / 100` and `<pct>%`. Then `Tip`: the window's first recommendation, its `title` and its `detail` when present, plain text (the CLI's own words, `:17`; the desktop's tip copy is not on the wire).
+- **`CLI output`**: a disclosure row at the bottom (`›` / `⌄`) that shows the notice's own text, plain, in the editor style. Collapsed, unless the session block failed. A subscriber's plan rows, which this round does not draw (2.2), are in that text (docs).
+
+**States.** Session block: `Loading usage…` until the first answer; `Could not load usage: <error>` (verbatim) or `The CLI did not answer within 15 s.`, with `Retry`, which sends both requests again; a success without a `session` object is `Could not load usage: the CLI's answer had no session`. Limits section: `Reading this machine's sessions…` while the scan runs (its duration is unmeasured, probes open question 2); `Could not read the usage history: <error>` or `The CLI did not answer within 60 s.`, with `Retry` (the full request only); `behaviors` null or absent (the SDK says so for sessions without a claude.ai subscription; this non-subscriber got data anyway, `:17`): `The CLI did not report what is using your limits.`; a window with no behaviour and no share: `Nothing recorded for this window.` Each failure is also visible without the card: the CLI's own text stays under `CLI output`.
+
+**On reload, on another process, on a stopped session.** The `get_usage` answers leave no trace on disk; a reloaded `/usage` is the plain notice of today. A card whose requests were cut by the process ending shows `The session has ended.` in the part that was loading (`McpError.Ended`), with no `Retry`.
+
+### 3.3 The `+` menu
+
+The `+` keeps its place, size and description (`Add`, polish 2.3). Its menu, above it and left-aligned, becomes paged, like the model menu's Effort page (`FooterMenuHandle`, `pageTurn`), not Jewel's hover `submenu`: a hover submenu opens under a pointer crossing it on its way to another row, and the footer menus already take their keys through AWT dispatch for that reason (`FooterControls.kt`, polish open item 13). The paging and key handling move out of `FooterControl` into a shared helper that both use.
+
+**Page 1** (the desktop's five items, in its order):
+
+| Row | Icon (Jewel `AllIconsKeys`, checked against the 0.37.0 jars by slice D6; none if absent) | Does |
+|---|---|---|
+| `Add files or photos` | `Actions.Attach` (today's) | unchanged: the image chooser, then the attachment strip (polish 2.7) |
+| `Add folder` | `Nodes.Folder` | 3.4 |
+| `Slash commands` | none (today's) | unchanged: `/` in an empty draft, focus in the text area, so the palette opens (MCP 3.4) |
+| `Connectors` | `Webreferences.Server` (the MCP header button's) | opens the MCP panel (`ChatUiState.mcpPanelOpen = true`), as the header button and `/mcp` do (MCP 3.1, 3.2) |
+| `Plugins ›` | `Nodes.Plugin` | turns to page 2 |
+
+**Page 2, `Plugins`**: `‹ Plugins` (back to page 1), a separator, then one row per plugin of the latest `system/init` (`plugins[{name, path, source, version}]`, `parity-add-dir:5`), in the CLI's order, built-in plugins left out (`path == "builtin"` or a `source` ending in `@builtin`: three of the four recorded plugins; they carry no version and their skills report `source:"built-in"` without a plugin name, so they cannot be grouped, probes 2.4). A row: the plugin's name verbatim (it is config text: no title-casing), `v<version>` in the dim tier when the version passes the check of 4.1, and `›` when the plugin has at least one command. Then a separator and a passive dim line: `Add or manage plugins with /plugin in a terminal.` With no plugin: `No plugins in this session.` Before the session's first `system/init`: `Plugins load when the session starts.`
+
+**Page 3, one plugin**: `‹ <plugin>`, a separator, then one row per command of that plugin: the catalogue entries (the `initialize` answer's `commands`, `ChatState.commands`, `parity-add-dir:1`) whose name starts with `<plugin>:`, else, while the catalogue is empty, the init's `slash_commands` names with that prefix (no description then). Both skills and commands are listed: both are `/<plugin>:<name>` in the catalogue, and the init's `skills` list misses the plugin command `hello` (probes 2.4). A row: the name after the colon, and under it, in the footer size and the dim tier, its description without the CLI's `(<plugin>) ` prefix (recorded, `:1`), at most two lines; the full description in the row's tooltip. The desktop shows a skill's description in a side panel on hover; a side panel does not fit a side chat, and hover has no keyboard path. **Pick**: the menu closes, `/<plugin>:<name> ` goes at the start of the draft (any text already typed follows it after one space), the text area takes the focus with the cursor at the end; nothing is sent, as a Tab in the palette inserts (MCP 3.4).
+
+### 3.4 Add folder
+
+**Choosing.** `FileChooserDescriptorFactory.createSingleFolderDescriptor()` titled `Add Folder`, shown with `FileChooser.chooseFile(descriptor, project, null)` on the EDT, as `ComposerImages.chooseImages` shows its chooser (a modal dialog; it reads nothing itself). The test-only system property `tandem.addFolder=<path>` returns that path instead, since IDE tests cannot drive the native chooser. Cancel does nothing.
+
+**Checking**, on `Dispatchers.IO`, in this order, each refusal a composer notice (the `InlineWarningBanner` above the box that attachment refusals use, polish 2.7):
+1. Not a directory any more: `Could not add <path>: it is not a folder.`
+2. `toRealPath()` (macOS keys paths on their physical form, `/private/tmp/...`, CLAUDE.md "macOS", `docs/protocol.md` 11.1), compared with the project's real root: the root itself or a folder under it → `<name> is inside the project, so Claude can already use it.` Nothing is sent. A stream-json session can only register a subfolder of its working directory (`register_repo_root`, `parity-add-dir:10`, `:12`), and that folder is readable already; loading its own `.claude` is deferred (2.2).
+3. Already added to this session (same real path): `<name> is already added.`
+
+**Mechanism: the CLI's `--add-dir` on the next spawn.** A running session cannot gain a folder outside its working directory: `/add-dir` answers `unavailable_headless` (`parity-add-dir:6`), `register_repo_root` refuses it (`:12`), `add_directory` only takes `/uploads/` or `/outputs/` (`:13`). The CLI takes `--add-dir <dir>`, repeatable, at spawn (docs). So the folder joins the session's list as `PENDING`; if the process is idle the handle stops it now (`SessionHandle.stopIfIdle`, the same stop the live-session cap uses, which settles the chat and loses nothing: the next prompt resumes the same session, `docs/design.md` "Key choices"); while a turn runs, a card waits or a prompt is queued, it stops as soon as the session is idle. A session with no process stops nothing. The next spawn passes `--add-dir <real path>` per folder, in the order added, after `--resume <id>` (4.1). This is **unrecorded**: slice D0 records a spawn with `--add-dir` and a `--resume` respawn adding a second one before any of this ships (hard rule 6; probes 4 item 4). If that recording shows the CLI refusing it, or a resume with a new `--add-dir` losing the session or its transcript, `Add folder` stays out of the menu and this section is revised.
+
+**Confirming.** Each `system/init` of a process spawned with folders lists `additional_directories` (recorded for `register_repo_root`: `[]` at `:5`, the folder at `:17`; for `--add-dir` **unrecorded**, D0 checks it). After that init the handle compares each folder with the list, on IO (string equality, then `Files.isSameFile`): found → `ACTIVE`; not found → `MISSING` and the WARNING notice `The CLI did not add the folder <path>.` once per folder per spawn (hard rule 5). Should D0 show that `--add-dir` folders never appear in `additional_directories`, the folder turns `ACTIVE` when the spawn's first init arrives, and the plan says so.
+
+**Shown in the session.** A strip at the top of the composer box, above the image thumbnails: one pill per folder, a folder icon, the folder's name, and a 16 dp `×`. Tooltip: the full path (the home as `~`) and the state: `Applies with the next prompt.` (`PENDING`), `Added to this session.` (`ACTIVE`), `The CLI did not add this folder.` (`MISSING`, the pill in `text.error`). `×` removes the folder the same way (stop when idle, the next spawn without it). A respawn reconnects the session's MCP servers and plugins, so the first prompt after a change takes longer; the `PENDING` tooltip says when it applies.
+
+**Lifetime.** As long as the session's `SessionHandle`: kept across the cap's stops and resumes; a fork starts with its parent's folders; a new session with none; not across IDE restarts (2.2). A folder that no longer exists when a spawn is built is dropped, with the WARNING notice `The folder <path> no longer exists, so it was not added.`; checked on IO before the spawn.
+
+### 3.5 Keyboard and focus (`ui-accessibility`)
+
+- **Ring and popover.** The ring stays one focus stop (`Context window`, role button) with Enter and Space to open, Esc to close; focus returns to the ring when the popover closes. Inside the popover (a Jewel `PopupMenu`, which takes the keys as the footer menus do): Up and Down move between the selectable rows (group headers, `Retry`, `See detailed breakdown`), Enter or Space acts, → expands a collapsed group and ← collapses an expanded one, Esc closes. Category rows and group items are passive (not focus stops); their text is in the popover's semantics (3.7). Colour is never the only signal: every swatch has its row's name, numbers and share beside it; deferred rows say `—`.
+- **Usage card.** In the chat's Tab order: the `24h | 7d` control (one stop; Left and Right switch, as Jewel's `SegmentedControl` does), each `Retry`, the `CLI output` disclosure (Enter or Space toggles; `stateDescription` `Expanded` or `Collapsed`). Text is selectable like a reply's. Nothing in the card takes the focus by itself: it arrives while the user may be typing.
+- **`+` menu.** `+` is one focus stop; Enter or Space opens the menu on page 1 and Jewel's menu keys move and pick (Up, Down, Enter); → on a row with `›` turns to its page, ← (or Enter on the `‹` row) goes back; Esc closes and the focus returns to `+`. A plugin's command pick and `Slash commands` put the focus in the text area. After `Add folder`'s chooser closes, the focus returns to the text area.
+- **Folder pills.** Each `×` is a focus stop in the composer box's order (after the `+`, before the text area, as the image strip's `×` buttons are), Enter or Space removes; the pill's name and state are its description.
+- **Tab cycle.** Nothing here redefines Tab or Shift+Tab; Esc keeps the MCP spec's precedence (drawer → MCP panel → palette → open card → running turn) with an open popover or `+` menu ahead of all, since they hold the keys while open.
+
+### 3.6 Every string (hard-rule-8 checklist; none says "Claude Code")
+
+Popover: `Context window`, `<used> / <window> (<pct>%)`, ` · Updating…`, `Loading the breakdown…`, `Could not load the breakdown: <error>`, `Could not load the breakdown: the CLI's answer had no categories`, `The CLI did not answer within 30 s.`, `Retry`, `The session is not running. The breakdown updates with the next prompt.`, groups `MCP tools`, `MCP server instructions`, `Memory files`, `Skills`, `Custom agents`, `<server> · <tool>`, `and N more`, `—`, `See detailed breakdown`, `See detailed breakdown (after this turn)`. Category names are the CLI's (`System prompt`, `Free space`, ...), shown verbatim as data. Card: `This session`, `Est. cost`, `API`, `Wall`, `Prompt cache`, `Breakdown`, `Input`, `Output`, `Cache read`, `Cache write`, `What's using your limits?`, `24h`, `7d`, `Last 24 hours`, `Last 7 days`, `<n> sessions`, `approximate, overlapping measures`, `this machine only`, behaviour labels `came from subagent-heavy sessions`, `came from sessions with a long context`, `came from sessions with large tool results`, `ran at max effort`, kinds `Subagent`, `Skill`, `Plugin`, `MCP`, `Tip`, `CLI output`, `Loading usage…`, `Could not load usage: <error>`, `Could not load usage: the CLI's answer had no session`, `The CLI did not answer within 15 s.`, `Reading this machine's sessions…`, `Could not read the usage history: <error>`, `The CLI did not answer within 60 s.`, `The CLI did not report what is using your limits.`, `Nothing recorded for this window.`, `The session has ended.`, `<$0.01`. Recommendation titles and details, model ids and share names are the CLI's or the user's own data. `+` menu: `Add files or photos`, `Add folder`, `Slash commands`, `Connectors`, `Plugins`, `‹ Plugins`, `v<version>`, `Add or manage plugins with /plugin in a terminal.`, `No plugins in this session.`, `Plugins load when the session starts.`. Folders: `Add Folder` (chooser title), `Could not add <path>: it is not a folder.`, `<name> is inside the project, so Claude can already use it.`, `<name> is already added.`, `Applies with the next prompt.`, `Added to this session.`, `The CLI did not add this folder.`, notices `The CLI did not add the folder <path>.`, `The folder <path> no longer exists, so it was not added.`. Accessibility: `Context window breakdown`, `<name>, <tokens> tokens, <share>`, `<name>, <tokens> tokens, deferred`, `<group>, <count> items, <tokens> tokens`, `Expanded`, `Collapsed`, `Usage for this session`, `Usage window`, `<plugin> plugin`, `/<plugin>:<name>`, `Folder <name>`, `Remove folder <name>`. The slice that adds them runs the hard-rule-8 grep (10, D7).
+
+### 3.7 Semantics and test hooks (base 4.19 style)
+
+Ring: `contentDescription = "Context window"` (today's), `stateDescription` = the header value. Popover: `testTag("context-popover")`, `contentDescription = "Context window breakdown"`; category rows `semantics(mergeDescendants = true) { contentDescription = "<name>, <tokens> tokens, <share>" }` (`deferred` in place of the share); group headers `contentDescription = "<title>, <count> items, <tokens> tokens"`, `stateDescription` `Expanded` or `Collapsed`; `Retry` and `See detailed breakdown` by their text. Card: `testTag("usage-card")`, `contentDescription = "Usage for this session"` on the box (not merged: its controls stay reachable), the window control `contentDescription = "Usage window"`, the disclosure `CLI output` with `stateDescription`. `+` menu rows by their text; plugin rows `contentDescription = "<plugin> plugin"`; command rows `contentDescription = "/<plugin>:<name>"`. Folder pills `contentDescription = "Folder <name>"`, their `×` `"Remove folder <name>"`. Every clickable row at least 24 dp from its top-left (the Driver clicks at `Point(10,10)`). Test hooks: `tandem.addFolder=<path>` (3.4); the fake's new answers (9.2).
+
+## 4. Data model
+
+### 4.1 `protocol/` (every field optional and validated; a mistyped entry is skipped, never thrown; `Unknown(raw)` stays the fallback)
+
+```kotlin
+// protocol/ContextBreakdown.kt: the get_context_usage payload (parity-context:2, :17, :18)
+data class ContextCategory(val id: String?, val name: String, val tokens: Long, val kind: String?, val deferred: Boolean)
+//   kind as sent ("used", "buffer", "free", "deferred"; other text kept); deferred = isDeferred == true || kind == "deferred";
+//   an entry without name or tokens is skipped; color is not decoded (TUI theme keys)
+data class MemoryFileUsage(val path: String, val type: String?, val tokens: Long)
+data class McpToolUsage(val name: String, val serverName: String?, val tokens: Long, val loaded: Boolean?)
+data class McpInstructionsUsage(val serverName: String, val tokens: Long)                      // docs only
+data class AgentUsage(val agentType: String, val source: String?, val tokens: Long)             // docs only
+data class SkillUsage(val name: String, val source: String?, val pluginName: String?, val tokens: Long)   // skills.skillFrontmatter[]
+data class ContextBreakdown(
+    val totalTokens: Long?, val maxTokens: Long?, val rawMaxTokens: Long?, val percentage: Int?, val model: String?,
+    val categories: List<ContextCategory>, val memoryFiles: List<MemoryFileUsage>, val mcpTools: List<McpToolUsage>,
+    val mcpInstructions: List<McpInstructionsUsage>, val agents: List<AgentUsage>, val skills: List<SkillUsage>)
+//   not decoded: gridRows, color, slashCommands, messageBreakdown, apiUsage, autoCompactThreshold, isAutoCompactEnabled,
+//   autocompactSource, systemTools, systemPromptSections, deferredBuiltinTools (2.2)
+
+// protocol/Usage.kt: the get_usage payload (parity-usage:16, :17)
+data class ModelTokens(val input: Long?, val output: Long?, val cacheRead: Long?, val cacheWrite: Long?, val costUsd: Double?)
+data class SessionUsage(val totalCostUsd: Double?, val apiDurationMs: Long?, val wallDurationMs: Long?,
+    val models: List<Pair<String, ModelTokens>>)                                                    // model_usage in the CLI's order
+data class UsageShare(val name: String, val pct: Int)
+data class UsageBehavior(val key: String, val pct: Int)
+data class UsageTip(val key: String, val title: String, val detail: String?)                   // recommendations[]
+data class UsageWindow(val sessionCount: Int?, val requestCount: Int?, val behaviors: List<UsageBehavior>, val tips: List<UsageTip>,
+    val agents: List<UsageShare>, val skills: List<UsageShare>, val plugins: List<UsageShare>, val mcpServers: List<UsageShare>)
+data class UsageHistory(val day: UsageWindow?, val week: UsageWindow?)
+data class UsageAnswer(val session: SessionUsage?, val history: UsageHistory?)                 // behaviors null or absent → history null
+//   pct accepted as a JSON number in 0..100 (rounded), else the entry is skipped; names and texts are data, never Markdown;
+//   not decoded: subscription_type, rate_limits_available, rate_limits, fix, total_lines_*, ModelUsage's other keys
+
+// protocol/Plugins.kt: system/init plugins[] (parity-add-dir:5)
+data class PluginInfo(val name: String, val path: String?, val source: String?, val version: String?)
+//   version kept only when it matches ^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$ (plugin-author text, probes 3.1 item 6), else null
+val PluginInfo.builtin: Boolean get() = path == "builtin" || source?.endsWith("@builtin") == true
+
+// CliMessage additions, each with a default so existing call sites compile
+SystemInit(+ plugins: List<PluginInfo> = emptyList(), additionalDirectories: List<String> = emptyList())   // parity-add-dir:5, :17
+// ControlPayloads additions
+fun contextUsage(payload: JsonObject?): ContextBreakdown?   // non-null only with a categories array
+fun usage(payload: JsonObject?): UsageAnswer?               // non-null for any object payload; session null without a session object
+// HostMessages additions (probes 3.2)
+fun getContextUsage(requestId: String): JsonObject          // {"subtype":"get_context_usage"}, no detail
+fun getUsage(requestId: String, skipBehaviors: Boolean): JsonObject   // {"subtype":"get_usage"} or {"subtype":"get_usage","skip_behaviors":true}
+// session/ClaudeSession.kt SessionConfig (argv is protocol: docs/protocol.md 1.1)
+SessionConfig(+ additionalDirectories: List<String> = emptyList())   // argv: "--add-dir", <dir> per entry, after --resume / --session-id
+```
+
+The assistant line's `context_usage`, `usage_report`, `rate_limit_event`, `reload_plugins`, `register_repo_root`, `get_session_cost` and `init.skills`/`init.agents` are not decoded this round (2.2); a `rate_limit_event` keeps becoming `Unknown`, as today.
+
+### 4.2 `session/`
+
+```kotlin
+// session/McpControls.kt: the MCP round's request results serve every control request; no rename this round
+typealias ControlResult<T> = McpResult<T>
+typealias ControlError = McpError
+// ClaudeSession
+suspend fun contextUsage(): ControlResult<ContextBreakdown>
+//   request(30 s, HostMessages::getContextUsage); decode on Default; a success without categories is
+//   Failed(Rejected("the CLI's answer had no categories")); on Ok dispatches SessionEvent.ContextBreakdownListed
+suspend fun usage(skipBehaviors: Boolean): ControlResult<UsageAnswer>   // 15 s with skipBehaviors, 60 s without (both guesses)
+//   readLoop: after dispatching an Assistant whose localCommand?.command == "usage", parentToolUseId == null and uuid != null,
+//   launches fetchUsage(uuid) in the session's scope: usage(true) → SessionEvent.UsageFetched(uuid, SESSION, it); then, unless the
+//   process ended, usage(false) → UsageFetched(uuid, HISTORY, it). TranscriptReader never fetches.
+// ContextControls (session/ContextControls.kt; SessionManager implements it, ContextBreakdownController depends on it)
+suspend fun contextBreakdown(id: SessionId): ControlResult<ContextBreakdown>   // NotRunning without a live process;
+//   one in flight per handle: a call made while one runs waits for, and shares, one follow-up run (refreshMcp's coalescing)
+// SessionManager
+fun retryUsage(id: SessionId, uuid: String, part: UsagePart)   // dispatches UsageRetry, then the request(s) in the handle's scope
+fun addFolder(id: SessionId, realPath: String)                  // the caller checked it on IO (3.4)
+fun removeFolder(id: SessionId, realPath: String)
+// SessionHandle
+val folders: StateFlow<List<AddedFolder>>
+data class AddedFolder(val path: String, val state: FolderState)
+enum class FolderState { PENDING, ACTIVE, MISSING }
+//   add/remove → respawnWhenIdle = true → stopIfIdle() now, else when the session next becomes idle (turn ended, no card, no queue);
+//   the spawn builds SessionConfig.additionalDirectories from folders that still exist (checked on IO; a vanished one leaves with
+//   its notice); after each SystemInit of the process, compares init.additionalDirectories with the folders on IO → ACTIVE or MISSING
+//   (+ notice once per folder per spawn). fork() copies the parent's folders. SessionManager.create starts with none.
+// ChatState (reducer-owned, so ReducerTest covers it)
+ChatState(+ contextBreakdown: ContextBreakdown? = null, plugins: List<PluginInfo> = emptyList(), additionalDirectories: List<String> = emptyList())
+ChatEntry.Notice(+ sourceUuid: String? = null, usage: UsageCard? = null)
+data class UsageCard(val session: UsagePartState<SessionUsage>, val history: UsagePartState<UsageHistory?>)
+sealed interface UsagePartState<out T> {
+    data object Loading : UsagePartState<Nothing>
+    data class Loaded<T>(val value: T) : UsagePartState<T>
+    data class Failed(val error: ControlError) : UsagePartState<Nothing>
+}
+enum class UsagePart { SESSION, HISTORY }
+SessionEvent.ContextBreakdownListed(val breakdown: ContextBreakdown)
+SessionEvent.UsageFetched(val uuid: String, val part: UsagePart, val result: ControlResult<UsageAnswer>)
+SessionEvent.UsageRetry(val uuid: String, val part: UsagePart)
+```
+
+Reducer rules: `SystemInit` replaces `plugins` and `additionalDirectories` (absent means empty). A stream `Assistant` with `localCommand?.command == "usage"` and a `uuid` goes through today's `localCommandNotice`, which also sets `sourceUuid` and `usage = UsageCard(Loading, Loading)`; `SessionEvent.LocalCommandOutput` (the transcript's lines) never gets a card. `UsageFetched` finds the notice by `sourceUuid` (scanning back from the end; none found → unchanged, logged at debug with the uuid only) and sets the part: `SESSION` with `Ok` → `Loaded(answer.session)`, or `Failed(Rejected("the CLI's answer had no session"))` when it is null; `HISTORY` with `Ok` → `Loaded(answer.history)` (null means not reported, 3.2); `Failed` → `Failed`. `UsageRetry(SESSION)` sets both parts `Loading`, `UsageRetry(HISTORY)` the history part. `ContextBreakdownListed` replaces `contextBreakdown`. A late answer to a timed-out request reaches the reducer as today (MCP 4.2): an error shows as `The CLI rejected a request: …`, a success is ignored.
+
+Logging (CLAUDE.md "never log ... secrets"): subtypes, request ids, counts and uuids only; never memory-file paths, tool, skill, server or plugin names, recommendation texts, folder paths or costs.
+
+### 4.3 `chat/` (pure)
+
+```kotlin
+// chat/ContextBreakdownModel.kt
+enum class ContextTone { MESSAGES, MCP_TOOLS, MEMORY_FILES, SYSTEM_PROMPT, NEUTRAL, FREE }   // by category id; ui maps it to colours
+data class CategoryRow(val name: String, val tokens: String, val share: String, val tone: ContextTone, val description: String)
+data class BarSegment(val tone: ContextTone, val fraction: Float)
+data class GroupItem(val label: String, val tokens: String, val dim: Boolean, val tooltip: String?)
+data class BreakdownGroup(val key: String, val title: String, val total: String, val count: Int, val items: ImmutableList<GroupItem>, val more: Int)
+data class ContextPopoverModel(val value: String?, val segments: ImmutableList<BarSegment>, val rows: ImmutableList<CategoryRow>,
+    val groups: ImmutableList<BreakdownGroup>)
+fun contextPopover(breakdown: ContextBreakdown?, ring: ContextUsage?, home: String?, projectRoot: String?): ContextPopoverModel
+//   rows, order and shares of 3.1; value from the breakdown (totalTokens, maxTokens, percentage), else ContextFormat.value(ring)
+// ContextFormat (+ fun percentOf(tokens: Long, max: Long): String)   // "0.3%", one decimal, "0.0%" for a non-zero sliver; max 0 → "—"
+
+// chat/UsageCardModel.kt
+data class UsageFact(val label: String, val value: String)
+data class ModelBlock(val label: String, val cost: String?, val rows: ImmutableList<UsageFact>)
+data class BehaviorLine(val pct: String, val label: String, val known: Boolean)    // known: Tandem's wording; else the key's words
+data class ShareRow(val name: String, val kind: String, val fraction: Float, val pct: String)
+data class UsageWindowModel(val caveat: String, val behaviors: ImmutableList<BehaviorLine>, val shares: ImmutableList<ShareRow>,
+    val tip: UsageTip?)                                                              // all empty → "Nothing recorded for this window."
+sealed interface UsageSection<out T> { data object Loading; data class Shown<T>(val value: T); data class Error(val text: String, val retry: Boolean); data class Note(val text: String) }
+data class UsageCardModel(val facts: UsageSection<ImmutableList<UsageFact>>, val promptCache: String?, val models: ImmutableList<ModelBlock>,
+    val history: UsageSection<Pair<UsageWindowModel?, UsageWindowModel?>>, val cliText: String, val cliTextOpen: Boolean)
+fun usageCard(card: UsageCard, noticeText: String, models: List<ModelOption>, activeModel: String?): UsageCardModel
+fun formatCost(usd: Double): String            // "$0.15"; "<$0.01" above 0 and under 0.005; "$0.00" at 0
+fun promptCacheLine(text: String): String?     // the rest of the line that starts "Prompt cache (main):", trimmed (parity-usage:22)
+// NoticeRow (+ usage: UsageCardModel? = null, markdown: Boolean = false)   // markdown: runCommand == "context" (3.1)
+
+// chat/PluginMenu.kt
+data class PluginCommand(val name: String, val command: String, val description: String)   // command "/probe-kit:greet"
+data class PluginEntry(val name: String, val version: String?, val commands: ImmutableList<PluginCommand>)
+fun pluginMenu(plugins: List<PluginInfo>, commands: List<SlashCommand>, names: List<String>): ImmutableList<PluginEntry>
+//   built-ins left out; a command belongs to the plugin whose name is its prefix before ':'; "(<plugin>) " stripped from descriptions
+fun withCommand(draft: String, command: String): String   // "$command " + draft.trimStart(); "$command " for a blank draft
+// ComposerModel (+ plugins: ImmutableList<PluginEntry> = persistentListOf(), pluginsKnown: Boolean = false)   // pluginsKnown: an init came
+```
+
+### 4.4 `ui/` and `ide/`
+
+- `ContextBreakdownController(id, breakdown: StateFlow<ContextBreakdown?>, ring: StateFlow<ContextUsage?>, turnsEnded: StateFlow<Int>, status: StateFlow<SessionStatus>, controls: ContextControls, scope, dispatcher = Dispatchers.Default)`, one per open popover, as `McpPanelController` is per open panel: requests on start, again on every change of `turnsEnded`, never after close (its scope is cancelled); exposes `model: StateFlow<ContextPopoverModel>` (built on `dispatcher`) and `status: StateFlow<FetchState>` (`Idle`, `Loading`, `Failed(text)`, `Stopped`); `retry()`. Tests pass plain flows, a recording fake and `runTest`'s dispatcher.
+- `ContextPopover` (`ui/ContextPopover.kt`): the `PopupMenu` content of 3.1 inside `RingControl`; `TandemColors.contextTone(tone)` for the swatches and segments, light and dark.
+- `UsageCardView` (`ui/rows/UsageCardView.kt`), drawn by `NoticeItem` when `row.usage != null`; its `Retry` calls `manager.retryUsage(id, uuid, part)`; its window choice and disclosure are `remember`ed per row key. `NoticeItem` draws `row.markdown` text with `TandemMarkdown`.
+- `PromptBar`: the paged `+` menu (the footer menus' paging helper, extracted from `FooterControl`), `Connectors` → `ui.mcpPanelOpen`, a plugin command pick → `ui.draft.setTextAndPlaceCursorAtEnd(withCommand(...))` and focus, `Add folder` → `FolderChooser`, then the IO checks, then `manager.addFolder`; `FolderStrip` above the attachment strip, collecting `handle.folders`.
+- `ide/FolderChooser`: `fun interface { fun choose(project: Project): Path? }`, the default the platform chooser (EDT), the `tandem.addFolder` system property a fixed path (3.4).
+- `ChatScreen` passes the tool window's height to the popover (its 60 % cap). No new settings.
+
+## 5. Components per layer
+
+- `protocol/`: `ContextBreakdown.kt`, `Usage.kt`, `Plugins.kt`, `ControlPayloads.contextUsage` and `usage`, `Ndjson` (init `plugins` and `additional_directories`), `HostMessages.getContextUsage` and `getUsage`; `SessionConfig.additionalDirectories` and its argv.
+- `session/`: `ClaudeSession.contextUsage`, `usage`, the `/usage` fetch in `readLoop`; `ContextControls`, `ControlResult`/`ControlError` aliases; `SessionManager.contextBreakdown` (with coalescing), `retryUsage`, `addFolder`, `removeFolder`; `SessionHandle.folders`, the respawn-when-idle flag, the spawn's folder list and the init comparison; `ChatState` fields, `Notice.sourceUuid`/`usage`, the three events and the reducer rules of 4.2.
+- `chat/`: `ContextBreakdownModel.kt`, `UsageCardModel.kt`, `PluginMenu.kt`, `ContextFormat.percentOf`, `NoticeRow.usage`/`markdown`, `ComposerModel.plugins`/`pluginsKnown`, `ChatRowsBuilder` filling them.
+- `ui/`: `ContextPopover.kt`, `ContextBreakdownController.kt`, `rows/UsageCardView.kt`, `NoticeItem` (card, Markdown), `FooterControls` (popover hook, the extracted paging helper), `PromptBar` (paged `+` menu, `FolderStrip`), `TandemColors.contextTone`, `ChatScreen` (height).
+- `ide/`: `FolderChooser`; `TandemSessions` passes the default.
+- Data flow, popover: ring click → `RingControl` open → controller → `manager.contextBreakdown` → `ClaudeSession.request` → stdin; stdout `control_response` → `replies[id]` → decode on `Default` → `ContextBreakdownListed` → reducer → `ChatState.contextBreakdown` → controller → `contextPopover()` on `Default` → `ContextPopover`. Card: `/usage` → stdin → synthetic line → reducer (notice with a pending card) and `fetchUsage` → two `get_usage` → `UsageFetched` → reducer → `ChatRowsBuilder` → `usageCard()` → `UsageCardView`. Folder: `+` → chooser (EDT) → checks (IO) → `addFolder` → `folders` → `stopIfIdle` → next prompt → spawn with `--add-dir` → init → comparison (IO) → pill state.
+
+## 6. Flows
+
+1. **Open the popover after a turn** (`parity-context`): the turn ends (`:15`) → ring `38.0k / 1M (4%)` → click → header from the ring, `Loading the breakdown…` → `{"type":"control_request","request_id":"tandem-N","request":{"subtype":"get_context_usage"}}` → `:17` → rows `System tools 21.4k 2.1%`, `Messages 6.4k 0.6%`, `Memory files 4.3k 0.4%`, `Skills 3.2k 0.3%`, `System prompt 2.8k 0.3%`, `Autocompact buffer 33.0k 3.3%`, `Free space 929.0k 92.9%`, `System tools (deferred) 22.3k —`; groups `MCP tools` (1, `echo · echo`, 0 tokens, dim), `Memory files` (1), `Skills` (36).
+2. **A turn ends while open**: `turnsEnded` changes → ` · Updating…` → a new request → new rows.
+3. **Unsupported CLI**: the answer is an error (`Unsupported control request subtype: get_context_usage`, the shape of `:19`) → `Could not load the breakdown: Unsupported control request subtype: get_context_usage` with `Retry`; the header keeps the ring's value.
+4. **See detailed breakdown**: popover closes → `/context` sent → `:23` init, `:24` synthetic line → notice `Reply to /context` rendered as Markdown (tables) → `:25` result, no footer (MCP 3.5).
+5. **`/usage`** (`parity-usage`): sent → `:21` init, `:22` synthetic line with `local_command_run.command:"usage"` → notice with a pending card; `get_usage {"skip_behaviors":true}` → `:16` → `This session`: `Est. cost $0.15 · API 4s · Wall 7s`, `Prompt cache` with the rest of the `:22` line; `Breakdown`: the session's model `$0.15`, `Input 2`, `Output 3`, `Cache read 0`, `Cache write 38.0k`, then the helper model `<$0.01`, `Input 1.2k`, ...; `Reading this machine's sessions…`; `get_usage` → `:17` → `24h`: behaviours by `pct`, `subagent_heavy` with Tandem's label, `cron` and `workflow` as their words; shares `workflow-subagent Subagent 80%`, `server-a MCP 2%`, `server-b MCP 2%`; `Tip` from the first recommendation. `7d` switches to the week window. `:23` result → no footer.
+6. **`/cost`**: the same card (`:28`, `local_command_run.command:"usage"`).
+7. **Plugins page** (`parity-add-dir`): after `:5`, `+` → `Plugins ›` → `probe-kit v0.1.0 ›` (the three built-ins left out) → page `‹ probe-kit`: `hello` / `Says hello from a plugin command`, `greet` / `Greets the user by name in one short sentence.` → pick `greet` → draft `/probe-kit:greet ` with the focus in the text area.
+8. **Add folder** (after D0's recording): `+` → `Add folder` → a folder outside the project → pill `PENDING` → idle process stopped → next prompt → argv `... --resume <id> --add-dir <real path>` → init `additional_directories` lists it → pill `ACTIVE`.
+9. **Connectors**: `+` → `Connectors` → the MCP panel opens (MCP flow 1).
+
+## 7. Errors and edge cases
+
+- **A CLI without `get_context_usage` or `get_usage`**: an error answer is shown verbatim (popover, card), or a timeout; no version gate: try, then show. The card's CLI text stays reachable either way.
+- **A CLI that stops sending `id` on categories** (probes open question 8): rows still draw, grey, ordered by `kind`; without `kind` they sort last; never matched on `name`.
+- **Mid-turn requests**: sent (nothing is gated on `busy`); a timeout shows as one; the turn-end refresh retries the popover by itself (3.1). `/usage` cannot be sent mid-turn (the composer refuses Enter while busy), and its own fetch starts on its local line, just before its zero-turn `result`; whether the CLI answers `get_usage` before that `result` is unrecorded (the probe sent it between turns): a 15 s timeout covers a hold until the result.
+- **The process ends mid-request**: `Reply.Ended` → `The session has ended.` in the card part; the popover turns to its stopped state (the controller watches `status`). A popover closed mid-request cancels its call; a late answer goes to the reducer (MCP 4.2): a success is ignored, an error shows as `The CLI rejected a request: …`.
+- **Two `/usage` in one session**: each notice has its own `sourceUuid`, so answers land on their own card.
+- **Huge lists**: groups draw at most 100 items (3.1); share rows and behaviours are not capped (the CLI sends a handful per kind).
+- **Odd numbers**: `maxTokens` 0 or absent → shares `—`, no bar, header from the ring; `percentage` absent → computed from `totalTokens / maxTokens`, rounded, as `ContextFormat.value` does; a negative or non-numeric count skips the entry; `pct` outside 0..100 skips the entry.
+- **`rawMaxTokens` below `maxTokens`** (**docs only**, a compaction window): the header still shows `maxTokens` and the CLI's `percentage` (which is computed on `rawMaxTokens`, probes 2.1); revisit with a recording (11 item 4).
+- **Plugin text**: names and descriptions are config text, drawn as plain `Text`, never Markdown; a version failing 4.1's check is not drawn. A command whose prefix names no listed plugin (a built-in's, or a plugin that failed to load) is not in any page; it stays in the palette.
+- **Folders**: the folder is deleted after it was added → dropped at the next spawn with its notice;; the same folder through a symlink → one real path, `is already added`; a folder on another volume or a network share → passed as chosen after `toRealPath()`, whatever the CLI then says is shown (init comparison); the user removes a `PENDING` folder before any spawn → it simply leaves the list, and if the process was already stopped for it, the next prompt resumes without it.
+- **A prompt queued while a respawn waits**: the queued prompt goes to the stopped session's next spawn, which already carries the folders; nothing is sent twice.
+- **Fork**: copies the parent's folders; the fork's first init confirms them for the fork.
+- **Markdown in `/context`'s notice**: the text is the CLI's report built from local data (paths, tool and skill names). It is rendered with the same renderer and the same rules as replies; nothing in it is executed.
+
+## 8. Performance
+
+No request while the popover is closed; at most one `get_context_usage` in flight per session; one pair of `get_usage` per `/usage`. Payloads (a few KB; the probe's `full` answer carries a 200-cell `gridRows` that is skipped, not decoded) decode on `Default`; models build on `Default`; the popover's rows are at most the categories (about 15) plus the groups' first 100 items each, built only for expanded groups. The card is one row in the `LazyColumn`, keyed by the notice id, recomposed only when its part states change. The plugin pages are built from `ComposerModel`, which changes only when the init or the catalogue does. The folder checks and the init comparison run on `IO`. A folder change costs one respawn (MCP servers and plugins reconnect), only when the user adds or removes a folder.
+
+## 9. Testing
+
+Fixture names and line numbers are those of the committed files; backtick test names, JUnit 5, `ReducerTest` style; nothing needs a real `claude` except D0's recording.
+
+### 9.1 Protocol fixture tests (`FixtureDecodeTest`, `HostMessagesTest`, `RobustnessTest`, `SessionConfigTest`)
+
+| Test | Fixture:line | Asserts |
+|---|---|---|
+| `parity-context: the breakdown after a turn decodes every category` | `parity-context:17` | 8 categories with their `id`, `kind`; used rows sum to `totalTokens` 38032; `maxTokens` 1000000, `percentage` 4; `system_tools_deferred.deferred`; `memoryFiles` one `Project` entry, 4300; `mcpTools` one `mcp__echo__echo`, `serverName` echo, `loaded == false`; `skills` 36 entries, `probe-kit:greet` with `pluginName` `probe-kit` |
+| `parity-context: the breakdown before the first turn` | `parity-context:2` | decodes; `mcpTools` empty; a `messages` row of 10 tokens |
+| `parity-context: summary has no messages row and a deferred MCP row` | `parity-context:18` | no `messages` id; `mcp_tools_deferred` present, `deferred` |
+| `parity-context: an unknown subtype is an error with the CLI's text` | `parity-context:19` | `isSuccess == false`, `error` starts `Unsupported control request subtype:` |
+| `parity-usage: get_usage without the scan has the session and no history` | `parity-usage:16` | `totalCostUsd` 0.1523063, `apiDurationMs` 4192, `wallDurationMs` 7234; two models in order, the session's model with `cacheWrite` 38037; `history == null` |
+| `parity-usage: get_usage with the scan has both windows` | `parity-usage:17` | `day` and `week`; `day.behaviors` keys in order incl. `subagent_heavy`, `cron`; `day.tips[0].title`; `day.agents == [workflow-subagent 80]`; `day.mcpServers` two; `week.plugins == [plugin-a 1]` |
+| `parity-usage: /usage and /cost run the usage command locally` | `parity-usage:22,23,28,29` | `localCommand.command == "usage"` on `:22` and `:28`; `uuid` non-null; `Result.localCommand` `usage` and `cost`; `promptCacheLine(text)` starts `1 request` |
+| `parity-add-dir: init lists plugins and additional directories` | `parity-add-dir:5,17` | four plugins, three `builtin`; `probe-kit` version `0.1.0`; `additionalDirectories` `[]` at `:5`, one entry at `:17` |
+| `parity-add-dir: the catalogue names plugin commands with a prefix` | `parity-add-dir:1` | `probe-kit:hello`, `probe-kit:greet` with descriptions starting `(probe-kit) ` |
+| `parity-add-dir-spawn: ...` (D0's fixture; names set by the recording) | D0 | argv logged with `--add-dir`; init's `additional_directories` per spawn; the resumed session keeps its id |
+| `HostMessagesTest`: `the parity requests match the probe frames` | — | exact JSON of probes 3.2 for `get_context_usage` and both `get_usage` forms |
+| `SessionConfigTest`: `added folders become --add-dir after --resume` | — | order kept; none without folders |
+| `RobustnessTest` | the three fixtures and twins | the sweep never throws; mutated: a category without `id` or `kind`, `tokens` as a string (skipped), `pct` 140 (skipped), `behaviors` a number (history null), a plugin `version` with spaces (null), `plugins` an object (empty) |
+
+### 9.2 Reducer, session and fake
+
+`ReducerTest`: `an init sets the plugins and added directories` (`parity-add-dir:5`, `:17`); `a stream usage line gets a pending card` (`parity-usage:22`); `/cost gets the same card` (`:28`); `a transcript's usage line has no card` (`transcripts/parity-usage.jsonl:30` through `TranscriptReader`); `usage answers fill their own card` (two notices, answers by `sourceUuid`); `a usage answer for an unknown uuid changes nothing`; `a session answer without session fails the part`; `retry sets the parts loading`; `a breakdown answer replaces the last one`. `ClaudeSessionTest` (fake process): `a usage line sends both get_usage requests in order`; `the history request is not sent once the process ended`; `contextUsage decodes off the caller's thread and times out at 30 s` (virtual time). `SessionManagerTest`: `contextBreakdown coalesces a second call`; `NotRunning without a process`. `SessionHandleTest`: `adding a folder stops an idle process and the next spawn carries it`; `adding during a turn stops after the turn`; `a folder missing from init warns once`; `a vanished folder is dropped with a notice`; `a fork copies the folders`; `removing a folder respawns without it`.
+
+**What `fake-claude.py` learns** (its docstring updated with each rule): (h) `get_context_usage` is answered inline, at any time, with the fixture's first `control_response` whose payload has `categories` and a `messages` category (the `full` answer), else `{"subtype":"error","error":"Unsupported control request subtype: get_context_usage"}` (the recorded shape, `parity-context:19`); (i) `get_usage` with `skip_behaviors:true` with the fixture's first `control_response` whose payload has `session` and `behaviors: null`, without it the first whose `behaviors` is an object, else the same unsupported error; (j) those lines leave the in-order replay; (k) `--add-dir` is already logged with the argv in `__spawn__`. `TANDEM_FAKE_DELAY_MS` delays these answers too, so the loading states can be seen.
+
+### 9.3 Pure presentation tests (`chat/`)
+
+`ContextBreakdownModelTest` (on `parity-context:17` decoded): order (used by tokens, buffer, free, deferred), shares `0.3%`, `—` for deferred, zero rows hidden, tones by id, an unknown id `NEUTRAL`, an unknown kind last, the value `38.0k / 1M (4%)`, the ring's value without a breakdown, `echo · echo` and a raw name without the prefix, `~` and project-relative paths, 100-item cap with `more`. `UsageCardModelTest` (on `:16`, `:17`, `:22`): facts `Est. cost $0.15`, `API 4s`, `Wall 7s`; `formatCost` edges (0, 0.004, 0.005, 0.1523); `promptCacheLine` present and absent; active model first; behaviour labels known and unknown (`cron` as words); shares sorted; window caveat with and without a session count; history null → the note; loading and error sections; `cliTextOpen` when the session part failed. `PluginMenuTest` (on `parity-add-dir:1`, `:5`): built-ins out, `probe-kit` with `hello` and `greet`, prefix stripped, fallback to init names without descriptions; `withCommand` on blank and non-blank drafts. `ChatRowsBuilderTest`: a usage notice row carries the model; a `context` notice is `markdown`; other local notices stay plain.
+
+### 9.4 Platform and `ui/` tests
+
+`ContextBreakdownControllerTest` (`runTest`, its dispatcher injected, a recording `ContextControls`): one request on start; one per `turnsEnded` change; none after close; `Failed` with the CLI's text; `Stopped` while `STOPPED`, a request when it leaves; a refresh during a request coalesces. `PagedMenuTest`: → opens a row's page, ← goes back, `pageTurn` unchanged for the footer menus (their existing tests stay green). `FolderCheckTest` (temp dirs, `toRealPath`; a test that needs a case-insensitive volume or Linux says so with `assumeTrue`): inside the project, the root, already added, not a folder, outside.
+
+### 9.5 IDE Starter tests (`ToolWindowIdeTest`)
+
+- `the context ring opens the breakdown` (fixture `parity-context`): send a prompt, wait for the turn's end; `ui.x("//div[@class='ComposeNode' and @contentdescription='Context window']").click(Point(10,10))`; `waitFor` a node `starts-with(@contentdescription, 'Messages,')`; the fake's log holds `{"subtype":"get_context_usage"}`; Esc closes it.
+- `/usage shows a card` (fixture `parity-usage`, with `TANDEM_FAKE_FIXTURES` replaying from the `/usage` turn): type `/usage`, Enter; `waitFor` `@contentdescription='Usage for this session'`; the log holds both `get_usage` frames in order; click `24h`/`7d` switches the window.
+- `the plus menu inserts a plugin command` (fixture `parity-add-dir`): send a prompt so an init arrives; click `Add`; click `Plugins`; click `probe-kit plugin`; click `/probe-kit:greet`; the draft reads `/probe-kit:greet `; nothing new on stdin.
+- `Add folder respawns with --add-dir` (after D0; `tandem.addFolder=<temp dir outside the project>`, fixtures `parity-add-dir-spawn` twice): click `Add`, `Add folder`; `waitFor` `@contentdescription='Folder <name>'`; send a prompt; the second `__spawn__` line's argv holds `--resume` and `--add-dir <real path>`.
+- `Connectors opens the MCP panel` (fixture `mcp-status`): click `Add`, `Connectors`; `waitFor` `@contentdescription='MCP servers panel'`.
+
+### 9.6 Manual `runIde` checklist (feel; the owner)
+
+The popover at 350 px wide and at full height with many MCP tools (scrolling, the 100-item cap, expand and collapse by keyboard); the card's wrapping at 350 px in both LaFs; the `+` menu's pages with the keyboard (→, ←, Esc) and the mouse (no page opens under a passing pointer); a folder added while a turn runs applies after it; the respawn's delay with many MCP servers; colours of the four tones against both themes.
+
+## 10. Task slices (SDD; each green on its own; dependencies in brackets)
+
+Model tiers: D1 to D6 implementation slices run on Opus with per-task reviewers on Opus; D0 (recording tooling and fixtures) and D7's docs run on Sonnet, as do small review fixes; a slice that fails review twice moves to Fable; the final whole-branch review after D7 runs on Fable. Time matters here: do not spend time that can be avoided, and the earlier a correct result is obtained, the better.
+
+0. **D0 add-dir-recording** (Sonnet) — `scripts/drive_cli.py` scenario `add-dir-spawn` (a spawn with `--add-dir <temp dir outside cwd>`, a turn, a stop, a `--resume <id>` respawn with that `--add-dir` and a second one, a turn; both stdouts and the CLI's transcript), its `scripts/test_drive_cli.py` case, `scripts/record-scenario.sh add-dir-spawn`; the redactor follow-ups of probes 3.5 (exempt `categories[].id` of `get_context_usage` from `ID_KEYS`, add `submitUuid`, rename the names in `get_usage.behaviors`, stop `PATH_RE` swallowing a trailing backtick and colon) with `python3 -m unittest`; record `parity-add-dir-spawn` with the sandbox's signed-in `claude` (`claude-sonnet-5-5`, as the probes did) and note in the probe report what it shows (does init list `--add-dir` folders, does the resume keep the id and transcript). If it shows `--add-dir` cannot work, D6 drops `Add folder` and this spec's 3.4 is revised before D6 starts.
+1. **D1 protocol-parity** (Opus) — 4.1 whole: the three files, `ControlPayloads`, `Ndjson` init fields, `HostMessages`, `SessionConfig.additionalDirectories`; the 9.1 tests (D0's row once its fixture exists). [—; runs beside D0]
+2. **D2 session-parity** (Opus) — 4.2 whole: requests, the `/usage` fetch, `ContextControls` and coalescing, the folder list, respawn-when-idle, the init comparison, `ChatState` and reducer rules; the fake's rules (h)-(k); the 9.2 tests. [D1, D0 for the folder tests]
+3. **D3 chat-parity** (Opus) — 4.3 whole and `ChatRowsBuilder`; the 9.3 tests. [D2]
+4. **D4 ui-context-popover** (Opus) — `ContextPopover`, `ContextBreakdownController`, `TandemColors.contextTone`, `ChatScreen` height, `See detailed breakdown`, the Markdown `context` notice; the controller test and IDE test 1. [D3]
+5. **D5 ui-usage-card** (Opus) — `UsageCardView`, `NoticeItem` hook, `retryUsage` wiring; IDE test 2. [D3; may run beside D4: they touch different files except `NoticeItem`, which D4 changes for Markdown only, so D5 rebases on D4 if both edit it]
+6. **D6 ui-plus-menu-and-folders** (Opus) — the paging helper extracted from `FooterControl`, the paged `+` menu, `Connectors`, the Plugins pages, `FolderChooser` with its hook, the IO checks, `FolderStrip`; `PagedMenuTest`, `FolderCheckTest`, IDE tests 3 to 5. [D4 (`FooterControls`), D0's outcome]
+7. **D7 docs-and-verify** (Sonnet for docs; checks as listed; read `docs/launch.md` first) — `docs/protocol.md` (4.4 `get_context_usage`, `get_usage`, their errors; 1.1 `--add-dir`; 5.1 `init.plugins`, `additional_directories`; 6.1 the `usage` local command and the card's requests), `CLAUDE.md` (the fake's new answers, `tandem.addFolder`, the parity fixtures, `record-scenario.sh add-dir-spawn`), `docs/design.md` (the milestone note and the architecture sketch's footer and `+` menu), the hard-rule-8 grep over the new strings, `./gradlew check` (Kover at least 90 % in `protocol/`, `session/`, `chat/`), `./gradlew verifyPlugin`, `xvfb-run ./gradlew integrationTest`. [D1-D6]
+
+Order: D0 ∥ D1 → D2 → D3 → D4 (∥ D5) → D6 → D7 → final review (Fable).
+
+## 11. Open items
+
+1. **`--add-dir` on a resume** (3.4, D0): whether the CLI accepts a new `--add-dir` on `--resume`, keeps the session id and transcript, and lists the folder in `additional_directories`. Everything in 3.4 after "Mechanism" waits on it.
+2. **Requests while a turn runs** (3.1, 7): whether the CLI answers `get_context_usage` or `get_usage` mid-turn or holds them until the `result`; every recorded one falls between turns.
+3. **Cost and latency of `get_context_usage` `full`** and of the `get_usage` scan (probes open questions 1, 2): the 30 s and 60 s timeouts are guesses; measure on the owner's machine (many sessions, many MCP servers) in the 9.6 pass, and lower or raise them.
+4. **Rows not exercised** (probes open question 7): `mcpInstructions`, `agents`, `over_limit`, `rawMaxTokens` below `maxTokens`; a recording with the default setting sources (user memory, user plugins, custom agents) would cover the first two.
+5. **Subscriber `/usage`** (2.2, probes open question 3): `usage_report`, `rate_limits`, the plan rows; a recording on the owner's Mac before plan bars are designed. Until then those rows are only in the CLI's text under `CLI output`.
+6. **Jewel `PopupMenu` with a long, scrolling content and expandable rows** (3.1): whether its own scrolling honours a height cap and keeps keyboard selection visible; if not, the popover draws a `VerticallyScrollableContainer` inside one passive item and keeps `Retry` and `See detailed breakdown` as selectable items outside it.
+7. **Icons** (3.3): `Nodes.Folder`, `Nodes.Plugin` in 0.37.0; checked by D6, none drawn if absent.
+8. **Desktop semantics** (probes open question 5): what "See detailed breakdown" opens, what "Active" measures, the model share's basis, the "All" filter; this round's choices (`/context`, wall time, per-model cost, no filter) stand until known.
+9. **`system/commands_changed` and `reload_plugins`** (2.2): a plugin installed from a terminal mid-session appears in the Plugins page only after the next init; decode both when Manage plugins is designed.
