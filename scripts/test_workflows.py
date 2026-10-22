@@ -195,8 +195,8 @@ class DriftFixWorkflowTest(unittest.TestCase):
 
     def test_the_fix_job_s_steps_run_in_order(self):
         names = [s.get("name") for s in steps(load(DRIFT), "fix")]
-        expected = ["Free disk space", "Check out main", None, None, "Ensure the labels exist", "Name the red run", "Fetch the recording",
-                    "Mutate a recording for the rehearsal", "Classify before Gradle", "Reproduce the red", "Classify",
+        expected = ["Check out main", "Ensure the labels exist", "Name the red run", "Fetch the recording", "Mutate a recording for the rehearsal",
+                    "Classify before Gradle", "Free disk space", None, None, "Reproduce the red", "Classify",
                     "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Require a protected main", "Fix the drift"]
         self.assertEqual(expected, names)                                             # the allowlist step is the enforce job's, after this job
         wf = load(DRIFT)
@@ -365,6 +365,23 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertIn('[[ "$id" =~ ^[0-9]+$ ]] || {', name_run)                        # no newline reaches GITHUB_OUTPUT or the branch name
         self.assertLess(name_run.index("=~ ^[0-9]+$"), name_run.index("gh api"))
         self.assertIn("jq -c '[.name, .conclusion, .head_branch, .head_repository.full_name, .event]'", name_run)   # one line: no field starts a workflow command
+
+    def test_a_run_the_cli_did_not_answer_sets_up_no_disk_java_or_gradle(self):
+        fix = steps(load(DRIFT), "fix")
+        names = [s.get("name") for s in fix]
+        precheck, reproduce = names.index("Classify before Gradle"), names.index("Reproduce the red")
+        setup = [i for i, s in enumerate(fix) if s.get("uses", "").split("@")[0] in ("jlumbroso/free-disk-space", "actions/setup-java", "gradle/actions/setup-gradle")]
+        self.assertEqual(3, len(setup))
+        for i in setup:
+            self.assertEqual("steps.precheck.outputs.kind != 'cli-did-not-answer'", fix[i]["if"], fix[i]["uses"])   # skipped on kind 1, as Reproduce the red is
+            self.assertLess(precheck, i, fix[i]["uses"])                              # the kind is known before any of them
+            self.assertLess(i, reproduce, fix[i]["uses"])                             # and they are all set up before Gradle runs
+        for s in fix[:precheck + 1]:
+            self.assertIn(s.get("uses", "actions/checkout@").split("@")[0], ("actions/checkout",), s.get("name"))   # nothing before the precheck needs Java or the room
+            self.assertNotIn("gradlew", s.get("run", ""), s.get("name"))
+        for s in fix:
+            if "gradlew" in s.get("run", ""):
+                self.assertIn("steps.precheck.outputs.kind != 'cli-did-not-answer'", s["if"], s.get("name"))   # Gradle never runs on kind 1
 
     def test_the_gradle_cache_is_read_only(self):
         gradle = [s for s in steps(load(DRIFT), "fix") if s.get("uses", "").startswith("gradle/actions/setup-gradle@")]

@@ -153,10 +153,12 @@ The nightly keeps its name, schedule, steps and artifact name. Four additions:
 
 Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
 
-1. `jlumbroso/free-disk-space@v2.0.0` (the same settings as `build.yml`: the platform tests need the room),
-   `actions/checkout@v7` with `persist-credentials: false` (so the only GitHub credential the agent holds is the App
-   token the action exports; see step 7), `actions/setup-java@v6` (zulu 21), `gradle/actions/setup-gradle@v6` with
-   `cache-read-only: true`, against an accidental save: the agent runs test code it wrote in this job, which can
+1. `actions/checkout@v7` with `persist-credentials: false` (so the only GitHub credential the agent holds is the App
+   token the action exports; see step 7). The disk, Java and the Gradle cache come right after step 3, each `if` its
+   kind is not `cli-did-not-answer`, so a run the CLI did not answer sets up none of them and is reported within a
+   minute: `jlumbroso/free-disk-space@v2.0.0` (the same settings as `build.yml`: the platform tests need the room),
+   `actions/setup-java@v6` (zulu 21), `gradle/actions/setup-gradle@v6` with `cache-read-only: true`, against an
+   accidental save: the agent runs test code it wrote in this job, which can
    rewrite the Gradle User Home (build cache entries, dependency jars), and a cache setup-gradle's post step saved
    from it in `main`'s scope would be restored by `Build` on `main` and on every pull request, past the ruleset's review.
    It does not bind hostile code, which runs with sudo on a job on `main` and could write such a cache itself with the
@@ -819,7 +821,7 @@ line exists, the milestone is open, whatever the rehearsals showed.
   downloaded, so the fetch step reds the job by design: that is the fetch-failure path, not kind 1). Expected: "Name
   the red run" prints that run's url and date; "Fetch the recording" prints `the run left no recording` (or downloads
   a stream whose `result` has `is_error: true`); "Classify before Gradle" prints `"kind": "cli-did-not-answer"`;
-  "Reproduce the red", "Classify", the gate, "Fix the drift" and the allowlist step
+  the disk, Java and Gradle setup, "Reproduce the red", "Classify", the gate, "Fix the drift" and the allowlist step
   are skipped; "Report a run the
   agent cannot fix" creates the issue "CLI contract: the CLI did not answer" with the label `contract-drift` (or
   comments on it); the job is green with no Gradle and no agent spend; `gh issue view` shows the bold first line
