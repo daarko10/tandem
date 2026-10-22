@@ -7,6 +7,7 @@ tests pinning the workflows, and build.yml's "Script tests" step must never skip
 import importlib
 import json
 import os
+import re
 import unittest
 
 try:
@@ -78,7 +79,10 @@ class DriftFixWorkflowTest(unittest.TestCase):
 
     def test_permissions_concurrency_and_guards(self):
         wf = load(DRIFT)
-        self.assertEqual({"id-token": "write", "contents": "read", "pull-requests": "write", "issues": "write", "actions": "read"}, wf["permissions"])   # the fix branch is pushed with the App token, never the workflow token
+        self.assertEqual({"id-token": "write", "contents": "read", "pull-requests": "read", "issues": "write", "actions": "read"}, wf["permissions"])   # the fix branch is pushed with the App token, never the workflow token, which the agent's test code can read: no pull-request write
+        gate = step(wf, "fix", "Skip when a fix is already waiting")["run"]
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" -f body=', gate)   # the comment goes through the issues endpoint: issues: write covers it
+        self.assertEqual([], [s.get("name") for s in steps(wf, "fix") if "gh pr comment" in s.get("run", "")])   # nothing in the fix job needs pull-requests: write
         self.assertEqual({"group": "drift-fix", "cancel-in-progress": False}, wf["concurrency"])
         job = wf["jobs"]["fix"]
         self.assertEqual(90, job["timeout-minutes"])
@@ -176,9 +180,14 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual("steps.gate.outputs.proceed == 'true'", protect["if"])
         self.assertIn("set -euo pipefail", protect["run"])                            # a failed read fails the step, and the agent never starts
         self.assertIn('repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"', protect["run"])
-        self.assertIn('select(.type == "pull_request") | .parameters.required_approving_review_count', protect["run"])
+        self.assertIn('select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true)] | length', protect["run"])   # an App can approve a PR it did not author: a code owner's review of the last push is what it cannot give
         self.assertNotIn(".protected", protect["run"])                                # classic protected: true accepts a direct push when no option is ticked
-        self.assertIn('if [[ "$reviews" =~ ^[0-9]+$ ]] && [ "$reviews" -ge 1 ]; then', protect["run"])   # fail closed: only a number >= 1 passes
+        self.assertIn('if [[ "$rules" =~ ^[0-9]+$ ]] && [ "$rules" -ge 1 ]; then', protect["run"])   # fail closed: only a number >= 1 passes
+        self.assertIn('gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=main"', protect["run"])   # the code-owner review binds only owned files
+        self.assertIn("grep -qE '^\\*[[:space:]]+@' <<<\"$owners\"", protect["run"])
+        self.assertIn("exit 1", protect["run"].split("CODEOWNERS?ref=main", 1)[1].split("branches/$BRANCH", 1)[0])
+        self.assertLess(protect["run"].index("rules/branches/main"), protect["run"].index("CODEOWNERS?ref=main"))
+        self.assertLess(protect["run"].index("CODEOWNERS?ref=main"), protect["run"].index("branches/$BRANCH"))
         self.assertIn("exit 1", protect["run"].split("else", 1)[1])                 # anything else ends the step red
         self.assertNotIn("-lt", protect["run"])                                       # a non-number made [ -lt ] false and passed the step
         self.assertEqual("drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}", protect["env"]["BRANCH"])
@@ -205,6 +214,20 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertLess(names.index("Skip when a fix is already waiting"), names.index("Fix the drift"))
         self.assertLess(names.index("Require a protected main"), names.index("Fix the drift"))
         self.assertLess(names.index("Classify"), names.index("Fix the drift"))
+        enforce_run = step(wf, "enforce", "Enforce the edit allowlist")["run"]
+        self.assertEqual("drift/${{ needs.fix.outputs.date }}-${{ needs.fix.outputs.id }}", step(wf, "enforce", "Enforce the edit allowlist")["env"]["BRANCH"])
+        self.assertIn('open="$(gh pr list --state open --limit 100 --json number,headRefName,labels)"', enforce_run)   # a failed list fails the step
+        self.assertIn('jq -r --arg branch "$BRANCH" \'.[] | select(.headRefName == $branch or any(.labels[]; .name == "contract-drift"))', enforce_run)   # this run's branch first, then the label: an unlabelled PR is checked, not misread as a stopped agent
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/issues/$pr/labels" -f "labels[]=contract-drift"', enforce_run)   # so the gate holds while it is open
+        self.assertIn('for entry in "${prs[@]}"; do', enforce_run)                    # every PR is checked, never only the first
+        self.assertIn('if [ "${#prs[@]}" -gt 1 ]; then', enforce_run)                  # a second PR is red: the agent opens one
+        self.assertIn('exit "$red"', enforce_run)
+        self.assertNotIn("][0].number", enforce_run)                               # not the first contract-drift PR only
+
+    def test_main_s_codeowners_owns_every_file(self):
+        with open(os.path.join(ROOT, ".github/CODEOWNERS"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        self.assertTrue(any(re.fullmatch(r"\*\s+@\S+", line.strip()) for line in lines), lines)   # the ruleset's code-owner review binds only owned files
 
     def test_a_fork_s_run_never_reaches_the_agent(self):
         wf = load(DRIFT)
