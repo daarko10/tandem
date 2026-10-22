@@ -13,7 +13,9 @@ import com.intellij.testFramework.useProjectAsync
 import dev.daarkolabs.tandem.TandemProjectScope
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.protocol.Fixtures
+import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.NewSessionOptions
+import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
@@ -148,6 +150,36 @@ class SessionActionsTest {
             }
         }
         assertEquals("claude --resume $SEEDED", copied)
+    }
+
+    @Test
+    fun `fork selects the fork, and a session without a transcript gets the notice in its chat`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("fork").createDirectories()
+        seed(dir)
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            sessions.ensureStarted()
+            val manager = sessions.manager
+            val actions = SessionActions(project, manager, TandemProjectScope.get(project).scope)
+            assertNotNull(actions.show(SEEDED)).join()
+
+            actions.fork(SEEDED)
+            while (manager.sessions.value.size < 2) delay(20)
+            val fork = manager.sessions.value.single { it.forkOf == SEEDED }
+            // The fork is listed a moment before it is selected: two flows, one lock.
+            while (manager.selected.value != fork.id) delay(20)
+            assertEquals(fork.id, manager.selected.value)
+
+            // A session with no prompt yet has no transcript: nothing to fork, and its chat says so.
+            val fresh = actions.create(NewSessionOptions())
+            actions.fork(fresh)
+            val handle = manager.sessions.value.single { it.id == fresh }
+            val notice = ChatEntry.Notice("", NoticeLevel.WARNING, "This session has no transcript to fork yet")
+            fun shown(): Boolean = (handle.state.value.entries.lastOrNull() as? ChatEntry.Notice)?.copy(id = "") == notice
+            while (!shown()) delay(20)
+            assertEquals(3, manager.sessions.value.size)
+        }
+        awaitNoOwnFakeCli()
     }
 
     /** Writes the `history-reply` transcript as session [SEEDED]'s, in the CLI's folder for the project in [dir]. */

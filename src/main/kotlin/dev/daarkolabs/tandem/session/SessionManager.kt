@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.session
 
 import com.intellij.openapi.diagnostic.logger
+import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
@@ -59,7 +60,7 @@ data class NewSessionOptions(val model: String? = null, val effort: String? = nu
  * [scope] ends every process. Process and file work runs on [Dispatchers.IO].
  *
  * Threads: every function may be called from any thread, the EDT included. [create], [select], [send], [interrupt], [allow],
- * [deny], [setModel] and [setPermissionMode] never wait: they change state or queue work, and return. [open], [fork], [rename],
+ * [deny], [setModel], [setPermissionMode] and [setEffort] never wait: they change state or queue work, and return. [open], [fork], [rename],
  * [stop], [close], [delete] and [refreshIndex] suspend until they are done.
  *
  * Processes: a session starts or stops one process at a time (its spawn lock). [send] to a stopped session starts one and
@@ -112,6 +113,9 @@ class SessionManager internal constructor(
     /** The index's last listing. */
     private val listing = MutableStateFlow<List<SessionSummary>>(emptyList())
 
+    /** The models a process listed last, or those [seedModels] gave until one has. */
+    private val mutableModels = MutableStateFlow<List<ModelOption>>(emptyList())
+
     /** One listing at a time, so that an older one never replaces a newer one. */
     private val refreshLock = Mutex()
 
@@ -156,6 +160,14 @@ class SessionManager internal constructor(
     val summaries: StateFlow<List<SessionSummary>> =
         combine(listing, mutableSessions.flatMapLatest(::titles)) { listed, open -> merge(listed, open) }
             .stateIn(scope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * The models the CLI offers, as the process that answered `initialize` last listed them; until one has, those [seedModels] gave
+     * (remembered from an earlier IDE run); empty while there are neither. Every session runs the same `claude`, so a session whose
+     * own process has not listed them ([ChatState.models]: it has none yet, a restored session for one) offers these. Nothing starts
+     * a process to read them.
+     */
+    val models: StateFlow<List<ModelOption>> = mutableModels.asStateFlow()
 
     init {
         // The first signal comes once the folders are watched, so it also gives the first listing.
@@ -232,16 +244,24 @@ class SessionManager internal constructor(
         return fork
     }
 
+    /** Offers [models], the list remembered from an earlier IDE run, as [SessionManager.models] until a process lists them. */
+    fun seedModels(models: List<ModelOption>) {
+        mutableModels.compareAndSet(emptyList(), models)
+    }
+
     /** Selects session [id], or none; the selected session's [SessionHandle.attention] clears. An [id] that is not open is ignored. */
     fun select(id: SessionId?) {
         synchronized(lock) { selectLocked(id) }
     }
 
-    /** Sends a prompt. A stopped session starts a process first, and gets the prompt once it is up. */
-    fun send(id: SessionId, text: String) {
+    /**
+     * Sends a prompt: [text] and the [images] attached to it, in order. A stopped session starts a process first, and gets the
+     * prompt once it is up.
+     */
+    fun send(id: SessionId, text: String, images: List<ImageBlock> = emptyList()) {
         val handle = handle(id) ?: return
         handle.lastUsed = clock()
-        if (handle.sendOrQueue(text)) spawner.startInBackground(handle, forPrompts = true)
+        if (handle.sendOrQueue(Prompt(text, images))) spawner.startInBackground(handle, forPrompts = true)
     }
 
     /** Interrupts the turn in progress, if a process runs. */
@@ -249,16 +269,28 @@ class SessionManager internal constructor(
         handle(id)?.liveSession()?.interrupt()
     }
 
+    /**
+     * Answers the pending permission request [requestId] with [answer] ([PermissionAnswers]). Nothing happens when no process runs
+     * or the request is no longer pending (answered already, cancelled, or its turn ended), so a second click writes no frame.
+     */
+    fun answer(id: SessionId, requestId: String, answer: PermissionAnswer) {
+        answerPending(id, requestId) { answer }
+    }
+
     /** Allows the pending permission request [requestId]; [always] allows the same again for the rest of the session. */
     fun allow(id: SessionId, requestId: String, always: Boolean) {
-        val session = handle(id)?.liveSession() ?: return
-        session.state.value.pendingPermissions.firstOrNull { it.requestId == requestId }?.let { session.allow(it, always) }
+        answerPending(id, requestId) { if (always) PermissionAnswers.allowForSession(it) else PermissionAnswers.allowOnce(it) }
     }
 
     /** Denies the pending permission request [requestId]. */
     fun deny(id: SessionId, requestId: String) {
+        answerPending(id, requestId) { PermissionAnswers.deny() }
+    }
+
+    private inline fun answerPending(id: SessionId, requestId: String, answer: (PendingPermission) -> PermissionAnswer) {
         val session = handle(id)?.liveSession() ?: return
-        session.state.value.pendingPermissions.firstOrNull { it.requestId == requestId }?.let { session.deny(it) }
+        val pending = session.state.value.pendingPermissions.firstOrNull { it.requestId == requestId } ?: return
+        session.answer(pending, answer(pending))
     }
 
     /** Picks a model (null: the CLI's default). A running process switches (`set_model`); a stopped session starts with it. */
@@ -269,6 +301,14 @@ class SessionManager internal constructor(
     /** Picks a permission mode. A running process switches (`set_permission_mode`); a stopped session starts with it. */
     fun setPermissionMode(id: SessionId, mode: PermissionMode) {
         handle(id)?.pick(live = { it.setPermissionMode(mode) }, stopped = SessionEvent.PermissionModeRequested(mode))
+    }
+
+    /**
+     * Picks an effort. A running process changes it from its next turn (`apply_flag_settings`); a stopped session starts with it
+     * (`--effort`).
+     */
+    fun setEffort(id: SessionId, level: String) {
+        handle(id)?.pick(live = { it.setEffort(level) }, stopped = SessionEvent.EffortRequested(level))
     }
 
     /**
@@ -462,7 +502,8 @@ class SessionManager internal constructor(
      * Follows the session's status: every change counts as use, and a session that is not selected asks for attention when it
      * starts waiting for a permission, or when a turn ends ([ChatState.turnsEnded] grows: a count, which no conflation of the status
      * hides, and which a permission answered outside a turn or a Stop leaves alone), from [SessionHandle.turnsEndedAtStart] on: a
-     * turn that ended before this, as while a resumed-as-new session is taken over, still asks.
+     * turn that ended before this, as while a resumed-as-new session is taken over, still asks. The models its process lists become
+     * [models].
      */
     private fun watch(handle: SessionHandle) {
         // Undispatched, so that it sees the status from the start: the session's process may start right away.
@@ -480,6 +521,11 @@ class SessionManager internal constructor(
             handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
                 if (count > ended) raiseAttentionUnlessSelected(handle)
                 ended = count
+            }
+        }
+        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            handle.state.map { it.models }.distinctUntilChanged().collect { listed ->
+                if (listed.isNotEmpty()) mutableModels.value = listed
             }
         }
     }

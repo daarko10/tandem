@@ -7,14 +7,25 @@ Sources, in order of authority:
    (CLI 2.1.300); `history-reply`, `history-permission`, `history-interrupt`, `permission-mode`, `fork` (CLI 2.1.301).
    The `history-*` and `fork` recordings come with the CLI's own on-disk transcript of the same session in
    `fixtures/transcripts/` (section 11). Re-record with `scripts/record-fixture.sh` (one-shot prompt) or
-   `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too.
+   `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too. The 29 probe recordings of
+   2026-10-18 (CLI 2.1.302: `ask-*`, `plan-*`, `think-*`, `tools-*`, `agent-*`, `misc-*`, each with its transcript) are
+   written up in `docs/superpowers/research/2026-10-18-protocol-probes.md`; this document cites them as
+   `<name>.ndjson:<line>`. Their host-to-CLI frames are not in the fixtures; the probes doc quotes them.
+   `ask-two` (CLI 2.1.306) is a `scripts/record-scenario.sh ask-two` scenario recording, not one of the 29 probes: one
+   `AskUserQuestion` call with two questions, a one-answer and a multi-select, answered together; it comes with its
+   transcript.
+   `effort-switch` and `permission-mode-auto` (CLI 2.1.306, `scripts/record-scenario.sh`, each with its transcript) record a
+   live effort change (4.4) and the `auto` permission mode (8). `user-image` (CLI 2.1.306, `scripts/record-scenario.sh`,
+   with its transcript) records a user message of a text block then a base64 PNG block (section 3); the transcript's user
+   line keeps both blocks, the image's `data` verbatim.
 2. Measurements with CLI 2.1.301 where a section says so: headless runs in an empty scratch folder with the variables
    of section 1.2 removed. Most send only `initialize`, so no model is used; those that needed a prompt say so. The
    checks of `--session-id X` and `--resume X` on their own (1.1) ran signed in, with the usual config directory. Those
    of forks, of `--session-id` together with `--resume`, of the failed starts' `result` ids and of an early
    `rename_session` (1.1, 4.4) ran without sign-in: a scratch `CLAUDE_CONFIG_DIR` and no variable whose name contains
-   `TOKEN`, `API_KEY` or `OAUTH`. Such a run writes nothing before its `initialize` response, where a signed-in run first
-   writes a `system/ui_invalidate` line with the session id (1.1). The fork probe without sign-in forked a session that
+   `TOKEN`, `API_KEY` or `OAUTH`. Such a run writes nothing before its `initialize` response, where a signed-in run
+   usually first writes a `system/ui_invalidate` line with the session id (1.1; three 2.1.302 probe recordings lack it,
+   5.2, so it is no sign-in signal). The fork probe without sign-in forked a session that
    had no title line, so its missing `system/session_title_changed` (1.1) says nothing about sign-in.
 3. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads).
 4. `claude --help` output.
@@ -38,7 +49,8 @@ then appends optional flags in this order (only those Tandem cares about are lis
 
 | Flag | When the SDK adds it | Tandem |
 |---|---|---|
-| `--thinking=adaptive` / `--thinking=disabled` / `--max-thinking-tokens N` | `thinking` option | optional |
+| `--thinking=adaptive` / `--thinking=disabled` / `--max-thinking-tokens N` | `thinking` option | optional. `--thinking=adaptive` is accepted and changed nothing against the default (`think-adaptive.ndjson:7`, 2.1.302: `thinking_display:"updates"`, empty thinking text, as `think-default.ndjson:7`) |
+| `--thinking-display <summarized\|omitted\|highlights>` | not in the SDK; hidden from `--help` (2.1.302) | yes, always `summarized` (`SessionConfig.argv()`); section 6.3. `summarized` streams the thinking summary as text in `thinking_delta` frames and in the completed block (`think-display-summarized.ndjson:11,34`). `highlights` is accepted (`message_start` says `highlights`, `think-display-highlights.ndjson:8`) but gave one empty `thinking_delta`, no `system/thinking_tokens` line and an empty block while 79 thinking tokens were used (`:10,12,18`): unusable over stdio on the probing account. `omitted` was tried only through `set_max_thinking_tokens` (section 4.4). Without the flag the display is `updates`: empty text, token estimates only (`think-default.ndjson:10,16`) |
 | `--effort <low\|medium\|high\|xhigh\|max>` | `effort` option | yes, picked when a session is created |
 | `--max-turns N`, `--max-budget-usd X` | limits | no |
 | `--model <id>` | `model` option | yes, user's pick |
@@ -46,7 +58,7 @@ then appends optional flags in this order (only those Tandem cares about are lis
 | `--permission-prompt-tool <mcp tool>` | `permissionPromptToolName` (mutually exclusive with the above) | no |
 | `--permission-prompts <host\|none>` | option | no (default `host`) |
 | `--continue` / `--resume <session-id>` | resume options | `--resume` for an existing session (section 8); no `--continue` |
-| `--allowedTools a,b` / `--disallowedTools a,b` | options | `--disallowedTools Edit,Write,MultiEdit,NotebookEdit` (hard rule 4) |
+| `--allowedTools a,b` / `--disallowedTools a,b` | options | `--disallowedTools Edit,Write,MultiEdit,NotebookEdit` (hard rule 4). `MultiEdit` no longer exists in 2.1.302 (in no `system/init.tools`, `tools-edit.ndjson:6`); naming it is harmless |
 | `--tools a,b` / `--tools=default` | `tools` option | optional |
 | `--mcp-config <json>` | non-SDK MCP servers given | yes: our IDE MCP server (see 1.4) |
 | `--setting-sources user,project,local` | option | optional |
@@ -72,7 +84,7 @@ Recommended Tandem argv (`SessionConfig.argv()` builds it):
 
 ```
 claude --output-format stream-json --verbose --input-format stream-json \
-  --include-partial-messages --permission-prompt-tool=stdio \
+  --include-partial-messages --thinking-display summarized --permission-prompt-tool=stdio \
   --model <picked> --effort <level> --permission-mode <mode> \
   --mcp-config '{"mcpServers":{"tandem":{...}}}' \
   --disallowedTools Edit,Write,MultiEdit,NotebookEdit \
@@ -100,7 +112,8 @@ Measured with CLI 2.1.301, sending only `initialize` (conditions in Sources item
   --continue or --resume if --fork-session is also specified." (`sdk.d.ts` documents the same for `sessionId`.)
 - `--resume X` and `--resume X --fork-session` answer `initialize` but emit no `system/init` until the first prompt.
   A signed-in run names the session's id before that all the same, in lines the SDK does not document:
-  `system/ui_invalidate` at start (in every recording, and in a run with `--session-id` and no prompt), and
+  `system/ui_invalidate` at start (in 26 of the 29 probe recordings, in every older signed-in fixture and in a run with
+  `--session-id` and no prompt; `think-default`, `think-adaptive` and `think-opus` have none, 5.2), and
   `system/session_title_changed` when the original has a title (fixture `fork`: started without `--session-id`, the
   fork names its new id in both before its `initialize` response). The run without sign-in wrote neither. Tandem
   passes `--session-id`, a fork's too, so it never relies on those lines.
@@ -116,7 +129,7 @@ The SDK copies the host environment (or `options.env` if given) and then:
 |---|---|---|
 | `CLAUDE_CODE_ENTRYPOINT` | `sdk-ts` if unset | Tandem sets `sdk-tandem` (inferred: any string; certain values like `claude-desktop-3p`, `remote_cowork` switch CLI behaviour, avoid them) |
 | `CLAUDE_AGENT_SDK_VERSION` | `0.3.300` if unset | do not fake this |
-| `CLAUDE_CODE_SDK_READS_SESSION_STATE` | `1` unless set (any case) | makes the CLI emit `system/session_state_changed` (inferred) |
+| `CLAUDE_CODE_SDK_READS_SESSION_STATE` | `1` unless set (any case) | makes the CLI emit `system/session_state_changed` with `sdk_host_only:true` (`misc-state-sdk.ndjson:3`, 2.1.302; section 5.2). `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1` emits the same lines without that flag (`misc-state-emit.ndjson:3`); with neither, none (`misc-state-none`) |
 | `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | `true` when file checkpointing enabled | needed for `rewind_files` |
 | `NODE_OPTIONS` | deleted | Tandem deletes it too |
 | `DEBUG` | deleted (or `1` if `DEBUG_CLAUDE_AGENT_SDK`) | |
@@ -237,6 +250,12 @@ Images (base64 content block, Anthropic format):
   {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0..."}}]}}
 ```
 
+Tandem sends this shape for attachments (`HostMessages.userMessage`): the text block, left out when blank, then one image block per attachment; the CLI does not echo the frame (`user-image.ndjson`), its on-disk line is `transcripts/user-image.jsonl`.
+
+Fixture `user-image` (CLI 2.1.306) sends exactly this with a 2 × 2 PNG. The transcript's user line keeps both blocks, the
+image's `data` verbatim, under the uuid the host sent; the CLI adds an `isMeta` user line after it naming where it cached the
+image, which the reader skips as it skips every `isMeta` line (section 11).
+
 Slash commands are sent as plain text (`"/compact"`) unless `client_composed:true`.
 Messages sent while a turn is running are queued and may be folded into the running turn; `result.user_message_uuids` lists which sends a turn consumed.
 
@@ -281,6 +300,15 @@ Request fields (all optional): `hooks`, `sdkMcpServers`, `sdkMcpServerConfigs`, 
 `forwardSubagentText`, `supportedDialogKinds` (absence = cannot render any `request_user_dialog`; fails closed),
 `perTaskStopAffordance`, `plugins` (only with `--await-initialize`).
 
+Tandem sends (`HostMessages.initialize`):
+
+```json
+{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize","hooks":null,"forwardSubagentText":true}}
+```
+
+`forwardSubagentText:true` makes the CLI forward a subagent's text replies as `assistant` lines with an `agent_id`
+(`agent-forwarded.ndjson:38`; section 5.2, `task_notification`), which Tandem nests under the `Agent` row.
+
 Success `response` payload (`SDKControlInitializeResponse`):
 
 | Field | Type |
@@ -288,7 +316,7 @@ Success `response` payload (`SDKControlInitializeResponse`):
 | `commands` | `SlashCommand[]` |
 | `agents` | `AgentInfo[]` |
 | `output_style`, `available_output_styles` | string, string[] |
-| `models` | `ModelInfo[]` (use this to populate the model picker) |
+| `models` | `ModelInfo[]`: `value`, `displayName`, `description`, and per model `resolvedModel` (the wire id an alias or the `default` entry stands for: the footer labels the entry whose `resolvedModel` equals `init.model`, never the `default` entry), `supportsAutoMode` (`auto` is offered only while the shown model has it; `agent-sync.ndjson:2`: true on every model but Haiku 4.5), `supportsEffort` and `supportedEffortLevels` (the effort page; `low` to `max`, no `xhigh` on Opus 4.6 and Sonnet 4.6). Decoded leniently in `Reducer.modelOption`: an entry without a string `value` is skipped, a missing `displayName` reads as the `value`, a missing flag reads false, and the levels count only with `supportsEffort` true |
 | `account` | `AccountInfo` (display only; never store) |
 | `claude_code_version` | string (absent on older CLIs) |
 | `fast_mode_state`, `fast_mode_disabled_reason` | optional |
@@ -310,18 +338,21 @@ Enabled by `--permission-prompt-tool=stdio`. The CLI blocks the tool until answe
 
 | Field | Notes |
 |---|---|
-| `tool_name`, `input`, `tool_use_id` | always |
-| `permission_suggestions` | `PermissionUpdate[]` for "always allow" buttons |
+| `tool_name`, `input`, `tool_use_id` | always. `input` can be `{}`: `ExitPlanMode` under Tandem's argv, where the plan-file `Write` is disallowed (`plan-disallowed.ndjson:173`, 2.1.302) |
+| `permission_suggestions` | `PermissionUpdate[]` for "always allow" buttons. Absent on `AskUserQuestion` and `ExitPlanMode` requests (`ask-single.ndjson:22`, `plan-approve.ndjson:88`) |
 | `blocked_path` | path that triggered the ask |
-| `decision_reason`, `decision_reason_type` | `rule\|mode\|subcommandResults\|permissionPromptTool\|hook\|asyncAgent\|sandboxOverride\|workingDir\|safetyCheck\|classifier\|other` |
+| `decision_reason`, `decision_reason_type` | `rule\|mode\|subcommandResults\|permissionPromptTool\|hook\|asyncAgent\|sandboxOverride\|workingDir\|safetyCheck\|classifier\|other`. Recorded: `decision_reason_type:"subcommandResults"` on a Bash whose sub-command was not auto-allowed, with a suggestion naming only that sub-command (`tools-bash.ndjson:20`); no 2.1.302 fixture has `decision_reason` |
 | `classifier_approvable` | `false` = a safety check needs a human |
 | `suppress_always_allow_rule` | hide "don't ask again" |
 | `default_to_no` | do not preselect Approve |
-| `requires_user_interaction` | no one-tap Approve/Deny |
+| `requires_user_interaction` | no one-tap Approve/Deny. `true` on `AskUserQuestion` and `ExitPlanMode` (`ask-single.ndjson:22`, `plan-disallowed.ndjson:173`); absent on Bash prompts (`tools-bash.ndjson:20`) |
 | `matched_ask_rule` | `{source, tool_name, rule_content?}` |
 | `title`, `display_name`, `description` | UI strings |
-| `agent_id` | subagent origin |
+| `agent_id` | subagent origin: a prompt from inside an `Agent` subagent is a normal request plus `agent_id` = the task's `task_id` (`agent-sync.ndjson:43`; section 5.2) |
 | `mcp_server` | `{name, source}` for MCP tools |
+
+Tandem decodes `requires_user_interaction` (absent or mistyped: `false`), `decision_reason_type` and `agent_id` on
+`CanUseTool`; `agent_id` gives the card its `From the agent "<description>"` line.
 
 Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_use_id`):
 
@@ -337,23 +368,48 @@ Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_u
 - `allow`: `updatedInput` optional in types; **always echo the (possibly edited) input** for safety on older CLIs (inferred).
 - `deny`: `message` required; `interrupt:true` also aborts the turn.
 - `PermissionUpdate` variants: `addRules|replaceRules|removeRules {rules:[{toolName,ruleContent?}], behavior:"allow"|"deny"|"ask", destination}`, `setMode {mode, destination}`, `addDirectories|removeDirectories {directories, destination}`; destination `userSettings|projectSettings|localSettings|session|cliArg`.
-- Fixture order (`permission`): `assistant` with the `tool_use` block, then `content_block_stop`, then the
-  `can_use_tool` request (its `tool_use_id` equals the block's `id`), then `message_delta`/`message_stop`. After the
-  answer, a `user` line carries the `tool_result` (`is_error:true` with the deny message on deny) plus
-  `tool_result_meta[{id, permission_decision:{decision:"accept"|"reject", source}}]`.
+- Fixture order (`permission`, 2.1.300): `assistant` with the `tool_use` block, then `content_block_stop`, then the
+  `can_use_tool` request (its `tool_use_id` equals the block's `id`), then `message_delta`/`message_stop`. In the
+  2.1.302 recordings the request arrives in either order relative to `content_block_stop`: before it for
+  AskUserQuestion, ExitPlanMode and WebSearch (`ask-single.ndjson:21-23`, `plan-approve.ndjson:87-89`,
+  `misc-web.ndjson:73-74`), after it for Bash and WebFetch (`tools-bash.ndjson:18-20`, `misc-web.ndjson:29-31`), so
+  a decoder must not key on either. When the host answers at once the `user` line with the tool result
+  precedes `message_delta`/`message_stop` (`ask-deny.ndjson:24,25`): accept a tool result for a message that is not
+  closed yet. After the answer, a `user` line carries the `tool_result` (`is_error:true` with the deny message on deny)
+  plus `tool_result_meta[{id, permission_decision:{decision:"accept"|"reject", source, reason_type?}}]` (section 6.2).
 - Read-only commands (e.g. `echo`) are auto-approved and never reach the host.
 - If the turn is interrupted while a prompt is open, the CLI sends `control_cancel_request` for it: close the dialog, send nothing.
 - Auto-denials without a prompt arrive as `system/permission_denied` (section 5).
+- `AskUserQuestion` (2.1.302, fixtures `ask-*`; probes doc 2.1): the request arrives in `default` mode too, with exactly
+  `subtype, tool_name, display_name, input, tool_use_id, requires_user_interaction` (`ask-single.ndjson:22`): it is how
+  the CLI asks the host to render the question. `input.questions[]` is `{question, header, options[{label,
+  description}], multiSelect}`; the `tool_use` block has the same input in another key order, so compare by value.
+  Answer with `allow` and `updatedInput` = the input plus `answers`, keyed by the exact question text: a label, the
+  `", "`-joined labels of a multi-select (what the CLI's own UI sends; an array is accepted too,
+  `ask-multi-array.ndjson:30`) or free text (`ask-other.ndjson:26`); or `updatedInput.response` with a free-text reply
+  and no `answers` (`ask-response.ndjson:24`). The `tool_result` text differs per case ("Your questions have been
+  answered: ...", "The user answered: ...", "The user responded: ...") and `tool_use_result` is the `updatedInput` sent
+  (`ask-single.ndjson:26`). `deny` with a `message` and no `interrupt` cancels the question only: an `is_error` result
+  holding the message, and the turn goes on (`ask-deny.ndjson:24,36`); `result.permission_denials` lists the call.
+- `ExitPlanMode` (fixtures `plan-*`; probes doc 2.2): `input` is `{plan, planFilePath}` once the plan file was written
+  (`plan-approve.ndjson:88`), `{}` when `Write` is disallowed, as under Tandem's argv (`plan-disallowed.ndjson:173`;
+  the model's plan-file `Write` then fails with a `tool_use_error`, no prompt, `:103`). Never `permission_suggestions`,
+  so the host builds the mode switch itself: `allow` with `updatedInput` = the input and
+  `updatedPermissions:[{"type":"setMode","mode":"acceptEdits","destination":"session"}]` switches the live session, and
+  the CLI confirms with `system/status {status:null, permissionMode:"acceptEdits"}` before the tool result
+  (`plan-approve.ndjson:90,91`); the next turn's `init` agrees (`:160`). A plain `allow` leaves plan mode to `default`
+  (`plan-disallowed.ndjson:177`, `plan-deny.ndjson:145`). `deny` with the feedback as `message` keeps plan mode: an
+  `is_error` result, no `system/status`, and the model revises the plan file and asks again (`plan-deny.ndjson:81,143`).
 
 ### 4.4 Host → CLI requests
 
 | subtype | Request fields | Success `response` |
 |---|---|---|
 | `interrupt` | `cancel_queued?: boolean` | `{still_queued: string[], cancelled?: string[]}` (empty `{}` on CLIs without `interrupt_receipt_v1`) |
-| `set_model` | `model?: string\|null` (`null`/`"default"` = session default) | none: the success frame has no `response` field (fixture). The CLI also emits a replayed `user` line (`isReplay:true`) with `<local-command-stdout>Set model to ...</local-command-stdout>` |
+| `set_model` | `model?: string\|null` (`null`/`"default"` = session default) | none: the success frame has no `response` field (fixture). The CLI also emits a replayed `user` line (`isReplay:true`) with `<local-command-stdout>Set model to ...</local-command-stdout>`. An `error` answer is unrecorded; Tandem then puts back the previous pick and adds the notice `The CLI rejected the switch to model <m> (<error>); it stays on model <x>.` |
 | `set_permission_mode` | `mode: "default"\|"acceptEdits"\|"bypassPermissions"\|"plan"\|"dontAsk"\|"auto"` | `{"mode": "<wire name>"}`, then a `system/status` line with `status: null` and the new `permissionMode`; the next `init` agrees (fixture `permission-mode`, 2.1.301) |
 | `rename_session` | `title: string`, `source: "host"` | none: no `response` field, like `set_model`. A `system/session_title_changed` line (`title`) comes just before it, and the CLI appends a `custom-title` line to the transcript (fixtures `fork`, `fork-origin`) |
-| `set_max_thinking_tokens` | `max_thinking_tokens?: number\|null`, `thinking_display?` | `{}` |
+| `set_max_thinking_tokens` | `max_thinking_tokens?: number\|null`, `thinking_display?: "summarized"\|"omitted"\|"highlights"\|null` | none: the success frame has no `response` field (`think-summarized.ndjson:25`, 2.1.302). Takes effect on the next turn (below). Not sent by Tandem, which passes `--thinking-display summarized` at spawn (1.1) |
 | `list_models` | — | model catalog (`{models: ModelInfo[]}`, inferred shape) |
 | `get_context_usage` | `detail?: "summary"\|"full"` | categories `{name, tokens, kind:"used"\|"free"\|"buffer"\|"deferred"}` plus totals |
 | `rewind_files` | `user_message_id: string`, `dry_run?: boolean` | rewind result (needs file checkpointing env) |
@@ -396,14 +452,35 @@ turn at the default effort, then two requests, then a second turn.
 - Neither turn's `system/init` names an effort (section 5.1), so only the transcript confirms the change. The models in
   the `initialize` response list `supportsEffort` and `supportedEffortLevels` (`low` to `max`).
 
-Tandem passes effort only at spawn (`--effort`) for now; `apply_flag_settings` is the way to let a live session change it.
+Tandem passes `--effort` at spawn, and an effort picked in the footer of a live session goes as
+`{"subtype":"apply_flag_settings","settings":{"effortLevel":<level>}}` (fixture `effort-switch`, CLI 2.1.306: a turn, the
+`high` request answered by a success with no `response` field, `:18`, then a second turn). Both of the fixture's turns ran at
+`high`, the model's default in that recording (the transcript's `assistant` lines, `transcripts/effort-switch.jsonl:20` and `:29`,
+both have `"effort":"high"`), so the fixture records the request and the shapes of its answers, not a change of level; that the
+next turn runs at the new level rests on the 2.1.301 probe above (`medium`, then `high`). The footer shows the picked level at once; an `error` answer puts the level shown before it back, with the
+notice `Effort not changed: <error>` quoting the CLI's `error`. CLI 2.1.306 takes any `effortLevel` over stdio without
+checking it (`"bogus"` too, and with `CLAUDE_CODE_EFFORT_LEVEL` set), so the one refusal the fixture records is a request whose
+`settings` is not an object: `` {"subtype":"error","error":"apply_flag_settings requires `settings` to be an object, got string"} ``
+(`:19`). A picked effort on a stopped session is passed with `--effort` at the next spawn.
+
+Thinking display on a live session (fixture `think-summarized`, 2.1.302; section 6.3):
+`{"subtype":"set_max_thinking_tokens","thinking_display":"summarized"}` sent after `initialize` gets a bare success
+(`:25`), and the next turn's `message_start` says `summarized` and streams the summary text (`:30`, `:33-59`, block
+`:62`); the turn already running is unchanged. `"highlights"` (`:74`; next `message_start` says `highlights`, `:79`),
+`"omitted"` (`:100`) and `null` (`:118`) succeed too, but `omitted` and `null` both read back as `updates` on the next
+`message_start` (`:105`, `:123`), so a host cannot tell from the stream that it asked for `omitted`. `"full"` is
+rejected: `{"subtype":"error","error":"set_max_thinking_tokens: max_thinking_tokens must be an integer or null and
+thinking_display must be \"summarized\", \"omitted\", \"highlights\", or null"}` (`:73`). Not measured:
+`max_thinking_tokens` together with `thinking_display`.
 
 From the 2.1.301 binary's strings, not measured: a `CLAUDE_CODE_EFFORT_LEVEL` environment variable overrides the
 session's effort, and `apply_flag_settings` then refuses an effort change ("apply_flag_settings: CLAUDE_CODE_EFFORT_LEVEL
-overrides effort for this session"); a `maxEffort` setting or an organization's cap also clamps `--effort`. The variable
-passes through `cliEnvironment` (1.2), so the effort badge, which shows what Tandem passed, can disagree with the level
-the CLI runs at. The transcript's `assistant` lines should show the real level (their `effort` followed
-`apply_flag_settings` in the probe above). The effort picker has to handle both cases.
+overrides effort for this session"); a `maxEffort` setting or an organization's cap also clamps `--effort`. Measured with
+2.1.306: over stdio the request succeeds with the variable set (the refusal and an "unrecognized effortLevel" error sit in the
+2.1.306 binary's Remote Control path, `bridge_flag_settings`). The variable passes through `cliEnvironment` (1.2), so
+the footer's effort, which shows what Tandem passed or picked, can disagree with the level the CLI runs at. The
+transcript's `assistant` lines should show the real level (their `effort` followed `apply_flag_settings` in the probe
+above); reading it from there is left for later.
 
 ### 4.5 Other CLI → host requests
 
@@ -456,7 +533,7 @@ disk is the last `assistant` line's `effort` in its transcript (section 11).
 
 | subtype | Fields | Tandem action |
 |---|---|---|
-| `status` | `status: "requesting"\|"compacting"\|null`, `permissionMode?`, `compact_result?: "success"\|"failed"`, `compact_error?` | spinner |
+| `status` | `status: "requesting"\|"compacting"\|null`, `permissionMode?`, `compact_result?: "success"\|"failed"`, `compact_error?`. `{status:null, permissionMode}` also after an allowed `ExitPlanMode`, before its tool result (`plan-approve.ndjson:90`; section 4.3) | spinner |
 | `compact_boundary` | `compact_metadata{trigger:"manual"\|"auto", pre_tokens, post_tokens?, duration_ms?, preserved_segment?, preserved_messages?}` | divider in chat |
 | `api_retry` | `attempt, max_retries, retry_delay_ms, error_status: number\|null, error: SDKAssistantMessageError, no_response?{waited_ms,retry_wait_ms}` | **show** "retrying (2/10) in 4s" |
 | `model_refusal_fallback` | see 5.3 | **show** |
@@ -464,12 +541,27 @@ disk is the last `assistant` line's `effort` in its transcript (section 11).
 | `permission_denied` | `tool_name, tool_use_id, agent_id?, decision_reason_type?, decision_reason?` | show denial |
 | `notification` | `key, text, priority:"low"\|"medium"\|"high"\|"immediate", color?, timeout_ms?` | IDE notification/inline |
 | `informational` | `content, level:"info"\|"notice"\|"suggestion"\|"warning", tool_use_id?, prevent_continuation?` | inline note |
-| `session_state_changed` | `state:"idle"\|"running"\|"requires_action"` | `idle` is the authoritative turn-over signal |
+| `session_state_changed` | `state:"idle"\|"running"\|"requires_action"`, `sdk_host_only?: true`. Only with `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1` (`misc-state-emit.ndjson:3,18`) or `CLAUDE_CODE_SDK_READS_SESSION_STATE=1`, which adds `sdk_host_only:true` (`misc-state-sdk.ndjson:3`); with neither, never (`misc-state-none`, 2.1.302). `running` before `system/init`; `requires_action` right before each `can_use_tool` and `running` right after the answer (`misc-state-action.ndjson:20,21,24`); `idle` after `result` and `command_lifecycle completed`, as the turn's last line | `idle` is the authoritative turn-over signal |
 | `local_command_output` | output of local slash commands | render as assistant text |
 | `hook_started/progress/response` | hook lifecycle | ignore (or debug) |
-| `task_started/progress/updated/notification`, `background_tasks_changed` | subagent/background tasks | task list |
+| `task_started` | `task_id, run_id, tool_use_id, description, is_backgrounded, task_type:"local_agent"\|"local_bash"`; a subagent adds `subagent_type, spawn_depth, prompt` (`agent-sync.ndjson:37`, 2.1.302). `task_id` is the `agent_id` of every subagent line and `tool_use_result.agentId`; `tool_use_id` is the `Agent` block's id (the block is named `Agent` while `init.tools` lists `Task`, `agent-sync.ndjson:35,6`). A plain foreground `Bash` is a task too: `task_type:"local_bash"`, `description` = the call's description, no `subagent_type` (`agent-bash-task.ndjson:21`, a 6 s command), so key subagent handling on `task_type` or `subagent_type` | task list |
+| `task_progress` | `task_id, run_id, tool_use_id, description:"Running <command>", subagent_type, usage{total_tokens, tool_uses, duration_ms}, last_tool_name`; once per subagent tool call, before that call's `assistant` line (`agent-sync.ndjson:41`); none for a Bash task | task list |
+| `task_updated` | `task_id, run_id, patch{status, end_time}`; no `tool_use_id`, correlate by `task_id` (`agent-sync.ndjson:48`) | task list |
+| `task_notification` | `task_id, run_id, tool_use_id, status:"completed", output_file, summary, usage` (`agent-sync.ndjson:49`; `summary` is the subagent's final text, which is not streamed as an `assistant` line unless `initialize` had `forwardSubagentText:true`, `agent-forwarded.ndjson:38`). A Bash task gets one too, with `output_file:""`, `summary` = its description and no `usage` (`agent-bash-task.ndjson:22`) | task list |
+| `background_tasks_changed` | background tasks; not recorded | task list |
+| `thinking_tokens` | `estimated_tokens, estimated_tokens_delta, user_message_uuid` (`think-default.ndjson:11`): a running estimate while a thinking block streams, interleaved with its `thinking_delta` frames in the `updates` and `summarized` displays, none in `highlights` (section 6.3). It overshoots the final `message_delta.usage.output_tokens_details.thinking_tokens` | token counter |
+| `ui_invalidate` | `event:"ui.render"`; usually the first line of a signed-in run, before `init` (26 of the 29 probe recordings, e.g. `tools-bash.ndjson:1`; section 10). Absent from `think-default`, `think-adaptive` and `think-opus` (2.1.302), which start with the `initialize` response, so key nothing on it | ignore |
 | `commands_changed` | `commands` | refresh palette |
-| `thinking_tokens`, `files_persisted`, `memory_recall`, `elicitation_complete`, `control_request_progress`, `plugin_install`, `mirror_error`, `worker_shutting_down` | | ignore or log type |
+| `files_persisted`, `memory_recall`, `elicitation_complete`, `control_request_progress`, `plugin_install`, `mirror_error`, `worker_shutting_down` | | ignore or log type |
+
+Tandem decodes `thinking_tokens` (`ThinkingTokens{estimatedTokens, estimatedTokensDelta?, userMessageUuid?}`; a line
+without an integer `estimated_tokens` stays unknown), `task_started` (`TaskStarted{taskId, toolUseId?, description?,
+subagentType?, taskType?, isBackgrounded}`), `task_progress` (`TaskProgress{taskId, toolUseId?, description?,
+usage{totalTokens?, toolUses?, durationMs?}?, lastToolName?}`), `task_updated` (`TaskUpdated{taskId, status?}`, the
+status read from `patch.status`) and `task_notification` (`TaskNotification{taskId, toolUseId?, status?, summary?,
+usage?}`) as typed lines; every field but `task_id` is optional and a mistyped one reads as absent. The thinking row
+counts tokens from `thinking_tokens`; the `Agent` row's sub-line is `N tool uses · T tokens · D` from the latest
+`task_progress` while the task runs, and the working row names a running subagent's step from its `description`.
 
 `SDKAssistantMessageError` = `authentication_failed | oauth_org_not_allowed | account_on_hold | verification_required | billing_error | rate_limit | overloaded | invalid_request | model_not_found | server_error | unknown | max_output_tokens | cloud_credential_error`.
 
@@ -525,15 +617,56 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
 - `parent_tool_use_id` non-null = produced inside a subagent started by that `tool_use`.
 - `supersedes?: uuid[]`: uuids of earlier messages this one replaces (refusal-fallback retry). Evict them on arrival; idempotent with `model_refusal_fallback.retracted_message_uuids`.
 - `aborted?: true`: truncated by an interrupt; `stop_reason` never arrived and the text may end mid-word.
+- 2.1.302 additions: `thinking_duration_ms` and `thinking_display` on the line that completes a thinking block
+  (section 6.3); `caller:{type:"direct"}` on every `tool_use` block (`ask-single.ndjson:21`); `wire_tool_inputs`
+  (section 10); on subagent lines `agent_id`, `subagent_type` and `task_description` beside `parent_tool_use_id`
+  (section 6.2).
+- Tandem reads `thinking_duration_ms` (the thinking row's `Thought for Ns`), `thinking_display`, `agent_id`,
+  `subagent_type`, `task_description` and `timestamp` (ISO-8601, as epoch milliseconds) on `assistant` lines, and
+  `agent_id`, `subagent_type`, `task_description` and `timestamp` on `user` lines (6.2). On disk the names are
+  `thinkingDurationMs`, `thinkingDisplay` and `timestamp` (section 11); `agentId`, `subagentType` and `taskDescription`
+  are read as fallbacks too, though the main `<id>.jsonl` carries `agentId` only inside `toolUseResult`
+  (`agent-sync.jsonl`, `agent-forwarded.jsonl`).
 
 ### 6.2 `user` (tool results)
 
 ```json
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01...","content":"...","is_error":false}]},
- "parent_tool_use_id":null,"tool_use_result":{...},"session_id":"<sid>","uuid":"<uuid>"}
+ "parent_tool_use_id":null,"session_id":"<sid>","uuid":"<uuid>","timestamp":"2026-10-18T20:07:10.236Z",
+ "tool_use_result":{...},"tool_result_meta":[{"id":"toolu_01...","permission_decision":{"decision":"accept","source":"user_temporary"}}]}
 ```
 
-- `tool_use_result` is the tool's structured output (per-tool shape, unknown-typed).
+- `tool_use_result` is the tool's structured output: a JSON object on success, per-tool shape, and on any failure the
+  **string** `"Error: " + content` (`tools-bash.ndjson:39`, `tools-read-unavailable.ndjson:49`, `ask-deny.ndjson:24`,
+  `plan-deny.ndjson:81`, 2.1.302), so decode it as a `JsonElement`. Absent on a subagent's successful tool results
+  (`agent-sync.ndjson:47`).
+- `is_error` is absent on most successes (Read, Glob, Grep, Edit, Write, Agent, ToolSearch, AskUserQuestion:
+  `tools-read.ndjson:21`), `false` on a Bash success (`tools-bash.ndjson:23`), `true` on errors (`:39`). `content` is a
+  string, or a block array: `image` for a Read of an image (`misc-image.ndjson:26`), `tool_reference` for `ToolSearch`
+  (`misc-web.ndjson:17`), `text` for `Agent` (`agent-sync.ndjson:50`).
+- `tool_result_meta`: `[{id: <tool_use id>, permission_decision:{decision:"accept"|"reject", source, reason_type?},
+  non_execution_kind?}]`. Recorded: `source:"config"` with `reason_type:"mode"` for a mode auto-accept
+  (`tools-read.ndjson:21`), `"subcommandResults"` for read-only Bash (`agent-sync.ndjson:47`), `"other"` for the plan
+  file's Write in plan mode (`plan-approve.ndjson:73`), and no `reason_type` for ToolSearch and Agent;
+  `source:"user_temporary"` after a host allow (`tools-bash.ndjson:23`); `{decision:"reject", source:"user_reject"}`
+  with `non_execution_kind:"permission-rule"` after a host deny (`ask-deny.ndjson:24`). Missing on an unknown-tool
+  error (`tools-read-unavailable.ndjson:49`).
+- Subagent lines, `user` and `assistant`, carry `parent_tool_use_id` (the `Agent` block's id), `agent_id` (the task's
+  `task_id`, section 5.2), `subagent_type` and `task_description` (`agent-sync.ndjson:38,47`); the first is a `user`
+  text line echoing the subagent's prompt (`:38`). No `stream_event` frames come from a subagent.
+- Per-tool `tool_use_result` on success (2.1.302), the shapes Tandem renders; the full table, with inputs and the
+  `tool_result.content` texts, is section 2.4 of `docs/superpowers/research/2026-10-18-protocol-probes.md`:
+
+| Tool | `tool_use_result` | Fixture |
+|---|---|---|
+| Read | `{type:"text", file:{filePath, content, numLines, startLine, totalLines}}`; an image: `{type:"image", file:{base64, type, originalSize, dimensions{originalWidth, originalHeight, displayWidth, displayHeight}}}` | `tools-read.ndjson:21`, `misc-image.ndjson:26` |
+| Edit | `{filePath, oldString, newString, originalFile, structuredPatch[{oldStart, oldLines, newStart, newLines, lines}], userModified, replaceAll}` | `tools-edit.ndjson:44` |
+| Write | `{type:"create"\|"update", filePath, content, structuredPatch, originalFile, userModified}` | `tools-edit.ndjson:61`, `plan-deny.ndjson:141` |
+| Bash | `{stdout, stderr:"", interrupted, isImage, noOutputExpected}`: stderr is merged into `stdout`, no exit code; a failure is the string `"Error: Exit code 3\n..."` | `tools-bash.ndjson:23,39` |
+| Agent | `{status, prompt, agentId, agentType, content[{type:"text", text}], totalDurationMs, totalTokens, totalToolUseCount, usage, toolStats, canContinueAgent}`; render `content[].text`, not the hand-back frame in `tool_result.content` | `agent-sync.ndjson:50` |
+| AskUserQuestion | `{questions, answers, response?}` (section 4.3) | `ask-single.ndjson:26` |
+| ExitPlanMode | `{plan, isAgent, filePath}`; `plan:null` when `Write` was disallowed | `plan-approve.ndjson:91`, `plan-disallowed.ndjson:178` |
+
 - `isSynthetic: true` for CLI-generated user messages; `isReplay: true` for echoes of our own sends (with `--replay-user-messages`).
 
 ### 6.3 `stream_event` (with `--include-partial-messages`)
@@ -550,7 +683,24 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
 | `api_message_id` | fixture-only field: the API message id; matches `message_start.message.id` and `assistant.message.id` in real runs (inferred; redacted in the fixture) |
 | `ttft_ms` | on `message_start` |
 | `user_message_uuid(s)` | on the turn's first non-ping event: which client send this turn answers |
-| `thinking_display` | on `message_start` in the fixture; the SDK types it only on `set_max_thinking_tokens` |
+| `estimated_tokens` | on `thinking_delta` frames, beside `thinking`: an integer on the first deltas of an `updates` block, `null` on its last one and on every `summarized` delta (below) |
+| `message_start.message.usage` | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`; Tandem decodes the sum of the three input counts (`plain-reply.ndjson:7`) |
+| `message_delta.usage` | the request's `output_tokens` and `output_tokens_details.thinking_tokens` (`plain-reply.ndjson:12`); Tandem decodes both, and the working row's ` · N tokens` adds up each request's `output_tokens` (plus the running `thinking_tokens` estimate until the request's `message_delta`) |
+| `thinking_display` | wrapper-level `"updates"\|"summarized"\|"highlights"` on `message_start`, the block's `content_block_start` and every `thinking_delta` frame (`think-default.ndjson:7,8,10`; `think-display-summarized.ndjson:8,11`), not on `signature_delta` or `content_block_stop` (`think-default.ndjson:15,17`; `think-display-highlights.ndjson:11`), so no decoder keys block membership on its presence; and on the `assistant` line that completes the block, with `thinking_duration_ms` (`think-default.ndjson:16`: 2143 ms). The SDK types it only on `set_max_thinking_tokens`; `"full"` never appears over stdio (section 4.4) |
+
+Thinking blocks (2.1.302, fixtures `think-*`; probes doc 2.3). In the default display, `updates`
+(without `--thinking-display`; Opus the same, `think-opus`), every `thinking_delta` has `thinking:""` and a non-standard sibling `estimated_tokens`, an
+integer on the first deltas and `null` on the last one before `signature_delta` (`think-default.ndjson:10,12,13`); the
+completed block is `{type:"thinking", thinking:"", signature}` (`:16`), and the thinking shows only as
+`system/thinking_tokens` lines (section 5.2) and `message_delta.usage.output_tokens_details.thinking_tokens`. With
+`summarized` (`--thinking-display summarized`, section 1.1, or `set_max_thinking_tokens`, section 4.4)
+`thinking_delta.thinking` is a text chunk and `estimated_tokens` is `null` (`think-display-summarized.ndjson:11`), each
+chunk preceded by a `thinking_tokens` line (`:10`), and the completed block holds the whole summary (`:34`). Tandem
+always passes `--thinking-display summarized` (section 1.1). With `highlights` the block streams one empty delta and no
+`thinking_tokens` line (`think-display-highlights.ndjson:10`). So
+render a thinking block by appending `thinking_delta.thinking` and replacing it with the completed block; an empty
+string with a signature is normal, not a parse error. The transcript on disk keeps what was streamed (section 11), so a
+session recorded in `updates` has no summaries to load.
 
 ### 6.4 Correlating partial and complete messages
 
@@ -576,6 +726,10 @@ Reconciliation rules for `session/`:
 5. If partials are missing (no flag, or retries), the `assistant` line alone is sufficient.
 6. Subagent traffic interleaves; always key by `parent_tool_use_id` too.
 7. On `model_refusal_fallback`, drop `retracted_message_uuids` (these are `assistant`/`user` `uuid`s, not stream-frame uuids).
+8. A `control_request` can arrive before the block's `content_block_stop`, and a `user` tool result before the parent
+   message's `message_delta`/`message_stop` (`ask-single.ndjson:21-23`, `ask-deny.ndjson:24,25`; section 4.3);
+   `task_started` and the subagent's first line also arrive before the `Agent` call's message closes
+   (`agent-sync.ndjson:35-40`). Never make a tool's card wait for the message to close.
 
 ---
 
@@ -589,6 +743,8 @@ Exactly one per turn, after that turn's `assistant`/`user`/`stream_event` lines;
  "permission_denials":[],"terminal_reason":"completed","session_id":"<sid>","uuid":"<uuid>","result_index":0,"queued_turn_count":0}
 ```
 
+`modelUsage[<model>].contextWindow` is the context ring's window (`Result.contextWindows`, `misc-image.ndjson:66`: 1000000): the active model's, else the largest listed; a `result` without any keeps the ring as it was. The ring's tokens are the last main-thread `message_start` input sum (section 6.3).
+
 | subtype | Meaning |
 |---|---|
 | `success` | normal end; `is_error:true` possible (then `result` holds error text) |
@@ -601,6 +757,9 @@ Common fields: `duration_ms`, `duration_api_ms`, `is_error`, `num_turns`, `stop_
 Success only: `result`, `ttft_ms`, `ttft_stream_ms`, `time_to_request_ms`, `structured_output?`.
 Error only: `errors: string[]`, `startup_failure_reason?`.
 The fixture also has `api_error_status`, `subagent_stats`, `safety_stops`, `turn_start_resume_kind`, many `process_*` timing fields: ignore.
+Tandem reads `duration_ms` (the footer's `Worked for <duration>`), `duration_api_ms`, `num_turns`, `usage.output_tokens`
+and `permission_denials` (`PermissionDenial{toolName, toolUseId?}`; an entry without a string `tool_name` is skipped):
+each optional, a mistyped one absent.
 
 API error (fixture `invalid-model`, 2.1.302, run with `--model claude-nonexistent-0`): no stream frames; the CLI writes an
 `assistant` line itself, `message.model:"<synthetic>"`, with `error:"model_not_found"`, `is_api_error_message:true`,
@@ -623,8 +782,8 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 | Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, and no `system/init` reports it before the fork's first prompt (only undocumented lines do, section 1.1) |
 | Resume at a point | `--resume <id> --resume-session-at <message uuid>` (not used) |
 | Switch model mid-session | `control_request{set_model, model}`; next turn's `system/init.model` must equal it. `--model` on resume also works |
-| Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`). Tandem shows the new mode at once; an `error` response to that request (envelope 4.1; fixture `permission-mode-rejected`, 2.1.302: `bypassPermissions` to a process not launched with `--dangerously-skip-permissions` gets `{"subtype":"error","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions","error_code":"bypass_not_launched"}`, and the session goes on) puts back the mode shown before it, unless a later pick replaced it, with an error notice naming the rejected mode |
-| Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4); Tandem picks effort only when a session is created |
+| Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`). Tandem shows the new mode at once; an `error` response to that request (envelope 4.1; fixture `permission-mode-rejected`, 2.1.302: `bypassPermissions` to a process not launched with `--dangerously-skip-permissions` gets `{"subtype":"error","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions","error_code":"bypass_not_launched"}`, and the session goes on) puts back the mode shown before it, unless a later pick replaced it, with an error notice naming the rejected mode. `auto` (fixture `permission-mode-auto`, 2.1.306): `set_permission_mode auto` is acknowledged with `{"mode":"auto"}` and a `system/status` line in `auto`, and the next `init` reports `auto`; a process spawned with `--permission-mode auto` reports `auto` in its first `init` too (a probe, not committed), so Tandem offers `auto` and a respawn keeps it |
+| Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4; fixture `effort-switch` for the request, its success and its error shape): the next turn runs at the new level (the 2.1.301 probe of section 4.4; both of the fixture's turns ran at its default, `high`). Tandem sends it for an effort picked in the footer of a live session and shows the level at once; an `error` answer puts back the level shown before it, with the notice `Effort not changed: <error>`. A stopped session passes the pick with `--effort` at its next spawn |
 | Rename | a live process that has reported its first `system/init`: `control_request{rename_session}` (section 4.4); otherwise append a `custom-title` line (section 11.5) if the transcript exists. A live process that has not reported it yet also gets `rename_session` with that init, and so does the next process of a session renamed without a transcript or while an earlier title still waited for an init; only the last title is sent |
 | Delete | remove `<id>.jsonl` and `<id>/` (section 11.5) |
 | Rewind files | `rewind_files{user_message_id}` (needs `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` at spawn) |
@@ -698,7 +857,7 @@ Parse them leniently; any of them can change without notice.
 | `system/task_summary` | `{detail: string\|null}` | not in `sdk.d.ts`; short status line while a tool runs, `null` when done |
 | `system/session_title_changed` | `{title}` | not in `sdk.d.ts`. Just before the success of a `rename_session` (section 4.4); a fork of a renamed session also emits it, before its `initialize` response (fixture `fork`, 2.1.301) |
 | `assistant.wire_tool_inputs` | `{<tool_use id>: input}` | not in `sdk.d.ts` |
-| `user.tool_result_meta` | `[{id, permission_decision:{decision, source}, non_execution_kind?}]` | not in `sdk.d.ts` |
+| `user.tool_result_meta` | `[{id, permission_decision:{decision, source, reason_type?}, non_execution_kind?}]` | not in `sdk.d.ts`; typed, section 6.2 (`ToolResultMeta`; an entry without a string `id` is skipped; `reason_type`: `tools-read.ndjson:21`, 2.1.302) |
 | initialize `control_response` | `pid, current_permission_mode, session_state, feedback_mode, remote_control_*, user_output_styles_dir` | beyond `SDKControlInitializeResponse` |
 
 ---
@@ -750,7 +909,7 @@ have `uuid` and `parentUuid` (11.3).
 
 | `type` | Fields Tandem reads | Use |
 |---|---|---|
-| `user` | `uuid`, `parentUuid`, `isSidechain`, `isMeta`, `isCompactSummary`, `permissionMode`, `message.content` | prompts (a string or text blocks) and tool results (`tool_result` blocks); the last `permissionMode` is the session's mode |
+| `user` | `uuid`, `parentUuid`, `isSidechain`, `isMeta`, `isCompactSummary`, `permissionMode`, `message.content` | prompts (a string, or text and base64 `image` blocks) and tool results (`tool_result` blocks); the last `permissionMode` is the session's mode |
 | `assistant` | `uuid`, `parentUuid`, `isSidechain`, `effort`, `message.id`, `message.model`, `message.content` | one line per content block, sharing `message.id`, as on stdout (6.1); the last model and effort |
 | `custom-title` | `customTitle` | the title the user or `rename_session` set |
 | `ai-title` | `aiTitle` | a generated title |
@@ -791,9 +950,9 @@ fixture has a rewind, a compaction or parallel tool calls yet; `TranscriptReader
 ### 11.4 What Tandem shows
 
 - Title, the first that applies: the last `custom-title`; the last `ai-title` or `summary`, whichever comes last; the
-  first prompt of the current history, slash commands aside, as its first line trimmed and cut to 80 characters; the
-  session id. A blank title does not count. The SDK's `listSessions` (0.3.300) differs: it joins the prompt's lines,
-  cuts at 200 characters and prefers `aiTitle` over `summary`.
+  first prompt of the current history, slash commands aside, as its first line trimmed and cut to 80 characters (a prompt
+  of images only: `[Image #1]`); the session id. A blank title does not count. The SDK's `listSessions` (0.3.300)
+  differs: it joins the prompt's lines, cuts at 200 characters and prefers `aiTitle` over `summary`.
 - Model: `message.model` of the last `assistant` line, except models that start with `<`, such as `<synthetic>` on the
   lines the CLI writes itself for API errors. Effort: the last `effort` present. Permission mode: the last `user` line's
   `permissionMode` that names a known mode; compact summaries do not count. All three from the current history only.
@@ -802,7 +961,7 @@ fixture has a rewind, a compaction or parallel tool calls yet; `TranscriptReader
 
 | Text starts with | Written for | Tandem shows |
 |---|---|---|
-| `[Request interrupted` (`by user`, `by user for tool use`) | an interrupt | the "Stopped." notice, as live |
+| `[Request interrupted` (`by user`, `by user for tool use`) | an interrupt | the interrupt notice, shown as `Interrupted · What should Claude do instead?`, as live |
 | `<command-name>` or `<command-message>`, with `<command-args>` | a slash command | `/name args`, never as the title |
 | `<local-command-stdout>`, `<local-command-stderr>` | a command's output | nothing |
 | `<bash-input>` | a `!command` shell escape | `!command` |
@@ -815,6 +974,27 @@ the shape the hand-written test uses. The others come from the CLI's binary and 
 lines in `TranscriptReaderTest`.
 
 A loaded chat is settled whatever the file ends with: not busy, no pending permission, no streaming entry.
+
+The reader feeds the reducer the same events as the live stream, each stamped with its line's `timestamp`, and the
+decoder reads the on-disk names (`toolUseResult`, `thinkingDurationMs`, `agentId`, `permissionDecision` +
+`toolDenialKind`), so a reloaded session builds the same rows, with these differences:
+
+| Row element | Live source | On disk (`fixtures/transcripts/*.jsonl`) | On reload |
+|---|---|---|---|
+| tool bodies, stats | `tool_use_result` | `toolUseResult` (`tools-edit.jsonl` has `structuredPatch`) | identical bodies |
+| `DONE` / `FAILED` / `DENIED` | `tool_result_meta` / `is_error` | `permissionDecision` + `toolDenialKind` (`ask-deny.jsonl:20`), `is_error` in the block | identical states |
+| thinking summary, duration | deltas, `thinking_duration_ms` | the block text as recorded, `thinkingDurationMs` (`think-default.jsonl`: 2143) | `Thought for 2s`; the summary only if the session ran summarized (`think-display-summarized.jsonl:18`) |
+| thinking tokens | `system/thinking_tokens` | not on disk | no ` · n tokens` (the row is complete anyway) |
+| `Worked for …` footer | `result` | no `result` lines | no footer; `Interrupted · …` from the marker notice only |
+| working row | `turn` | settled state | none; every call without a result is `INTERRUPTED` |
+| subagent children | sidechain lines with `parent_tool_use_id` | not in `<id>.jsonl` (they live in `<id>/subagents/agent-*.jsonl`, not read) | `Agent` row with `Done (…)` from `toolUseResult.totalToolUseCount/totalTokens/totalDurationMs` (`agent-sync.jsonl`) and no children; its body is the agent's final text |
+| user send time, elapsed | `sentAtMillis` | `timestamp` on the user line | unused on a settled state |
+| notices (retries, fallbacks) | `system/*` lines | not on disk | absent |
+| `cwd` for relative names | `system/init.cwd` | every line's `cwd` | identical names |
+
+`cwd`: the first line's `cwd` (the first line of the current history that has one), so relative file names match the
+live session. A transcript whose lines have no `timestamp` and no `cwd` (an older CLI) still loads, with no `cwd` and the
+same entries.
 
 ### 11.5 What Tandem writes
 

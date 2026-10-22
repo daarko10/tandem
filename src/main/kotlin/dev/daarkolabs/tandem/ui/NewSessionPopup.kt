@@ -27,20 +27,21 @@ import org.jetbrains.jewel.ui.component.Text
 /** The effort picker's first entry: the CLI's default effort, picked by passing none. */
 private const val DEFAULT_EFFORT_LABEL: String = "Default effort"
 
-/** The efforts the popup offers after the default, as `--effort` takes them. */
-private val EFFORT_LEVELS: List<String> = listOf("low", "medium", "high", "max")
+/** The efforts the popup offers after the default, as `--effort` takes them; the footer's effort page lists them too until the CLI lists its models. */
+internal val EFFORT_LEVELS: List<String> = listOf("low", "medium", "high", "max")
 
 /**
- * What [NewSessionPopup] offers and where its picks go: [models] lists the models the CLI offers, as an open session was told them
- * or, until one is, as a session was told them last ([TandemWorkspaceState.knownModels]), and [workspace] holds the project's last
- * picks, which prefill the popup and which "Create" replaces.
+ * What [NewSessionPopup] offers and where its picks go: [models] lists the models the CLI offers, as the last process to answer
+ * `initialize` listed them ([dev.daarkolabs.tandem.session.SessionManager.models]) or, before the manager is seeded at startup, as
+ * the workspace remembers them ([TandemWorkspaceState.knownModels]); [workspace] holds the project's last picks, which prefill the
+ * popup and which "Create" replaces.
  */
 internal class NewSessionChoices(val workspace: TandemWorkspaceState, val models: () -> List<ModelOption>)
 
 /**
  * The popup that starts a new session, below the button that opened it: a model picker ("Default model", then the models the CLI
- * offers, from [choices]), an effort picker ("Default effort", low, medium, high, max) and a permission mode picker (Default, Accept
- * edits, Plan), prefilled with the project's last picks, and "Create", focused.
+ * offers, from [choices]), an effort picker ("Default effort", low, medium, high, max) and a permission mode picker ("Default mode",
+ * Auto, Manual, Accept edits, Plan), prefilled with the project's last picks, and "Create", focused.
  *
  * "Create" starts a session with what the pickers show ([onCreate]): no model, effort or permission mode for the defaults, so that
  * the CLI picks them, and these picks become the project's last ones. Escape or a click outside closes the popup ([onDismiss]) and
@@ -54,9 +55,9 @@ internal fun NewSessionPopup(choices: NewSessionChoices, onCreate: (NewSessionOp
         var picks by remember { mutableStateOf(lastPicks(last.lastModel, last.lastEffort, last.lastPermissionMode)) }
         val focus = remember { FocusRequester() }
         Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            ModelPicker(models, picks.model, active = null) { model -> picks = picks.copy(model = model) }
+            ModelPicker(models, picks.model) { model -> picks = picks.copy(model = model) }
             EffortPicker(picks.effort) { effort -> picks = picks.copy(effort = effort) }
-            PermissionModePicker(picks.permissionMode) { mode -> picks = picks.copy(permissionMode = newSessionMode(mode)) }
+            PermissionModePicker(picks.permissionMode) { mode -> picks = picks.copy(permissionMode = mode) }
             DefaultButton(
                 onClick = {
                     last.lastModel = picks.model
@@ -109,16 +110,9 @@ internal fun effortEntries(effort: String?): List<PickerEntry<String?>> =
     (listOf(PickerEntry<String?>(DEFAULT_EFFORT_LABEL, null)) + EFFORT_LEVELS.map { PickerEntry(it, it) }).withEntryFor(effort) { it }
 
 /**
- * The permission mode a new session gets for [mode] picked in the popup: none for Default, so that the CLI starts in the mode its
- * own settings give it, which Default stands for here.
- */
-internal fun newSessionMode(mode: PermissionMode?): PermissionMode? = mode?.takeUnless { it == PermissionMode.DEFAULT }
-
-/**
  * The picks the popup starts with: the project's last ones, as the workspace state stores them (the permission mode by its wire
- * name). A permission mode the popup does not offer, or a name it does not know, is none, as Default is ([newSessionMode]).
+ * name). A permission mode the popup does not offer, or a name it does not know, is none ("Default mode": no flag); `default` is
+ * Manual, passed as `--permission-mode default`.
  */
-internal fun lastPicks(model: String?, effort: String?, permissionMode: String?): NewSessionOptions {
-    val mode = PermissionMode.fromWire(permissionMode)?.takeIf { it in OFFERED_MODES }
-    return NewSessionOptions(model, effort, newSessionMode(mode))
-}
+internal fun lastPicks(model: String?, effort: String?, permissionMode: String?): NewSessionOptions =
+    NewSessionOptions(model, effort, PermissionMode.fromWire(permissionMode)?.takeIf { it in OFFERED_MODES })

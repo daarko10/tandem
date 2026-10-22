@@ -1,6 +1,5 @@
 package dev.daarkolabs.tandem.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,7 +18,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -33,11 +31,13 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.chat.ComposerModel
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionHandle
+import kotlinx.coroutines.flow.StateFlow
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Icon
+import org.jetbrains.jewel.ui.component.InlineWarningBanner
 import org.jetbrains.jewel.ui.component.IconButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
@@ -45,7 +45,8 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
 
 /**
  * The top of the chat: the button that shows or hides the session sidebar, a "+" that starts a new session (the same popup as the
- * sidebar's "New session", offering [newSession]), the selected session's title and its status line.
+ * sidebar's "New session", offering [newSession]), the selected session's title and its status line, read from the session's
+ * [composer] model so that a streamed delta never recomposes the header.
  *
  * A double-click on the title, or [renaming] (the sidebar menu's Rename), swaps the title for a text field that starts with all of
  * it selected: Enter renames the session to what it holds ([onRename]) unless that is blank, Escape leaves it as it was. Either
@@ -57,6 +58,7 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
 @Composable
 internal fun SessionHeader(
     handle: SessionHandle?,
+    composer: StateFlow<ComposerModel>?,
     sidebarShown: Boolean,
     onToggleSidebar: () -> Unit,
     newSession: NewSessionChoices,
@@ -104,9 +106,9 @@ internal fun SessionHeader(
                 }
             }
         }
-        if (handle != null) {
-            val state by handle.state.collectAsState()
-            StatusLine(state)
+        if (composer != null) {
+            val model by composer.collectAsState()
+            StatusLine(model)
         }
     }
 }
@@ -159,25 +161,15 @@ private fun TitleField(title: String, onConfirm: (String) -> Unit, onCancel: () 
 }
 
 /**
- * What the session runs: the model the CLI reports (else the one picked, else its default), the permission mode, the CLI's version
- * and whether a turn is in progress. Above it, while the CLI does not run the model that was picked, a warning saying so.
+ * The CLI's version, `claude <version>` (spec 4.1): the pickers below the prompt show the model and the permission mode, and the
+ * chat's working row whether a turn is in progress. Above it, while the CLI does not run the model that was picked, a warning
+ * saying so.
  */
 @Composable
-private fun StatusLine(state: ChatState) {
-    val warning = state.modelWarning
-    if (warning != null) {
-        Text(
-            "⚠ $warning",
-            color = Color.White,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.fillMaxWidth().background(Color(0xFFB3261E)).padding(horizontal = 12.dp, vertical = 6.dp),
-        )
+private fun StatusLine(model: ComposerModel) {
+    // The theme's warning banner (spec 4.2: theme tokens only, no literal colours).
+    model.modelWarning?.let { InlineWarningBanner(text = it, modifier = Modifier.fillMaxWidth()) }
+    model.claudeCodeVersion?.let { version ->
+        Text("claude $version", color = JewelTheme.globalColors.text.info, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
     }
-    val parts = listOfNotNull(
-        state.activeModel ?: state.requestedModel ?: "default model",
-        state.permissionMode?.wire?.let { "mode: $it" },
-        state.claudeCodeVersion?.let { "claude $it" },
-        if (state.busy) "working…" else null,
-    )
-    Text(parts.joinToString("  ·  "), color = JewelTheme.globalColors.text.info, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
 }

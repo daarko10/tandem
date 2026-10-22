@@ -27,6 +27,15 @@ class TandemSettings : SimplePersistentStateComponent<TandemSettings.State>(Tand
 
         /** At most this many sessions run a process at once. Read it with [maxLiveSessions], which keeps it in range. */
         var maxLiveSessions: Int by property(4)
+
+        /** Whether the chat shows a row for each thinking block (spec 4.5); open chats take it on [TandemSessions.settingsChanged]. */
+        var showThinking: Boolean by property(true)
+
+        /**
+         * Whether the chat's working spark stands still (spec 4.9); open chats take it on [TandemSessions.settingsChanged]. Tandem's
+         * own: the IDE has no reduce-motion setting (`UISettings.animateWindows` is the tool windows' slide, off by default).
+         */
+        var reduceMotion: Boolean by property(false)
     }
 
     /**

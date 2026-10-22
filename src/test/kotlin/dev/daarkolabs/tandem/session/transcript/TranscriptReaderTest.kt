@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session.transcript
 
+import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
@@ -8,12 +9,19 @@ import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.PendingPermission
 import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
@@ -21,10 +29,12 @@ import java.io.IOException
 import java.io.StringReader
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
+import java.time.Instant
 import java.util.BitSet
 import kotlin.io.path.appendText
 import kotlin.io.path.bufferedWriter
 import kotlin.io.path.fileSize
+import kotlin.io.path.readLines
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 import kotlin.system.measureTimeMillis
@@ -32,8 +42,13 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+/** The base64 of `scripts/drive_cli.py`'s `tiny_png()`, the image the `user-image` fixture sent; `test_drive_cli.py` pins the same. */
+private const val TINY_PNG_BASE64: String =
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg=="
 
 class TranscriptReaderTest {
     private fun ChatState.userTexts(): List<String> = entries.filterIsInstance<ChatEntry.User>().map { it.text }
@@ -55,6 +70,7 @@ class TranscriptReaderTest {
             }
             is ChatEntry.ToolResult -> "result: ${entry.text}" + if (entry.isError) " (error)" else ""
             is ChatEntry.Notice -> "${entry.level}: ${entry.text}"
+            is ChatEntry.TurnEnded -> "end: ${entry.end}"
         }
     }
 
@@ -210,7 +226,10 @@ class TranscriptReaderTest {
             """{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"file.txt","is_error":false},{"type":"text","text":"also check"},{"type":"text","text":"the docs"}]}}""",
         )
         assertEquals(
-            listOf(ChatEntry.ToolResult("result-toolu_1", "toolu_1", "file.txt", false), ChatEntry.User("u1", "also check\nthe docs")),
+            listOf(
+                ChatEntry.ToolResult("result-toolu_1", "toolu_1", "file.txt", false, content = JsonPrimitive("file.txt"), atMillis = 0L),
+                ChatEntry.User("u1", "also check\nthe docs", sentAtMillis = 0L),
+            ),
             TranscriptReader.read(f).state.entries,
         )
     }
@@ -542,6 +561,12 @@ class TranscriptReaderTest {
         assertEquals(listOf("pong", "pong again"), state.assistantTexts())
     }
 
+    // polish spec 5, edge 3: assistant lines' usage is not decoded, so a reloaded session draws no ring.
+    @Test
+    fun `a reloaded transcript has no context`() = runBlocking<Unit> {
+        assertNull(TranscriptReader.read(Fixtures.transcript("history-reply")).state.context)
+    }
+
     @Test
     fun `recorded transcripts give their title, last model, effort, permission mode and folder`() = runBlocking<Unit> {
         val reply = TranscriptReader.read(Fixtures.transcript("history-reply"))
@@ -766,5 +791,153 @@ class TranscriptReaderTest {
             ),
             running.settled(),
         )
+    }
+
+    private fun read(name: String): ChatState = runBlocking { TranscriptReader.read(Fixtures.transcript(name)) }.state
+
+    private fun result(state: ChatState, id: String): ChatEntry.ToolResult =
+        state.entries.filterIsInstance<ChatEntry.ToolResult>().single { it.toolUseId == id }
+
+    /** The id of the call to [tool] in [state]. */
+    private fun callId(state: ChatState, tool: String): String =
+        state.entries.filterIsInstance<ChatEntry.Assistant>().flatMap { it.blocks }.filterIsInstance<AssistantBlock.ToolUse>().single { it.name == tool }.id
+
+    @Test
+    fun `a recorded question session reloads with its answers and decision`() {
+        val single = result(read("ask-single"), "<id-12>")
+        assertEquals("Blue", single.result!!.jsonObject["answers"]!!.jsonObject["Which colour?"]!!.jsonPrimitive.content)
+        assertFalse(single.isError)
+
+        val deny = read("ask-deny")
+        val denied = result(deny, callId(deny, "AskUserQuestion"))
+        assertTrue(denied.isError)
+        assertEquals("reject", denied.decision!!.decision)
+        assertTrue(denied.decision.nonExecutionKind != null, denied.decision.toString())
+    }
+
+    @Test
+    fun `a recorded edit reloads with its patch`() {
+        val state = read("tools-edit")
+        val results = state.entries.filterIsInstance<ChatEntry.ToolResult>()
+        assertTrue(results.any { (it.result as? JsonObject)?.get("structuredPatch")?.jsonArray?.isNotEmpty() == true }, results.toString())
+        val write = result(state, callId(state, "Write"))
+        assertEquals("create", write.result!!.jsonObject["type"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `a recorded thinking block reloads with its duration`() {
+        val thinking = read("think-default").entries.filterIsInstance<ChatEntry.Assistant>().flatMap { it.blocks }.filterIsInstance<AssistantBlock.Thinking>()
+        assertTrue(thinking.any { it.text == "" && it.durationMs == 2143L }, thinking.toString())
+    }
+
+    @Test
+    fun `a recorded agent session reloads the agent result without children`() {
+        val state = read("agent-sync")
+        val agent = result(state, "<id-12>").result!!.jsonObject
+        assertEquals(2, agent["totalToolUseCount"]!!.jsonPrimitive.content.toInt())
+        assertEquals(21781, agent["totalTokens"]!!.jsonPrimitive.content.toInt())
+        assertEquals(5829, agent["totalDurationMs"]!!.jsonPrimitive.content.toInt())
+        // The subagent's own lines live in <id>/subagents/, which the reader does not read.
+        assertTrue(state.entries.none { it is ChatEntry.Assistant && it.parentToolUseId != null })
+        assertTrue(state.entries.none { it is ChatEntry.ToolResult && it.parentToolUseId != null })
+    }
+
+    @Test
+    fun `a reloaded user line with an image yields the same entry as its stream`() {
+        val e = read("user-image").entries.filterIsInstance<ChatEntry.User>().first()
+        assertEquals("What colour is this image? Reply with one word.", e.text)
+        // The uuid of the frame drive_cli sent, as the stream's command_lifecycle lines name it: the redactor gave it one
+        // placeholder across the pair, so the id is the same live and on reload.
+        val sent = Fixtures.lines("user-image").map { Json.parseToJsonElement(it).jsonObject }
+            .filter { it["type"]?.jsonPrimitive?.content == "command_lifecycle" }
+            .map { it["command_uuid"]!!.jsonPrimitive.content }
+            .distinct()
+            .single()
+        assertEquals(sent, e.id)
+        assertEquals(UserImage("${e.id}#0", "image/png", TINY_PNG_BASE64), e.images.single())
+    }
+
+    /** A transcript of one user line holding one image, its data redacted to the placeholder (spec 5.7), and no text. */
+    private fun imagesOnly(dir: Path): Path = dir.resolve("66666666-6666-4666-8666-666666666666.jsonl").apply {
+        writeLines(
+            """{"type":"user","uuid":"u9","timestamp":"2026-10-21T20:26:59.860Z","message":{"role":"user","content":""" +
+                """[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"<base64>"}}]}}""",
+        )
+    }
+
+    @Test
+    fun `a reloaded images-only user line keeps its images`(@TempDir dir: Path) = runBlocking<Unit> {
+        val state = TranscriptReader.read(imagesOnly(dir)).state
+        assertEquals(
+            ChatEntry.User(
+                "u9",
+                "",
+                Instant.parse("2026-10-21T20:26:59.860Z").toEpochMilli(),
+                listOf(UserImage("u9#0", "image/png", "<base64>")),
+            ),
+            state.entries.filterIsInstance<ChatEntry.User>().single(),
+        )
+    }
+
+    // The JVM takes no brackets in a method name: the spec's name is the display name.
+    @Test
+    @DisplayName("an images-only first prompt is the meta's first prompt [Image #1]")
+    fun `an images-only first prompt is the meta's first prompt Image #1`(@TempDir dir: Path) = runBlocking<Unit> {
+        val file = imagesOnly(dir)
+        assertEquals("[Image #1]", TranscriptReader.meta(file).firstPrompt)
+        assertEquals("[Image #1]", TranscriptReader.read(file).meta.title)
+    }
+
+    @Test
+    fun `images beside tool results with nothing typed make no prompt`(@TempDir dir: Path) = runBlocking<Unit> {
+        val file = dir.resolve("77777777-7777-4777-8777-777777777777.jsonl")
+        file.writeLines(
+            """{"type":"user","uuid":"u8","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},""" +
+                """{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$TINY_PNG_BASE64"}}]}}""",
+        )
+        assertEquals(listOf("result: ok"), TranscriptReader.read(file).state.shape())
+        assertNull(TranscriptReader.meta(file).firstPrompt)
+    }
+
+    @Test
+    fun `timestamps and cwd are read from the lines`() {
+        val state = read("ask-single")
+        assertEquals("<path>", state.cwd)
+        val users = state.entries.filterIsInstance<ChatEntry.User>()
+        assertTrue(users.isNotEmpty())
+        assertTrue(users.all { (it.sentAtMillis ?: 0L) > 0L }, users.toString())
+        val results = state.entries.filterIsInstance<ChatEntry.ToolResult>()
+        assertTrue(results.isNotEmpty())
+        assertTrue(results.all { (it.atMillis ?: 0L) > 0L }, results.toString())
+    }
+
+    @Test
+    fun `a transcript without timestamps or cwd still loads`(@TempDir dir: Path) = runBlocking<Unit> {
+        // history-reply's prompt (line 3) and reply (line 18), as an older CLI would write them: no timestamp, no cwd. The reply's
+        // recorded parent, <uuid-27>, is an attachment line left out, so it names the prompt instead.
+        val lines = Fixtures.transcript("history-reply").readLines()
+        val prompt = Json.parseToJsonElement(lines[2]).jsonObject
+        val reply = Json.parseToJsonElement(lines[17]).jsonObject
+        assertEquals("<uuid-17>", prompt["uuid"]!!.jsonPrimitive.content)
+        val file = dir.resolve("old-cli.jsonl")
+        file.writeLines(
+            JsonObject(prompt - "timestamp" - "cwd").toString(),
+            JsonObject(reply - "timestamp" - "cwd" + ("parentUuid" to JsonPrimitive("<uuid-17>"))).toString(),
+        )
+        val state = TranscriptReader.read(file).state
+        assertEquals(listOf("user: Reply with the single word: pong", "assistant: pong"), state.shape())
+        assertNull(state.cwd)
+        assertEquals(0L, state.entries.filterIsInstance<ChatEntry.User>().single().sentAtMillis ?: 0L)
+        // The reader stamps a line without a timestamp 0, which the reducer maps to no time (polish spec edge 21).
+        assertNull(state.entries.filterIsInstance<ChatEntry.Assistant>().single().atMillis)
+    }
+
+    @Test
+    fun `a reloaded assistant entry is stamped with its line's timestamp`() {
+        // history-reply's reply, line 18.
+        val line = Fixtures.transcript("history-reply").readLines()[17]
+        val stamped = assertNotNull((Ndjson.decode(line) as CliMessage.Assistant).timestampMillis)
+        assertEquals(Instant.parse("2026-10-16T15:28:34.762Z").toEpochMilli(), stamped)
+        assertEquals(stamped, read("history-reply").entries.filterIsInstance<ChatEntry.Assistant>().single().atMillis)
     }
 }

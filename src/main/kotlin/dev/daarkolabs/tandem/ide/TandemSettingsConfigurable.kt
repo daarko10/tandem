@@ -5,13 +5,16 @@ import com.intellij.openapi.application.UI
 import com.intellij.openapi.application.asContextElement
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.components.serviceIfCreated
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.BoundConfigurable
+import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.ui.DialogPanel
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.intellij.ui.dsl.builder.AlignX
 import com.intellij.ui.dsl.builder.MutableProperty
 import com.intellij.ui.dsl.builder.bindIntText
+import com.intellij.ui.dsl.builder.bindSelected
 import com.intellij.ui.dsl.builder.panel
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -28,7 +31,8 @@ import javax.swing.JLabel
 private const val NOT_EXECUTABLE_TEXT: String = "Configured path is not executable"
 
 /**
- * Settings | Tools | Tandem: the `claude` to run, and how many sessions may run a process at once ([TandemSettings]).
+ * Settings | Tools | Tandem: the `claude` to run, how many sessions may run a process at once and whether the chat shows thinking
+ * rows ([TandemSettings]).
  *
  * The page never blocks the EDT. Once [ClaudeBinary.detect] has run on a background thread, it shows the executable Tandem finds by
  * itself ("Detecting…" until then) and where it found it (on the login shell's `PATH`, or in a usual install location), and says
@@ -91,6 +95,14 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
                 intTextField(TandemSettings.MAX_LIVE_SESSIONS)
                     .bindIntText({ settings.state.maxLiveSessions }, { settings.state.maxLiveSessions = it })
             }.rowComment("Beyond this, opening a session stops the process of the least recently used idle one.")
+            row {
+                checkBox("Show thinking rows")
+                    .bindSelected({ settings.state.showThinking }, { settings.state.showThinking = it })
+            }
+            row {
+                checkBox("Reduce motion")
+                    .bindSelected({ settings.state.reduceMotion }, { settings.state.reduceMotion = it })
+            }.rowComment("The spark beside Claude's working line stands still.")
         }
         check()
         return page
@@ -98,6 +110,8 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
 
     override fun apply() {
         super.apply()
+        // Open chats rebuild their rows with the new setting; a project whose sessions never started reads it when they do.
+        ProjectManager.getInstance().openProjects.forEach { it.serviceIfCreated<TandemSessions>()?.settingsChanged() }
         check() // the saved path may have changed
     }
 

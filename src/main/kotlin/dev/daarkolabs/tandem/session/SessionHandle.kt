@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.promptTitle
 import kotlinx.coroutines.CoroutineName
@@ -91,7 +92,7 @@ class SessionHandle internal constructor(
     private var mirror: Job? = null
 
     /** Prompts sent while no process runs, in order: the next process gets them. */
-    private val queued = ArrayList<String>()
+    private val queued = ArrayList<Prompt>()
     private var closed = false
 
     /**
@@ -124,6 +125,7 @@ class SessionHandle internal constructor(
     /** [Snapshot.chat], written in the same step as [snapshot] and just before it, so that [status] never runs ahead of [state]. */
     private val mutableState = MutableStateFlow(initialState)
     private val mutableAttention = MutableStateFlow(false)
+    private val mutableLastFrameAt = MutableStateFlow(0L)
 
     /** A title set in Tandem ([rename], or a fork's) that the index does not list yet: it wins until the index lists the same. */
     private var titleOverride: String? = pendingTitle
@@ -156,6 +158,12 @@ class SessionHandle internal constructor(
     /** Whether the user should look at this session: it asked for permission or finished a turn while another one was selected. */
     val attention: StateFlow<Boolean> = mutableAttention.asStateFlow()
 
+    /**
+     * The attached process's [ClaudeSession.lastFrameAtMillis]: when it last wrote a line, 0 until it wrote one. Keeps the last
+     * value once the process is let go, until the next one is attached.
+     */
+    val lastFrameAtMillis: StateFlow<Long> = mutableLastFrameAt.asStateFlow()
+
     init {
         // The index's listing comes from the manager's scope; its title counts from the next step on.
         scope.launch {
@@ -185,17 +193,17 @@ class SessionHandle internal constructor(
     internal fun liveSession(): ClaudeSession? = synchronized(lock) { liveLocked() }
 
     /**
-     * Sends [text] to the running process; without one, queues it for the next, which [attach] hands it to. True when it was
+     * Sends [prompt] to the running process; without one, queues it for the next, which [attach] hands it to. True when it was
      * queued, so that a process has to be started. Either way prompts keep their order. Dropped after [close].
      */
-    internal fun sendOrQueue(text: String): Boolean = synchronized(lock) {
+    internal fun sendOrQueue(prompt: Prompt): Boolean = synchronized(lock) {
         if (closed) return false
         val live = liveLocked()
         if (live != null && queued.isEmpty()) {
-            live.sendUserMessage(text)
+            live.sendUserMessage(prompt.text, prompt.images)
             false
         } else {
-            queued.add(text)
+            queued.add(prompt)
             true
         }
     }
@@ -398,7 +406,7 @@ class SessionHandle internal constructor(
     }
 
     private fun flushLocked(live: ClaudeSession) {
-        queued.forEach(live::sendUserMessage)
+        queued.forEach { live.sendUserMessage(it.text, it.images) }
         queued.clear()
     }
 
@@ -407,9 +415,15 @@ class SessionHandle internal constructor(
         val session = process.session
         attachment = process
         publishLocked(session.state.value, attached = true)
+        mutableLastFrameAt.value = session.lastFrameAtMillis.value // in the same step, so state and frame time are one process's
         mirror = scope.launch {
             // A child of the mirror, so that it ends when the process is let go or handed over before its first system/init.
             launch { onFirstInit(session, session.reportedSessionId.filterNotNull().first()) }
+            launch {
+                session.lastFrameAtMillis.collect { at ->
+                    synchronized(lock) { if (attachment?.session === session) mutableLastFrameAt.value = at }
+                }
+            }
             session.state.collect { chat ->
                 synchronized(lock) { if (attachment?.session === session) publishLocked(chat, attached = true) }
             }
@@ -467,11 +481,18 @@ class SessionHandle internal constructor(
     }
 }
 
-/** The first prompt of this chat as a title: its first line, trimmed and cut to 80 characters; null without one. */
+/**
+ * The first prompt of this chat as a title: its first line, trimmed and cut to 80 characters, or `[Image #1]` for one of images
+ * only; null without one.
+ */
 internal fun ChatState.firstPrompt(): String? = firstUser()?.asTitle()
 
 private fun ChatState.firstUser(): ChatEntry.User? = entries.firstNotNullOfOrNull { it as? ChatEntry.User }
 
-private fun ChatEntry.User.asTitle(): String? = promptTitle(text).ifEmpty { null }
+/** An images-only prompt is titled by its first image. */
+private fun ChatEntry.User.asTitle(): String? = promptTitle(text).ifEmpty { if (images.isNotEmpty()) "[Image #1]" else null }
+
+/** A prompt waiting for a process: [text] and the [images] attached to it. */
+internal data class Prompt(val text: String, val images: List<ImageBlock> = emptyList())
 
 private fun List<SessionSummary>.titleOf(id: SessionId): String? = firstOrNull { it.id == id }?.title

@@ -1,9 +1,12 @@
 package dev.daarkolabs.tandem.ide
 
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.components.serviceIfCreated
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
+import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.session.DefaultProcessLauncher
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.ProcessLauncher
@@ -18,13 +21,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import org.jetbrains.annotations.TestOnly
@@ -105,6 +107,25 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         deleteFiles = { deleteTranscript(it) },
     )
 
+    // The settings as already loaded: loading them reads a file, which the constructor must not (it may run on the EDT), so when
+    // they are not loaded yet the default holds until ensureStarted reads them on IO, before it restores any session.
+    private val _rowOptions = MutableStateFlow(
+        ApplicationManager.getApplication().serviceIfCreated<TandemSettings>()?.let(::rowOptionsOf) ?: RowOptions(showThinking = true),
+    )
+
+    /** What the chat rows show beyond the session's state: the `Show thinking rows` setting, as last applied ([settingsChanged]). */
+    val rowOptions: StateFlow<RowOptions> = _rowOptions.asStateFlow()
+
+    private val _reduceMotion = MutableStateFlow(
+        ApplicationManager.getApplication().serviceIfCreated<TandemSettings>()?.state?.reduceMotion ?: false,
+    )
+
+    /**
+     * Tandem's `Reduce motion` setting, as last applied ([settingsChanged]): the working row's spark stands still. Apart from
+     * [rowOptions], which the rows are built from, so that toggling it rebuilds no chat's rows.
+     */
+    val reduceMotion: StateFlow<Boolean> = _reduceMotion.asStateFlow()
+
     private val started = AtomicBoolean(false)
 
     /** The JVM shutdown hook [ensureStarted] added, until it is removed. */
@@ -121,20 +142,25 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
      * launches coroutines, and waits for nothing.
      * - Until every session's process has ended, a JVM shutdown hook kills them ([SessionManager.killAllNow]): when the IDE exits, the
      *   JVM can stop before the sessions' coroutines have ended their processes.
+     * - [rowOptions] and [reduceMotion] take the settings ([settingsChanged]), before any session is restored.
      * - The [SessionNotifier] starts.
+     * - The manager offers the models a session's CLI listed last ([TandemWorkspaceState.knownModels]) until a process lists them
+     *   ([SessionManager.seedModels]), so that a session restored without a process offers them too.
      * - The sessions that were open when the project was last closed open again, without a process: the one that was selected
      *   first, and selected again at once, then the others in their order. One whose transcript is gone, or that fails to open, is
      *   left out; if that is the selected one, the first one opened is selected in its place. Nothing is selected if the user has
      *   selected a session meanwhile.
      * - From then on the open sessions and the selection go to the workspace file ([TandemWorkspaceState]) whenever they change, and
- *   so do the models a session's CLI lists.
+     *   so do the models a session's CLI lists ([SessionManager.models]).
      * - With `-Dtandem.autoPrompt=<prompt>`, a development hook, a new session is created, selected and sent the prompt.
      */
     fun ensureStarted() {
         if (!started.compareAndSet(false, true)) return
         killOnJvmExit()
         scope.launch(Dispatchers.IO + CoroutineName("TandemSessions.start")) {
+            settingsChanged()
             SessionNotifier(project, manager, scope).start()
+            manager.seedModels(TandemWorkspaceState.getInstance(project).knownModels())
             restore()
             rememberInWorkspace()
             autoPrompt()
@@ -196,9 +222,8 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
 
     /**
      * Writes the open sessions and the selection to the workspace file whenever they change, and the models whenever a session's CLI
-     * lists them: every session runs the same `claude`, so the last list stands for all of them.
+     * lists them ([SessionManager.models]): every session runs the same `claude`, so the last list stands for all of them.
      */
-    @OptIn(ExperimentalCoroutinesApi::class)
     private fun rememberInWorkspace() {
         val workspace = TandemWorkspaceState.getInstance(project)
         scope.launch(CoroutineName("TandemSessions.workspace")) {
@@ -210,10 +235,7 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
             }
         }
         scope.launch(CoroutineName("TandemSessions.models")) {
-            manager.sessions.flatMapLatest { open -> open.map { handle -> handle.state.map { it.models } }.merge() }
-                .filter { it.isNotEmpty() }
-                .distinctUntilChanged()
-                .collect(workspace::rememberModels)
+            manager.models.collect(workspace::rememberModels)
         }
     }
 
@@ -224,6 +246,17 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         manager.select(session.id)
         manager.send(session.id, prompt)
         LOG.info("session ${session.id}: sent the autoPrompt")
+    }
+
+    /**
+     * Takes the settings the chat rows depend on into [rowOptions] ([TandemSettings.State.showThinking]), so that every open chat
+     * rebuilds its rows when it changes, and [TandemSettings.State.reduceMotion] into [reduceMotion]; called when the settings page
+     * applies. Safe on the EDT: it reads the settings in memory and sets two flows.
+     */
+    fun settingsChanged() {
+        val settings = TandemSettings.getInstance()
+        _rowOptions.value = rowOptionsOf(settings)
+        _reduceMotion.value = settings.state.reduceMotion
     }
 
     companion object {
@@ -254,3 +287,6 @@ private fun physical(path: Path): Path =
 private fun configDir(): Path =
     System.getProperty(CONFIG_DIR_PROPERTY)?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
         ?: TranscriptFolder.configDir(ShellEnvironment.get())
+
+/** The chat rows' options as [settings] say. */
+private fun rowOptionsOf(settings: TandemSettings): RowOptions = RowOptions(showThinking = settings.state.showThinking)

@@ -12,18 +12,36 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
+/** One image attachment of a prompt: its [mediaType] (`image/png`, ...) and its bytes as [base64], as the wire carries them. */
+data class ImageBlock(val mediaType: String, val base64: String)
+
 /** Frames the host writes to the CLI's stdin. Shapes follow docs/protocol.md sections 3 and 4. */
 object HostMessages {
-    /** A plain-text prompt. [uuid] comes back as `user_message_uuids` so turns can be correlated. */
-    fun userText(text: String, uuid: String): JsonObject = buildJsonObject {
+    /**
+     * A prompt: a text block for [text] unless it is blank, then one base64 image block per entry of [images], in order
+     * (docs/protocol.md 3). [uuid] comes back as `user_message_uuids` so turns can be correlated.
+     */
+    fun userMessage(text: String, images: List<ImageBlock>, uuid: String): JsonObject = buildJsonObject {
         put("type", "user")
         put("session_id", "")
         putJsonObject("message") {
             put("role", "user")
             putJsonArray("content") {
-                addJsonObject {
-                    put("type", "text")
-                    put("text", text)
+                if (text.isNotBlank()) {
+                    addJsonObject {
+                        put("type", "text")
+                        put("text", text)
+                    }
+                }
+                for (image in images) {
+                    addJsonObject {
+                        put("type", "image")
+                        putJsonObject("source") {
+                            put("type", "base64")
+                            put("media_type", image.mediaType)
+                            put("data", image.base64)
+                        }
+                    }
                 }
             }
         }
@@ -31,7 +49,11 @@ object HostMessages {
         put("uuid", uuid)
     }
 
-    fun initialize(requestId: String): JsonObject = request(requestId, "initialize") { put("hooks", JsonNull) }
+    /** `forwardSubagentText` makes the CLI forward a subagent's text replies as assistant lines with an `agent_id`. */
+    fun initialize(requestId: String): JsonObject = request(requestId, "initialize") {
+        put("hooks", JsonNull)
+        put("forwardSubagentText", true)
+    }
 
     fun interrupt(requestId: String): JsonObject = request(requestId, "interrupt") {}
 
@@ -40,6 +62,14 @@ object HostMessages {
 
     fun setPermissionMode(requestId: String, mode: PermissionMode): JsonObject =
         request(requestId, "set_permission_mode") { put("mode", mode.wire) }
+
+    /**
+     * Changes the session's effort from its next turn (`apply_flag_settings`, docs/protocol.md 4.4): [effortLevel] goes into the
+     * session's flag settings. The success has no `response` field.
+     */
+    fun applyFlagSettings(requestId: String, effortLevel: String): JsonObject = request(requestId, "apply_flag_settings") {
+        putJsonObject("settings") { put("effortLevel", effortLevel) }
+    }
 
     /** Asks the CLI to give the session a custom title. */
     fun renameSession(requestId: String, title: String): JsonObject = request(requestId, "rename_session") {

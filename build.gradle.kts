@@ -60,6 +60,9 @@ dependencies {
         bundledModule("intellij.platform.jewel.markdown.core")
         bundledModule("intellij.platform.jewel.markdown.ideLafBridgeStyling")
         bundledModule("intellij.platform.jewel.markdown.extensions.autolink")
+        // GFM tables and strikethrough (spec 4.4); also bundled, so declared here and in plugin.xml, never shipped.
+        bundledModule("intellij.platform.jewel.markdown.extensions.gfmTables")
+        bundledModule("intellij.platform.jewel.markdown.extensions.gfmStrikethrough")
         testFramework(TestFrameworkType.Platform)
         testFramework(TestFrameworkType.JUnit5)
         testFramework(TestFrameworkType.Starter, configurationName = integrationTestImplementation.name)
@@ -87,7 +90,7 @@ intellijPlatform {
     }
 }
 
-// Coverage of protocol/ and session/ (with session/transcript), whose target is 90% of lines (CLAUDE.md):
+// Coverage of protocol/, session/ (with session/transcript) and chat/, whose target is 90% of lines (CLAUDE.md):
 // ./gradlew koverLog prints it per package; koverHtmlReport and koverXmlReport write build/reports/kover/; koverVerify, part of check,
 // holds each package to it.
 kover {
@@ -102,13 +105,13 @@ kover {
     reports {
         filters {
             includes {
-                packages("dev.daarkolabs.tandem.protocol", "dev.daarkolabs.tandem.session")
+                packages("dev.daarkolabs.tandem.protocol", "dev.daarkolabs.tandem.session", "dev.daarkolabs.tandem.chat")
             }
         }
         total {
             // Part of check: fails the build when a package falls below 90% of lines.
             verify {
-                rule("90% of lines in each package of protocol/ and session/") {
+                rule("90% of lines in each package of protocol/, session/ and chat/") {
                     groupBy = GroupingEntityType.PACKAGE
                     bound {
                         minValue = 90

@@ -10,7 +10,7 @@
 # Like record-fixture.sh, this uses the local `claude` sign-in and never commits the raw transcripts.
 set -euo pipefail
 
-scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | permission-mode-rejected | fork | settings (a probe: give an out-dir outside the fixtures)}"
+scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | permission-mode-rejected | fork | effort-switch | permission-mode-auto | user-image | ask-two | settings (a probe: give an out-dir outside the fixtures)}"
 out_dir="${2:-src/test/resources/fixtures}"
 if [[ "$scenario" == settings ]]; then
   case "${2:-}" in

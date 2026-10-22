@@ -1,0 +1,207 @@
+package dev.daarkolabs.tandem.chat
+
+import dev.daarkolabs.tandem.chat.OrbIndicator.Phase
+import org.junit.jupiter.api.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
+
+/** The working row's orbs (spec 4.9.1): the desktop app's choreography as measured from its recording. */
+class OrbIndicatorTest {
+    /** Every 5 ms of one cycle. */
+    private val times: LongProgression = 0L until OrbIndicator.PERIOD_MS step 5
+
+    @Test
+    fun `one cycle is the measured shapes in order and lasts 12 s`() {
+        assertEquals(12_000L, OrbIndicator.PERIOD_MS)
+        assertEquals(OrbIndicator.PERIOD_MS, Phase.entries.sumOf { it.durationMs })
+        assertEquals(3_000L, Phase.RING.durationMs, "one turn of the ring")
+        assertEquals(2_400L, Phase.SQUARE.durationMs, "two 1.2 s swap cycles of the square")
+        assertEquals(4_000L, Phase.TRIAD.durationMs, "two 2 s flip cycles of the hexagon")
+        assertEquals(Phase.RING, OrbIndicator.phaseAt(Phase.RING.startMs))
+        assertEquals(Phase.SOLO_AFTER_TRIAD, OrbIndicator.phaseAt(OrbIndicator.PERIOD_MS - 1))
+        assertEquals(Phase.RING_SPLIT, OrbIndicator.phaseAt(OrbIndicator.PERIOD_MS))
+    }
+
+    @Test
+    fun `the frame repeats every period, before zero too`() {
+        for (t in times step 35) {
+            val frame = OrbIndicator.frame(t)
+            assertEquals(frame, OrbIndicator.frame(t + OrbIndicator.PERIOD_MS), "t = $t")
+            assertEquals(frame, OrbIndicator.frame(t + 7 * OrbIndicator.PERIOD_MS), "t = $t")
+            assertEquals(frame, OrbIndicator.frame(t - OrbIndicator.PERIOD_MS), "t = $t")
+        }
+    }
+
+    @Test
+    fun `the frame is the same for the same time`() {
+        assertEquals(OrbIndicator.frame(4_321), OrbIndicator.frame(4_321))
+    }
+
+    @Test
+    fun `every orb stays inside the unit box`() {
+        for (t in times) {
+            for (orb in OrbIndicator.frame(t)) {
+                assertTrue(orb.radius > 0f, "t = $t: $orb")
+                assertTrue(orb.x - orb.radius >= 0f && orb.x + orb.radius <= 1f, "t = $t: $orb")
+                assertTrue(orb.y - orb.radius >= 0f && orb.y + orb.radius <= 1f, "t = $t: $orb")
+                assertTrue(orb.alpha in 0f..1f, "t = $t: $orb")
+            }
+        }
+        for (orb in OrbIndicator.STILL) {
+            assertTrue(orb.x - orb.radius >= 0f && orb.x + orb.radius <= 1f && orb.y - orb.radius >= 0f && orb.y + orb.radius <= 1f, "$orb")
+        }
+    }
+
+    @Test
+    fun `radius and alpha grow with nearness`() {
+        val depths = (-40..40).map { it / 100f }
+        val orbs = depths.map { OrbIndicator.project(0.1f, -0.1f, it) }
+        orbs.zipWithNext().forEach { (far, near) ->
+            assertTrue(near.radius > far.radius, "$far then $near")
+            assertTrue(near.alpha >= far.alpha, "$far then $near")
+        }
+        // The desktop app shows a far orb by its size alone: full colour down to the ring's far side, the deepest a shape goes.
+        assertEquals(1f, OrbIndicator.project(0f, 0f, -0.34f).alpha, "opaque at the ring's far side")
+        assertEquals(1f, OrbIndicator.project(0f, 0f, 0f).alpha, "opaque at the centre's depth")
+        assertTrue(OrbIndicator.project(0f, 0f, -0.6f).alpha < 0.3f, "a flipping orb at its deepest fades as it vanishes")
+        assertTrue(orbs.last().x > orbs.first().x, "a near orb sits further from the centre")
+    }
+
+    @Test
+    fun `a flipping orb at its deepest all but vanishes, while the single orb and the shapes stay in sight`() {
+        val centre = OrbIndicator.project(0f, 0f, 0f).radius
+        assertTrue(OrbIndicator.project(0f, 0f, -0.6f).radius < 0.25f * centre, "a flipping orb at its deepest")
+        // The desktop app's single orb dips to about two thirds of its radius between two shapes, at full colour, and never vanishes.
+        for (phase in listOf(Phase.SOLO_AFTER_RING, Phase.SOLO_AFTER_SQUARE, Phase.SOLO_AFTER_TRIAD)) {
+            for (t in phase.startMs until phase.startMs + phase.durationMs step 5) {
+                val solo = OrbIndicator.frame(t).single()
+                assertTrue(solo.radius >= 0.5f * centre && solo.alpha >= 0.8f, "$phase at $t: $solo")
+            }
+            val deepest = OrbIndicator.frame(phase.startMs + phase.durationMs / 2).single()
+            assertTrue(deepest.radius < 0.85f * centre, "$phase: the single orb backs away: $deepest")
+        }
+        // The ring's far side, the deepest a shape goes, is only the camera's perspective away from the centre's size.
+        assertEquals(centre * 1.25f / (1.25f + 0.34f), OrbIndicator.project(0f, 0f, -0.34f).radius, 1e-4f)
+    }
+
+    @Test
+    fun `the hexagon's later orbs come in unseen and all but vanished, then grow and fade in`() {
+        val centre = OrbIndicator.project(0f, 0f, 0f).radius
+        for (join in listOf(150L, 300L)) {
+            val t = Phase.TRIAD_SPLIT.startMs + join + 1
+            // The newcomer is the farthest orb, so the first drawn.
+            val newcomer = OrbIndicator.frame(t).first()
+            assertTrue(newcomer.alpha < 0.05f && newcomer.radius < 0.3f * centre, "at $join ms: $newcomer")
+            val later = OrbIndicator.frame(t + 100).first()
+            assertTrue(later.alpha > newcomer.alpha && later.radius > newcomer.radius, "at $join ms: $newcomer, then $later")
+        }
+    }
+
+    @Test
+    fun `the ring tips its near side low, then high`() {
+        // A quarter of the way through the ring the near orb is below the far one; three quarters of the way, above it.
+        val low = OrbIndicator.frame(Phase.RING.startMs + Phase.RING.durationMs / 4)
+        assertTrue(low.last().y - low.first().y > 0.2f, "$low")
+        val high = OrbIndicator.frame(Phase.RING.startMs + Phase.RING.durationMs * 3 / 4)
+        assertTrue(high.first().y - high.last().y > 0.2f, "$high")
+        // Edge on in between, half way through: every orb on the centre's line.
+        val edgeOn = OrbIndicator.frame(Phase.RING.startMs + Phase.RING.durationMs / 2)
+        assertTrue(edgeOn.all { kotlin.math.abs(it.y - 0.5f) < 0.01f }, "$edgeOn")
+    }
+
+    @Test
+    fun `orbs come far to near, so that the near ones draw last`() {
+        for (t in times) {
+            val radii = OrbIndicator.frame(t).map { it.radius }
+            assertEquals(radii.sorted(), radii, "t = $t")
+        }
+    }
+
+    @Test
+    fun `the orb count follows the measured phases`() {
+        fun count(phase: Phase, at: Float): Int = OrbIndicator.frame(phase.startMs + (phase.durationMs * at).toLong()).size
+        for (at in listOf(0.01f, 0.5f, 0.99f)) {
+            assertEquals(3, count(Phase.RING, at), "ring at $at")
+            assertEquals(4, count(Phase.SQUARE, at), "square at $at")
+            assertEquals(3, count(Phase.TRIAD, at), "hexagon at $at")
+            assertEquals(1, count(Phase.SOLO_AFTER_RING, at))
+            assertEquals(1, count(Phase.SOLO_AFTER_SQUARE, at))
+            assertEquals(1, count(Phase.SOLO_AFTER_TRIAD, at))
+        }
+        // Into the hexagon the orbs come out one after another: 1, then 2, then 3.
+        val split = Phase.TRIAD_SPLIT
+        assertEquals(listOf(1, 2, 3), listOf(100L, 250L, 400L).map { OrbIndicator.frame(split.startMs + it).size })
+        for (phase in Phase.entries) {
+            for (t in phase.startMs until phase.startMs + phase.durationMs step 5) {
+                assertTrue(OrbIndicator.frame(t).size in 1..phase.orbs, "$phase at $t")
+            }
+        }
+    }
+
+    @Test
+    fun `the shapes meet at the centre, so that a phase change never jumps`() {
+        for (phase in Phase.entries) {
+            val before = OrbIndicator.frame(phase.startMs - 1)
+            val after = OrbIndicator.frame(phase.startMs)
+            // Compare the cluster's extent and the nearest orb, which merges and splits leave in place.
+            assertEquals(before.maxOf { it.radius }, after.maxOf { it.radius }, 0.01f, "into $phase")
+            assertEquals(extent(before), extent(after), 0.02f, "into $phase")
+        }
+    }
+
+    @Test
+    fun `no orb jumps from one frame to the next`() {
+        // Every 5 ms of a cycle, the wrap included, while the orb count holds: some pairing of the orbs moves each by little.
+        for (t in times) {
+            val before = OrbIndicator.frame(t)
+            val after = OrbIndicator.frame(t + 5)
+            if (before.size != after.size) continue
+            val step = permutations(before.indices.toList()).minOf { pairing ->
+                before.indices.maxOf { i -> jump(before[i], after[pairing[i]]) }
+            }
+            assertTrue(step <= 1f, "t = $t: $before, then $after")
+        }
+    }
+
+    @Test
+    fun `a merge ends with every orb at the centre`() {
+        for (merge in listOf(Phase.RING_MERGE, Phase.SQUARE_MERGE, Phase.TRIAD_MERGE)) {
+            val end = OrbIndicator.frame(merge.startMs + merge.durationMs - 1)
+            assertTrue(end.all { kotlin.math.abs(it.x - 0.5f) < 0.01f && kotlin.math.abs(it.y - 0.5f) < 0.01f }, "$merge: $end")
+        }
+    }
+
+    @Test
+    fun `the square holds its corners and the hexagon its stations between moves`() {
+        val square = OrbIndicator.frame(Phase.SQUARE.startMs + 50)
+        assertEquals(4, square.size)
+        assertTrue(square.all { kotlin.math.abs(kotlin.math.abs(it.x - 0.5f) - 0.255f) < 0.001f }, "$square")
+        // 0.2 s into the hexagon the first orb flips and the second rests at its home corner, upper left.
+        val hexagon = OrbIndicator.frame(Phase.TRIAD.startMs + 200)
+        assertTrue(hexagon.any { kotlin.math.abs(it.x - (0.5f - 0.32f * 0.866f)) < 0.01f && kotlin.math.abs(it.y - (0.5f - 0.16f)) < 0.01f }, "$hexagon")
+    }
+
+    @Test
+    fun `the reduced-motion frame is constant`() {
+        val still = OrbIndicator.STILL
+        assertEquals(3, still.size)
+        for (t in times step 97) assertSame(still, OrbIndicator.frame(t, animated = false), "t = $t")
+        assertEquals(OrbIndicator.frame(1_234), OrbIndicator.frame(1_234, animated = true))
+        val radii = still.map { it.radius }
+        assertEquals(radii.sorted(), radii, "far to near")
+        assertTrue(radii.last() > radii.first(), "one orb in front of the others")
+    }
+
+    /**
+     * How far [from] moves to [to] in one 5 ms frame, as a share of what still reads as motion: 0.03 of the box in place, 0.1 in alpha.
+     * Over 1 is a jump.
+     */
+    private fun jump(from: Orb, to: Orb): Float =
+        maxOf(kotlin.math.hypot(to.x - from.x, to.y - from.y) / 0.03f, kotlin.math.abs(to.alpha - from.alpha) / 0.1f)
+
+    private fun permutations(items: List<Int>): List<List<Int>> =
+        if (items.size <= 1) listOf(items) else items.flatMap { first -> permutations(items - first).map { listOf(first) + it } }
+
+    private fun extent(frame: List<Orb>): Float = frame.maxOf { maxOf(kotlin.math.abs(it.x - 0.5f), kotlin.math.abs(it.y - 0.5f)) + it.radius }
+}

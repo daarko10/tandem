@@ -9,6 +9,7 @@ import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.isInterrupt
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
@@ -34,6 +35,9 @@ private val LOG = logger<TranscriptReader>()
 /** A first prompt that stands in for the title is cut to this many characters. */
 private const val PROMPT_TITLE_LENGTH: Int = 80
 
+/** The title of a first prompt of images only. */
+private const val IMAGE_PROMPT_TITLE: String = "[Image #1]"
+
 // The CLI wraps the user lines it writes itself in these tags and, like Tandem, tells them apart by how the text starts.
 private const val COMMAND_NAME_TAG: String = "<command-name>"
 private const val COMMAND_MESSAGE_TAG: String = "<command-message>"
@@ -55,7 +59,10 @@ data class TranscriptMeta(
     val customTitle: String?,
     /** The last `ai-title` or `summary` line's text, whichever comes last. */
     val generatedTitle: String?,
-    /** The first prompt of the current history, slash commands aside: its first line, trimmed and cut to 80 characters. */
+    /**
+     * The first prompt of the current history, slash commands aside: its first line, trimmed and cut to 80 characters, or
+     * `[Image #1]` for a prompt of images only.
+     */
     val firstPrompt: String?,
     /** `message.model` of the last assistant line in the current history; lines the CLI wrote itself (model `<synthetic>`) aside. */
     val lastModel: String?,
@@ -92,11 +99,13 @@ data class LoadedTranscript(
  * calls branch off it; the second reads the lines on it as the live stream would have shown them. [meta] reads it once, keeping
  * what each line says about the meta until the first pass has placed it.
  *
- * Prompts (`user` text), tool results (`user` `tool_result` blocks) and `assistant` lines make the history: an interrupt
- * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`. `custom-title`,
- * `ai-title` and `summary` lines make the title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the
- * output of commands and shell escapes, background-task notifications, every other type, and lines that are not a JSON object
- * (such as a last line the CLI is still writing) are skipped. Bad input never throws.
+ * Prompts (`user` text and images), tool results (`user` `tool_result` blocks) and `assistant` lines make the history: an interrupt
+ * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`, and a line of images
+ * only (or a generated tag with images) a prompt with no text. Each goes to the reducer stamped with its line's `timestamp` (0
+ * when it has none), and [TranscriptMeta.cwd] becomes the state's `cwd`. `custom-title`, `ai-title` and `summary` lines make the
+ * title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the output of commands and shell escapes,
+ * background-task notifications and other generated tags unless they carry images, every other type, and lines that are not a
+ * JSON object (such as a last line the CLI is still writing) are skipped. Bad input never throws.
  */
 object TranscriptReader {
     /**
@@ -185,6 +194,8 @@ object TranscriptReader {
         return LoadedTranscript(
             state.copy(
                 sessionId = meta.sessionId,
+                // The live source is system/init, which a transcript does not keep: its lines' own cwd stands in.
+                cwd = meta.cwd ?: state.cwd,
                 activeModel = meta.lastModel ?: state.activeModel,
                 permissionMode = meta.lastPermissionMode ?: state.permissionMode,
                 effort = meta.lastEffort ?: state.effort,
@@ -288,8 +299,11 @@ private fun factsOf(message: CliMessage, raw: JsonObject): Facts {
         "user" -> if (raw.isSet("isMeta") || raw.isSet("isSidechain") || raw.isSet("isCompactSummary")) {
             Facts(cwd)
         } else {
-            val typed = (message as? CliMessage.User)?.let(::userLineOf)?.typed
-            Facts(cwd, permissionMode = PermissionMode.fromWire(raw.string("permissionMode")), prompt = typed?.takeIf { it.isPrompt }?.let { promptTitle(it.text) })
+            // The ids of the images do not matter here, only whether there are any.
+            val shown = (message as? CliMessage.User)?.let { userLineOf(it, it.uuid.orEmpty()) }
+            val prompt = shown?.typed?.takeIf { it.isPrompt }?.let { promptTitle(it.text) }
+                ?: IMAGE_PROMPT_TITLE.takeIf { shown?.images?.isNotEmpty() == true }
+            Facts(cwd, permissionMode = PermissionMode.fromWire(raw.string("permissionMode")), prompt = prompt)
         }
         "assistant" -> if (raw.isSet("isSidechain")) {
             Facts(cwd)
@@ -326,14 +340,25 @@ private class MetaBuilder(private val sessionId: String) {
         TranscriptMeta(sessionId, customTitle, generatedTitle, firstPrompt, lastModel, lastEffort, lastPermissionMode, cwd, lineCount)
 }
 
-/** A user line as Tandem shows it: an interrupt marker ([interrupted]), else what the user typed, if anything ([typed]). */
-private class UserLine(val interrupted: Boolean, val typed: Typed?)
+/**
+ * A user line as Tandem shows it: an interrupt marker ([interrupted]), else what the user typed, if anything ([typed]), and the
+ * images sent with it ([images]).
+ */
+private class UserLine(val interrupted: Boolean, val typed: Typed?, val images: List<UserImage>)
 
-private fun userLineOf(user: CliMessage.User): UserLine {
+/** [user] as Tandem shows it; its images get the ids `<uuid>#<index>`, as the live send gives them. */
+private fun userLineOf(user: CliMessage.User, uuid: String): UserLine {
     val text = user.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
     // The reducer's own test, so that a loaded line shows as the live one did.
     val interrupted = user.isInterrupt()
-    return UserLine(interrupted, if (interrupted) null else typedText(text))
+    val typed = if (interrupted) null else typedText(text)
+    // Images make a prompt of their own, but not beside an interrupt marker or tool results with nothing typed: no prompt either.
+    val images = if (interrupted || (typed == null && user.content.any { it is ContentBlock.ToolResult })) {
+        emptyList()
+    } else {
+        user.content.filterIsInstance<ContentBlock.Image>().mapIndexed { i, b -> UserImage("$uuid#$i", b.mediaType, b.data) }
+    }
+    return UserLine(interrupted, typed, images)
 }
 
 /**
@@ -358,18 +383,24 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
         meta.take(factsOf(message, raw))
         when (raw.string("type")) {
             "user" -> if (!raw.isSet("isMeta") && !raw.isSet("isSidechain") && !raw.isSet("isCompactSummary")) userLine(message)
-            "assistant" -> if (!raw.isSet("isSidechain")) state = reduce(state, SessionEvent.Cli(message))
+            "assistant" -> if (!raw.isSet("isSidechain")) {
+                state = reduce(state, SessionEvent.Cli(message, atMillis = (message as? CliMessage.Assistant)?.timestampMillis ?: 0L))
+            }
         }
     }
 
     private fun userLine(message: CliMessage) {
         val user = message as? CliMessage.User ?: return
-        val shown = userLineOf(user)
+        val uuid = user.uuid ?: "line-$lineCount"
+        val shown = userLineOf(user, uuid)
         // Tool results and an interrupt marker go through the reducer, as they do live; once per line, since it handles both.
         // The API puts a user message's tool_result blocks first and any text after them, so a prompt comes after its results.
-        if (shown.interrupted || user.content.any { it is ContentBlock.ToolResult }) state = reduce(state, SessionEvent.Cli(user))
-        val typed = shown.typed ?: return
-        state = reduce(state, SessionEvent.UserSent(user.uuid ?: "line-$lineCount", typed.text))
+        // Both are stamped with the line's own timestamp, 0 (unknown) when it has none, as an older CLI writes it.
+        val atMillis = user.timestampMillis ?: 0L
+        if (shown.interrupted || user.content.any { it is ContentBlock.ToolResult }) state = reduce(state, SessionEvent.Cli(user, atMillis))
+        // A line with images is a prompt even without typed text (images only), as it was when sent.
+        if (shown.typed == null && shown.images.isEmpty()) return
+        state = reduce(state, SessionEvent.UserSent(uuid, shown.typed?.text ?: "", atMillis, shown.images))
     }
 }
 

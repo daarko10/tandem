@@ -1,0 +1,90 @@
+package dev.daarkolabs.tandem.ui
+
+import dev.daarkolabs.tandem.chat.Cards
+import dev.daarkolabs.tandem.chat.Payload
+import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.PermissionAnswer
+import dev.daarkolabs.tandem.session.PermissionAnswers
+import dev.daarkolabs.tandem.ui.cards.agentLine
+import dev.daarkolabs.tandem.ui.cards.answerFor
+import dev.daarkolabs.tandem.ui.cards.editLines
+import dev.daarkolabs.tandem.ui.cards.escapeAnswer
+import dev.daarkolabs.tandem.ui.cards.moreWaitingText
+import dev.daarkolabs.tandem.ui.cards.payloadLineCount
+import dev.daarkolabs.tandem.ui.cards.permissionTitle
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import org.junit.jupiter.api.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/** What the docked card says and answers (spec 4.12, 5.2). */
+class PendingCardHostTest {
+    @Test
+    fun `a request that is gone yields no answer`() {
+        // The touch request (<request_id-26>) is pending; <request_id-63> (line 52) is not.
+        val state = stateAt("permission", 21)
+        assertEquals(
+            PermissionAnswer.Deny("The user denied this request."),
+            answerFor(state, "<request_id-26>") { PermissionAnswers.deny() },
+        )
+        assertNull(answerFor(state, "<request_id-63>") { PermissionAnswers.deny() })
+        assertNull(answerFor(ChatState(), "<request_id-26>") { PermissionAnswers.deny() })
+    }
+
+    @Test
+    fun `escape answers per card`() {
+        val p = pendingAt("permission", 21)
+        assertEquals(PermissionAnswer.Deny("The user denied this request."), escapeAnswer(Cards.permission(p, null), "")(p))
+        val q = pendingAt("ask-single", 22)
+        assertEquals(PermissionAnswer.Deny("cancelled"), escapeAnswer(Cards.question(q)!!, "")(q))
+        val plan = stateAt("plan-approve", 88)
+        val pp = plan.pendingPermissions.single()
+        assertEquals(PermissionAnswer.Deny("also add a date"), escapeAnswer(Cards.plan(pp, plan), "also add a date")(pp))
+        assertEquals(PermissionAnswer.Deny("No, keep planning"), escapeAnswer(Cards.plan(pp, plan), "  ")(pp))
+    }
+
+    @Test
+    fun `titles and the waiting count`() {
+        assertEquals("Allow Claude to Run touch tandem-fixture.txt?", permissionTitle(Cards.permission(pendingAt("permission", 21), null)))
+        val agent = pendingAt("permission", 21).copy(
+            toolName = "Agent",
+            input = buildJsonObject {
+                put("description", "Count lines")
+                put("prompt", "Count the lines of seed.txt")
+            },
+        )
+        // T6: ("Run", "an agent"): the object renders in mono (plan A, T6).
+        assertEquals("Allow Claude to Run an agent?", permissionTitle(Cards.permission(agent, null)))
+        assertEquals("From the agent \"Count lines in seed.txt\"", agentLine(Cards.pending(stateAt("agent-sync", 43)).first!!))
+        assertNull(agentLine(Cards.permission(pendingAt("permission", 21), null)))
+        assertNull(moreWaitingText(0))
+        assertEquals("1 more waiting", moreWaitingText(1))
+        assertEquals("3 more waiting", moreWaitingText(3))
+    }
+
+    @Test
+    fun `an insertion or a deletion shows no empty edit line`() {
+        assertEquals(emptyList(), editLines(""))
+        assertEquals(listOf("a", "b"), editLines("a\nb"))
+        // The path, then only the new lines of an insertion or the old lines of a deletion; the clamp counts the same lines.
+        assertEquals(3, payloadLineCount(Payload.OldNew("/p/a.txt", "", "x\ny")))
+        assertEquals(2, payloadLineCount(Payload.OldNew("/p/a.txt", "x", "")))
+        assertEquals(2, payloadLineCount(Payload.Mono("touch a\ntouch b")))
+        assertEquals(0, payloadLineCount(Payload.None))
+    }
+
+    @Test
+    fun `a card takes or returns the focus only while the chat holds it`() {
+        // The chat (composer, transcript or card) has the focus, or a card that just closed took it with it.
+        assertTrue(focusInChat(inPanel = true, rootFocused = true, chatFocused = true))
+        assertTrue(focusInChat(inPanel = true, rootFocused = false, chatFocused = false))
+        // The title field, the filter or a sidebar row has it.
+        assertFalse(focusInChat(inPanel = true, rootFocused = true, chatFocused = false))
+        // The editor or another tool window has it.
+        assertFalse(focusInChat(inPanel = false, rootFocused = false, chatFocused = false))
+        assertFalse(focusInChat(inPanel = false, rootFocused = true, chatFocused = true))
+    }
+}

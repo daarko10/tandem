@@ -10,6 +10,10 @@ object Fixtures {
 
     fun names(): List<String> = dir.listFiles { f -> f.name.endsWith(".ndjson") }.orEmpty().map { it.nameWithoutExtension }.sorted()
 
+    /** Names of the on-disk transcript fixtures in `transcripts/`, for [transcript]. */
+    fun transcriptNames(): List<String> =
+        File(dir, "transcripts").listFiles { f -> f.name.endsWith(".jsonl") }.orEmpty().map { it.nameWithoutExtension }.sorted()
+
     fun lines(name: String): List<String> = File(dir, "$name.ndjson").readLines().filter { it.isNotBlank() }
 
     fun decode(name: String): List<CliMessage> = lines(name).map(Ndjson::decode)

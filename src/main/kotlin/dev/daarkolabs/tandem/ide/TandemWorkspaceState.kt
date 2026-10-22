@@ -47,6 +47,9 @@ class TandemWorkspaceState : SimplePersistentStateComponent<TandemWorkspaceState
         var value: String? by string()
         var displayName: String? by string()
         var description: String? by string()
+        var resolvedModel: String? by string()
+        var supportsAutoMode: Boolean by property(false)
+        var effortLevels: MutableList<String> by list()
     }
 
     /**
@@ -56,7 +59,7 @@ class TandemWorkspaceState : SimplePersistentStateComponent<TandemWorkspaceState
     fun knownModels(): List<ModelOption> = state.knownModels.mapNotNull { stored ->
         val value = stored.value ?: return@mapNotNull null
         val name = stored.displayName ?: return@mapNotNull null
-        ModelOption(value, name, stored.description)
+        ModelOption(value, name, stored.description, stored.resolvedModel, stored.supportsAutoMode, stored.effortLevels.toList())
     }
 
     /** Remembers [models], which a session's CLI listed, as [knownModels]; an empty list leaves the last one as it was. */
@@ -67,6 +70,9 @@ class TandemWorkspaceState : SimplePersistentStateComponent<TandemWorkspaceState
                 value = model.value
                 displayName = model.displayName
                 description = model.description
+                resolvedModel = model.resolvedModel
+                supportsAutoMode = model.supportsAutoMode
+                effortLevels = model.effortLevels.toMutableList()
             }
         }
     }

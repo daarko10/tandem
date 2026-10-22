@@ -21,6 +21,8 @@
         <module name="intellij.platform.jewel.markdown.core"/>
         <module name="intellij.platform.jewel.markdown.ideLafBridgeStyling"/>
         <module name="intellij.platform.jewel.markdown.extensions.autolink"/>
+        <module name="intellij.platform.jewel.markdown.extensions.gfmTables"/>
+        <module name="intellij.platform.jewel.markdown.extensions.gfmStrikethrough"/>
     </dependencies>
 
     <extensions defaultExtensionNs="com.intellij">

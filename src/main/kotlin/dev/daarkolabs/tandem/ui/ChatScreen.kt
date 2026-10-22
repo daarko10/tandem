@@ -1,35 +1,41 @@
 package dev.daarkolabs.tandem.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.draw.drawWithContent
 import com.intellij.openapi.project.Project
+import dev.daarkolabs.tandem.chat.PermissionCard
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
-import dev.daarkolabs.tandem.session.PendingPermission
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
-import kotlinx.coroutines.flow.StateFlow
+import dev.daarkolabs.tandem.ui.cards.PendingCardHost
+import dev.daarkolabs.tandem.ui.cards.answerFor
+import dev.daarkolabs.tandem.ui.cards.escapeAnswer
+import dev.daarkolabs.tandem.ui.cards.pendingCard
+import dev.daarkolabs.tandem.ui.rows.ReplyHost
+import dev.daarkolabs.tandem.ui.rows.copyToClipboard
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import org.jetbrains.jewel.foundation.modifier.thenIf
 import org.jetbrains.jewel.foundation.theme.JewelTheme
-import org.jetbrains.jewel.ui.component.DefaultButton
-import org.jetbrains.jewel.ui.component.OutlinedButton
-import org.jetbrains.jewel.ui.component.Text
 
 /**
- * One session's chat: its transcript ([rows], rendered by [ChatRowsPresenter]), the permission requests it waits on, and the prompt
- * bar ([PromptBar]) with the session's pickers, whose picks are also the project's last ones in [workspace]. Everything goes to
- * [manager] for [handle]'s session; none of it waits: a prompt to a stopped session starts its process. With [focusPrompt] the
- * prompt box takes the focus, and then [onPromptFocused] is called.
+ * One session's chat: its transcript ([ChatPanel], drawn from [presenter] with what the chat remembers on screen in [ui]), the card of
+ * the request it waits on ([PendingCardHost]), docked above the composer, and the prompt bar ([PromptBar]) with the session's
+ * pickers, whose picks are also the project's last ones in [workspace]. Everything goes to [manager] for [handle]'s session; none of
+ * it waits: a prompt to a stopped session starts its process. While a permission card is open the transcript is dimmed. With
+ * [focusPrompt] the prompt box takes the focus, and then [onPromptFocused] is called. Esc in the transcript asks for the prompt box's
+ * focus with [onFocusComposer]; Esc in the prompt box while a card is open gives the card's Esc answer (spec 4.18). A card that opens
+ * takes the focus only when [cardTakesFocus] says so then. Under each ended turn's reply, Copy and Fork from here go through [actions].
+ * Prompts, with their attached images, go out through the session's [sender].
  */
 @Composable
 internal fun ChatPane(
@@ -37,39 +43,62 @@ internal fun ChatPane(
     handle: SessionHandle,
     manager: SessionManager,
     workspace: TandemWorkspaceState,
-    rows: StateFlow<List<ChatRow>>,
+    presenter: ChatPresenter,
+    ui: ChatUiState,
+    actions: SessionActions,
+    sender: ComposerSender,
     focusPrompt: Boolean = false,
     onPromptFocused: () -> Unit = {},
+    onFocusComposer: () -> Unit = {},
+    cardTakesFocus: () -> Boolean = { false },
 ) {
-    val state by handle.state.collectAsState()
+    val composer by presenter.composer.collectAsState()
+    val pendingFlow = remember(presenter) { presenter.chat.map { it.pendingCard() }.distinctUntilChanged() }
+    val pending by pendingFlow.collectAsState(presenter.chat.value.pendingCard())
+    // The plan card's feedback, for the request on screen: Esc in the composer sends it too.
+    val feedback = remember(pending.card?.requestId) { TextFieldState() }
+    val panel = JewelTheme.globalColors.panelBackground
+    // The replies' hover rows (polish spec 2.6): only they read the two states, so a turn's start or end recomposes nothing else.
+    val latestReply = presenter.latestReply.collectAsState()
+    val busy = presenter.busy.collectAsState()
+    val reply = remember(handle.id, actions, latestReply, busy) {
+        ReplyHost(::copyToClipboard, { actions.fork(handle.id) }, latestReply, busy)
+    }
     Column(Modifier.fillMaxSize()) {
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            val emptyText = if (state.ended) {
+        Box(
+            Modifier.weight(1f).fillMaxWidth()
+                // The dim of spec 4.12: a scrim drawn over the list, never an offscreen layer of it.
+                .thenIf(pending.card is PermissionCard) {
+                    drawWithContent {
+                        drawContent()
+                        drawRect(panel.copy(alpha = 0.5f))
+                    }
+                },
+        ) {
+            val emptyText = if (composer.ended) {
                 "This session's claude process has stopped. Send a prompt to start it again."
             } else {
                 "Ask Claude anything about this project."
             }
-            ChatPanel(project, rows, emptyText)
+            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis, onFocusComposer, reply)
         }
-        state.pendingPermissions.forEach { PermissionPrompt(it, handle, manager) }
-        PromptBar(handle, manager, workspace, focusPrompt, onPromptFocused)
-    }
-}
-
-@Composable
-private fun PermissionPrompt(permission: PendingPermission, handle: SessionHandle, manager: SessionManager) {
-    Column(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-            .background(JewelTheme.globalColors.borders.disabled).padding(8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Text("Allow ${permission.toolName}?", fontWeight = FontWeight.Bold)
-        permission.description?.let { Text(it) }
-        Text(permission.input.toString().take(300), color = JewelTheme.globalColors.text.info)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            DefaultButton(onClick = { manager.allow(handle.id, permission.requestId, always = false) }) { Text("Allow once") }
-            OutlinedButton(onClick = { manager.allow(handle.id, permission.requestId, always = true) }) { Text("Allow for this session") }
-            OutlinedButton(onClick = { manager.deny(handle.id, permission.requestId) }) { Text("Deny") }
-        }
+        pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) }
+        PromptBar(
+            project,
+            handle,
+            manager,
+            workspace,
+            presenter,
+            ui,
+            sender,
+            focusPrompt,
+            onPromptFocused,
+            onCardEscape = {
+                pending.card?.let { card ->
+                    answerFor(handle.state.value, card.requestId, escapeAnswer(card, feedback.text.toString()))
+                        ?.let { manager.answer(handle.id, card.requestId, it) }
+                }
+            },
+        )
     }
 }

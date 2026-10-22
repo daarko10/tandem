@@ -3,9 +3,14 @@ package dev.daarkolabs.tandem.session
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
+import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.StreamEvent
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
@@ -84,6 +89,8 @@ class ReducerTest {
         val final = replay("interrupt").last()
         val notices = final.entries.filterIsInstance<ChatEntry.Notice>()
         assertEquals(listOf("Stopped."), notices.map { it.text })
+        assertEquals(NoticeKind.INTERRUPTED, notices.single().kind)
+        assertEquals(TurnEnd.INTERRUPTED, final.entries.filterIsInstance<ChatEntry.TurnEnded>().single().end)
         assertFalse(final.busy)
         assertTrue(final.assistants().none { it.streaming })
     }
@@ -92,11 +99,16 @@ class ReducerTest {
     fun `a requested model switch confirmed by init produces no warning`() {
         var state = ChatState(requestedModel = "claude-sonnet-5-5")
         for (message in Fixtures.decode("model-switch")) {
-            if (message is CliMessage.ControlResponse && message.payload == null) state = reduce(state, SessionEvent.ModelRequested("claude-haiku-5-5"))
+            // The recorded set_model answer (<request_id-25>) goes through the set_model answer matching (ModelChange).
+            if (message is CliMessage.ControlResponse && message.payload == null) {
+                state = reduce(state, SessionEvent.ModelRequested("claude-haiku-5-5", message.requestId))
+            }
             state = reduce(state, SessionEvent.Cli(message))
             assertNull(state.modelWarning, "unexpected warning: ${state.modelWarning}")
         }
         assertEquals("claude-haiku-5-5", state.activeModel)
+        assertEquals(emptyMap(), state.modelChanges, "the recorded success answered the switch")
+        assertTrue(state.entries.none { it is ChatEntry.Notice })
     }
 
     @Test
@@ -170,13 +182,13 @@ class ReducerTest {
             SessionEvent.Ended("The claude CLI exited with code 3.\nboom", isError = true),
         ).entries.last() as ChatEntry.Notice
         assertEquals("The claude CLI exited with code 3. The turn ended without its result.\nboom", crashedSaid.text)
-        // A process Tandem itself ended (killed as the IDE exits) ends no turn: nobody is to be told of one.
+        // A process Tandem itself ended (killed as the IDE exits) ends its turn as interrupted, not failed: the chat says nothing more.
         val killed = reduce(
             reduce(one, SessionEvent.UserSent("u2", "more")),
             SessionEvent.Ended("The claude CLI exited with code 137.", isError = true, endedByHost = true),
         )
-        assertEquals(1, killed.turnsEnded)
-        assertEquals(TurnEnd.COMPLETED, killed.lastTurnEnd)
+        assertEquals(2, killed.turnsEnded)
+        assertEquals(TurnEnd.INTERRUPTED, killed.lastTurnEnd)
         assertEquals("The claude CLI exited with code 137.", (killed.entries.last() as ChatEntry.Notice).text)
         // Between turns, an exit ends no turn, error or not.
         assertEquals(1, reduce(one, SessionEvent.Ended("exited with code 1", isError = true)).turnsEnded)
@@ -207,6 +219,7 @@ class ReducerTest {
         assertTrue(modelMatches("opus", "claude-opus-5-5"))
         assertTrue(modelMatches("claude-opus-5-5[1m]", "claude-opus-5-5"))
         assertTrue(modelMatches("default", "claude-sonnet-5-5"))
+        assertTrue(modelMatches("fable", "claude-fable-5-1"))
         assertFalse(modelMatches("opus", "claude-sonnet-5-5"))
     }
 
@@ -252,7 +265,7 @@ class ReducerTest {
     @Test
     fun `retries, errors and process exit are visible`() {
         var state = reduce(ChatState(), cli("""{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":4000,"error":"overloaded"}"""))
-        assertEquals("API request failed (overloaded), retrying 2/10 in 4s.", (state.entries.last() as ChatEntry.Notice).text)
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.INFO, "overloaded · Retrying in 4s · attempt 2/10"), state.entries.last())
         state = reduce(state, cli("""{"type":"assistant","error":"authentication_failed","message":{"id":"m","content":[]}}"""))
         assertEquals(
             "The claude CLI (Claude Code) is not signed in. Run `claude` in a terminal to sign in, then retry.",
@@ -367,6 +380,9 @@ class ReducerTest {
     private fun rejection(requestId: String, error: String): SessionEvent =
         cli("""{"type":"control_response","response":{"subtype":"error","request_id":"$requestId","error":"$error"}}""")
 
+    private fun success(requestId: String): SessionEvent =
+        cli("""{"type":"control_response","response":{"subtype":"success","request_id":"$requestId"}}""")
+
     @Test
     fun `a rejected permission mode change goes back to the mode before it and says which change was rejected`() {
         var state = ChatState(permissionMode = PermissionMode.DEFAULT)
@@ -462,6 +478,193 @@ class ReducerTest {
     }
 
     @Test
+    fun `the initialize models keep resolvedModel, supportsAutoMode and effort levels`() {
+        val models = reduce(ChatState(), SessionEvent.Cli(Fixtures.decode("agent-sync")[1])).models
+        val levels = listOf("low", "medium", "high", "xhigh", "max")
+        assertEquals(ModelOption("default", "Default (recommended)", "Fable 5.1", "claude-fable-5-1", true, levels), models[0])
+        val haiku = models.single { it.displayName == "Haiku 4.5" }
+        assertEquals("claude-haiku-4-5-20251001", haiku.value)
+        assertFalse(haiku.supportsAutoMode)
+        assertEquals(emptyList(), haiku.effortLevels)
+    }
+
+    @Test
+    fun `a model pick is pending until the next init`() {
+        var state = reduce(ChatState(), SessionEvent.ModelRequested("opus"))
+        assertTrue(state.modelSwitchPending)
+        state = reduce(state, reply("a1", "m1", "x"))
+        state = reduce(state, cli("""{"type":"assistant","uuid":"a2","message":{"id":"m2","model":"claude-sonnet-5-5","content":[{"type":"text","text":"x"}]}}"""))
+        assertTrue(state.modelSwitchPending, "an assistant line keeps it")
+        state = reduce(state, SessionEvent.Cli(Fixtures.decode("agent-sync")[5]))
+        assertFalse(state.modelSwitchPending, "init clears it")
+
+        state = reduce(state, SessionEvent.ModelRequested("opus"))
+        fun fallback(scope: String): SessionEvent = cli(
+            """{"type":"system","subtype":"model_refusal_fallback","original_model":"claude-opus-5-5","fallback_model":"claude-sonnet-5-5",""" +
+                """"scope":"$scope","retracted_message_uuids":[]}""",
+        )
+        state = reduce(state, fallback("local"))
+        assertTrue(state.modelSwitchPending, "a local fallback answers one request only")
+        state = reduce(state, fallback("session"))
+        assertFalse(state.modelSwitchPending, "the session switched")
+    }
+
+    @Test
+    fun `a refused set_model puts back the model shown before, ends the pending switch and says so`() {
+        val before = ChatState(
+            requestedModel = "sonnet",
+            activeModel = "claude-haiku-5-5",
+            modelWarning = "You picked sonnet, but the CLI is using claude-haiku-5-5.",
+        )
+        val requested = reduce(before, SessionEvent.ModelRequested("opus", "r1"))
+        assertTrue(requested.modelSwitchPending)
+        assertNull(requested.modelWarning)
+        assertEquals(
+            mapOf("r1" to ModelChange("opus", "sonnet", previousPending = false, previousWarning = before.modelWarning)),
+            requested.modelChanges,
+        )
+
+        val accepted = reduce(requested, success("r1"))
+        assertEquals("opus", accepted.requestedModel)
+        assertTrue(accepted.modelSwitchPending, "an accepted switch still waits for its init")
+        assertEquals(emptyMap(), accepted.modelChanges)
+        assertTrue(accepted.entries.none { it is ChatEntry.Notice })
+
+        val refused = reduce(requested, rejection("r1", "Model opus is not available"))
+        assertEquals("sonnet", refused.requestedModel)
+        assertFalse(refused.modelSwitchPending, "the footer leaves its pending state")
+        assertEquals(before.modelWarning, refused.modelWarning)
+        assertEquals(emptyMap(), refused.modelChanges)
+        // The sonnet pick was confirmed, but the last system/init reported haiku (the footer shows it): the CLI stays on haiku.
+        val text = "The CLI rejected the switch to model opus (Model opus is not available); it stays on model claude-haiku-5-5."
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.ERROR, text), refused.entries.last())
+
+        val defaultRefused = reduce(reduce(ChatState(), SessionEvent.ModelRequested(null, "r2")), rejection("r2", "no"))
+        assertEquals(
+            "The CLI rejected the switch to the default model (no); it stays on the default model.",
+            (defaultRefused.entries.last() as ChatEntry.Notice).text,
+        )
+        assertFalse(defaultRefused.modelSwitchPending)
+        // No pick before: the model the session runs, from its last system/init.
+        val running = ChatState(activeModel = "claude-haiku-5-5")
+        val runningRefused = reduce(reduce(running, SessionEvent.ModelRequested("opus", "r3")), rejection("r3", "no"))
+        assertEquals(
+            "The CLI rejected the switch to model opus (no); it stays on model claude-haiku-5-5.",
+            (runningRefused.entries.last() as ChatEntry.Notice).text,
+        )
+        // The default pick, accepted and still waiting for its init: the CLI is on the default model, not the one before it.
+        val onSonnet = ChatState(requestedModel = "sonnet", activeModel = "claude-sonnet-5-5")
+        val defaultAccepted = reduce(reduce(onSonnet, SessionEvent.ModelRequested(null, "r1")), success("r1"))
+        val haikuRefused = reduce(reduce(defaultAccepted, SessionEvent.ModelRequested("haiku", "r4")), rejection("r4", "no"))
+        assertEquals(
+            "The CLI rejected the switch to model haiku (no); it stays on the default model.",
+            (haikuRefused.entries.last() as ChatEntry.Notice).text,
+        )
+        assertNull(haikuRefused.requestedModel)
+        assertTrue(haikuRefused.modelSwitchPending, "the default pick still waits for its init")
+    }
+
+    @Test
+    fun `a refused set_model hands what was shown before it to the next pick waiting`() {
+        // opus accepted and waiting for its init; then haiku (r2) and fable (r3), both sent before the CLI answers either.
+        val opus = reduce(reduce(ChatState(requestedModel = "sonnet"), SessionEvent.ModelRequested("opus", "r1")), success("r1"))
+        val sent = reduce(reduce(opus, SessionEvent.ModelRequested("haiku", "r2")), SessionEvent.ModelRequested("fable", "r3"))
+
+        val firstRefused = reduce(sent, rejection("r2", "no"))
+        assertEquals("fable", firstRefused.requestedModel, "the later pick still shows")
+        assertTrue(firstRefused.modelSwitchPending)
+        assertEquals(mapOf("r3" to ModelChange("fable", "opus", previousPending = true, previousWarning = null)), firstRefused.modelChanges)
+        // The footer shows fable, still waiting, so the notice says what the CLI runs meanwhile.
+        assertEquals(
+            "The CLI rejected the switch to model haiku (no); it stays on model opus.",
+            (firstRefused.entries.last() as ChatEntry.Notice).text,
+        )
+
+        val bothRefused = reduce(firstRefused, rejection("r3", "no"))
+        assertEquals("opus", bothRefused.requestedModel)
+        assertTrue(bothRefused.modelSwitchPending, "opus, accepted, still waits for its init")
+        assertEquals(emptyMap(), bothRefused.modelChanges)
+        assertEquals(
+            "The CLI rejected the switch to model fable (no); it stays on model opus.",
+            (bothRefused.entries.last() as ChatEntry.Notice).text,
+        )
+    }
+
+    @Test
+    fun `settled and an exit clear the model changes, and a pick for a stopped session records none`() {
+        val state = reduce(ChatState(), SessionEvent.ModelRequested("opus", "r1"))
+        assertEquals(emptyMap(), state.settled().modelChanges)
+        assertEquals(emptyMap(), reduce(state, SessionEvent.Ended("exited", isError = false)).modelChanges)
+        val stopped = reduce(ChatState(), SessionEvent.ModelRequested("opus"))
+        assertEquals("opus", stopped.requestedModel)
+        assertEquals(emptyMap(), stopped.modelChanges)
+    }
+
+    @Test
+    fun `apply_flag_settings success keeps the effort, an error restores it with a notice`() {
+        val requested = reduce(ChatState(effort = "medium"), SessionEvent.EffortRequested("high", "r1"))
+        assertEquals("high", requested.effort)
+        assertEquals(mapOf("r1" to EffortChange("high", "medium")), requested.effortChanges)
+
+        val kept = reduce(requested, cli("""{"type":"control_response","response":{"subtype":"success","request_id":"r1"}}"""))
+        assertEquals("high", kept.effort)
+        assertEquals(emptyMap(), kept.effortChanges)
+        assertTrue(kept.entries.none { it is ChatEntry.Notice })
+
+        val error = "CLAUDE_CODE_EFFORT_LEVEL overrides effort for this session"
+        val restored = reduce(requested, rejection("r1", error))
+        assertEquals("medium", restored.effort)
+        assertEquals(emptyMap(), restored.effortChanges)
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.ERROR, "Effort not changed: $error"), restored.entries.last())
+    }
+
+    @Test
+    fun `a rejected effort change hands its previous level to the next one waiting`() {
+        // From medium: high (r1), then max (r2), both sent before the CLI answers either.
+        val sent = reduce(
+            reduce(ChatState(effort = "medium"), SessionEvent.EffortRequested("high", "r1")),
+            SessionEvent.EffortRequested("max", "r2"),
+        )
+        assertEquals(mapOf("r1" to EffortChange("high", "medium"), "r2" to EffortChange("max", "high")), sent.effortChanges)
+
+        // r1 refused: max still shows, and r2 now starts from medium, where the CLI stayed.
+        val firstRefused = reduce(sent, rejection("r1", "no"))
+        assertEquals("max", firstRefused.effort)
+        assertEquals(mapOf("r2" to EffortChange("max", "medium")), firstRefused.effortChanges)
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.ERROR, "Effort not changed: no"), firstRefused.entries.last())
+
+        // Both refused: the CLI runs at medium, and so does the footer.
+        val bothRefused = reduce(firstRefused, rejection("r2", "no"))
+        assertEquals("medium", bothRefused.effort)
+        assertEquals(emptyMap(), bothRefused.effortChanges)
+
+        // r1 refused, r2 accepted: the CLI runs at max.
+        val secondAccepted = reduce(firstRefused, cli("""{"type":"control_response","response":{"subtype":"success","request_id":"r2"}}"""))
+        assertEquals("max", secondAccepted.effort)
+        assertEquals(emptyMap(), secondAccepted.effortChanges)
+
+        // r1 accepted, r2 refused: the CLI runs at high.
+        val firstAccepted = reduce(sent, cli("""{"type":"control_response","response":{"subtype":"success","request_id":"r1"}}"""))
+        assertEquals("high", reduce(firstAccepted, rejection("r2", "no")).effort)
+    }
+
+    @Test
+    fun `a rejected effort change leaves an effort set since then`() {
+        val requested = reduce(ChatState(effort = "medium"), SessionEvent.EffortRequested("high", "r1"))
+        val replaced = reduce(requested, SessionEvent.EffortRequested("low"))
+        assertEquals("low", reduce(replaced, rejection("r1", "no")).effort)
+    }
+
+    @Test
+    fun `settled clears the effort changes`() {
+        val state = reduce(ChatState(effort = "low"), SessionEvent.EffortRequested("max", "r2"))
+        assertEquals(emptyMap(), state.settled().effortChanges)
+        val stopped = reduce(ChatState(effort = "low"), SessionEvent.EffortRequested("high"))
+        assertEquals("high", stopped.effort)
+        assertEquals(emptyMap(), stopped.effortChanges)
+    }
+
+    @Test
     fun `model entries without a value are skipped and a missing display name falls back to the value`() {
         val state = reduce(
             ChatState(),
@@ -549,4 +752,429 @@ class ReducerTest {
         assertEquals("two more", state.text())
         assertEquals(state.positions(), state.entryIndex)
     }
+
+    /** A state with a turn open, as a send leaves it: no fixture line opens one. */
+    private fun sent(): ChatState = reduce(ChatState(), SessionEvent.UserSent("u1", "prompt", atMillis = 0L))
+
+    private fun ChatState.toolResults(): List<ChatEntry.ToolResult> = entries.filterIsInstance<ChatEntry.ToolResult>()
+
+    private fun ChatState.turnEnds(): List<ChatEntry.TurnEnded> = entries.filterIsInstance<ChatEntry.TurnEnded>()
+
+    /** The last thinking block of the last assistant entry that has one. */
+    private fun ChatState.thinking(): AssistantBlock.Thinking? =
+        assistants().lastOrNull { entry -> entry.blocks.any { it is AssistantBlock.Thinking } }?.blocks?.filterIsInstance<AssistantBlock.Thinking>()?.last()
+
+    /** The last tool call of the last assistant entry that has one. */
+    private fun ChatState.toolUse(): AssistantBlock.ToolUse? =
+        assistants().lastOrNull { entry -> entry.blocks.any { it is AssistantBlock.ToolUse } }?.blocks?.filterIsInstance<AssistantBlock.ToolUse>()?.last()
+
+    // spec: ask-single: the question is a pending permission before the block stops and the answer links to the call
+    @Test
+    fun `ask-single - the question is a pending permission before the block stops and the answer links to the call`() {
+        val states = replay("ask-single")
+        val asked = states[22].pendingPermissions.single()
+        assertEquals("AskUserQuestion", asked.toolName)
+        assertTrue(asked.requiresUserInteraction)
+        assertTrue(states[22].assistants().last().streaming, "the block has not stopped yet")
+        val answer = states[26].toolResults().single { it.toolUseId == "<id-12>" }
+        assertTrue(answer.result!!.jsonObject["answers"] is JsonObject, answer.toString())
+    }
+
+    // spec: ask-deny: a cancelled question is a rejected result and the turn still completes
+    @Test
+    fun `ask-deny - a cancelled question is a rejected result and the turn still completes`() {
+        val final = replay("ask-deny").last()
+        val cancelled = final.toolResults().single()
+        assertTrue(cancelled.isError)
+        assertEquals("reject", cancelled.decision!!.decision)
+        val end = final.turnEnds().single()
+        assertEquals(TurnEnd.COMPLETED, end.end)
+        assertEquals(1, end.denials.size)
+    }
+
+    @Test
+    fun `a tool result before message_delta lands on the streaming message`() {
+        val states = replay("ask-multi-array")
+        assertTrue(states[30].toolResults().any { it.toolUseId == "<id-11>" })
+        assertTrue(states[30].assistants().single().streaming)
+        // message_delta (31) and message_stop (32): the message no longer streams once both are in.
+        assertTrue(states[32].assistants().none { it.streaming })
+        assertEquals(1, states[32].toolResults().size)
+    }
+
+    // spec: plan-approve: the status line after approval switches the mode before the tool result
+    @Test
+    fun `plan-approve - the status line after approval switches the mode before the tool result`() {
+        val states = replay("plan-approve")
+        assertEquals(PermissionMode.PLAN, states[89].permissionMode)
+        assertEquals(PermissionMode.ACCEPT_EDITS, states[90].permissionMode)
+        assertTrue(states[90].toolResults().none { it.toolUseId == "<id-92>" })
+        assertNotNull(states[91].toolResults().single { it.toolUseId == "<id-92>" }.result!!.jsonObject["plan"])
+    }
+
+    // spec: plan-deny: a deny keeps plan mode and the second request is pending again
+    @Test
+    fun `plan-deny - a deny keeps plan mode and the second request is pending again`() {
+        val requests = mapOf(79 to "ExitPlanMode", 143 to "ExitPlanMode", 175 to "Write")
+        var state = ChatState()
+        for ((index, message) in Fixtures.decode("plan-deny").withIndex()) {
+            val line = index + 1
+            state = reduce(state, SessionEvent.Cli(message))
+            requests[line]?.let { tool ->
+                assertEquals(tool, state.pendingPermissions.single().toolName, "line $line")
+                state = reduce(state, SessionEvent.PermissionAnswered(state.pendingPermissions.single().requestId))
+            }
+            if (line in 5 until 145) assertEquals(PermissionMode.PLAN, state.permissionMode, "line $line")
+            if (line == 145) assertEquals(PermissionMode.DEFAULT, state.permissionMode)
+        }
+    }
+
+    // spec: think-display-summarized: thinking text accumulates then the complete block brings the duration
+    @Test
+    fun `think-display-summarized - thinking text accumulates then the complete block brings the duration`() {
+        val messages = Fixtures.decode("think-display-summarized")
+        val states = replay("think-display-summarized")
+        val deltas = messages.withIndex().filter { (_, m) ->
+            ((m as? CliMessage.StreamEvent)?.event as? StreamEvent.ContentBlockDelta)?.delta is Delta.Thinking
+        }.map { it.index + 1 }
+        assertEquals(11, deltas.size)
+        for (line in deltas) {
+            val before = states[line - 1].thinking()!!.text
+            val after = states[line].thinking()!!.text
+            assertTrue(after.length > before.length && after.startsWith(before), "line $line: '$before' -> '$after'")
+            assertNull(states[line].thinking()!!.durationMs, "still a draft at line $line")
+        }
+        val complete = states[34].thinking()!!
+        assertTrue(complete.text.startsWith("47×83"), complete.text)
+        assertEquals(1991L, complete.durationMs)
+    }
+
+    @Test
+    fun `a thinking block without thinking_duration_ms takes its duration from the host clock`() {
+        val lines = Fixtures.lines("think-default").map { line ->
+            val json = Json.parseToJsonElement(line).jsonObject
+            if ("thinking_duration_ms" in json) JsonObject(json - "thinking_duration_ms").toString() else line
+        }
+        // The content_block_start (line 8) at 1000, the complete line (16) at 3000.
+        val final = lines.foldIndexed(ChatState()) { index, state, line ->
+            reduce(state, SessionEvent.Cli(Ndjson.decode(line), atMillis = if (index + 1 < 16) 1000L else 3000L))
+        }
+        val thinking = final.thinking()!!
+        assertEquals(2000L, thinking.durationMs)
+        assertEquals(1000L, thinking.startedAtMillis)
+        assertEquals(3000L, thinking.completedAtMillis)
+    }
+
+    // spec: think-default: the thinking estimate rises with thinking_tokens and clears on message_delta
+    @Test
+    fun `think-default - the thinking estimate rises with thinking_tokens and clears on message_delta`() {
+        val states = replay("think-default", sent())
+        assertEquals(listOf(0, 50, 150, 285), states.take(45).map { it.turn!!.thinkingEstimate }.distinct())
+        assertEquals(50, states[9].turn!!.thinkingEstimate)
+        assertEquals(150, states[11].turn!!.thinkingEstimate)
+        assertEquals(285, states[14].turn!!.thinkingEstimate)
+        // The draft block carries the estimate too: the delta's own (line 12: 100), then the thinking_tokens line's (14: 285).
+        assertEquals(100, states[12].thinking()!!.estimatedTokens)
+        assertEquals(285, states[14].thinking()!!.estimatedTokens)
+        val delta = (Fixtures.decode("think-default")[44] as CliMessage.StreamEvent).event as StreamEvent.MessageDelta
+        assertEquals(0, states[45].turn!!.thinkingEstimate)
+        assertEquals(delta.outputTokens, states[45].turn!!.outputTokens)
+        assertEquals(324, states[45].turn!!.outputTokens)
+    }
+
+    // spec: tools-bash: results keep content, result and decision
+    @Test
+    fun `tools-bash - results keep content, result and decision`() {
+        val states = replay("tools-bash", sent())
+        assertEquals("subcommandResults", states[20].pendingPermissions.single().decisionReasonType)
+        val (first, second) = states.last().toolResults()
+        assertEquals(PermissionDecision("accept", "user_temporary", null, null), first.decision)
+        assertNotNull(first.result!!.jsonObject["stdout"])
+        assertNotNull(first.content)
+        assertTrue(second.isError)
+        assertTrue(second.result is JsonPrimitive, second.result.toString())
+        val bash = states[18].toolUse()!!
+        assertEquals("Bash", bash.name)
+        assertEquals(bash.id, states[18].turn!!.lastToolUseId)
+        assertEquals(1, states[18].turn!!.toolCount)
+        assertEquals(2, states[34].turn!!.toolCount)
+        assertEquals(states[34].toolUse()!!.id, states[34].turn!!.lastToolUseId)
+    }
+
+    // spec: permission: a denied call records the reject decision
+    @Test
+    fun `permission - a denied call records the reject decision`() {
+        val denied = replay("permission")[56].toolResults().single { it.toolUseId == "<id-52>" }
+        assertEquals("reject", denied.decision!!.decision)
+    }
+
+    // spec: agent-sync: task lines fill tasks and subagent entries carry the parent id
+    @Test
+    fun `agent-sync - task lines fill tasks and subagent entries carry the parent id`() {
+        val states = replay("agent-sync")
+        val final = states.last()
+        val task = final.tasks.getValue("<task_id-42>")
+        assertEquals("completed", task.status)
+        assertNotNull(task.summary)
+        assertEquals(2, task.toolUses)
+        assertEquals("<id-12>", task.toolUseId)
+        val nested = final.entries.filter {
+            (it as? ChatEntry.Assistant)?.parentToolUseId == "<id-12>" || (it as? ChatEntry.ToolResult)?.parentToolUseId == "<id-12>"
+        }
+        assertEquals(4, nested.size, nested.toString())
+        for (entry in nested) {
+            val agent = (entry as? ChatEntry.Assistant)?.agentId ?: (entry as ChatEntry.ToolResult).agentId
+            assertEquals("<task_id-42>", agent, entry.toString())
+        }
+        assertEquals("Running wc -l seed.txt && tail -c1 seed.txt | xxd", states[41].tasks.getValue("<task_id-42>").description)
+        assertEquals("<task_id-42>", states[43].pendingPermissions.single().agentId)
+    }
+
+    // spec: agent-bash-task: a bash task is not stored
+    @Test
+    fun `agent-bash-task - a bash task is not stored`() {
+        for (state in replay("agent-bash-task")) assertTrue(state.tasks.isEmpty(), state.tasks.toString())
+    }
+
+    // spec: misc-state-action: the pending permission keeps blocked_path, display name and suggestions
+    @Test
+    fun `misc-state-action - the pending permission keeps blocked_path, display name and suggestions`() {
+        val asked = replay("misc-state-action")[21].pendingPermissions.single()
+        assertEquals("<path>", asked.blockedPath)
+        assertEquals("Bash", asked.displayName)
+        assertEquals(3, asked.suggestions.size)
+        assertFalse(asked.requiresUserInteraction)
+    }
+
+    @Test
+    fun `a streaming tool_use has no input until its complete line`() {
+        val states = replay("permission")
+        val started = states[11].toolUse()!!
+        assertNull(started.input)
+        assertEquals("", started.partialInput)
+        assertTrue(states[18].toolUse()!!.partialInput.length > states[13].toolUse()!!.partialInput.length)
+        assertNull(states[18].toolUse()!!.input)
+        assertEquals("touch tandem-fixture.txt", states[19].toolUse()!!.input!!["command"]!!.jsonPrimitive.content)
+    }
+
+    // spec: agent-forwarded: the forwarded text is a subagent assistant entry
+    @Test
+    fun `agent-forwarded - the forwarded text is a subagent assistant entry`() {
+        val forwarded = replay("agent-forwarded").last().assistants().single { entry ->
+            entry.agentId != null && entry.blocks.any { it == AssistantBlock.Text("7") }
+        }
+        assertEquals("<id-12>", forwarded.parentToolUseId)
+        assertEquals("general-purpose", forwarded.subagentType)
+        assertEquals("Count lines in seed.txt", forwarded.taskDescription)
+    }
+
+    // spec: misc-image: an image result keeps its content array
+    @Test
+    fun `misc-image - an image result keeps its content array`() {
+        val image = replay("misc-image").last().toolResults().first { it.toolUseId == "<id-12>" }
+        assertTrue(image.content is JsonArray, image.content.toString())
+    }
+
+    @Test
+    fun `an image in assistant content is an Other block`() {
+        val image = """{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}"""
+        val complete = reduce(ChatState(), cli("""{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[$image]}}"""))
+        assertEquals(listOf<AssistantBlock>(AssistantBlock.Other("image")), complete.assistants().single().blocks)
+
+        var draft = reduce(ChatState(), cli("""{"type":"stream_event","event":{"type":"message_start","message":{"id":"m2"}}}"""))
+        draft = reduce(draft, cli("""{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":$image}}"""))
+        assertEquals(listOf<AssistantBlock>(AssistantBlock.Other("image")), draft.assistants().single().blocks)
+    }
+
+    @Test
+    fun `a user message keeps its images on the entry`() {
+        val images = listOf(UserImage("u1#0", "image/png", "AAAA"))
+        val state = reduce(ChatState(), SessionEvent.UserSent("u1", "look", 5L, images))
+        assertEquals(ChatEntry.User("u1", "look", 5L, listOf(UserImage("u1#0", "image/png", "AAAA"))), state.entries.single())
+    }
+
+    @Test
+    fun `UserSent records the send time and result appends a TurnEnded entry`() {
+        val initial = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 1234))
+        assertEquals(1234L, initial.turn!!.startedAtMillis)
+        assertEquals(TurnProgress("u1", 1234L, 0, 0, null, 0), initial.turn)
+        assertEquals(1234L, (initial.entries.single() as ChatEntry.User).sentAtMillis)
+        val final = replay("plain-reply", initial).last()
+        val result = Fixtures.decode("plain-reply").filterIsInstance<CliMessage.Result>().single()
+        val end = final.entries.last() as ChatEntry.TurnEnded
+        assertEquals(TurnEnd.COMPLETED, end.end)
+        assertEquals(result.durationMs, end.durationMs)
+        assertEquals(result.outputTokens, end.outputTokens)
+        assertNull(end.error)
+        assertNull(final.turn)
+        assertEquals(final.positions(), final.entryIndex)
+    }
+
+    @Test
+    fun `Ended during a turn appends a FAILED turn end with the host duration`() {
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 1000))
+        state = reduce(state, SessionEvent.Ended("exit 2", isError = true, atMillis = 4000))
+        val end = state.turnEnds().single()
+        assertEquals(TurnEnd.FAILED, end.end)
+        assertEquals(3000L, end.durationMs)
+        assertEquals("exit 2", end.error)
+        assertEquals(emptyList(), end.denials)
+        val error = state.entries.indexOfFirst { it is ChatEntry.Notice && it.level == NoticeLevel.ERROR }
+        assertTrue(state.entries.indexOf(end) in 0 until error, state.entries.toString())
+        assertNull(state.turn)
+    }
+
+    @Test
+    fun `Ended by the host during a turn appends an INTERRUPTED turn end`() {
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 1000))
+        state = reduce(state, SessionEvent.Ended("The claude CLI exited.", isError = false, endedByHost = true, atMillis = 4000))
+        val end = state.turnEnds().single()
+        assertEquals(TurnEnd.INTERRUPTED, end.end)
+        assertEquals(3000L, end.durationMs)
+        assertNull(end.error)
+        assertEquals(NoticeLevel.INFO, (state.entries.last() as ChatEntry.Notice).level)
+        assertNull(state.turn)
+    }
+
+    @Test
+    fun `turn end ids stay unique across a host stop and a later result`() {
+        val result = Fixtures.lines("plain-reply").first { "\"type\":\"result\"" in it }
+        var state = reduce(ChatState(), SessionEvent.UserSent("u1", "hi", atMillis = 1000))
+        state = reduce(state, SessionEvent.Ended("The claude CLI exited.", isError = false, endedByHost = true, atMillis = 2000))
+        state = reduce(state, SessionEvent.UserSent("u2", "again", atMillis = 3000))
+        state = reduce(state, cli(result))
+        val ends = state.turnEnds()
+        assertEquals(2, ends.size)
+        assertEquals(2, ends.map { it.id }.distinct().size, ends.toString())
+        assertEquals(state.entries.size, state.entryIndex.size)
+        assertEquals(state.positions(), state.entryIndex)
+    }
+
+    // spec: invalid-model: the assistant error line sets the turn error and the failed result carries it
+    @Test
+    fun `invalid-model - the assistant error line sets the turn error and the failed result carries it`() {
+        val states = replay("invalid-model", sent())
+        assertEquals("API Error: 404 model_not_found", states[4].turn!!.lastError)
+        val end = states.last().turnEnds().single()
+        assertEquals(TurnEnd.FAILED, end.end)
+        assertEquals("API Error: 404 model_not_found", end.error)
+    }
+
+    @Test
+    fun `an api_retry line yields the reference wording`() {
+        fun retry(fields: String): ChatEntry.Notice =
+            reduce(ChatState(), cli("""{"type":"system","subtype":"api_retry",$fields}""")).entries.single() as ChatEntry.Notice
+        assertEquals(
+            ChatEntry.Notice("notice-0", NoticeLevel.INFO, "529 overloaded · Retrying in 4s · attempt 2/10"),
+            retry(""""attempt":2,"max_retries":10,"retry_delay_ms":4000,"error":"overloaded","error_status":529"""),
+        )
+        assertEquals(
+            "overloaded · Retrying in 4s · attempt 2/10",
+            retry(""""attempt":2,"max_retries":10,"retry_delay_ms":4000,"error":"overloaded"""").text,
+        )
+        assertEquals("529 · Retrying in 4s", retry(""""retry_delay_ms":4999,"error_status":529""").text)
+        // The lines `entry ids stay unique after a retraction` uses: no error, no delay.
+        for (fields in listOf(""""attempt":1,"max_retries":3""", """"attempt":2,"max_retries":3""")) {
+            val text = retry(fields).text
+            assertFalse("null" in text, text)
+            assertEquals("API error · attempt ${fields.substringAfter(":").substringBefore(",")}/3", text)
+        }
+        assertEquals("API error", retry(""""attempt":1""").text)
+    }
+
+    @Test
+    fun `init stores cwd`() {
+        assertEquals("<path>", replay("tools-read")[5].cwd)
+        assertNull(replay("tools-read")[4].cwd)
+    }
+
+    /** The decoded line [line] (1-based) of fixture [name]. */
+    private fun at(name: String, line: Int): CliMessage = Ndjson.decode(Fixtures.lines(name)[line - 1])
+
+    private fun inputTokensAt(name: String, line: Int): Long? =
+        ((at(name, line) as CliMessage.StreamEvent).event as StreamEvent.MessageStart).inputTokens
+
+    // polish spec 2.3, 3.2: the context ring's tokens and window
+    @Test
+    fun `message_start sets the context tokens and result sets the window`() {
+        val states = replay("misc-image")
+        assertEquals(31_294L, inputTokensAt("misc-image", 8)) // 2 + 4754 + 26538
+        assertEquals(ContextUsage(inputTokensAt("misc-image", 8), null), states[8].context)
+        assertEquals(31_630L, inputTokensAt("misc-image", 52)) // 2 + 220 + 31408
+        assertEquals(ContextUsage(inputTokensAt("misc-image", 52), 1_000_000L), states.last().context)
+    }
+
+    @Test
+    fun `a subagent's message_start does not touch the context`() {
+        val initial = ChatState(context = ContextUsage(10, 200_000L))
+        fun start(parent: String?): SessionEvent = SessionEvent.Cli(
+            CliMessage.StreamEvent(StreamEvent.MessageStart("m", null, null, 5L), parentToolUseId = parent, apiMessageId = null, raw = buildJsonObject {}),
+        )
+        assertEquals(ContextUsage(10, 200_000L), reduce(initial, start("toolu_1")).context)
+        // The same event on the main thread sets the tokens: the parent guard, not a missing usage, is what keeps them above.
+        assertEquals(ContextUsage(5, 200_000L), reduce(initial, start(null)).context)
+        // A message_start without usage changes nothing either.
+        val noUsage = SessionEvent.Cli(
+            CliMessage.StreamEvent(StreamEvent.MessageStart("m", null, null, null), parentToolUseId = null, apiMessageId = null, raw = buildJsonObject {}),
+        )
+        assertEquals(ContextUsage(10, 200_000L), reduce(initial, noUsage).context)
+    }
+
+    @Test
+    fun `a result without modelUsage keeps the context`() {
+        val state = reduce(ChatState(context = ContextUsage(10, 200_000L)), cli("""{"type":"result","subtype":"success"}"""))
+        assertEquals(ContextUsage(10, 200_000L), state.context)
+    }
+
+    @Test
+    fun `a result before any message_start knows the window only`() {
+        assertEquals(ContextUsage(null, 1_000_000L), reduce(ChatState(), SessionEvent.Cli(at("misc-image", 66))).context)
+    }
+
+    // Review Focus 3: a mid-turn fallback leaves the active model out of modelUsage.
+    @Test
+    fun `the window falls back to the largest listed when the active model is not in modelUsage`() {
+        val opus = reduce(ChatState(activeModel = "claude-opus-5-5"), SessionEvent.Cli(at("misc-image", 66)))
+        assertEquals(1_000_000L, opus.context?.window)
+        val result = cli("""{"type":"result","subtype":"success","modelUsage":{"a":{"contextWindow":200000},"b":{"contextWindow":1000000}}}""")
+        assertEquals(ContextUsage(null, 1_000_000L), reduce(ChatState(activeModel = "c"), result).context)
+        // The active model's own window wins over a larger one.
+        assertEquals(ContextUsage(null, 200_000L), reduce(ChatState(activeModel = "a"), result).context)
+    }
+
+    @Test
+    fun `a line with two tool results attaches the object to neither`() {
+        val line = """{"type":"user","message":{"role":"user","content":[""" +
+            """{"type":"tool_result","tool_use_id":"t1","content":"one"},{"type":"tool_result","tool_use_id":"t2","content":"two"}]},""" +
+            """"tool_use_result":{"stdout":"one"}}"""
+        val results = reduce(ChatState(), cli(line)).toolResults()
+        assertEquals(listOf("t1", "t2"), results.map { it.toolUseId })
+        for (result in results) {
+            assertNull(result.result, result.toString())
+            assertNotNull(result.content)
+        }
+    }
+
+    @Test
+    fun `an assistant entry carries the time of its first line`() {
+        val messages = Fixtures.decode("plain-reply")
+        val state = messages.foldIndexed(ChatState()) { index, state, message -> reduce(state, SessionEvent.Cli(message, atMillis = index * 100L)) }
+        val start = messages.indexOfFirst { it is CliMessage.StreamEvent && it.event is StreamEvent.MessageStart }
+        assertTrue(start > 0)
+        // Stamped at its message_start, and kept when its complete line comes later.
+        assertEquals(start * 100L, state.assistants().single().atMillis)
+        // A complete line without a draft stamps its own time.
+        val complete = reduce(ChatState(), SessionEvent.Cli(Ndjson.decode(REPLY_LINE), atMillis = 1_234L))
+        assertEquals(1_234L, complete.assistants().single().atMillis)
+    }
+
+    @Test
+    fun `an assistant line stamped 0 carries no time`() {
+        val state = reduce(ChatState(), SessionEvent.Cli(Ndjson.decode(REPLY_LINE), atMillis = 0L))
+        assertNull(state.assistants().single().atMillis)
+    }
 }
+
+/** A complete main-thread `assistant` line with one text block. */
+private const val REPLY_LINE: String =
+    """{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-sonnet-5-5","content":[{"type":"text","text":"pong"}]}}"""

@@ -5,18 +5,42 @@ import com.intellij.testFramework.junit5.TestApplication
 import com.intellij.testFramework.junit5.fixture.tempPathFixture
 import com.intellij.testFramework.openProjectAsync
 import com.intellij.testFramework.useProjectAsync
+import dev.daarkolabs.tandem.chat.Cards
+import dev.daarkolabs.tandem.chat.ChatRowsBuilder
+import dev.daarkolabs.tandem.chat.RowOptions
+import dev.daarkolabs.tandem.chat.TextRow
+import dev.daarkolabs.tandem.chat.ThinkingRow
+import dev.daarkolabs.tandem.chat.ToolKind
+import dev.daarkolabs.tandem.chat.ToolRow
+import dev.daarkolabs.tandem.chat.ToolState
+import dev.daarkolabs.tandem.chat.WorkingIndicator
+import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
+import dev.daarkolabs.tandem.session.PermissionAnswers
 import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import dev.daarkolabs.tandem.ui.ChatPresenter
+import dev.daarkolabs.tandem.ui.RenderedChat
+import dev.daarkolabs.tandem.ui.cards.agentLine
+import dev.daarkolabs.tandem.ui.cards.picksOf
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
 import java.nio.file.Files
@@ -30,6 +54,7 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
@@ -110,6 +135,128 @@ class TandemSessionsTest {
     }
 
     @Test
+    fun aQuestionAnsweredFromTheServiceReachesTheFake() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("question").createDirectories()
+        val log = tempDir.get().resolve("question-sent.ndjson")
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "ask-single", "TANDEM_FAKE_LOG" to log.toString())
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            sessions.manager.send(handle.id, "Ask me a colour")
+            val p = handle.state.first { it.pendingPermissions.isNotEmpty() }.pendingPermissions.single()
+            val card = Cards.question(p)!!
+            val answers = Cards.answers(card, picksOf(card, mapOf(0 to setOf(1)), emptyMap())!!)
+            sessions.manager.answer(handle.id, p.requestId, PermissionAnswers.questionAnswers(p, answers))
+            handle.state.first { !it.busy }
+        }
+        // As the other tests of the class: no fake CLI outlives the project.
+        awaitNoOwnFakeCli()
+        // As SessionManagerTest.frames: the last piece is empty, or a line the fake is still writing.
+        val frames = log.readText().split('\n').dropLast(1).filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+        val answer = frames.single { it["type"]?.jsonPrimitive?.content == "control_response" }["response"]!!.jsonObject
+        assertEquals("<request_id-27>", answer["request_id"]!!.jsonPrimitive.content)
+        val response = answer["response"]!!.jsonObject
+        assertEquals("allow", response["behavior"]!!.jsonPrimitive.content)
+        assertEquals("<id-12>", response["toolUseID"]!!.jsonPrimitive.content)
+        assertEquals("Blue", response["updatedInput"]!!.jsonObject["answers"]!!.jsonObject["Which colour?"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `a subagent's permission request names the agent on its card and the nested row waits`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("subagent").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "agent-sync")
+            sessions.ensureStarted()
+            val manager = sessions.manager
+            val handle = manager.create(NewSessionOptions())
+            manager.send(handle.id, "Count lines")
+            // agent-sync:43, the subagent's Bash request; the fake holds the rest back until it is answered.
+            val state = handle.state.first { it.pendingPermissions.isNotEmpty() }
+            val p = state.pendingPermissions.single()
+            assertNotNull(p.agentId)
+            val rows = ChatRowsBuilder(RowOptions(showThinking = true)).build(state)
+            val card = assertNotNull(rows.card)
+            assertEquals("Count lines in seed.txt", card.agentDescription)
+            assertEquals("From the agent \"Count lines in seed.txt\"", agentLine(card))
+            assertEquals(0, rows.moreWaiting)
+            val agent = rows.rows.filterIsInstance<ToolRow>().single { it.calls.singleOrNull()?.kind == ToolKind.AGENT }
+            val nested = agent.calls.single().children.filterIsInstance<ToolRow>().single { it.calls.single().id == "<id-49>" }
+            assertEquals(ToolState.WAITING, nested.state)
+            val working = rows.rows.last()
+            assertTrue(working is WorkingRow && working.waiting, working.toString())
+
+            manager.answer(handle.id, p.requestId, PermissionAnswers.allowOnce(p))
+            val done = ChatRowsBuilder(RowOptions(showThinking = true)).build(handle.state.first { !it.busy })
+            val doneAgent = done.rows.filterIsInstance<ToolRow>().single { it.calls.singleOrNull()?.kind == ToolKind.AGENT }
+            assertEquals(ToolState.DONE, doneAgent.state)
+            assertEquals("Done (2 tool uses · 21.8k tokens · 5.8s)", doneAgent.calls.single().progress)
+        }
+        awaitNoOwnFakeCli()
+    }
+
+    @Test
+    @OptIn(ExperimentalJewelApi::class) // the presenter's rows carry Jewel's Markdown blocks
+    fun aPresenterRebuildsWhenShowThinkingChanges() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("thinking").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            // A turn that thinks with summaries, then answers.
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "think-display-summarized")
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            sessions.manager.send(handle.id, "What is 47 times 83 minus 19 squared?")
+            handle.state.first { s -> !s.busy && s.entries.any { it is ChatEntry.Assistant && !it.streaming } }
+            val presenterScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            try {
+                val presenter = ChatPresenter(presenterScope, handle.state, sessions.rowOptions)
+                // Never chat.value, which can precede the first emission.
+                val shown = presenter.chat.first { it.rows.any { r -> r.row is ThinkingRow } }
+                TandemSettings.getInstance().state.showThinking = false
+                sessions.settingsChanged()
+                val hidden = presenter.chat.first { it.rows.none { r -> r.row is ThinkingRow } }
+                fun keys(chat: RenderedChat): List<String> =
+                    chat.rows.map { it.row }.filter { it is ToolRow || it is TextRow }.map { it.key }
+                assertTrue(keys(shown).isNotEmpty(), keys(shown).toString())
+                assertEquals(keys(shown), keys(hidden), "the other rows keep their keys")
+            } finally {
+                // The settings are the application's: no other test may see showThinking = false.
+                TandemSettings.getInstance().loadState(TandemSettings.State())
+                sessions.settingsChanged()
+                presenterScope.cancel()
+            }
+        }
+        awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `the working row animates unless Reduce motion is on`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("motion").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            val row = WorkingRow(turnUuid = "turn", startedAtMillis = 0, step = "Pondering", outputTokens = 0, waiting = false)
+            fun animated(): Boolean = WorkingIndicator.view(row, 1_000, 1_000, sessions.reduceMotion.value).animated
+            assertFalse(sessions.reduceMotion.value)
+            assertTrue(animated(), "the spark moves on a default IDE")
+            val options = sessions.rowOptions.value
+            try {
+                TandemSettings.getInstance().state.reduceMotion = true
+                sessions.settingsChanged()
+                assertTrue(sessions.reduceMotion.value)
+                assertFalse(animated(), "the spark stands still")
+                // The rows' options, which every open chat rebuilds its rows on, do not change.
+                assertEquals(options, sessions.rowOptions.value)
+            } finally {
+                // The settings are the application's: no other test may see reduceMotion = true.
+                TandemSettings.getInstance().loadState(TandemSettings.State())
+                sessions.settingsChanged()
+            }
+            assertTrue(animated())
+        }
+    }
+
+    @Test
     fun `the models a session's CLI lists are remembered for the next IDE run`() = timeoutRunBlocking(30.seconds) {
         val dir = tempDir.get().resolve("models").createDirectories()
         openProjectAsync(dir).useProjectAsync { project ->
@@ -124,6 +271,19 @@ class TandemSessionsTest {
             while (workspace.knownModels() != models) delay(20)
         }
         awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `the models remembered from the last IDE run are every session's until a process lists them`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("remembered-models").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val remembered = listOf(ModelOption("opus", "Opus", null, "claude-opus-5-5"))
+            TandemWorkspaceState.getInstance(project).rememberModels(remembered)
+            val sessions = TandemSessions.get(project)
+            sessions.ensureStarted()
+            // A session restored without a process has no initialize response of its own: it offers these (ChatPresenter).
+            assertEquals(remembered, sessions.manager.models.first { it.isNotEmpty() })
+        }
     }
 
     @Test

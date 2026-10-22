@@ -25,12 +25,15 @@ The existing options were studied in October 2026:
 ## Architecture
 
 ```
- Jewel tool window (ui/)  session sidebar, header, chat, prompt bar with the model and permission-mode pickers
+ Jewel tool window (ui/)  session sidebar, header; the chat: a keyed list of rows (bubbles, Markdown, tool, thinking,
+        │                 working and footer rows), a hover row under each reply (Copy, Fork from here, time), the
+        │                 permission / question / plan cards, the composer (the `+` attach button, the thumbnail strip,
+        │                 the text area) and its footer: the mode control, the model · effort control and the context ring
         │  collects StateFlows, calls SessionManager
         ▼
  TandemSessions (ide/)  project service: owns the SessionManager in its coroutine scope, restores the open sessions
-        │               from TandemWorkspaceState, reads TandemSettings (claude path, max live sessions; Settings |
-        │               Tools | Tandem), runs SessionNotifier (IDE notifications)
+        │               from TandemWorkspaceState, reads TandemSettings (claude path, max live sessions, show thinking rows,
+        │               reduce motion; Settings | Tools | Tandem), runs SessionNotifier (IDE notifications)
         ▼
  SessionManager (session/)  the project's sessions: StateFlow<List<SessionHandle>> and the selection, the live cap,
         │                   create / open / fork / rename / delete / close, the resume-id mismatch rule. It raises the
@@ -49,6 +52,7 @@ The existing options were studied in October 2026:
              • TranscriptReader  a transcript → settled ChatState + TranscriptMeta; TranscriptChain picks the current history
         ▼
  protocol/  pure Kotlin. Json tree → sealed CliMessage; unknown types → Unknown(raw)
+ chat/      pure Kotlin. ChatState → chat rows (ChatRowsBuilder): tool labels, states, bodies; no Compose, no IntelliJ
         ▲
  ide/ (Milestone 2)  Tandem MCP server (edit tools via WriteCommandAction), diff preview, file/selection context
 ```
@@ -84,8 +88,18 @@ Key choices:
    several live sessions under a cap, resume, fork, rename and delete, model and permission-mode pickers, effort picked
    at creation. Covered by unit, fixture and platform tests, IDE Starter tests and the Plugin Verifier; feel, focus and
    freezes are still to be checked by hand in `runIde`.
+
+   **Phase 2a, chat redesign.** The desktop app's chat feel: typed tool rows with grouping, thinking rows, the working
+   indicator, the permission / question / plan cards, intent-based autoscroll, subagent nesting, reload parity; spec
+   docs/superpowers/specs/2026-10-19-chat-redesign-design.md. **Status: implemented on feat/chat-redesign**, covered by
+   fixture, pure-presentation (chat/), platform and IDE Starter tests; feel is checked by hand (spec 10.7).
+
+   **Phase 2a polish** (spec docs/superpowers/specs/2026-10-21-chat-polish-design.md): live tool states and Show more /
+   Show less, the desktop-style composer and footer menus with the context ring, coloured Bash bodies and the inline code
+   pill, the hover action row, image attachments by paste, drop and the `+` menu. **Status: implemented on
+   feat/chat-redesign.**
 2. **IDE-native edits.** MCP edit tools, diff preview, undo.
-3. **Parity.** Slash commands, plan mode, AskUserQuestion, images, context meter, rewind, subagent status.
+3. **Parity.** Slash commands, plan mode, AskUserQuestion, rewind, subagent status.
 4. **Hardening.** Windows/WSL, Remote Development, IDE matrix in CI, published benchmarks.
 
 ## Open questions
@@ -114,4 +128,4 @@ Resolved while building the sessions spec (its open items; details in `protocol.
   (`protocol.md` 1.1 and 8).
 - ~~Changing effort on a live session~~: `apply_flag_settings` with `{"effortLevel": …}` changes the next turn's effort
   (the transcript shows it; `init` has no effort); `update_settings` writes settings files and is not for this
-  (`protocol.md` 4.4). The effort badge can become a picker later.
+  (`protocol.md` 4.4). An effort picked in the footer is sent as `apply_flag_settings` (`protocol.md` 4.4).

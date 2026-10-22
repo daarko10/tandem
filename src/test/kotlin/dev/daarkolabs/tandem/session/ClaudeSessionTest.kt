@@ -1,9 +1,11 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -12,6 +14,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -61,6 +64,69 @@ class ClaudeSessionTest {
         val written = stdin.readLines()
         assertTrue(written[0].contains("\"subtype\":\"initialize\""), written[0])
         assertTrue(written[1].contains("\"type\":\"user\""), written[1])
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `sendUserMessage writes one frame with the image blocks after the text`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val launcher = fakeCli("cat '${File(fixtures, "user-image.ndjson").path}'; cat > '${stdin.path}'")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        session.start()
+        session.sendUserMessage("What colour is this image? Reply with one word.", listOf(ImageBlock("image/png", "iVBORw0KGgo=")))
+
+        withTimeout(10_000) { session.state.first { state -> !state.busy && state.entries.any { it is ChatEntry.Assistant } } }
+        session.close()
+        val written = stdin.readLines()
+        val content = Json.parseToJsonElement(written[1]).jsonObject.getValue("message").jsonObject.getValue("content").jsonArray
+        assertEquals(listOf("text", "image"), content.map { it.jsonObject.getValue("type").jsonPrimitive.content })
+        assertEquals("What colour is this image? Reply with one word.", content[0].jsonObject.getValue("text").jsonPrimitive.content)
+        val source = content[1].jsonObject.getValue("source").jsonObject
+        assertEquals("base64", source.getValue("type").jsonPrimitive.content)
+        assertEquals("image/png", source.getValue("media_type").jsonPrimitive.content)
+        assertEquals("iVBORw0KGgo=", source.getValue("data").jsonPrimitive.content)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `image ids are the entry uuid and the index`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val launcher = fakeCli("cat '${File(fixtures, "user-image.ndjson").path}'; cat > '${stdin.path}'")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        session.start()
+        session.sendUserMessage("x", listOf(ImageBlock("image/png", "AAAA"), ImageBlock("image/jpeg", "/9j/")))
+
+        val entry = session.state.value.entries.filterIsInstance<ChatEntry.User>().single()
+        withTimeout(10_000) { session.state.first { state -> !state.busy && state.entries.any { it is ChatEntry.Assistant } } }
+        session.close()
+        val uuid = Json.parseToJsonElement(stdin.readLines()[1]).jsonObject.getValue("uuid").jsonPrimitive.content
+        assertEquals(uuid, entry.id)
+        assertEquals(listOf("$uuid#0", "$uuid#1"), entry.images.map { it.id })
+        assertEquals(listOf(UserImage("$uuid#0", "image/png", "AAAA"), UserImage("$uuid#1", "image/jpeg", "/9j/")), entry.images)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `blank text with an image makes an entry with no text, as on reload`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val launcher = fakeCli("cat > '${stdin.path}'")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        session.start()
+        session.sendUserMessage("  ", listOf(ImageBlock("image/png", "AAAA")))
+
+        val entry = session.state.value.entries.filterIsInstance<ChatEntry.User>().single()
+        assertEquals("", entry.text)
+        assertEquals(listOf(UserImage("${entry.id}#0", "image/png", "AAAA")), entry.images)
+        // The frame carries no text block, so the reloaded line's text is "" too.
+        val isPrompt = { line: String -> "\"type\":\"user\"" in line }
+        withTimeout(10_000) { while (stdin.readLines().none(isPrompt)) delay(20) }
+        session.close()
+        val frame = Json.parseToJsonElement(stdin.readLines().first(isPrompt)).jsonObject
+        val content = frame.getValue("message").jsonObject.getValue("content").jsonArray
+        assertEquals(listOf("image"), content.map { it.jsonObject.getValue("type").jsonPrimitive.content })
         scope.coroutineContext.job.cancelAndJoin()
     }
 
@@ -162,7 +228,7 @@ class ClaudeSessionTest {
     fun `argv for a new session and for a resumed fork`() {
         val base = listOf(
             "claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
-            "--include-partial-messages", "--permission-prompt-tool=stdio",
+            "--include-partial-messages", "--thinking-display", "summarized", "--permission-prompt-tool=stdio",
         )
         assertEquals(
             base + listOf(
@@ -186,6 +252,49 @@ class ClaudeSessionTest {
         assertFailsWith<IllegalArgumentException> { SessionConfig("claude", tmp, sessionId = "a", resumeSessionId = "b") }
         // A fork without the session it forks would silently start a new session.
         assertFailsWith<IllegalArgumentException> { SessionConfig("claude", tmp, sessionId = "a", forkSession = true) }
+    }
+
+    @Test
+    fun `keep_alive and unknown lines advance lastFrameAt without a state emission`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val launcher = fakeCli("echo '{\"type\":\"keep_alive\"}'; sleep 0.2; echo '{\"type\":\"no_such_type\"}'; sleep 0.2")
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        // One log of both flows, in the order they changed: a frame time, or a new chat state.
+        val log = Collections.synchronizedList(mutableListOf<Any>())
+        scope.launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) { session.lastFrameAtMillis.collect { log.add(it) } }
+        scope.launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) { session.state.collect { log.add(it) } }
+        session.start()
+        withTimeout(10_000) { session.state.first { it.ended } }
+
+        val frames = synchronized(log) { log.toList() }
+        val times = frames.filterIsInstance<Long>().filter { it != 0L }
+        assertEquals(2, times.size, frames.toString())
+        assertTrue(times[1] > times[0], times.toString())
+        val between = frames.subList(frames.indexOf(times[0]) + 1, frames.indexOf(times[1]))
+        assertEquals(emptyList(), between, "a keep_alive line changes no state")
+        // The unknown line set times[1] before its dispatch: a state it caused would come after it. Only the end may.
+        val after = frames.drop(frames.indexOf(times[1]) + 1).filterIsInstance<ChatState>()
+        assertTrue(after.isNotEmpty() && after.all { it.ended }, "an unknown line changes no state: $after")
+        assertEquals(1, frames.subList(0, frames.indexOf(times[0])).count { it is ChatState }, "only the initial state before")
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `the injected clock stamps the prompt, the turn and every line`() = runBlocking {
+        // Waits for initialize and the prompt before it answers, so the turn has started when its lines come.
+        val launcher = fakeCli("read a; read b; cat '${File(fixtures, "plain-reply.ndjson").path}'; cat > /dev/null")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher, clock = { 1_000L })
+        session.start()
+        session.sendUserMessage("Reply with the single word: pong")
+        val sent = session.state.value
+        assertEquals(1_000L, sent.turn?.startedAtMillis)
+        assertEquals(1_000L, sent.entries.filterIsInstance<ChatEntry.User>().single().sentAtMillis)
+
+        withTimeout(10_000) { session.state.first { it.turnsEnded == 1 } }
+        assertEquals(1_000L, session.lastFrameAtMillis.value)
+        session.close()
+        scope.coroutineContext.job.cancelAndJoin()
     }
 
     @Test
@@ -254,6 +363,57 @@ class ClaudeSessionTest {
         session.setPermissionMode(PermissionMode.PLAN)
         assertEquals(PermissionMode.PLAN, session.state.value.permissionMode)
         scope.cancel()
+    }
+
+    @Test
+    fun `setEffort sends apply_flag_settings and records the previous level`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > '${stdin.path}'"))
+        session.start()
+        session.setEffort("high")
+        assertEquals("high", session.state.value.effort)
+        assertEquals(EffortChange("high", null), session.state.value.effortChanges.values.single())
+
+        val written = withTimeout(10_000) {
+            var lines = stdin.readLines()
+            while (lines.none { "apply_flag_settings" in it }) {
+                delay(20)
+                lines = stdin.readLines()
+            }
+            lines
+        }
+        val line = written.single { "apply_flag_settings" in it }
+        assertTrue("\"subtype\":\"apply_flag_settings\"" in line, line)
+        assertTrue("\"effortLevel\":\"high\"" in line, line)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `setModel sends set_model and records the model shown before under its request id`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > '${stdin.path}'"))
+        session.start()
+        session.setModel("opus")
+        // The request id is what lets a refusal put back the model shown before (Reducer, ModelChange).
+        val (requestId, change) = session.state.value.modelChanges.entries.single()
+        assertEquals(ModelChange("opus", null, previousPending = false, previousWarning = null), change)
+
+        val written = withTimeout(10_000) {
+            var lines = stdin.readLines()
+            while (lines.none { "set_model" in it }) {
+                delay(20)
+                lines = stdin.readLines()
+            }
+            lines
+        }
+        val frame = Json.parseToJsonElement(written.single { "set_model" in it }).jsonObject
+        assertEquals(requestId, frame["request_id"]!!.jsonPrimitive.content)
+        val request = frame["request"]!!.jsonObject
+        assertEquals("set_model", request["subtype"]!!.jsonPrimitive.content)
+        assertEquals("opus", request["model"]!!.jsonPrimitive.content)
+        scope.coroutineContext.job.cancelAndJoin()
     }
 
     @Test
@@ -377,8 +537,8 @@ class ClaudeSessionTest {
     }
 
     @Test
-    fun `a process killed at once during a turn ends no turn`() = runBlocking {
-        // As the JVM shutdown hook kills it when the IDE exits: the turn in progress is not one that failed.
+    fun `a process killed at once during a turn ends it as interrupted, not failed`() = runBlocking {
+        // As the JVM shutdown hook kills it when the IDE exits: the turn in progress is not one that failed, but it did end.
         val output = CutOffOutput()
         val process = CutOffProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start(), output, cutOnKill = true)
         val run = CutOffSession(process, tmp, newSessionId)
@@ -389,8 +549,10 @@ class ClaudeSessionTest {
 
         run.session.killNow()
         val ended = withTimeout(10_000) { run.session.state.first { it.ended } }
-        assertEquals(0, ended.turnsEnded)
-        assertNull(ended.lastTurnEnd)
+        assertEquals(1, ended.turnsEnded)
+        assertEquals(TurnEnd.INTERRUPTED, ended.lastTurnEnd)
+        assertEquals(TurnEnd.INTERRUPTED, ended.entries.filterIsInstance<ChatEntry.TurnEnded>().single().end)
+        assertNull(ended.turn)
         run.scope.coroutineContext.job.cancelAndJoin()
     }
 

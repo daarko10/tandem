@@ -7,6 +7,7 @@ import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.text.StringUtil
 import dev.daarkolabs.tandem.session.NewSessionOptions
+import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.coroutines.CompletableDeferred
@@ -67,10 +68,17 @@ internal class SessionActions(private val project: Project, private val manager:
         }
     }
 
-    /** Forks session [id]; the fork is selected. */
+    /**
+     * Forks session [id]; the fork is selected. A session with no transcript yet (no prompt sent) has nothing to fork: its chat says
+     * so (polish spec 2.6).
+     */
     fun fork(id: SessionId) {
         requested = null
-        scope.launch { manager.fork(id) }
+        scope.launch {
+            if (manager.fork(id) == null) {
+                manager.sessions.value.firstOrNull { it.id == id }?.notice(NoticeLevel.WARNING, "This session has no transcript to fork yet")
+            }
+        }
     }
 
     /** Deletes session [id], titled [title]: true once it is gone, false if it could not be (the user is told why). */
