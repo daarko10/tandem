@@ -689,6 +689,7 @@ class TranscriptReaderTest {
         val sends = mapOf(
             "bash-mode" to SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>", "<command_uuid-6>"), null, 0),
             "bash-mode-respond" to SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), "<command_uuid-10>", 0),
+            "bash-mode-context" to SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), null, 0),
         )
         for ((name, sent) in sends) {
             val shown = listOf(
@@ -711,7 +712,7 @@ class TranscriptReaderTest {
 
     @Test
     fun `the first prompt of a shell escape session is the command`(@TempDir dir: Path) = runBlocking<Unit> {
-        for (name in listOf("bash-mode", "bash-mode-respond")) {
+        for (name in listOf("bash-mode", "bash-mode-respond", "bash-mode-context")) {
             val prompt = "! echo bash-mode-probe && printf err >&2"
             assertEquals(prompt, TranscriptReader.meta(Fixtures.transcript(name)).firstPrompt, name)
             assertEquals(prompt, TranscriptReader.read(Fixtures.transcript(name)).meta.firstPrompt, name)
