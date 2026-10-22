@@ -880,12 +880,15 @@ private class McpRefresh {
     var next: CompletableDeferred<McpResult<List<McpServerInfo>>>? = null
 }
 
-/** What [servers] say about a sign-in to [server]: null while it still needs auth. */
-private fun signInOutcome(servers: List<McpServerInfo>, server: String): McpAuthOutcome? {
+/**
+ * What [servers] say about a sign-in to [server]: null while it still needs auth, or is pending (it may be reconnecting once the
+ * browser's callback landed: unrecorded, so the wait goes on until it settles or the deadline).
+ */
+internal fun signInOutcome(servers: List<McpServerInfo>, server: String): McpAuthOutcome? {
     val entry = servers.firstOrNull { it.name == server } ?: return McpAuthOutcome.Removed
     return when (entry.status) {
         McpStatus.CONNECTED -> McpAuthOutcome.Connected
-        McpStatus.NEEDS_AUTH -> null
+        McpStatus.NEEDS_AUTH, McpStatus.PENDING -> null
         else -> McpAuthOutcome.Changed(entry.status, entry.error)
     }
 }
@@ -900,14 +903,20 @@ private fun McpError.text(): String? = when (this) {
     McpError.NotRunning, McpError.Ended -> null
 }
 
-/** The chat's notice for a sign-in that ended with [outcome]; null for one that needs none. */
-private fun signInNotice(server: String, outcome: McpAuthOutcome): Pair<NoticeLevel, String>? = when (outcome) {
+/**
+ * The chat's notice for a sign-in that ended with [outcome]: every outcome has one but the session's end, which the chat shows
+ * already (MCP spec 3.3 step 5, hard rule 5); `Cancel` posts nothing and never gets here.
+ */
+internal fun signInNotice(server: String, outcome: McpAuthOutcome): Pair<NoticeLevel, String>? = when (outcome) {
     McpAuthOutcome.Connected -> NoticeLevel.INFO to "Signed in to $server."
     McpAuthOutcome.StillNeedsAuth -> NoticeLevel.WARNING to "Sign-in to $server did not complete within 3 minutes."
     McpAuthOutcome.NoLink -> NoticeLevel.ERROR to "Sign-in to $server failed: the CLI sent no sign-in link"
     is McpAuthOutcome.Failed -> outcome.error.text()?.let { NoticeLevel.ERROR to "Sign-in to $server failed: $it" }
-    is McpAuthOutcome.Changed -> outcome.error?.let { NoticeLevel.ERROR to "Sign-in to $server failed: $it" }
-    McpAuthOutcome.Removed -> null
+    is McpAuthOutcome.Changed -> when (val error = outcome.error) {
+        null -> NoticeLevel.WARNING to "Sign-in to $server ended: the server is now ${outcome.status.wire.ifEmpty { "in an unknown state" }}."
+        else -> NoticeLevel.ERROR to "Sign-in to $server failed: $error"
+    }
+    McpAuthOutcome.Removed -> NoticeLevel.WARNING to "Sign-in to $server ended: $server is no longer configured."
 }
 
 /** Each session with its title, again whenever a title changes. */

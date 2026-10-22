@@ -4,6 +4,7 @@ import com.intellij.openapi.diagnostic.Logger
 import dev.daarkolabs.tandem.protocol.BashEscape
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
@@ -1719,6 +1720,30 @@ class SessionManagerTest {
         assertTrue(framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } >= 2, "the poll asked more than once")
     }
 
+    // MCP spec 3.3 steps 3 and 5: a pending server (reconnecting after the callback, unrecorded) keeps the wait going, and every
+    // outcome but Cancel and the session's end has a chat notice.
+    @Test
+    fun `a sign-in waits through pending and says when the server changed or went`() {
+        fun listed(status: McpStatus, error: String? = null) = listOf(McpServerInfo("authy", status, status.wire, error = error))
+        assertNull(signInOutcome(listed(McpStatus.NEEDS_AUTH), "authy"))
+        assertNull(signInOutcome(listed(McpStatus.PENDING), "authy"), "pending goes on waiting")
+        assertEquals(McpAuthOutcome.Connected, signInOutcome(listed(McpStatus.CONNECTED), "authy"), "then connected ends it")
+        assertEquals(McpAuthOutcome.Removed, signInOutcome(emptyList(), "authy"))
+        assertEquals(McpAuthOutcome.Changed(McpStatus.FAILED, "boom"), signInOutcome(listed(McpStatus.FAILED, "boom"), "authy"))
+
+        assertEquals(NoticeLevel.WARNING to "Sign-in to authy ended: authy is no longer configured.", signInNotice("authy", McpAuthOutcome.Removed))
+        assertEquals(
+            NoticeLevel.WARNING to "Sign-in to authy ended: the server is now disabled.",
+            signInNotice("authy", McpAuthOutcome.Changed(McpStatus.DISABLED, null)),
+        )
+        assertEquals(
+            NoticeLevel.WARNING to "Sign-in to authy ended: the server is now in an unknown state.",
+            signInNotice("authy", McpAuthOutcome.Changed(McpStatus.OTHER, null)),
+        )
+        assertEquals(NoticeLevel.ERROR to "Sign-in to authy failed: boom", signInNotice("authy", McpAuthOutcome.Changed(McpStatus.FAILED, "boom")))
+        assertNull(signInNotice("authy", McpAuthOutcome.Failed(McpError.Ended)), "the chat shows the session's end already")
+    }
+
     @Test
     fun `an mcp_status error answer is Rejected with the CLI's text`() = test {
         val manager = manager(fixtures = "plain-reply")
@@ -1995,7 +2020,7 @@ class SessionManagerTest {
     @Test
     fun `with replies off a shell escape sends one context frame`() = test {
         unix()
-        val manager = manager(fixtures = "bash-mode", respondToShell = { false })
+        val manager = manager(fixtures = "bash-mode-context", respondToShell = { false })
         val handle = manager.create(NewSessionOptions())
         manager.runShell(handle.id, "echo hi")
         val quiet = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.sent } && s.quietSends.isEmpty() }
