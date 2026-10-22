@@ -151,6 +151,20 @@ class OrbIndicatorTest {
     }
 
     @Test
+    fun `no orb jumps from one frame to the next`() {
+        // Every 5 ms of a cycle, the wrap included, while the orb count holds: some pairing of the orbs moves each by little.
+        for (t in times) {
+            val before = OrbIndicator.frame(t)
+            val after = OrbIndicator.frame(t + 5)
+            if (before.size != after.size) continue
+            val step = permutations(before.indices.toList()).minOf { pairing ->
+                before.indices.maxOf { i -> jump(before[i], after[pairing[i]]) }
+            }
+            assertTrue(step <= 1f, "t = $t: $before, then $after")
+        }
+    }
+
+    @Test
     fun `a merge ends with every orb at the centre`() {
         for (merge in listOf(Phase.RING_MERGE, Phase.SQUARE_MERGE, Phase.TRIAD_MERGE)) {
             val end = OrbIndicator.frame(merge.startMs + merge.durationMs - 1)
@@ -178,6 +192,16 @@ class OrbIndicatorTest {
         assertEquals(radii.sorted(), radii, "far to near")
         assertTrue(radii.last() > radii.first(), "one orb in front of the others")
     }
+
+    /**
+     * How far [from] moves to [to] in one 5 ms frame, as a share of what still reads as motion: 0.03 of the box in place, 0.1 in alpha.
+     * Over 1 is a jump.
+     */
+    private fun jump(from: Orb, to: Orb): Float =
+        maxOf(kotlin.math.hypot(to.x - from.x, to.y - from.y) / 0.03f, kotlin.math.abs(to.alpha - from.alpha) / 0.1f)
+
+    private fun permutations(items: List<Int>): List<List<Int>> =
+        if (items.size <= 1) listOf(items) else items.flatMap { first -> permutations(items - first).map { listOf(first) + it } }
 
     private fun extent(frame: List<Orb>): Float = frame.maxOf { maxOf(kotlin.math.abs(it.x - 0.5f), kotlin.math.abs(it.y - 0.5f)) + it.radius }
 }
