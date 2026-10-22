@@ -7,6 +7,9 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,6 +44,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -365,33 +369,50 @@ private fun composerKeyEvent(event: KeyEvent, busy: Boolean, cardOpen: Boolean, 
 
 /**
  * The `+` at the start of the composer box (polish spec 2.3, 2.7): a 24 dp icon button in the secondary tier, described as `Add`,
- * whose menu opens above it, left-aligned, with one item, `Add files or photos`, which calls [onAdd] once the menu has closed.
+ * whose menu opens above it, left-aligned, with one item, `Add files or photos`, which calls [onAdd] once the menu has closed. A click
+ * on the `+` while the menu is open closes it, as a footer control's does.
+ *
+ * [modifier] (the button's padding in the row) goes on an outer box; the menu is placed in the inner, unpadded one, so that
+ * [AboveAnchor] measures from the button's own edges, as `FooterControl` places its menu.
  */
 @Composable
 private fun AddButton(modifier: Modifier, onAdd: () -> Unit) {
     var open by remember { mutableStateOf(false) }
+    val source = remember { MutableInteractionSource() }
+    val hovered by source.collectIsHoveredAsState()
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
     Box(modifier) {
-        IconButton(onClick = { open = !open }, modifier = Modifier.size(24.dp).semantics { contentDescription = "Add" }) {
-            Icon(AllIconsKeys.General.Add, contentDescription = null, tint = chatPalette().secondary)
-        }
-        if (open) {
-            PopupMenu(
-                onDismissRequest = {
-                    open = false
-                    true
-                },
-                popupPositionProvider = remember(gap) { AboveAnchor(alignEnd = false, gapPx = gap) },
+        Box {
+            IconButton(
+                onClick = { open = !open },
+                modifier = Modifier.size(24.dp).hoverable(source).semantics { contentDescription = "Add" },
+                interactionSource = source,
             ) {
-                selectableItem(
-                    selected = false,
-                    iconKey = AllIconsKeys.Actions.Attach,
-                    onClick = {
-                        open = false
-                        onAdd()
+                Icon(AllIconsKeys.General.Add, contentDescription = null, tint = chatPalette().secondary)
+            }
+            if (open) {
+                PopupMenu(
+                    onDismissRequest = { mode ->
+                        // A click on the `+` itself closes the menu through the button (its click toggles it).
+                        if (mode == InputMode.Touch && hovered) {
+                            false
+                        } else {
+                            open = false
+                            true
+                        }
                     },
+                    popupPositionProvider = remember(gap) { AboveAnchor(alignEnd = false, gapPx = gap) },
                 ) {
-                    Text("Add files or photos")
+                    selectableItem(
+                        selected = false,
+                        iconKey = AllIconsKeys.Actions.Attach,
+                        onClick = {
+                            open = false
+                            onAdd()
+                        },
+                    ) {
+                        Text("Add files or photos")
+                    }
                 }
             }
         }
