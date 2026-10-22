@@ -185,7 +185,8 @@ jobs:
           python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test | tee build/drift/classification.json
           echo "kind=$(jq -r .kind build/drift/classification.json)" >> "$GITHUB_OUTPUT"
       # Kind 1 and unknown: one standing issue, one comment per red run, no branch, no agent. The job ends green. Reads the
-      # classification when Gradle ran, else the precheck.
+      # classification when Gradle ran, else the precheck. The comment's bold first line names the kind, since the title
+      # names only kind 1: an unknown red is one the CLI answered and the loop cannot classify.
       - name: Report a run the agent cannot fix
         if: steps.precheck.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'unknown'
         env:
@@ -195,7 +196,7 @@ jobs:
           set -euo pipefail
           file=build/drift/classification.json; [ -f "$file" ] || file=build/drift/precheck.json
           title="CLI contract: the CLI did not answer"
-          body="$(jq -r --arg url "$RUN_URL" '"The CLI contract run \($url) is red and the drift loop cannot fix it.\n\n- kind: \(.kind)\n- CLI version: \(.cli_version // "unknown")\n- detail: \(.detail)\n- files: \(if .files == [] then "none" else (.files | join(", ")) end)"' "$file")"
+          body="$(jq -r --arg url "$RUN_URL" '"\(if .kind == "unknown" then "**The CLI answered; the red is unclassified.**" else "**The CLI did not answer.**" end)\n\nThe CLI contract run \($url) is red and the drift loop cannot fix it.\n\n- kind: \(.kind)\n- CLI version: \(.cli_version // "unknown")\n- detail: \(.detail)\n- files: \(if .files == [] then "none" else (.files | join(", ")) end)"' "$file")"
           issue="$(gh issue list --label contract-drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
           if [ -z "$issue" ]; then gh issue create --title "$title" --label contract-drift --body "$body"; else gh issue comment "$issue" --body "$body"; fi
       # One open fix at a time: a red that persists for a week opens one PR, not seven. The reminder on the waiting PR
@@ -228,7 +229,11 @@ jobs:
       # no code owner, and cannot approve its own push), and main's .github/CODEOWNERS owns every file with a `* @owner`
       # line: the code-owner review binds only files that have an owner. Anything else, a failed read or an answer that
       # is not a number included, fails the step: the run is red and the agent does not start. A ruleset bypass list
-      # naming the Claude App would defeat the rule; keeping the App off that list is the owner's part. A ruleset on a
+      # naming the Claude App would defeat the rule, so each qualifying ruleset is read by its id (by exit status, as
+      # below) and an Integration (an App) on its bypass list refuses, whatever its bypass mode; a role (the owner's
+      # admin role, how the only code owner merges) is allowed. GitHub returns bypass_actors only to a caller who can
+      # edit the ruleset, which the workflow token never can (it has no administration permission), so on a real run
+      # the list is withheld, the step says so in its log, and keeping the App off it stays the owner's part. A ruleset on a
       # private repository owned by a personal account is enforced only with GitHub Pro: on Free the repository goes
       # public before the ruleset and the rehearsals, and what this endpoint lists for an unenforced ruleset is not
       # known, so reading the rule here does not prove enforcement. The same step refuses a drift branch that already
@@ -246,12 +251,30 @@ jobs:
           BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
         run: |
           set -euo pipefail
-          rules="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100" --jq '[.[] | select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true)] | length')"
-          if [[ "$rules" =~ ^[0-9]+$ ]] && [ "$rules" -ge 1 ]; then
-            echo "main requires a pull request, an approving review from a code owner and approval of the last push (ruleset)"
+          ids="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100" --jq '[.[] | select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")')"
+          if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then
+            echo "main requires a pull request, an approving review from a code owner and approval of the last push (ruleset $ids)"
           else
             echo "::error title=Drift fix::No ruleset on main requires a pull request with an approving review from a code owner and approval of the most recent push (a private repository of a personal account enforces one only with GitHub Pro); the agent is not started."; exit 1
           fi
+          for id in $ids; do
+            if ! ruleset="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" 2>/dev/null)"; then
+              status="$(jq -r '.status // empty' <<<"$ruleset" 2>/dev/null || true)"
+              echo "::error title=Drift fix::Reading the ruleset $id failed (HTTP status '${status:-none}'), so whether an App can bypass it is not known; the agent is not started."; exit 1
+            fi
+            listed="$(jq -r '.bypass_actors | type' <<<"$ruleset")"
+            if [ "$listed" = "null" ]; then
+              echo "ruleset $id: GitHub shows its bypass list only to a caller who can edit the ruleset, not to this token; keeping the Claude App off it is the owner's part"
+            elif [ "$listed" = "array" ]; then
+              apps="$(jq -c '[.bypass_actors[] | select(.actor_type == "Integration") | {actor_type, actor_id}]' <<<"$ruleset")"
+              if [ "$apps" != "[]" ]; then
+                echo "::error title=Drift fix::The ruleset $id on main lets an App bypass it ($apps), so the Claude App's token could push to main or merge without review; remove it from the bypass list. The agent is not started."; exit 1
+              fi
+              echo "ruleset $id: no App on its bypass list"
+            else
+              echo "::error title=Drift fix::The ruleset $id answered a bypass list of type '$listed'; the agent is not started."; exit 1
+            fi
+          done
           if ! owners="$(gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=main" 2>/dev/null)"; then
             status="$(jq -r '.status // empty' <<<"$owners" 2>/dev/null || true)"
             if [ "$status" != "404" ]; then
