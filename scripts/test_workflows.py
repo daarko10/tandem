@@ -49,7 +49,7 @@ DENY = {"Edit(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)
         "Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)",
         "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)",
         "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)",
-        "Bash(ktlint:*)"}
+        "Bash(ktlint:*)", "Bash(grep *.git/*)", "Bash(grep -r*)", "Bash(grep * -r*)", "Bash(grep -R*)", "Bash(grep * -R*)"}
 # The invocations the skill prescribes, exactly: a rule added to both the skill and the action fails here.
 ALLOWED = {"Read", "Grep", "Glob", "Edit", "Write", "Bash(./gradlew check)", "Bash(./gradlew test:*)", "Bash(python3 -I scripts/classify_drift.py:*)",
            "Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*)",
@@ -193,10 +193,10 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual("fix-contract-drift", front["name"])
         self.assertEqual({t.strip() for t in front["allowed-tools"].split(",")}, tools(step(load(DRIFT), "fix", "Fix the drift")["with"]["claude_args"]))
 
-    def test_the_steps_run_in_the_spec_s_order(self):
+    def test_the_fix_job_s_steps_run_in_order(self):
         names = [s.get("name") for s in steps(load(DRIFT), "fix")]
         expected = ["Free disk space", "Check out main", None, None, "Ensure the labels exist", "Name the red run", "Fetch the recording",
-                    "Mutate a recording for the rehearsal", "Classify before Gradle", "Reproduce the red", "Classify",
+                    "Mutate a recording for the rehearsal", "Classify before Gradle", "Require a public repository", "Reproduce the red", "Classify",
                     "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Require a protected main", "Fix the drift"]
         self.assertEqual(expected, names)                                             # the allowlist step is the enforce job's, after this job
         wf = load(DRIFT)
@@ -210,8 +210,10 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual(["Comment on the waiting pull request"], [s.get("name") for s in steps(wf, "remind")])
         self.assertTrue(step(wf, "fix", "Reproduce the red")["continue-on-error"])
         self.assertIn("--rerun", step(wf, "fix", "Reproduce the red")["run"])        # the build cache never replays a pass on another recording
-        for name in ("Name the red run", "Fetch the recording", "Report a run the agent cannot fix", "Skip when a fix is already waiting",
-                     "Require a protected main"):
+        self.assertEqual(30, step(wf, "fix", "Reproduce the red")["timeout-minutes"])   # a hung download or test is a failed reproduction, not the job's cancellation
+        self.assertEqual(5, step(wf, "fix", "Fetch the recording")["timeout-minutes"])   # 75 + 30 + 5 leaves the rest of the job's 120 to the setup
+        for name in ("Name the red run", "Fetch the recording", "Require a public repository", "Report a run the agent cannot fix",
+                     "Skip when a fix is already waiting", "Require a protected main"):
             self.assertEqual("${{ github.token }}", step(wf, "fix", name)["env"]["GH_TOKEN"])
         self.assertEqual("${{ github.token }}", step(wf, "enforce", "Enforce the edit allowlist")["env"]["GH_TOKEN"])
         self.assertEqual("${{ github.token }}", step(wf, "remind", "Comment on the waiting pull request")["env"]["GH_TOKEN"])
@@ -273,9 +275,15 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual("steps.gate.outputs.proceed == 'true'", protect["if"])
         self.assertIn("set -euo pipefail", protect["run"])                            # a failed read fails the step, and the agent never starts
         self.assertIn('repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"', protect["run"])
-        self.assertIn('if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then', protect["run"])   # a private repository of a personal account enforces a ruleset only with Pro, which no read here can tell
-        self.assertIn('if [ "$private" != "false" ]; then', protect["run"])          # fail closed: only an answer of false passes
-        self.assertLess(protect["run"].index("--jq .private"), protect["run"].index("rules/branches/main"))
+        self.assertNotIn(".private", protect["run"])                                  # read before Gradle, by its own step
+        public = step(wf, "fix", "Require a public repository")
+        self.assertEqual("public", public["id"])
+        self.assertEqual("steps.precheck.outputs.kind != 'cli-did-not-answer'", public["if"])   # a run the CLI did not answer is reported while the repository is private
+        self.assertNotIn("continue-on-error", public)                                 # a refusal fails the job: no Gradle, no agent, no enforce
+        self.assertIn('if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then', public["run"])   # a private repository of a personal account enforces a ruleset only with Pro, which no read here can tell
+        self.assertIn('if [ "$private" != "false" ]; then', public["run"])            # fail closed: only an answer of false passes
+        names = [s.get("name") for s in steps(wf, "fix")]
+        self.assertLess(names.index("Require a public repository"), names.index("Reproduce the red"))   # before the Gradle spend
         self.assertIn('select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")', protect["run"])   # an App can approve a PR it did not author: a code owner's review of the last push is what it cannot give
         self.assertNotIn(".protected", protect["run"])                                # classic protected: true accepts a direct push when no option is ticked
         self.assertIn('if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then', protect["run"])   # fail closed: only one or more ruleset ids pass
@@ -374,7 +382,7 @@ class DriftFixWorkflowTest(unittest.TestCase):
 
     def test_the_only_push_is_exact_and_the_broad_rules_are_gone(self):
         allowed = tools(step(load(DRIFT), "fix", "Fix the drift")["with"]["claude_args"])
-        self.assertEqual(ALLOWED, allowed)                                              # the spec's 24 entries, exactly; the checks below say why
+        self.assertEqual(ALLOWED, allowed)                                              # the 24 invocations the skill prescribes, exactly; the checks below say why
         self.assertEqual(24, len(ALLOWED))
         self.assertIn("Bash(git push -u origin HEAD)", allowed)                        # a :* rule matches prefix + space; drift/:* never matched the push
         self.assertEqual([], [t for t in allowed if t.startswith("Bash(git push") and t.endswith(":*)")])
@@ -391,13 +399,15 @@ class DriftFixWorkflowTest(unittest.TestCase):
         agent = step(load(DRIFT), "fix", "Fix the drift")
         self.assertEqual("agent", agent["id"])
         deny = json.loads(agent["with"]["settings"])["permissions"]["deny"]
-        self.assertEqual(DENY, set(deny))                                             # the spec's list, exactly: nothing dropped, nothing unexplained
+        self.assertEqual(DENY, set(deny))                                             # the deny list the agent step's comment explains, exactly: nothing dropped, nothing unexplained
         self.assertEqual(len(DENY), len(deny))
-        self.assertEqual(24, len(deny))
+        self.assertEqual(29, len(deny))
         self.assertEqual([], [d for d in deny if d.startswith("Write(")])              # never consulted by the CLI: Edit(path) covers Write
         for rule in ("Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)"):
             self.assertIn(rule, deny)                                                 # each path pattern on the allowlist loses `..` and a third argument
-        self.assertEqual({"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, json.loads(agent["with"]["settings"])["env"])   # ./gradlew check outlives the Bash tool's two-minute default
+        for rule in ("Bash(grep *.git/*)", "Bash(grep -r*)", "Bash(grep * -r*)", "Bash(grep -R*)", "Bash(grep * -R*)"):
+            self.assertIn(rule, deny)                                                 # Read(.git/**) binds the Read tool, not a Bash grep of .git/config
+        self.assertEqual({"BASH_DEFAULT_TIMEOUT_MS": "1800000", "BASH_MAX_TIMEOUT_MS": "2700000"}, json.loads(agent["with"]["settings"])["env"])   # ./gradlew check (platform tests, coverage) outlives the Bash tool's two-minute default; 30 minutes, under the step's 75
         self.assertEqual({"commit": "", "pr": ""}, json.loads(agent["with"]["settings"])["attribution"])   # the CLI's own co-author trailer and "Generated with" line stay out of the commit and the PR body (2.1.308: an empty string hides attribution; includeCoAuthoredBy is deprecated)
 
 
@@ -589,11 +599,10 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertEqual("", calls)
 
     def protect(self, rules: str, owners: str | tuple[str, int], branch: tuple[str, int], ruleset: tuple[str, int] = (ROLE_ONLY, 0),
-                branches: tuple[str, int] = ("main\nci/drift-loop\n", 0), heads: tuple[str, int] = ("", 0),
-                private: tuple[str, int] = ("false\n", 0)) -> tuple[int, str, str, str]:
+                branches: tuple[str, int] = ("main\nci/drift-loop\n", 0), heads: tuple[str, int] = ("", 0)) -> tuple[int, str, str, str]:
         owners = owners if isinstance(owners, tuple) else (owners, 0)
         return run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
-                        [(REPO, private[0], private[1]), (RULES, rules, 0), (RULESET, ruleset[0], ruleset[1]), (CODEOWNERS, owners[0], owners[1]),
+                        [(RULES, rules, 0), (RULESET, ruleset[0], ruleset[1]), (CODEOWNERS, owners[0], owners[1]),
                          (BRANCH_READ, branch[0], branch[1]), (BRANCHES, branches[0], branches[1]), (HEADS, heads[0], heads[1])])
 
     def test_protect_passes_a_ruleset_an_owner_and_a_missing_branch(self):
@@ -601,18 +610,21 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertIn("main requires a pull request, an approving review from a code owner and approval of the last push (ruleset 17)", out)
         self.assertIn("ruleset 17: no App on its bypass list", out)                   # the owner's admin role is how the only code owner merges
-        self.assertEqual([REPO.split(" --jq", 1)[0], RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0], BRANCHES.split(" --jq", 1)[0], HEADS.split(" --jq", 1)[0]],
-                         [c.split(" --jq", 1)[0] for c in calls.splitlines()])        # the visibility first, then the ruleset; the stale-branch listing last
+        self.assertEqual([RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0], BRANCHES.split(" --jq", 1)[0], HEADS.split(" --jq", 1)[0]],
+                         [c.split(" --jq", 1)[0] for c in calls.splitlines()])        # the ruleset first; the stale-branch listing last
 
-    def test_protect_refuses_a_private_repository_or_a_failed_read(self):
+    def test_a_private_repository_is_refused_before_gradle(self):
         for private, message in ((("true\n", 0), "The repository is private (answer 'true')"),   # a ruleset there is enforced only with Pro, which no read here tells
                                  ((SERVER_ERROR, 1), "Reading the repository failed (HTTP status '502')"),   # red without a verdict, never "public"
                                  (("", 1), "Reading the repository failed (HTTP status 'none')"),
                                  (("null\n", 0), "The repository is private (answer 'null')")):   # only false passes
-            rc, out, _, calls = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), private=private)
+            rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a public repository", {"GH_TOKEN": "stub"}, [(REPO, private[0], private[1])])
             self.assertEqual(1, rc, (message, out))
             self.assertIn(message, out)
-            self.assertEqual(REPO + "\n", calls)                                       # refused before any other read
+            self.assertEqual(REPO + "\n", calls)
+        rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a public repository", {"GH_TOKEN": "stub"}, [(REPO, "false\n", 0)])
+        self.assertEqual(0, rc, out)
+        self.assertIn("the repository is public", out)
 
     def test_protect_refuses_a_drift_branch_without_an_open_pull_request(self):
         rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), branches=("main\ndrift/2026-10-20-5\ndrift/2026-10-19-4\nfeature/drift\n", 0),
@@ -645,7 +657,7 @@ class StepOutcomeTest(unittest.TestCase):
 
     def test_protect_reads_every_qualifying_ruleset(self):
         rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
-                                     [(REPO, "false\n", 0), (RULES, "17 23\n", 0), (RULESET, ROLE_ONLY, 0), ("api repos/daarko10/tandem/rulesets/23", APP_BYPASS, 0)])
+                                     [(RULES, "17 23\n", 0), (RULESET, ROLE_ONLY, 0), ("api repos/daarko10/tandem/rulesets/23", APP_BYPASS, 0)])
         self.assertEqual(1, rc, out)
         self.assertIn("The ruleset 23 on main lets an App bypass it", out)
         self.assertNotIn("CODEOWNERS", calls)

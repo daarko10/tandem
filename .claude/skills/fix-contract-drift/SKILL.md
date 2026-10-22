@@ -84,10 +84,12 @@ changed shape in the section that describes it, citing the fixture by name and t
 is still possible. No reference to any spec or plan.
 
 ## 7. Verify
-`./gradlew check` and, from the repository root, `python3 -m unittest discover -s scripts -t scripts` (the same tests
-as `cd scripts && python3 -m unittest`, which you cannot run: `cd` is not on the list). If `check` fails for a reason
-unrelated to the drift (a flaky platform test, disk space), run it once more; still red: open the PR as a draft
-(section 8, add `--draft`) and name the failing test and that it is unrelated to the drift, so the owner decides.
+`./gradlew check`, run with the Bash tool's `timeout` set to 1800000 (it runs the platform tests and the coverage
+check, which can outlast the tool's default), and, from the repository root,
+`python3 -m unittest discover -s scripts -t scripts` (the same tests as `cd scripts && python3 -m unittest`, which you
+cannot run: `cd` is not on the list). If `check` fails for a reason unrelated to the drift (a flaky platform test, disk
+space), run it once more; still red: open the PR as a draft (section 8, add `--draft`) and name the failing test and
+that it is unrelated to the drift, so the owner decides.
 The live contract check cannot run on the branch (the federation rule admits `main` only); the evidence is the red
 run's artifact plus `check` here, and the next nightly after the merge is the real proof.
 
