@@ -121,6 +121,7 @@ internal fun McpSheet(
     val model by controller.rows.collectAsState()
     val busy by controller.busy.collectAsState()
     val message by controller.message.collectAsState()
+    val messageRetry by controller.messageRetry.collectAsState()
     val refreshing by controller.refreshing.collectAsState()
     val titleNote by controller.titleNote.collectAsState()
     val waits by controller.auth.collectAsState()
@@ -170,7 +171,9 @@ internal fun McpSheet(
         message?.let { text ->
             Row(Modifier.fillMaxWidth().padding(end = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(text, color = JewelTheme.globalColors.text.error, modifier = Modifier.weight(1f))
-                OutlinedButton(onClick = controller::refresh, modifier = Modifier.semantics { contentDescription = "Retry" }) { Text("Retry") }
+                if (messageRetry) {
+                    OutlinedButton(onClick = controller::refresh, modifier = Modifier.semantics { contentDescription = "Retry" }) { Text("Retry") }
+                }
             }
         }
         val info = JewelTheme.globalColors.text.info

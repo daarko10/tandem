@@ -103,12 +103,12 @@ internal class SessionSpawner(
             }
             if (path == null) {
                 val dropped = handle.failToStart(SessionManager.NO_CLI_TEXT)
-                LOG.info("session ${handle.id}: claude not found, $dropped prompt(s) not sent")
+                LOG.info("session ${handle.id}: claude not found, $dropped queued message(s) not sent")
                 return
             }
             if (originalGone) {
                 val dropped = handle.failToStart(SessionManager.FORK_ORIGINAL_GONE_TEXT)
-                LOG.warn("session ${handle.id}: not started, the transcript of the session it forks was not found; $dropped prompt(s) not sent")
+                LOG.warn("session ${handle.id}: not started, the transcript of the session it forks was not found; $dropped queued message(s) not sent")
                 return
             }
             admission.withLock {

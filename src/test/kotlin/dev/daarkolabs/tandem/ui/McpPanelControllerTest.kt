@@ -33,6 +33,7 @@ import org.junit.jupiter.api.Test
 import java.util.Collections
 import java.util.concurrent.Executors
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -119,11 +120,22 @@ class McpPanelControllerTest {
         val controller = controller()
         until { controller.message.value != null }
         assertEquals("Could not list servers: Unknown subtype", controller.message.value)
+        assertTrue(controller.messageRetry.value)
 
         controls.refreshAnswer = { McpResult.Ok(listOf(echo)) }
         controller.refresh()
         until { controller.message.value == null }
+        assertFalse(controller.messageRetry.value)
         assertEquals(false, controller.refreshing.value)
+    }
+
+    @Test
+    fun `a refresh that finds the session ended shows it without Retry`() = test {
+        controls.refreshAnswer = { McpResult.Failed(McpError.Ended) }
+        val controller = controller()
+        until { controller.message.value != null }
+        assertEquals("The session has ended.", controller.message.value)
+        assertFalse(controller.messageRetry.value, "a retry cannot help an ended session")
     }
 
     @Test
@@ -137,6 +149,7 @@ class McpPanelControllerTest {
 
         until { controller.message.value != null }
         assertEquals("Could not list servers: The CLI did not answer within 15 s.", controller.message.value)
+        assertTrue(controller.messageRetry.value)
         assertEquals(listOf("toggle echo false"), controls.calls.filter { it.startsWith("toggle") })
         assertNull(controller.busy.value)
     }
@@ -153,6 +166,7 @@ class McpPanelControllerTest {
 
         until { controller.message.value != null }
         assertEquals("echo: Server not found: echo · echo is no longer configured", controller.message.value)
+        assertFalse(controller.messageRetry.value, "Retry belongs to a listing that failed (spec 3.2)")
         assertEquals(emptyMap(), controller.rowErrors.value)
     }
 
@@ -345,9 +359,10 @@ class McpPanelControllerTest {
     // spec: sign-in string: a link that is not http or https
     @Test
     fun `sign-in string - a link that is not http or https`() = test {
+        // Spec 3.3 step 2: mcp_authenticate itself succeeded, so no terminal hint (step 4's is for its own error).
         assertEquals(
-            "Could not start sign-in: the sign-in link is not an http(s) URL\n${terminalHint("authy")}",
-            authenticateError(authy, McpError.Rejected("the sign-in link is not an http(s) URL")),
+            "Could not start sign-in: the sign-in link is not an http(s) URL",
+            authenticateError(authy, McpError.Rejected("the sign-in link is not an http(s) URL", linkFailed = true)),
         )
     }
 

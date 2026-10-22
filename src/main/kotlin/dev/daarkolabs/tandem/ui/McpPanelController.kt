@@ -145,6 +145,7 @@ internal class McpPanelController(
 
     private val mutableBusy = MutableStateFlow<McpBusy?>(null)
     private val mutableMessage = MutableStateFlow<String?>(null)
+    private val mutableMessageRetry = MutableStateFlow(false)
     private val mutableRefreshing = MutableStateFlow(false)
     private val mutableRowErrors = MutableStateFlow<Map<String, String>>(emptyMap())
     private val mutableRetryActions = MutableStateFlow<Map<String, McpAction>>(emptyMap())
@@ -160,8 +161,14 @@ internal class McpPanelController(
     /** The row whose request runs ([McpBusy]); the sign-in wait is not one. */
     val busy: StateFlow<McpBusy?> = mutableBusy.asStateFlow()
 
-    /** The title area's error: a refresh's, or an action's on a server the follow-up list no longer has. Shown with `Retry`. */
+    /** The title area's error: a refresh's, or an action's on a server the follow-up list no longer has. */
     val message: StateFlow<String?> = mutableMessage.asStateFlow()
+
+    /**
+     * Whether [message] gets `Retry`, which lists the servers again: only a listing that failed or timed out (spec 3.2), never
+     * `The session has ended.`, which a retry cannot help, nor an action's error moved there.
+     */
+    val messageRetry: StateFlow<Boolean> = mutableMessageRetry.asStateFlow()
 
     /** Whether a refresh runs: the title gets ` · Refreshing…`. */
     val refreshing: StateFlow<Boolean> = mutableRefreshing.asStateFlow()
@@ -237,15 +244,15 @@ internal class McpPanelController(
             is McpResult.Ok -> {
                 // The plan's rule: every Ok clears the title area, a re-poll's included, so an action error moved there by
                 // act lasts until the next listing (it was shown, hard rule 5).
-                mutableMessage.value = null
+                showMessage(null, retry = false)
                 afterList(result.value)
             }
             is McpResult.Failed -> when (val error = result.error) {
-                is McpError.Rejected -> mutableMessage.value = "Could not list servers: ${error.message}"
-                is McpError.TimedOut -> mutableMessage.value = "Could not list servers: ${timedOut(error.seconds)}"
+                is McpError.Rejected -> showMessage("Could not list servers: ${error.message}", retry = true)
+                is McpError.TimedOut -> showMessage("Could not list servers: ${timedOut(error.seconds)}", retry = true)
                 // The session is not running: the stopped sheet says so itself.
                 McpError.NotRunning -> Unit
-                McpError.Ended -> mutableMessage.value = SESSION_ENDED
+                McpError.Ended -> showMessage(SESSION_ENDED, retry = false)
             }
         }
         return result
@@ -287,7 +294,7 @@ internal class McpPanelController(
         val shown = mutableRowErrors.value[name]
         if (shown != null && listed is McpResult.Ok && listed.value.none { it.name == name }) {
             // The row is gone with the server: its error moves to the title area, never lost with the row (hard rule 5).
-            mutableMessage.value = "$name: $shown · $name is no longer configured"
+            showMessage("$name: $shown · $name is no longer configured", retry = false)
             mutableRowErrors.update { it - name }
             mutableRetryActions.update { it - name }
         }
@@ -295,7 +302,7 @@ internal class McpPanelController(
 
     /**
      * Starts [name]'s sign-in. The wait itself shows through [auth]; only a start that failed shows in the row, with the hint the
-     * manager's [loginHinted] goes with (spec 3.3 step 4).
+     * manager's [loginHinted] goes with (spec 3.3 step 4), except for a link that could not be used (step 2), which gets none.
      */
     private suspend fun authenticate(name: String) {
         val result = try {
@@ -313,7 +320,8 @@ internal class McpPanelController(
             is McpError.Rejected -> "Could not start sign-in: ${error.message}"
             is McpError.TimedOut -> timedOut(error.seconds)
         }
-        rowError(name, "$text\n${signInHint(name)}", retry = McpAction.AUTHENTICATE)
+        val linkFailed = (error as? McpError.Rejected)?.linkFailed == true
+        rowError(name, if (linkFailed) text else "$text\n${signInHint(name)}", retry = McpAction.AUTHENTICATE)
     }
 
     /** What to do after a sign-in that could not start, by the server's source: a `dynamic` one is unknown to a terminal login. */
@@ -323,6 +331,11 @@ internal class McpPanelController(
         } else {
             "Run claude mcp login \"$name\" in a terminal, then press Reconnect, or start a new session."
         }
+
+    private fun showMessage(text: String?, retry: Boolean) {
+        mutableMessageRetry.value = retry && text != null
+        mutableMessage.value = text
+    }
 
     private fun rowError(name: String, text: String, retry: McpAction?) {
         mutableRowErrors.update { it + (name to text) }

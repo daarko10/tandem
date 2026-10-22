@@ -1007,7 +1007,10 @@ class ClaudeSessionTest {
         // A link Tandem would not open is never handed on.
         val local = async { run.session.mcpAuthenticate("authy") }
         run.success(run.requestIdOf("mcp_authenticate", nth = 2), """{"authUrl":"file:///etc/passwd"}""")
-        assertEquals(McpResult.Failed(McpError.Rejected("the sign-in link is not an http(s) URL")), withTimeout(10_000) { local.await() })
+        assertEquals(
+            McpResult.Failed(McpError.Rejected("the sign-in link is not an http(s) URL", linkFailed = true)),
+            withTimeout(10_000) { local.await() },
+        )
 
         assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "every answer was its caller's")
         run.close()

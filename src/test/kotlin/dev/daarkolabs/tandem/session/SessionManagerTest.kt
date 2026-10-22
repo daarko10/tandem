@@ -543,6 +543,21 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `a shell escape whose claude is not found says its output was not sent`() = test {
+        unix()
+        val manager = manager(lookup = { null })
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "echo hi")
+        val done = handle.state.first { s -> s.entries.lastOrNull().let { it is ChatEntry.Notice && it.level == NoticeLevel.WARNING } }
+        val (install, unsent) = done.entries.takeLast(2).map { it as ChatEntry.Notice }
+        assertEquals(NoticeLevel.ERROR, install.level)
+        assertTrue("not found" in install.text, install.text)
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", unsent.text)
+        assertEquals(ShellEnd.Exited(0), done.shell().end)
+        assertFalse(log.exists(), "no process was started")
+    }
+
+    @Test
     fun `attention is raised for a background session and cleared on select`() = test {
         val manager = manager(fixtures = "permission,interrupt")
         val asking = manager.create(NewSessionOptions())
@@ -1677,6 +1692,19 @@ class SessionManagerTest {
         assertEquals(listOf("Signed in to authy."), chat.notices(NoticeLevel.INFO))
         assertEquals(listOf(authUrl), opened.toList(), "the browser opens once")
         assertEquals(emptySet(), handle.mcpLoginHinted.value)
+    }
+
+    @Test
+    fun `a sign-in link that does not open posts the error without the terminal hint`() = test {
+        val (manager, handle) = mcpSession(every = 50.milliseconds)
+
+        val result = manager.startMcpAuth(handle.id, "authy") { throw java.io.IOException("no browser") }
+
+        assertEquals(McpResult.Failed(McpError.Rejected("no browser", linkFailed = true)), result)
+        val chat = handle.state.first { it.notices(NoticeLevel.ERROR).isNotEmpty() }
+        assertEquals(listOf("Sign-in to authy failed: no browser"), chat.notices(NoticeLevel.ERROR))
+        assertEquals(emptySet(), handle.mcpLoginHinted.value, "mcp_authenticate itself succeeded (spec 4.2)")
+        assertEquals(emptyMap(), handle.mcpAuth.value)
     }
 
     @Test

@@ -621,7 +621,7 @@ class SessionManager internal constructor(
             throw e
         } catch (e: Exception) {
             LOG.warn("session $id: the browser did not open for MCP server $server (${e.javaClass.simpleName})")
-            val failed = McpResult.Failed(McpError.Rejected(e.message ?: e.javaClass.simpleName))
+            val failed = McpResult.Failed(McpError.Rejected(e.message ?: e.javaClass.simpleName, linkFailed = true))
             signInFailed(handle, server, failed.error)
             return failed
         }
@@ -629,10 +629,13 @@ class SessionManager internal constructor(
         return started
     }
 
-    /** `mcp_authenticate` failed with [error]: the chat says so and the panel offers the terminal's sign-in, unless the session ended. */
+    /**
+     * The sign-in failed to start with [error]: the chat says so, unless the session ended, and the panel offers the terminal's
+     * sign-in when `mcp_authenticate` itself failed or timed out (spec 4.2), not when only its link could not be used.
+     */
     private fun signInFailed(handle: SessionHandle, server: String, error: McpError) {
         val text = error.text() ?: return
-        handle.hintMcpLogin(server)
+        if ((error as? McpError.Rejected)?.linkFailed != true) handle.hintMcpLogin(server)
         handle.notice(NoticeLevel.ERROR, "Sign-in to $server failed: $text")
         LOG.info("session ${handle.id}: mcp_authenticate for MCP server $server failed (${error.javaClass.simpleName})")
     }

@@ -68,8 +68,12 @@ sealed interface McpResult<out T> {
 
 /** Why an MCP control request failed. */
 sealed interface McpError {
-    /** The CLI answered with an error, or with an answer Tandem cannot use; [message] says which, as the CLI wrote it when it did. */
-    data class Rejected(val message: String) : McpError
+    /**
+     * The CLI answered with an error, or with an answer Tandem cannot use; [message] says which, as the CLI wrote it when it did.
+     * [linkFailed]: `mcp_authenticate` itself succeeded, but its sign-in link was not an `http(s)` URL or did not open, so no
+     * terminal sign-in is hinted (MCP spec 3.3 step 2; step 4's hint is for an error of the request itself).
+     */
+    data class Rejected(val message: String, val linkFailed: Boolean = false) : McpError
 
     /** The CLI did not answer within [seconds]. */
     data class TimedOut(val seconds: Int) : McpError

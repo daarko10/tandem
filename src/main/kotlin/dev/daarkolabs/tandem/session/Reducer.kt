@@ -645,19 +645,22 @@ private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent, at: 
 /**
  * A `result`, with the quiet sends ([ChatState.quietSends]) told apart. One that names only quiet sends is theirs: they leave the set,
  * the session id is taken, and nothing else changes (no turn end, no footer; the turn a responding shell escape opened stays open
- * for its own result). One that names quiet sends among others drops them and is reduced as today, and so is one that names none,
- * except a zero-turn result while quiet sends wait: from a CLI that leaves `user_message_uuids` out, it is the oldest one's.
+ * for its own result), except that an error says so (hard rule 5). One that names quiet sends among others drops them and is
+ * reduced as today, and so is one that names none, except a zero-turn result while quiet sends wait: from a CLI that leaves
+ * `user_message_uuids` out, it is the oldest one's, which leaves the set; an error one is then reduced as a failed result.
  */
 private fun reduceQuietOr(state: ChatState, result: CliMessage.Result): ChatState {
     if (state.quietSends.isEmpty()) return reduceResult(state, result)
     val uuids = result.userMessageUuids
     val quiet = uuids.filter { it in state.quietSends }
     return when {
+        // Hard rule 5: an error the CLI reports for a quiet send is shown, though no turn ran.
         uuids.isNotEmpty() && quiet.size == uuids.size ->
             state.copy(quietSends = state.quietSends - quiet.toSet(), sessionId = result.sessionId ?: state.sessionId)
+                .let { if (result.isError) it.failed(result) else it }
         quiet.isNotEmpty() -> reduceResult(state.copy(quietSends = state.quietSends - quiet.toSet()), result)
-        uuids.isEmpty() && result.numTurns == 0 ->
-            state.copy(quietSends = state.quietSends - state.quietSends.first(), sessionId = result.sessionId ?: state.sessionId)
+        uuids.isEmpty() && result.numTurns == 0 -> state.copy(quietSends = state.quietSends - state.quietSends.first())
+            .let { if (result.isError) reduceResult(it, result) else it.copy(sessionId = result.sessionId ?: state.sessionId) }
         else -> reduceResult(state, result)
     }
 }

@@ -317,7 +317,7 @@ class ClaudeSession(
             val escape = HeldEscape(id, command, output, respond)
             when {
                 // Read under shellLock: set before dropShellFrames takes it, so an escape not dropped there is seen as unsent here.
-                ended -> notice(NoticeLevel.WARNING, unsentText(command))
+                ended -> notice(NoticeLevel.WARNING, unsentShellText(command))
                 heldEscapes.isEmpty() && pendingOutput == null && _state.value.turn == null -> startEscapeLocked(escape)
                 else -> heldEscapes.addLast(escape)
             }
@@ -394,7 +394,7 @@ class ClaudeSession(
      * its quiet result needs none: the turn its escape opened ends with the process, as failed.
      */
     private fun endWith(end: SessionEvent.Ended) {
-        val unsent = dropShellFrames(withPending = false).map { SessionEvent.HostNotice(NoticeLevel.WARNING, unsentText(it)) }
+        val unsent = dropShellFrames(withPending = false).map { SessionEvent.HostNotice(NoticeLevel.WARNING, unsentShellText(it)) }
         _state.update { s -> unsent.fold(reduce(s, end)) { acc, notice -> reduce(acc, notice) } }
     }
 
@@ -404,11 +404,8 @@ class ClaudeSession(
      * without a word).
      */
     internal fun letGoShellFrames() {
-        dropShellFrames(withPending = true).forEach { notice(NoticeLevel.WARNING, unsentText(it)) }
+        dropShellFrames(withPending = true).forEach { notice(NoticeLevel.WARNING, unsentShellText(it)) }
     }
-
-    /** The notice for a shell escape of [command] whose output never reached the CLI. */
-    private fun unsentText(command: String): String = "The output of ! ${command.lineSequence().first()} was not sent: the CLI ended first."
 
     /**
      * Asks for another model. The switch only counts once `system/init` reports it (see [ChatState.modelWarning]); an error answer
@@ -504,7 +501,7 @@ class ClaudeSession(
         mcpRequest(MCP_SLOW_SECONDS, { HostMessages.mcpAuthenticate(it, name) }) { payload ->
             val start = ControlPayloads.mcpAuthenticate(payload) ?: McpAuthStart(authUrl = null)
             if (start.authUrl != null && ControlPayloads.browsableUrl(start.authUrl) == null) {
-                McpResult.Failed(McpError.Rejected("the sign-in link is not an http(s) URL"))
+                McpResult.Failed(McpError.Rejected("the sign-in link is not an http(s) URL", linkFailed = true))
             } else {
                 McpResult.Ok(start)
             }
@@ -676,3 +673,6 @@ class ClaudeSession(
 
     private fun newRequestId(): String = "tandem-${nextId.incrementAndGet()}"
 }
+
+/** The notice for a shell escape of [command] whose output never reached the CLI (hard rule 5). */
+internal fun unsentShellText(command: String): String = "The output of ! ${command.lineSequence().first()} was not sent: the CLI ended first."
