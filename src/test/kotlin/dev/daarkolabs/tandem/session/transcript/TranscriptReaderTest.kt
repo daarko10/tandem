@@ -7,6 +7,8 @@ import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.NoticeKind
+import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.PendingPermission
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.UserImage
@@ -96,6 +98,81 @@ class TranscriptReaderTest {
         assertEquals("claude-sonnet-5-5", loaded.meta.lastModel)
         // history-reply was recorded with --effort high, which its assistant lines carry as "effort":"high".
         assertEquals("high", TranscriptReader.meta(Fixtures.transcript("history-reply")).lastEffort)
+
+        // The MCP fixtures: the same replies and tool results, and the same local-command notices by level and text. The stream's
+        // other notices (mcp-status's `The CLI rejected a request: …` for its error answers) have no line on disk, so they stay out
+        // of the comparison; `command` differs, since the stream is folded without the prompt the CLI does not echo.
+        for (name in listOf("mcp-status", "mcp-slash", "mcp-tool-call")) {
+            val stream = Fixtures.decode(name).fold(ChatState()) { s, m -> reduce(s, SessionEvent.Cli(m)) }
+            val disk = TranscriptReader.read(Fixtures.transcript(name)).state
+            assertEquals(
+                stream.entries.filterIsInstance<ChatEntry.Assistant>().map { it.blocks },
+                disk.entries.filterIsInstance<ChatEntry.Assistant>().map { it.blocks },
+                name,
+            )
+            assertEquals(
+                stream.entries.filterIsInstance<ChatEntry.ToolResult>().map { it.text to it.isError },
+                disk.entries.filterIsInstance<ChatEntry.ToolResult>().map { it.text to it.isError },
+                name,
+            )
+            assertEquals(stream.localNotices(), disk.localNotices(), name)
+        }
+        assertEquals(3, TranscriptReader.read(Fixtures.transcript("mcp-slash")).state.localNotices().size)
+    }
+
+    private fun ChatState.localNotices(): List<Pair<NoticeLevel, String>> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.kind == NoticeKind.LOCAL_COMMAND }.map { it.level to it.text }
+
+    @Test
+    fun `a local command on disk is the same notice as its stream`() = runBlocking<Unit> {
+        val loaded = TranscriptReader.read(Fixtures.transcript("mcp-slash")).state
+        val notices = loaded.entries.filterIsInstance<ChatEntry.Notice>()
+        assertEquals(
+            listOf(
+                "user: /mcp", "INFO: ${notices[0].text}", "user: /model", "INFO: ${notices[1].text}",
+                "user: /help", "INFO: /help isn't available in this environment.", "user: /hello", "assistant: hello from the hello command",
+            ),
+            loaded.shape(),
+        )
+        assertTrue(notices.all { it.kind == NoticeKind.LOCAL_COMMAND })
+        assertEquals(listOf("mcp", "model", "help"), notices.map { it.command })
+        assertEquals(listOf("mcp", "model", null), notices.map { it.runCommand })
+        // transcripts/mcp-slash.jsonl:13, the typed /help, which has no <command-name> line.
+        assertEquals("<uuid-50>", loaded.entries.filterIsInstance<ChatEntry.User>()[2].id)
+
+        // The stream's notices, with the prompts the CLI does not echo: the same but for their ids.
+        val lines = Fixtures.decode("mcp-slash")
+        fun streamed(prompt: String, from: Int, to: Int): ChatEntry.Notice =
+            lines.subList(from - 1, to).fold(reduce(ChatState(), SessionEvent.UserSent("u1", prompt))) { s, m -> reduce(s, SessionEvent.Cli(m)) }
+                .entries.filterIsInstance<ChatEntry.Notice>().single()
+        assertEquals(streamed("/mcp", 2, 6).copy(id = "n"), notices[0].copy(id = "n"))
+        assertEquals(streamed("/help", 14, 18).copy(id = "n"), notices[2].copy(id = "n"))
+    }
+
+    @Test
+    fun `local command lines load by their shape and other system lines are skipped`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("31313131-3131-4131-8131-313131313131.jsonl")
+        f.writeLines(
+            // The typed command without a uuid, then its error output (unrecorded: no fixture has <local-command-stderr>).
+            """{"type":"system","subtype":"local_command","content":"/nope now","submitUuid":"s1","timestamp":"2026-10-21T10:23:55.130Z"}""",
+            """{"type":"system","subtype":"local_command","uuid":"o1","content":"<local-command-stderr>Unknown command: /nope</local-command-stderr>"}""",
+            // Bare content without a submitUuid, a meta line and a line without content are no rows.
+            """{"type":"system","subtype":"local_command","uuid":"x1","content":"just text"}""",
+            """{"type":"system","subtype":"local_command","uuid":"x2","isMeta":true,"content":"<local-command-stdout>hidden</local-command-stdout>"}""",
+            """{"type":"system","subtype":"local_command","uuid":"x3","commandRun":{"command":"mcp"}}""",
+            """{"type":"system","subtype":"informational","uuid":"x4","content":"<local-command-stdout>other</local-command-stdout>"}""",
+            // Output with a run and no wrapper is still the command's.
+            """{"type":"system","subtype":"local_command","uuid":"o2","content":"plain","commandRun":{"command":"cost","args":""}}""",
+        )
+        val loaded = TranscriptReader.read(f).state
+        assertEquals(listOf("user: /nope now", "INFO: Unknown command: /nope", "INFO: plain"), loaded.shape())
+        val user = loaded.entries.first() as ChatEntry.User
+        assertEquals("line-1", user.id)
+        assertEquals(Instant.parse("2026-10-21T10:23:55.130Z").toEpochMilli(), user.sentAtMillis)
+        val notices = loaded.entries.filterIsInstance<ChatEntry.Notice>()
+        assertEquals(listOf("nope", "nope"), notices.map { it.command })
+        assertEquals(listOf(null, "cost"), notices.map { it.runCommand })
+        assertFalse(loaded.busy)
     }
 
     @Test

@@ -3,6 +3,7 @@ package dev.daarkolabs.tandem.session
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.PermissionDenial
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SlashCommand
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
@@ -86,6 +87,12 @@ data class ChatState(
     val context: ContextUsage? = null,
     /** The session's MCP servers, as the latest `system/init` and `mcp_status` answer report them. */
     val mcp: McpState = McpState(),
+    /** The slash commands the CLI offers, in its order, from the `commands` of its `initialize` answer; empty until it answers. */
+    val commands: List<SlashCommand> = emptyList(),
+    /** The command names of the latest `system/init` (`slash_commands`), for the palette while [commands] is empty. */
+    val slashCommandNames: List<String> = emptyList(),
+    /** The commands the latest `system/init` says work only in a terminal (`terminal_slash_commands`). */
+    val terminalCommands: Set<String> = emptySet(),
 )
 
 /**
@@ -115,6 +122,8 @@ data class TurnProgress(
     val lastToolUseId: String?,
     val toolCount: Int,
     val lastError: String? = null,
+    /** The CLI answered the turn's prompt itself (a local command such as `/mcp`): its `result` ends it without a footer. */
+    val localCommand: Boolean = false,
 )
 
 /** A subagent the CLI runs for an `Agent` tool call ([toolUseId]), from its `task_*` lines: what it does now and its totals. */
@@ -226,8 +235,19 @@ sealed interface ChatEntry {
         val atMillis: Long? = null,
     ) : ChatEntry
 
-    /** Something the user must see that is not model output: retries, fallbacks, errors, stops. */
-    data class Notice(override val id: String, val level: NoticeLevel, val text: String, val kind: NoticeKind = NoticeKind.GENERIC) : ChatEntry
+    /**
+     * Something the user must see that is not model output: retries, fallbacks, errors, stops, and what a local command printed
+     * ([NoticeKind.LOCAL_COMMAND]). On a local command's notice, [command] is the command the user typed, from the prompt before it
+     * (else [runCommand]), and [runCommand] the command the CLI says it ran (`local_command_run.command`), which decides its link.
+     */
+    data class Notice(
+        override val id: String,
+        val level: NoticeLevel,
+        val text: String,
+        val kind: NoticeKind = NoticeKind.GENERIC,
+        val command: String? = null,
+        val runCommand: String? = null,
+    ) : ChatEntry
 
     /**
      * The end of a turn: how it ended, how long it took and its output tokens, and the calls denied in it. [error] is set on a
@@ -246,8 +266,11 @@ sealed interface ChatEntry {
 
 enum class NoticeLevel { INFO, WARNING, ERROR }
 
-/** What a notice stands for: [INTERRUPTED] is the "Stopped." of an interrupted turn, which the chat shows as the turn's end. */
-enum class NoticeKind { GENERIC, INTERRUPTED }
+/**
+ * What a notice stands for: [INTERRUPTED] is the "Stopped." of an interrupted turn, which the chat shows as the turn's end;
+ * [LOCAL_COMMAND] is the output of a command the CLI answered itself, such as `/mcp`, in place of a reply.
+ */
+enum class NoticeKind { GENERIC, INTERRUPTED, LOCAL_COMMAND }
 
 /** How a tool call's permission was decided ([decision], [source], [reasonType]), or why it did not run ([nonExecutionKind]). */
 data class PermissionDecision(val decision: String, val source: String?, val reasonType: String?, val nonExecutionKind: String?)

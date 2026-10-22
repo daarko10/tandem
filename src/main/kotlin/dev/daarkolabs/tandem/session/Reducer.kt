@@ -2,9 +2,11 @@ package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ContentBlock
+import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.InboundRequest
 import dev.daarkolabs.tandem.protocol.McpServerInfo
+import dev.daarkolabs.tandem.protocol.McpServerSummary
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.protocol.TaskUsage
@@ -63,6 +65,13 @@ sealed interface SessionEvent {
 
     /** The CLI answered `mcp_status` with [servers]: they replace what `system/init` listed. */
     data class McpServersListed(val servers: List<McpServerInfo>) : SessionEvent
+
+    /**
+     * What a local command printed, as a loaded transcript keeps it (a `system` `local_command` line): its [text] without the
+     * output tags, and the command the CLI says it ran ([runCommand]), if the line names one. The same rule as the stream's
+     * local-command line applies.
+     */
+    data class LocalCommandOutput(val text: String, val runCommand: String?) : SessionEvent
 }
 
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
@@ -98,6 +107,7 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.HostNotice -> state.notice(event.level, event.text)
     is SessionEvent.Ended -> reduceEnded(state, event)
     is SessionEvent.McpServersListed -> state.copy(mcp = state.mcp.copy(servers = event.servers, detailed = true))
+    is SessionEvent.LocalCommandOutput -> state.localCommandNotice(event.text, event.runCommand)
 }
 
 /**
@@ -158,6 +168,9 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         claudeCodeVersion = message.claudeCodeVersion ?: state.claudeCodeVersion,
         cwd = message.cwd ?: state.cwd,
         modelSwitchPending = false,
+        mcp = state.mcp.mergedWith(message.mcpServers),
+        slashCommandNames = message.slashCommands,
+        terminalCommands = message.terminalSlashCommands.toSet(),
     ).checkModel(message.model)
     is CliMessage.SystemStatus -> state.copy(permissionMode = message.permissionMode ?: state.permissionMode)
     is CliMessage.ApiRetry -> state.notice(NoticeLevel.INFO, retryText(message))
@@ -202,9 +215,9 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
             effortChange != null -> state.rejectEffortChange(message.requestId, effortChange, message.error)
             // Accepted: the switch still waits for the next system/init to confirm it.
             modelChange != null && message.isSuccess -> state.copy(modelChanges = state.modelChanges - message.requestId)
-                .withModels(message.payload)
+                .withModels(message.payload).withCommands(message.payload)
             modelChange != null -> state.rejectModelChange(message.requestId, modelChange, message.error)
-            message.isSuccess -> answered.withModels(message.payload)
+            message.isSuccess -> answered.withModels(message.payload).withCommands(message.payload)
             change == null -> answered.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
             else -> state.rejectModeChange(message.requestId, change, message.error)
         }
@@ -247,6 +260,51 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         ).withUsage(message.usage)
     }
     is CliMessage.KeepAlive, is CliMessage.Unknown -> state
+}
+
+/** The `source` of a claude.ai connector's entry, which a `system/init` may leave out (probes 2.5). */
+private const val CONNECTOR_SOURCE: String = "claudeai"
+
+/**
+ * These servers after a `system/init` that lists [listed]: status and source per name, in the init's order. A name whose status
+ * changed loses its error, tools and version until the next `mcp_status` (they belong to the old status: a server is connected
+ * with tools and failed with an error), a new name comes without config, and a name the init leaves out is dropped, except a
+ * claude.ai connector's, which stays after the listed ones until the next `mcp_status`. Two entries with one name pair off in
+ * order. [McpState.detailed] stays as it is.
+ */
+private fun McpState.mergedWith(listed: List<McpServerSummary>): McpState {
+    val stored = LinkedHashMap<String, ArrayDeque<McpServerInfo>>()
+    for (server in servers) stored.getOrPut(server.name) { ArrayDeque() }.addLast(server)
+    val merged = listed.map { summary ->
+        val old = stored[summary.name]?.removeFirstOrNull()
+        when {
+            old == null -> McpServerInfo(summary.name, summary.status, summary.statusText, source = summary.source)
+            old.status == summary.status && old.statusText == summary.statusText -> old.copy(source = summary.source ?: old.source)
+            else -> old.copy(
+                status = summary.status,
+                statusText = summary.statusText,
+                source = summary.source ?: old.source,
+                error = null,
+                tools = null,
+                serverInfo = null,
+            )
+        }
+    }
+    val connectors = stored.values.flatten().filter { it.source == CONNECTOR_SOURCE }
+    return copy(servers = merged + connectors, initCount = initCount + 1)
+}
+
+/**
+ * The notice of a local command, from a stream's line the CLI wrote itself or a loaded transcript's `local_command` line: [text]
+ * as the CLI printed it, named after the latest prompt when that is a command (the first word of `/mcp reconnect x` without its
+ * `/`: the CLI does not echo the prompt), else after [runCommand]. The turn in progress, if any, is flagged local, so that its
+ * result ends it without a footer.
+ */
+private fun ChatState.localCommandNotice(text: String, runCommand: String?): ChatState {
+    val prompt = (entries.lastOrNull { it is ChatEntry.User } as ChatEntry.User?)?.text
+    val typed = prompt?.takeIf { it.startsWith("/") }?.drop(1)?.takeWhile { !it.isWhitespace() }?.ifEmpty { null }
+    return withTurn { it.copy(localCommand = true) }
+        .notice(NoticeLevel.INFO, text, NoticeKind.LOCAL_COMMAND, command = typed ?: runCommand, runCommand = runCommand)
 }
 
 /**
@@ -372,6 +430,11 @@ private fun ChatState.rejectModelChange(requestId: String, change: ModelChange, 
 private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at: Long): ChatState {
     var next = state
     if (message.supersedes.isNotEmpty()) next = next.withoutAssistants(message.supersedes.toSet())
+    // The CLI answered the prompt itself: what it printed is a notice, not a reply (spec 3.5).
+    message.localCommand?.let { local ->
+        val text = local.stdout ?: message.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+        return next.localCommandNotice(text, local.command)
+    }
     message.error?.let { error ->
         // The turn's failure, as its footer says it: `API Error: 404 model_not_found`.
         val failure = "API Error: " + listOfNotNull(message.apiErrorStatus?.toString(), error).joinToString(" ")
@@ -522,6 +585,7 @@ private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent, at: 
 }
 
 private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState {
+    if (result.localCommand != null || state.turn?.localCommand == true) return reduceLocalResult(state, result)
     // An interrupt: the result says so, or, from a CLI that sends no terminal_reason, the turn carried the interrupt marker.
     val interrupted = result.terminalReason == "aborted_streaming" || state.turnInterrupted
     val end = when {
@@ -549,14 +613,33 @@ private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState
     )
     return when {
         interrupted -> next // the interrupt already showed "Stopped."
-        result.isError -> next.notice(
-            NoticeLevel.ERROR,
-            "The turn failed" + result.failureKind()?.let { " ($it)" }.orEmpty() + ": " +
-                (result.result ?: result.errors.joinToString("; ").ifEmpty { "no details" }),
-        )
+        result.isError -> next.failed(result)
         else -> next
     }
 }
+
+/**
+ * The result of a turn the CLI answered itself: it names a local command (`local_command`), or the turn was flagged local by the
+ * command's own line. The turn ends without a [ChatEntry.TurnEnded], and [ChatState.turnsEnded] and [ChatState.lastTurnEnd] stay
+ * as they are, so it draws no footer, attention or notification. An error result still says so (hard rule 5).
+ */
+private fun reduceLocalResult(state: ChatState, result: CliMessage.Result): ChatState {
+    val next = state.finishStreaming().copy(
+        busy = false,
+        sessionId = result.sessionId ?: state.sessionId,
+        pendingPermissions = emptyList(),
+        turnInterrupted = false,
+        turn = null,
+    )
+    return if (result.isError) next.failed(result) else next
+}
+
+/** This state with the error notice of [result], a failed one. */
+private fun ChatState.failed(result: CliMessage.Result): ChatState = notice(
+    NoticeLevel.ERROR,
+    "The turn failed" + result.failureKind()?.let { " ($it)" }.orEmpty() + ": " +
+        (result.result ?: result.errors.joinToString("; ").ifEmpty { "no details" }),
+)
 
 /**
  * The context with the window [result] reports: the active model's, else, after a mid-turn fallback that left it out of
@@ -658,6 +741,10 @@ private fun toolResultText(block: ContentBlock.ToolResult): String = when (val c
 
 private fun entryId(messageId: String, parent: String?): String = if (parent == null) messageId else "$parent/$messageId"
 
+/** The `commands` an `initialize` answer's [payload] lists replace [ChatState.commands]; other payloads keep them. */
+private fun ChatState.withCommands(payload: JsonObject?): ChatState =
+    ControlPayloads.initialize(payload)?.let { copy(commands = it.commands) } ?: this
+
 /** The `models` a response's [payload] lists, as the `initialize` response does, replace [ChatState.models]; other payloads keep them. */
 private fun ChatState.withModels(payload: JsonObject?): ChatState {
     val models = payload?.array("models") ?: return this
@@ -755,5 +842,10 @@ private fun ChatState.finishStreaming(): ChatState = copy(
     },
 )
 
-private fun ChatState.notice(level: NoticeLevel, text: String, kind: NoticeKind = NoticeKind.GENERIC): ChatState =
-    append(ChatEntry.Notice("notice-$noticeCount", level, text, kind)).copy(noticeCount = noticeCount + 1)
+private fun ChatState.notice(
+    level: NoticeLevel,
+    text: String,
+    kind: NoticeKind = NoticeKind.GENERIC,
+    command: String? = null,
+    runCommand: String? = null,
+): ChatState = append(ChatEntry.Notice("notice-$noticeCount", level, text, kind, command, runCommand)).copy(noticeCount = noticeCount + 1)

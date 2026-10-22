@@ -6,7 +6,9 @@ import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ContentBlock
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.obj
 import dev.daarkolabs.tandem.protocol.string
+import dev.daarkolabs.tandem.protocol.unwrapLocalCommandOutput
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.UserImage
@@ -26,6 +28,8 @@ import java.nio.channels.FileChannel
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.time.DateTimeException
+import java.time.Instant
 import java.util.BitSet
 import kotlin.io.path.bufferedReader
 import kotlin.io.path.name
@@ -101,11 +105,12 @@ data class LoadedTranscript(
  *
  * Prompts (`user` text and images), tool results (`user` `tool_result` blocks) and `assistant` lines make the history: an interrupt
  * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`, and a line of images
- * only (or a generated tag with images) a prompt with no text. Each goes to the reducer stamped with its line's `timestamp` (0
- * when it has none), and [TranscriptMeta.cwd] becomes the state's `cwd`. `custom-title`, `ai-title` and `summary` lines make the
- * title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the output of commands and shell escapes,
- * background-task notifications and other generated tags unless they carry images, every other type, and lines that are not a
- * JSON object (such as a last line the CLI is still writing) are skipped. Bad input never throws.
+ * only (or a generated tag with images) a prompt with no text. A `system` `local_command` line is a local command's output, the
+ * notice the stream shows for it, or the command itself as typed (see [Scan]). Each goes to the reducer stamped with its line's
+ * `timestamp` (0 when it has none), and [TranscriptMeta.cwd] becomes the state's `cwd`. `custom-title`, `ai-title` and `summary`
+ * lines make the title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the output of commands and shell
+ * escapes in user lines, background-task notifications and other generated tags unless they carry images, every other type, and
+ * lines that are not a JSON object (such as a last line the CLI is still writing) are skipped. Bad input never throws.
  */
 object TranscriptReader {
     /**
@@ -386,6 +391,24 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
             "assistant" -> if (!raw.isSet("isSidechain")) {
                 state = reduce(state, SessionEvent.Cli(message, atMillis = (message as? CliMessage.Assistant)?.timestampMillis ?: 0L))
             }
+            "system" -> if (raw.string("subtype") == "local_command" && !raw.isSet("isMeta") && !raw.isSet("isSidechain")) localCommand(raw)
+        }
+    }
+
+    /**
+     * A `local_command` line. Its output (`content` wrapped in `<local-command-stdout>` or `<local-command-stderr>`, or a line that
+     * names the command it ran, `commandRun`, or its outcome, `commandOutcome`) goes to the reducer as the stream's local-command
+     * line does, so the notice is the same. Bare `content` with a `submitUuid` is the command as typed (`/help`, which has no
+     * `<command-name>` line), a prompt. Any other, and one without a string `content`, is skipped.
+     */
+    private fun localCommand(raw: JsonObject) {
+        val content = raw.string("content") ?: return
+        val output = unwrapLocalCommandOutput(content)
+        val run = raw.obj("commandRun")
+        if (output != content || run != null || raw.obj("commandOutcome") != null) {
+            state = reduce(state, SessionEvent.LocalCommandOutput(output, run?.string("command")))
+        } else if (raw.string("submitUuid") != null) {
+            state = reduce(state, SessionEvent.UserSent(raw.string("uuid") ?: "line-$lineCount", content, timestampOf(raw)))
         }
     }
 
@@ -401,6 +424,18 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
         // A line with images is a prompt even without typed text (images only), as it was when sent.
         if (shown.typed == null && shown.images.isEmpty()) return
         state = reduce(state, SessionEvent.UserSent(uuid, shown.typed?.text ?: "", atMillis, shown.images))
+    }
+}
+
+/** The line's ISO-8601 `timestamp` in epoch milliseconds; 0 (unknown) when it has none or it does not parse. */
+private fun timestampOf(raw: JsonObject): Long {
+    val text = raw.string("timestamp") ?: return 0L
+    return try {
+        Instant.parse(text).toEpochMilli()
+    } catch (_: DateTimeException) {
+        0L
+    } catch (_: ArithmeticException) { // an instant too far out for epoch milliseconds
+        0L
     }
 }
 
