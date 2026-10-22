@@ -45,16 +45,21 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import com.intellij.openapi.util.SystemInfo
 import dev.daarkolabs.tandem.chat.CommandScope
 import dev.daarkolabs.tandem.chat.PaletteItem
 import dev.daarkolabs.tandem.chat.SlashPalette
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.VerticallyScrollableContainer
+import org.jetbrains.jewel.ui.component.scrollbarContentSafePadding
+import org.jetbrains.jewel.ui.component.styling.ScrollbarVisibility
+import org.jetbrains.jewel.ui.theme.scrollbarStyle
 import org.jetbrains.jewel.ui.theme.textAreaStyle
 import kotlin.math.max
 import kotlin.math.min
@@ -134,6 +139,24 @@ internal fun scopeLabel(scope: CommandScope): String? = when (scope) {
     CommandScope.PLUGIN -> "plugin"
 }
 
+/**
+ * The horizontal space a row takes beside its text, in pixels, as its paddings lay it out, each side rounded on its own: [ROW_INSET]
+ * and [TEXT_INSET] on both sides, then, while the list scrolls, [scrollbarPadding] at the row's end (the track drawn over the rows)
+ * and [scrollbarTakenOut] (the track Jewel's container takes out of the rows' width).
+ */
+internal fun Density.rowInsetsPx(scrollbarPadding: Dp = 0.dp, scrollbarTakenOut: Dp = 0.dp): Int =
+    2 * ROW_INSET.roundToPx() + 2 * TEXT_INSET.roundToPx() + scrollbarPadding.roundToPx() + scrollbarTakenOut.roundToPx()
+
+/** The horizontal space the footer takes beside its text, in pixels: one padding of [ROW_INSET] + [TEXT_INSET], each side rounded. */
+internal fun Density.footerInsetsPx(): Int = 2 * (ROW_INSET + TEXT_INSET).roundToPx()
+
+/**
+ * The width of the scrollbar's track that Jewel's container takes out of the content beside it: only on macOS ([mac]) with scroll
+ * bars always shown ([alwaysVisible]), the track's expanded [thickness]; elsewhere the track is drawn over the content, which keeps
+ * `scrollbarContentSafePadding()` clear instead.
+ */
+internal fun scrollbarTakenOut(mac: Boolean, alwaysVisible: Boolean, thickness: Dp): Dp = if (mac && alwaysVisible) thickness else 0.dp
+
 /** Whether [item] has anything for the description box: a description or a scope. */
 internal fun hasDescription(item: PaletteItem): Boolean = item.description.isNotEmpty() || scopeLabel(item.scope) != null
 
@@ -167,7 +190,9 @@ internal fun filterHintShown(text: CharSequence, palette: SlashPalette?): Boolea
 /**
  * The slash-command palette (MCP spec 3.4, 14), in the desktop app's form: a compact popup above the composer box it is placed in, at
  * the box's left edge, its bottom 8 dp above the box's top. The list is as wide as its widest row (a position provider cannot size
- * a popup, so the rows are measured here), at least 200 dp, never wider than the box ([boxWidthPx]): one line per command, its name
+ * a popup, so the rows are measured here, with room for the scrollbar while it scrolls), at least 200 dp, never wider than the box
+ * ([boxWidthPx]); while the popup is open its width only grows, so neither it nor the description's place moves as the user types
+ * and the rows thin out. One line per command, its name
  * without the slash, the highlighted row's argument hint after it, dimmed, and ` · via /<alias>` on a row only an alias matched. It
  * shows 10 rows and scrolls past that, its selected row scrolled into view; the footer (`No matching command`, `Commands load when
  * the session starts`) is its last line. The highlighted row's description, the scope first, sits in a small box beside the list,
@@ -190,20 +215,38 @@ internal fun SlashPaletteView(palette: SlashPalette, boxWidthPx: Int, maxHeightP
         val nameStyle = JewelTheme.defaultTextStyle
         val footerStyle = smallTextStyle()
         val rowHeight = maxOf(24.dp, lineHeight(nameStyle) + 6.dp)
+        val rowPx = with(density) { rowHeight.roundToPx() }
+        // Never cut by the frame's own padding: the weight in ListFrame then only has to make room for the footer.
+        val listPx = min(min(palette.items.size, MAX_ROWS) * rowPx, max(0, maxHeightPx - 2 * with(density) { FRAME_PADDING.roundToPx() }))
+        // While the list scrolls its scrollbar takes room beside the rows, or is drawn over their end: either way the rows keep it.
+        val scrolls = palette.items.size * rowPx > listPx
+        val scrollbarPadding = if (scrolls) scrollbarContentSafePadding() else 0.dp
+        val visibility = JewelTheme.scrollbarStyle.scrollbarVisibility
+        val alwaysVisible = visibility is ScrollbarVisibility.AlwaysVisible
+        val takenOut = if (scrolls) scrollbarTakenOut(SystemInfo.isMac, alwaysVisible, visibility.trackThicknessExpanded) else 0.dp
         val measurer = rememberTextMeasurer()
-        // Each row's text measured once while the popup is open: the list fits the widest of the rows shown, and the footer.
+        // Each text measured once while the popup is open: the list fits the widest of the rows shown, and the footer. A row's name
+        // and what follows it are two Texts, each as wide as its own measure, so they are measured apart.
         val widths = remember(nameStyle, density) { HashMap<String, Int>() }
-        val contentWidth = remember(palette.items, palette.footer, nameStyle, footerStyle, density) {
-            val rows = palette.items.maxOfOrNull { item ->
-                val text = item.name + rowTrailing(item, selected = false)
-                widths.getOrPut(text) { measurer.measure(text, nameStyle, maxLines = 1, softWrap = false).size.width }
-            } ?: 0
-            val footer = palette.footer?.let { measurer.measure(it, footerStyle, maxLines = 1, softWrap = false).size.width } ?: 0
-            with(density) { max(rows + ((ROW_INSET + TEXT_INSET) * 2).roundToPx(), footer + ((ROW_INSET + TEXT_INSET) * 2).roundToPx()) }
+        val measured = { text: String ->
+            widths.getOrPut(text) { measurer.measure(text, nameStyle, maxLines = 1, softWrap = false).size.width }
         }
+        val contentWidth = remember(palette.items, palette.footer, nameStyle, footerStyle, density, scrollbarPadding, takenOut) {
+            val rows = palette.items.maxOfOrNull { item ->
+                val trailing = rowTrailing(item, selected = false)
+                measured(item.name) + if (trailing.isEmpty()) 0 else measured(trailing)
+            }
+            val footer = palette.footer?.let { measurer.measure(it, footerStyle, maxLines = 1, softWrap = false).size.width }
+            with(density) {
+                max(rows?.let { it + rowInsetsPx(scrollbarPadding, takenOut) } ?: 0, footer?.let { it + footerInsetsPx() } ?: 0)
+            }
+        }
+        // The widest content seen since the popup opened: the width, and where the description goes, only grow (spec 14).
+        val widest = remember(nameStyle, density) { intArrayOf(0) }
+        widest[0] = max(widest[0], contentWidth)
         val geometry = with(density) {
             paletteGeometry(
-                contentWidth,
+                widest[0],
                 boxWidthPx,
                 MIN_LIST_WIDTH.roundToPx(),
                 GAP.roundToPx(),
@@ -211,14 +254,14 @@ internal fun SlashPaletteView(palette: SlashPalette, boxWidthPx: Int, maxHeightP
                 MAX_DESCRIPTION_WIDTH.roundToPx(),
             )
         }
-        val rowPx = with(density) { rowHeight.roundToPx() }
-        val listPx = min(min(palette.items.size, MAX_ROWS) * rowPx, max(0, maxHeightPx))
         val listState = rememberLazyListState()
         LaunchedEffect(palette.query, palette.selected) { scrollIntoView(listState, palette.selected) }
         val selectedNow by rememberUpdatedState(palette.selected)
-        val rowTop by remember(listState, rowPx, listPx) {
+        // Against the list's viewport as laid out: the footer's line can cut it shorter than it asked for.
+        val rowTop by remember(listState, rowPx) {
             derivedStateOf {
-                selectedRowTop(selectedNow, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, rowPx, listPx)
+                val viewport = listState.layoutInfo.viewportSize.height
+                selectedRowTop(selectedNow, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, rowPx, viewport)
             }
         }
         val selected = palette.items.getOrNull(palette.selected)?.takeIf(::hasDescription)
@@ -232,13 +275,15 @@ internal fun SlashPaletteView(palette: SlashPalette, boxWidthPx: Int, maxHeightP
                 gapPx = with(density) { GAP.roundToPx() },
                 modifier = outer,
             ) {
-                ListFrame(palette, listState, listPx, rowHeight, Modifier.width(listWidth)) { currentOnPick(it) }
+                ListFrame(palette, listState, listPx, rowHeight, scrollbarPadding, Modifier.width(listWidth)) { currentOnPick(it) }
                 if (selected != null) {
                     DescriptionBox(selected, Modifier.widthIn(max = with(density) { geometry.descriptionMaxWidth.toDp() }))
                 }
             }
             DescriptionPlace.UNDER -> Column(outer.width(listWidth)) {
-                ListFrame(palette, listState, listPx, rowHeight, Modifier.weight(1f, fill = false).fillMaxWidth()) { currentOnPick(it) }
+                ListFrame(palette, listState, listPx, rowHeight, scrollbarPadding, Modifier.weight(1f, fill = false).fillMaxWidth()) {
+                    currentOnPick(it)
+                }
                 // Two lines' height whichever row is highlighted, with or without a description: the list never moves with the selection.
                 if (palette.items.any(::hasDescription)) {
                     Spacer(Modifier.height(GAP))
@@ -273,13 +318,17 @@ private fun BesideList(rowTopPx: Int, gapPx: Int, modifier: Modifier, content: @
     }
 }
 
-/** The rows in a framed, scrolling list [listPx] tall, then the footer; a click on a row calls [onPick] with it. */
+/**
+ * The rows in a framed, scrolling list [listPx] tall, each keeping [scrollbarPadding] clear at its end, then the footer; a click on a
+ * row calls [onPick] with it.
+ */
 @Composable
 private fun ListFrame(
     palette: SlashPalette,
     listState: LazyListState,
     listPx: Int,
     rowHeight: Dp,
+    scrollbarPadding: Dp,
     modifier: Modifier,
     onPick: (PaletteItem) -> Unit,
 ) {
@@ -299,7 +348,7 @@ private fun ListFrame(
             ) {
                 LazyColumn(state = listState) {
                     itemsIndexed(palette.items, key = { _, item -> item.name }) { index, item ->
-                        PaletteRow(item, selected = index == palette.selected, rowHeight) { onPick(item) }
+                        PaletteRow(item, selected = index == palette.selected, rowHeight, scrollbarPadding) { onPick(item) }
                     }
                 }
             }
@@ -317,10 +366,11 @@ private fun ListFrame(
 
 /**
  * One command: its name, then [rowTrailing] dimmed, on one line [height] tall (at least 24 dp, so the IDE tests' click at (10, 10)
- * lands on it, MCP spec 3.7); the selected row on a rounded fill inset from the list's edges.
+ * lands on it, MCP spec 3.7); the selected row on a rounded fill inset from the list's edges. Its text keeps [scrollbarPadding] clear
+ * at its end, where the scrollbar's track may be drawn.
  */
 @Composable
-private fun PaletteRow(item: PaletteItem, selected: Boolean, height: Dp, onClick: () -> Unit) {
+private fun PaletteRow(item: PaletteItem, selected: Boolean, height: Dp, scrollbarPadding: Dp, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth()
             .padding(horizontal = ROW_INSET)
@@ -332,7 +382,8 @@ private fun PaletteRow(item: PaletteItem, selected: Boolean, height: Dp, onClick
                 contentDescription = "/${item.name}"
                 this.selected = selected
             }
-            .padding(horizontal = TEXT_INSET),
+            .padding(horizontal = TEXT_INSET)
+            .padding(end = scrollbarPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis)

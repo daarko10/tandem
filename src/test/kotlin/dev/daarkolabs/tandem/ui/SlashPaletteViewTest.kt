@@ -1,6 +1,8 @@
 package dev.daarkolabs.tandem.ui
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.chat.CommandScope
 import dev.daarkolabs.tandem.chat.PaletteItem
 import dev.daarkolabs.tandem.chat.slashPalette
@@ -28,6 +30,30 @@ class SlashPaletteViewTest {
         // A box narrower than the minimum: the box's width.
         assertEquals(150, paletteGeometry(120, 150, 200, 6, 140, 260).listWidth)
         assertEquals(0, paletteGeometry(120, -5, 200, 6, 140, 260).listWidth)
+    }
+
+    @Test
+    fun `the insets are counted as the paddings lay them out, each side rounded on its own`() {
+        // At 125 %: 4 dp is 5 px, 10 dp is 12.5, so 13 px a side; 14 dp is 17.5, so 18 px a side. 28 dp at once would be 35.
+        with(Density(1.25f)) {
+            assertEquals(36, rowInsetsPx())
+            assertEquals(36, footerInsetsPx())
+            assertEquals(36 + 19 + 0, rowInsetsPx(scrollbarPadding = 15.dp))
+        }
+        // At 175 %: 7 + 18 a side for the rows, 25 a side for the footer, against 49 for 28 dp at once.
+        with(Density(1.75f)) {
+            assertEquals(50, rowInsetsPx())
+            assertEquals(50, footerInsetsPx())
+            assertEquals(50 + 25, rowInsetsPx(scrollbarTakenOut = 14.dp))
+        }
+        with(Density(1f)) { assertEquals(28, rowInsetsPx()) }
+    }
+
+    @Test
+    fun `only macOS with scroll bars always shown takes the track out of the rows`() {
+        assertEquals(14.dp, scrollbarTakenOut(mac = true, alwaysVisible = true, thickness = 14.dp))
+        assertEquals(0.dp, scrollbarTakenOut(mac = true, alwaysVisible = false, thickness = 14.dp))
+        assertEquals(0.dp, scrollbarTakenOut(mac = false, alwaysVisible = true, thickness = 14.dp))
     }
 
     @Test
