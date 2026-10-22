@@ -232,8 +232,9 @@ One JSON object per line, UTF-8, `\n`-terminated. Blank lines and non-JSON lines
 Every stdout message except control frames and `keep_alive` carries `uuid` and `session_id`.
 
 The tables follow `sdk.d.ts` 0.3.300. Recorded on stdout with CLI 2.1.300 to 2.1.306: `system`, `assistant`, `user`,
-`stream_event`, `result`, `rate_limit_event`, `control_request`, `control_response`, and the undocumented
-`command_lifecycle`, `active_goal` and `autocompact_state` (section 10). No fixture has the other types.
+`stream_event`, `result`, `rate_limit_event`, `control_request`, `control_response`, and `command_lifecycle` and
+`autocompact_state`, which the SDK does not type, and `active_goal`, typed but outside the `SDKMessage` union
+(section 10). No fixture has the other types.
 
 ---
 
@@ -632,9 +633,9 @@ error, config or tools, which come from `mcp_status` (4.4). Recorded statuses: `
 (0.3.306) types the same five. Tandem keeps any other value as text (`McpStatus.OTHER`). It merges each `init`'s list into
 the servers it knows: a server whose status changed loses its error, tools and version until the next `mcp_status`, and a
 server the `init` leaves out is dropped, except a claude.ai connector (`source:"claudeai"`), which stays until the next
-`mcp_status`: whether `init` lists connectors is unrecorded. `slash_commands` lists the command names (73 in `mcp-slash.ndjson:4`, the names of the
-initialize `commands`, 4.2) and `terminal_slash_commands` the ones that need the terminal
-(`["doctor","color","focus","reload-plugins"]`, `:4`). In the other fixtures the redactor empties these lists.
+`mcp_status`: whether `init` lists connectors is unrecorded. `slash_commands` lists the command names (73 in
+`mcp-slash.ndjson:4`, the names of the initialize `commands`, 4.2) and `terminal_slash_commands` the ones that need the
+terminal (`["doctor","color","focus","reload-plugins"]`, `:4`). In the other fixtures the redactor empties these lists.
 
 `effort` is typed in the SDK but missing from every recorded `init` (2.1.300 and 2.1.301), which carry only
 `per_turn_effort_active: true`. So Tandem shows the effort it passed with `--effort`, which for a session loaded from
@@ -746,10 +747,10 @@ Shape (`plain-reply.ndjson:10`, 2.1.300; trimmed):
   are read as fallbacks too, though the main `<id>.jsonl` carries `agentId` only inside `toolUseResult`
   (`agent-sync.jsonl`, `agent-forwarded.jsonl`).
 - A local command's reply (2.1.306): when the CLI answers a typed `/mcp`, `/model` or `/help` itself (section 3), it writes
-  one `assistant` line with `message.model:"<synthetic>"`, zero usage and three top-level keys: `local_command_run {command,
-  args}` (`mcp-slash.ndjson:5`, `:11`), or instead `local_command_outcome {kind}` for a command it cannot run headless
-  (`{"kind":"unavailable_headless"}`, `/help`, `:17`), and `local_command_source`, the text wrapped in
-  `<local-command-stdout>…</local-command-stdout>` (`:5`). No `system/status requesting`, no `stream_event`. Its `result`
+  one `assistant` line with `message.model:"<synthetic>"`, zero usage and two of three top-level keys:
+  `local_command_run {command, args}` (`mcp-slash.ndjson:5`, `:11`) or `local_command_outcome {kind}` for a command it
+  cannot run headless (`{"kind":"unavailable_headless"}`, `/help`, `:17`), plus `local_command_source`, the text wrapped
+  in `<local-command-stdout>…</local-command-stdout>` (`:5`). No `system/status requesting`, no `stream_event`. Its `result`
   carries `local_command:"mcp"` (none for `/help`, `:18`), `num_turns:0` and `duration_api_ms:0` (`:6`). Tandem shows a line
   with any of the three keys as an INFO notice under the prompt, never as a reply, the text unwrapped, and that `result`
   ends the turn without a `Worked for` footer (section 7). `/mcp`'s text ends with `` Use `/mcp` in the terminal for
