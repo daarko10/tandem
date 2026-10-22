@@ -50,9 +50,8 @@ internal enum class ComposerAction {
  * Enter alone sends, and does nothing while a turn runs (the Stop button stands in for Send) or a card is open (until it is answered,
  * spec 4.15), whether or not the reducer still counts the turn as running, unless the draft is one of Tandem's own commands
  * ([interceptable], asked for a plain Enter only): the interception table runs then, palette or not, busy or not, and sends nothing
- * (MCP spec 3.4). Shift+Enter is a newline, which the
- * composer types itself ([composerFallback]), and Alt+Enter and Ctrl/Cmd+Enter do nothing yet. Esc goes to the open card first, then
- * stops a running turn.
+ * (MCP spec 3.4). Shift+Enter is a newline, which the composer types itself ([composerFallback]), and Alt+Enter and Ctrl/Cmd+Enter
+ * do nothing yet. Esc goes to the open card first, then stops a running turn.
  *
  * Ctrl/Cmd+V pastes images, busy or not, when [clipboardHasImage] says the clipboard holds a file list or an image without text
  * ([ComposerImages.clipboardHasImage]); it is asked for that key only, and otherwise the text area pastes. Backspace removes the last

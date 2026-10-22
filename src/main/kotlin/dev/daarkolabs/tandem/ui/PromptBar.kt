@@ -484,7 +484,8 @@ private class ImagePasteProvider(private val onPaste: () -> Unit) : PasteProvide
  * Hands [event] to [composerKey] and runs what it returns, else to [composerFallback]: a newline in [ui]'s draft ([insertNewline]),
  * which the text area would not type, or nothing at all (spec 4.15). Every other key goes to the text area. With the slash palette
  * open ([paletteOpen]) its keys come first (MCP spec 3.4); a pick that does nothing still takes the key, so a busy Enter types no
- * newline. With the palette closed, a busy Enter on one of Tandem's own commands ([interceptable]) still runs it. Ctrl/Cmd+V asks the clipboard for its flavours only (polish spec 2.7): the data is read later, off the EDT.
+ * newline. With the palette closed, a busy Enter on one of Tandem's own commands ([interceptable]) still runs it. Ctrl/Cmd+V asks
+ * the clipboard for its flavours only (polish spec 2.7): the data is read later, off the EDT.
  */
 private fun composerKeyEvent(
     event: KeyEvent,
