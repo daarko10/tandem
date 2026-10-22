@@ -779,6 +779,21 @@ class NightlyWorkflowTest(unittest.TestCase):
         self.assertIn('scripts/make_drift.py "$DRIFT" build/contract --from build/contract', mutate["run"])
         self.assertNotIn("${{", mutate["run"])
 
+    def test_every_step_that_starts_the_cli_has_a_fresh_identity_token_and_records_one_scenario(self):
+        # A GitHub OIDC token is single use and lives about five minutes: a step that starts the CLI comes right after
+        # the anthropic-token action, and a scenario step records one scenario, never a loop over several on one token.
+        contract = steps(load(NIGHTLY), "contract")
+        starts_cli = re.compile(r"record-scenario\.sh|record-fixture\.sh|(^|[\s(;&|])claude\s")
+        starts = [i for i, s in enumerate(contract) if starts_cli.search(s.get("run", "").replace("claude --version", ""))]
+        self.assertTrue(starts, "no step starts the CLI")
+        for i in starts:
+            self.assertEqual("./.github/actions/anthropic-token", contract[i - 1].get("uses"), contract[i].get("name"))
+        scenarios = [s["run"].strip() for s in contract if "record-scenario.sh" in s.get("run", "")]
+        for run in scenarios:
+            self.assertRegex(run, r"^\./scripts/record-scenario\.sh [a-z-]+ build/contract$")
+        self.assertEqual(["bash-mode", "bash-mode-context", "bash-mode-respond", "mcp-slash", "mcp-status", "mcp-tool-call"],
+                         sorted(run.split()[1] for run in scenarios))   # the scenarios ContractTest checks
+
     def test_the_nightly_keeps_its_name_schedule_and_no_interpolated_run_line(self):
         wf = load(NIGHTLY)
         self.assertEqual("CLI contract", wf["name"])                                  # drift-fix.yml listens to this name
