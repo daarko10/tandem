@@ -69,7 +69,8 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
 /**
  * The MCP panel of [handle]'s session over its chat, while it is open: the drawer's scrim over the whole chat box (a click on it
  * closes the panel) and the sheet anchored at its top, the chat column's width and at most 60 % of its height. One
- * [McpPanelController] per open panel, closed with it: its requests go to [controls], a sign-in's link to [opener]. [onClose]
+ * [McpPanelController] per open panel, closed with it: its requests go to [controls], a sign-in's link to [opener]; it starts a stopped
+ * session only when [takeStartOnOpen], read once as it is built, says a user action opened it. [onClose]
  * closes the panel (Esc in it, Close, a click on the scrim); [firstFocus] is its first enabled action button, else Close, and
  * [closeFocus] always its Close. While [drawerOver] (the sidebar over the chat covers the panel) Esc in it is left to the tool
  * window, which closes the sidebar first (spec 3.2's precedence).
@@ -77,6 +78,7 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
 @Composable
 internal fun McpPanelHost(
     handle: SessionHandle,
+    takeStartOnOpen: () -> Boolean,
     controls: McpControls,
     opener: BrowserOpener,
     onClose: () -> Unit,
@@ -90,6 +92,7 @@ internal fun McpPanelHost(
         McpPanelController(
             handle.id, handle.mcpServers, handle.mcpAuth, handle.mcpLoginHinted, handle.status, controls, opener, scope,
             endReason = { endNotice(handle.state.value) },
+            startOnOpen = takeStartOnOpen(),
         )
     }
     DisposableEffect(controller) { onDispose { controller.close() } }

@@ -69,8 +69,12 @@ class McpPanelControllerTest {
         opener: BrowserOpener = BrowserOpener { },
         dispatcher: CoroutineDispatcher = Dispatchers.Default,
         endReason: () -> String? = { null },
+        startOnOpen: Boolean = true,
     ): McpPanelController =
-        McpPanelController(SESSION, servers, auth, loginHinted, status, controls, opener, scope, dispatcher, pendingRepollMillis = 20, endReason = endReason)
+        McpPanelController(
+            SESSION, servers, auth, loginHinted, status, controls, opener, scope, dispatcher, pendingRepollMillis = 20, endReason = endReason,
+            startOnOpen = startOnOpen,
+        )
 
     private fun test(block: suspend () -> Unit) = runBlocking { withTimeout(10_000) { block() } }
 
@@ -336,6 +340,34 @@ class McpPanelControllerTest {
         controls.refreshAnswer = { listed(echo, authy) }
         controller.startSession()
         until { controls.count("refresh") == 2 && controller.start.value == McpPanelStart.None }
+        assertEquals(listOf("start s1 true"), controls.calls.filter { it.startsWith("start") })
+    }
+
+    @Test
+    fun `a panel shown again on a stopped session, not opened by the user, starts nothing and offers Start session`() = test {
+        // Its session was stopped by the cap while another was selected; selecting it again shows the panel left open.
+        servers.value = McpState()
+        status.value = SessionStatus.STOPPED
+        controls.known.value = listOf(server("known", McpStatus.CONNECTED))
+        controls.refreshAnswer = { McpResult.Failed(McpError.NotRunning) }
+        val controller = controller(startOnOpen = false)
+
+        assertEquals(McpPanelStart.None, controller.start.value)
+        until { controls.count("refresh") == 1 } // NotRunning: the stopped sheet says so itself
+        delay(50)
+        assertEquals(0, controls.count("start"), "nothing starts the session by itself")
+        assertEquals(
+            McpPanelNotice("The session is not running. Start it to manage its servers.", canStart = true),
+            mcpPanelNotice(controller.rows.value, controller.start.value, controller.message.value),
+        )
+
+        controls.startAnswer = {
+            status.value = SessionStatus.IDLE
+            McpStart.Running
+        }
+        controls.refreshAnswer = { listed(echo, authy) }
+        controller.startSession()
+        until { controller.start.value == McpPanelStart.None && !controller.rows.value.stopped }
         assertEquals(listOf("start s1 true"), controls.calls.filter { it.startsWith("start") })
     }
 

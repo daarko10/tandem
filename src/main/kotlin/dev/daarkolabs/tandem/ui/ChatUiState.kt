@@ -67,8 +67,30 @@ internal class ChatUiState {
 
     val listState: LazyListState = LazyListState()
 
-    /** Whether the session's MCP panel is open over its chat (MCP spec 3.2, 4.4): the header's button and `/mcp` open it. */
+    /**
+     * Whether the session's MCP panel is open over its chat (MCP spec 3.2, 4.4): [openMcpPanel] opens it. It stays open while another
+     * session is selected, and shows again when this one is.
+     */
     val mcpPanelOpen: MutableState<Boolean> = mutableStateOf(false)
+
+    // Whether the panel was opened by a user action and has not been built since: only such a panel starts a stopped session.
+    private var mcpStartOnOpen: Boolean = false
+
+    /**
+     * Opens the MCP panel on a user action (the header's button, `/mcp`, a notice's link): the panel built for it starts the session
+     * if it has no process ([takeMcpStartOnOpen]). Nothing if it is open already.
+     */
+    fun openMcpPanel() {
+        if (mcpPanelOpen.value) return
+        mcpStartOnOpen = true
+        mcpPanelOpen.value = true
+    }
+
+    /**
+     * Whether the panel being built now was opened by a user action ([openMcpPanel]); read once. A panel shown again because its
+     * session is selected again reads false, and starts nothing by itself (MCP spec 3.2).
+     */
+    fun takeMcpStartOnOpen(): Boolean = mcpStartOnOpen.also { mcpStartOnOpen = false }
 
     /**
      * The slash palette's selection (MCP spec 4.4): the committed draft it was made on and the row's index. It counts only while the

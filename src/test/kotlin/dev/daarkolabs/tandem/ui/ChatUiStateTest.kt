@@ -150,6 +150,23 @@ class ChatUiStateTest {
         }
     }
 
+    @Test
+    fun `only a panel a user action opened starts its session, and only once`() {
+        val ui = ChatUiState()
+        assertFalse(ui.takeMcpStartOnOpen(), "nothing opened it")
+
+        ui.openMcpPanel()
+        assertTrue(ui.mcpPanelOpen.value)
+        assertTrue(ui.takeMcpStartOnOpen())
+        assertFalse(ui.takeMcpStartOnOpen(), "the panel shown again when its session is selected again starts nothing")
+
+        ui.openMcpPanel() // `/mcp` while it is open: no new panel is built, so nothing is left to start a later one
+        assertFalse(ui.takeMcpStartOnOpen())
+        ui.mcpPanelOpen.value = false
+        ui.openMcpPanel()
+        assertTrue(ui.takeMcpStartOnOpen())
+    }
+
     // spec: palette state is kept per session key
     @Test
     fun `palette state is kept per session key`() {

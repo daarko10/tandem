@@ -171,10 +171,12 @@ internal fun McpRowButtons.hasEnabledButton(): Boolean = when (this) {
  * One open MCP panel of session [id] (spec 4.4): [rows] from the session's [servers], the servers that showed the terminal hint
  * ([loginHinted]) and its [status]; the four requests through [controls], a sign-in's link opened by [opener].
  *
- * A session without a process when the panel opens is started ([McpControls.startForMcp], within the cap): until its process has
- * listed its servers, [rows] are the project's last known ones ([McpControls.knownMcpServers]), without actions, and [start] says how
- * the start stands; a start the cap stopped, or that failed, says why, and [startSession] starts it over the cap. Why a process the
- * panel started ended comes from [endReason], the chat's notice of its end.
+ * A session without a process when a user action opened the panel ([startOnOpen]) is started ([McpControls.startForMcp], within the
+ * cap): until its process has listed its servers, [rows] are the project's last known ones ([McpControls.knownMcpServers]), without
+ * actions, and [start] says how the start stands; a start the cap stopped, or that failed, says why, and [startSession] starts it over
+ * the cap. A panel shown again without one (its session selected again, the panel left open) starts nothing: a stopped session says
+ * so, with `Start session`, as one that stops while the panel is open. Why a process the panel started ended comes from [endReason],
+ * the chat's notice of its end.
  *
  * It lists the servers when it opens, on every new `system/init` (`initCount`), when the session's process starts (its [status]
  * leaves `STOPPED`) and, while an answer lists a `pending` server, again [pendingRepollMillis] later, at most 5 times in a row. After
@@ -196,6 +198,8 @@ internal class McpPanelController(
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val pendingRepollMillis: Long = 2_000,
     private val endReason: () -> String? = { null },
+    /** Whether a user action opened the panel (the header's button, `/mcp`, a notice's link): only then is a stopped session started. */
+    startOnOpen: Boolean = true,
 ) {
     private val job: Job = SupervisorJob(scope.coroutineContext[Job])
 
@@ -217,8 +221,9 @@ internal class McpPanelController(
     private val mutableRowErrors = MutableStateFlow<Map<String, String>>(emptyMap())
     private val mutableRetryActions = MutableStateFlow<Map<String, McpAction>>(emptyMap())
 
-    // A session with no process when the panel opens is started at once: its first rows are already the last known ones.
-    private val mutableStart = MutableStateFlow(if (status.value == SessionStatus.STOPPED) McpPanelStart.Starting else McpPanelStart.None)
+    // A session with no process when a user action opens the panel is started at once: its first rows are already the last known ones.
+    private val mutableStart =
+        MutableStateFlow(if (startOnOpen && status.value == SessionStatus.STOPPED) McpPanelStart.Starting else McpPanelStart.None)
 
     /** How the panel's own start of the session stands ([McpPanelStart]). */
     val start: StateFlow<McpPanelStart> = mutableStart.asStateFlow()

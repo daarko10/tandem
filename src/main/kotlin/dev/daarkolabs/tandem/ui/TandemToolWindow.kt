@@ -210,7 +210,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     mcp = selected?.mcpServers,
                     status = selected?.status,
                     // Closing the panel from its button also gives the composer the focus back (MCP spec 3.2).
-                    onToggleMcp = { if (sheetOpen) closeMcpPanel() else mcpPanelOpen?.value = true },
+                    onToggleMcp = { if (sheetOpen) closeMcpPanel() else selected?.let { presenters.ui(it.id).openMcpPanel() } },
                     mcpFocus = mcpFocus,
                 )
                 Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -273,7 +273,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                         onPromptFocused = { promptFocusFor = null },
                                         onFocusComposer = { promptFocusFor = selected.id },
                                         cardTakesFocus = chatHoldsFocus,
-                                        onOpenMcp = { ui.mcpPanelOpen.value = true },
+                                        onOpenMcp = { ui.openMcpPanel() },
                                         onStop = { manager.stopShell(selected.id) },
                                     )
                                 }
@@ -284,6 +284,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                         key(selected.id) {
                             McpPanelHost(
                                 selected,
+                                takeStartOnOpen = { presenters.ui(selected.id).takeMcpStartOnOpen() },
                                 controls = manager,
                                 opener = sessions.browserOpener,
                                 onClose = closeMcpPanel,

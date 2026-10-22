@@ -165,7 +165,7 @@ internal fun PromptBar(
     val runIntercept = { intercept: SlashIntercept ->
         when (intercept) {
             is SlashIntercept.Send -> sendNow()
-            SlashIntercept.OpenMcp -> ui.mcpPanelOpen.value = true
+            SlashIntercept.OpenMcp -> ui.openMcpPanel()
             SlashIntercept.PickModel -> ui.menuRequest.value = FooterMenu.MODEL
             SlashIntercept.PickPermissionMode -> ui.menuRequest.value = FooterMenu.MODE
             is SlashIntercept.SetModel -> {
