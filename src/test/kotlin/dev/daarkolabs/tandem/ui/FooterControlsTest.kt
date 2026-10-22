@@ -231,7 +231,7 @@ class FooterControlsTest {
         assertTrue(modeMenu(composer).none { it.checked })
         assertEquals(ModelLabel("Model", null), modelLabel(composer))
         // No process has listed its models yet: the CLI's own aliases, none badged, their Default checked since nothing is picked.
-        assertEquals(listOf("Default", "Opus", "Sonnet", "Haiku"), modelMenu(composer).map { it.label })
+        assertEquals(listOf("Default", "Opus", "Fable", "Sonnet", "Haiku"), modelMenu(composer).map { it.label })
         assertTrue(modelMenu(composer).none { it.isDefault })
         assertEquals(listOf("Default"), modelMenu(composer).filter { it.checked }.map { it.label })
         assertNull(effortMenu(composer))
@@ -250,7 +250,7 @@ class FooterControlsTest {
         // Before any process has answered: the aliases, and the raw id by its alias's name, never "claude-opus-5-5".
         val first = composerModel(resumed)
         assertEquals(ModelLabel("Opus", "Medium"), modelLabel(first))
-        assertEquals(listOf("Default", "Opus", "Sonnet", "Haiku"), modelMenu(first).map { it.label })
+        assertEquals(listOf("Default", "Opus", "Fable", "Sonnet", "Haiku"), modelMenu(first).map { it.label })
         assertEquals(listOf("low", "medium", "high", "max"), effortMenu(first)?.items?.map { it.level })
     }
 
@@ -266,7 +266,7 @@ class FooterControlsTest {
         for (requested in listOf(null, "default")) {
             val back = modelMenu(composerModel(ChatState(requestedModel = requested)))
             assertTrue(back.item("Default").checked, "requested $requested")
-            assertEquals(listOf("opus", "sonnet", "haiku"), back.filter { !it.checked }.map { it.value }, "requested $requested")
+            assertEquals(listOf("opus", "fable", "sonnet", "haiku"), back.filter { !it.checked }.map { it.value }, "requested $requested")
         }
         // A list that resolves its `default` entry badges that entry instead: no Default item of its own.
         assertTrue(modelMenu(composer()).all { it.isDefault || it.value != null })

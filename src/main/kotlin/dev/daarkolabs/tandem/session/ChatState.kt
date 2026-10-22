@@ -167,6 +167,7 @@ data class ModelOption(
 val CLI_MODEL_ALIASES: List<ModelOption> = listOf(
     ModelOption("default", "Default", null),
     ModelOption("opus", "Opus", null),
+    ModelOption("fable", "Fable", null),
     ModelOption("sonnet", "Sonnet", null),
     ModelOption("haiku", "Haiku", null),
 )

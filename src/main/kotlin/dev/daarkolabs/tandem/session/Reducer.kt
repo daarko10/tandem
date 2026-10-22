@@ -591,8 +591,11 @@ internal fun modelMatches(requested: String, reported: String): Boolean {
     val wanted = requested.substringBefore('[').lowercase()
     val actual = reported.substringBefore('[').lowercase()
     if (wanted == "default" || wanted == actual) return true
-    return wanted in setOf("opus", "sonnet", "haiku", "fable") && actual.startsWith("claude-$wanted")
+    return wanted in MODEL_FAMILY_ALIASES && actual.startsWith("claude-$wanted")
 }
+
+/** The aliases of [CLI_MODEL_ALIASES] that stand for a family of models (`opus`), all but the CLI's `default`. */
+private val MODEL_FAMILY_ALIASES: Set<String> = CLI_MODEL_ALIASES.map { it.value }.filterTo(HashSet()) { it != "default" }
 
 /**
  * What the chat says for an API error on [message]. A rejected model is named as the line names it, unless that is no model (the

@@ -54,7 +54,7 @@ class ComposerModelTest {
     fun `before any process has listed its models the CLI's own aliases are offered`() {
         val composer = composerModel(ChatState(activeModel = "claude-opus-5-5"))
         assertEquals(CLI_MODEL_ALIASES, composer.models)
-        assertEquals(listOf("default", "opus", "sonnet", "haiku"), composer.models.map { it.value })
+        assertEquals(listOf("default", "opus", "fable", "sonnet", "haiku"), composer.models.map { it.value })
         assertEquals("Opus", modelDisplayName("claude-opus-5-5", composer.models))
     }
 
@@ -70,6 +70,7 @@ class ComposerModelTest {
         // An alias, which names no model, stands for the models of its family.
         assertEquals("Opus", modelDisplayName("claude-opus-4-1-20250805", CLI_MODEL_ALIASES))
         assertEquals("Sonnet", modelDisplayName("claude-3-5-sonnet-20241022", CLI_MODEL_ALIASES))
+        assertEquals("Fable", modelDisplayName("claude-fable-5-1", CLI_MODEL_ALIASES))
         assertEquals("claude-unknown-9", modelDisplayName("claude-unknown-9", CLI_MODEL_ALIASES))
         assertEquals("claude-unknown-9", modelDisplayName("claude-unknown-9", emptyList()))
     }
