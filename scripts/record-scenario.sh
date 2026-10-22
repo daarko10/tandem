@@ -6,11 +6,14 @@
 # Example: scripts/record-scenario.sh permission
 # `settings` is a probe, not a fixture: it needs an out-dir outside the fixtures,
 # e.g. scripts/record-scenario.sh settings scratch/rec
+# The connector scenarios sign in to one claude.ai connector, named in the environment and never in a file:
+# TANDEM_PROBE_CONNECTOR="claude.ai <Name>" scripts/record-scenario.sh mcp-connectors
+# then open the printed link within 3 minutes. Read the redacted diff before committing it.
 #
 # Like record-fixture.sh, this uses the local `claude` sign-in and never commits the raw transcripts.
 set -euo pipefail
 
-scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | permission-mode-rejected | fork | effort-switch | permission-mode-auto | user-image | ask-two | settings (a probe: give an out-dir outside the fixtures)}"
+scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | permission-mode-rejected | fork | effort-switch | permission-mode-auto | user-image | ask-two | bash-mode | bash-mode-respond | bash-mode-respond-together | bash-mode-context | mcp-connectors | mcp-connectors-all (needs TANDEM_PROBE_CONNECTOR=\"claude.ai <Name>\"; the redactor renames the connector) | settings (a probe: give an out-dir outside the fixtures)}"
 out_dir="${2:-src/test/resources/fixtures}"
 if [[ "$scenario" == settings ]]; then
   case "${2:-}" in

@@ -28,6 +28,23 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
   ask-two          one turn whose single AskUserQuestion call asks two questions, a one-answer one and a multi-select
                    one, answered together (Red, then Cheese and Ham); the run stops if the model asks anything else,
                    in another number of calls, or not at all: record it again (with --model opus as an extra flag)
+  mcp-connectors   a claude.ai connector, named by TANDEM_PROBE_CONNECTOR (or --connector <name>, which never reaches
+                   claude): mcp_status, mcp_authenticate on it (the sign-in link goes to stderr: open it within 3 minutes),
+                   mcp_status every 2 s until it no longer needs auth, mcp_toggle off and on, mcp_reconnect, then the
+                   prompt ping with an mcp_status and an mcp_toggle off sent while it streams and the toggle back on after
+                   its result. Runs without --safe-mode and with --strict-mcp-config and an empty --mcp-config; the name is
+                   never written to a file, and redact_fixture.py renames every connector
+  mcp-connectors-all
+                   the same frames without the two strict flags, so every configured server loads (the redactor keeps
+                   only the claude.ai connectors); use it when mcp-connectors lists no connector
+  bash-mode        the terminal's `!` as context only: <bash-input> and <bash-stdout> sent back to back, both
+                   shouldQuery false and client_composed, a 3 s wait, then a prompt asking for the command's output
+  bash-mode-respond
+                   the `!` Claude answers: <bash-input> quiet, a 3 s wait, then <bash-stdout> without shouldQuery
+  bash-mode-respond-together
+                   bash-mode-respond with the two frames back to back (whether a merged quiet + querying batch gets a reply)
+  bash-mode-context
+                   context only as one frame, the line the CLI writes when it merges the pair, then bash-mode's prompt
 
 Run it from an empty directory (scripts/record-scenario.sh does this) and redact the output
 with redact_fixture.py before committing. Uses whatever sign-in the local `claude` already has.
@@ -39,6 +56,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import queue
 import zlib
 
@@ -66,11 +84,12 @@ def child_environment() -> dict[str, str]:
 
 
 class Cli:
-    def __init__(self, extra: list[str], model: str | None = None, first_id: int = 0):
+    def __init__(self, extra: list[str], model: str | None = None, first_id: int = 0, drop: list[str] = ()):
         argv = ["claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
                 "--include-partial-messages", "--permission-prompt-tool=stdio",
                 # No user hooks, plugins or MCP servers: keeps fixtures reproducible and free of local setup.
                 "--safe-mode"]
+        argv = [arg for arg in argv if arg not in drop]  # a scenario that needs what --safe-mode turns off
         if model:
             argv += ["--model", model]
         self.extra = extra
@@ -126,9 +145,22 @@ class Cli:
 
     def user_content(self, content: list[dict]) -> None:
         self.next_id += 1
-        self.send({"type": "user", "session_id": "", "parent_tool_use_id": None,
-                   "uuid": f"00000000-0000-4000-8000-{self.next_id:012d}",
+        self.send({"type": "user", "session_id": "", "parent_tool_use_id": None, "uuid": self.last_uuid(),
                    "message": {"role": "user", "content": content}})
+
+    def composed(self, content: str, quiet: bool) -> None:
+        """A user frame as the terminal's `!` sends it: string content and client_composed (no @path expansion, no slash
+        dispatch); a quiet one also has shouldQuery false, so the CLI appends it without a turn."""
+        self.next_id += 1
+        msg = {"type": "user", "session_id": "", "parent_tool_use_id": None, "uuid": self.last_uuid(),
+               "message": {"role": "user", "content": content}, "client_composed": True}
+        if quiet:
+            msg["shouldQuery"] = False
+        self.send(msg)
+
+    def last_uuid(self) -> str:
+        """The uuid of the user message sent last."""
+        return f"00000000-0000-4000-8000-{self.next_id:012d}"
 
     def until(self, predicate, on_message=None) -> dict:
         while True:
@@ -157,6 +189,12 @@ def is_result(msg: dict) -> bool:
 
 def is_init(msg: dict) -> bool:
     return msg.get("type") == "system" and msg.get("subtype") == "init"
+
+
+def result_of(uuid: str):
+    """The result that ends the user message `uuid`: a quiet send gets its own zero-turn result first. A CLI that lists no
+    user_message_uuids ends it with its next result."""
+    return lambda msg: is_result(msg) and uuid in (msg.get("user_message_uuids") or [uuid])
 
 
 def permission(cli: Cli) -> None:
@@ -338,25 +376,158 @@ def ask_two(cli: Cli) -> None:
         raise RuntimeError("the turn ended without an AskUserQuestion request: the model replied without asking")
 
 
+CONNECTOR_VARIABLE = "TANDEM_PROBE_CONNECTOR"
+CONNECTOR_FLAG = "--connector"
+
+
+def connector_name(extra: list[str]) -> tuple[str, list[str]]:
+    """The connector the MCP scenarios sign in to: $TANDEM_PROBE_CONNECTOR, else the value after --connector in `extra`.
+    Returns it with `extra` minus "--connector <value>", so nothing of it reaches claude. The name is the owner's: it is
+    never written to a file (redact_fixture.py renames every connector in what claude printed)."""
+    rest = list(extra)
+    flagged = None
+    if CONNECTOR_FLAG in rest:
+        at = rest.index(CONNECTOR_FLAG)
+        flagged = rest[at + 1] if at + 1 < len(rest) else None
+        del rest[at:at + 2]
+    name = os.environ.get(CONNECTOR_VARIABLE) or flagged
+    if not name:
+        print(f'set {CONNECTOR_VARIABLE}="claude.ai <Name>" (the name as the CLI\'s /mcp shows it), '
+              f'or pass {CONNECTOR_FLAG} "claude.ai <Name>"', file=sys.stderr)
+        raise SystemExit(2)
+    return name, rest
+
+
+def mcp_status_of(answer: dict, name: str) -> str | None:
+    """The status mcp_status reports for the server `name`, None when it is not listed."""
+    servers = answer.get("response", {}).get("response", {}).get("mcpServers")
+    for server in servers if isinstance(servers, list) else []:
+        if isinstance(server, dict) and server.get("name") == name:
+            return server.get("status")
+    return None
+
+
+def mcp_connectors(cli: Cli, connector: str, sleep=time.sleep, every: float = 2.0, timeout: float = 180.0) -> None:
+    """A claude.ai connector driven as Tandem's MCP panel drives it (spec 10 item 6, 11 items 1 and 13). Every request but
+    the first status is allowed to fail: the answer is what the recording is for."""
+    status = {"subtype": "mcp_status"}
+
+    def toggle(enabled: bool) -> dict:
+        return {"subtype": "mcp_toggle", "serverName": connector, "enabled": enabled}
+
+    cli.call(status)
+    answer = cli.call({"subtype": "mcp_authenticate", "serverName": connector}, allow_error=True)
+    response = answer.get("response", {})
+    if response.get("subtype") == "error":
+        # Nothing to sign in to: polling for 3 minutes would only delay the rest.
+        print("mcp_authenticate was refused; not waiting for a sign-in", file=sys.stderr)
+    else:
+        link = (response.get("response") or {}).get("authUrl")
+        if link:
+            print(f"open this link within 3 minutes: {link}", file=sys.stderr)
+        waited = 0.0
+        while mcp_status_of(cli.call(status), connector) == "needs-auth" and waited < timeout:
+            sleep(every)
+            waited += every
+    cli.call(toggle(False), allow_error=True)
+    cli.call(toggle(True), allow_error=True)
+    cli.call({"subtype": "mcp_reconnect", "serverName": connector}, allow_error=True)
+
+    # Does the CLI answer mcp_* requests while a turn streams, or only after its result? Sent on the turn's init, answers
+    # not awaited; the toggle back on after the result is awaited, and the CLI answers in order.
+    sent_mid_turn = []
+
+    def during(msg: dict) -> None:
+        if is_init(msg) and not sent_mid_turn:
+            sent_mid_turn.append(True)
+            cli.request(status)
+            cli.request(toggle(False))
+
+    cli.user("ping")
+    cli.until(result_of(cli.last_uuid()), on_message=during)
+    cli.call(toggle(True), allow_error=True)
+
+
+def mcp_connectors_all(cli: Cli, connector: str) -> None:
+    """mcp-connectors' frames; the scenario differs only in its argv (SCENARIO_FLAGS)."""
+    mcp_connectors(cli, connector)
+
+
+# The bash probes' frames (docs/superpowers/research/2026-10-21-bash-mode-probe.md 1); BASH_CONTEXT is the line the CLI
+# writes when it merges the two quiet sends (transcripts/bash-mode.jsonl:5).
+BASH_INPUT = "<bash-input>echo bash-mode-probe && printf err >&2</bash-input>"
+BASH_OUTPUT = "<bash-stdout>bash-mode-probe\nerr</bash-stdout><bash-stderr></bash-stderr>"
+BASH_CONTEXT = BASH_INPUT + "\n" + BASH_OUTPUT
+BASH_PROMPT = "Reply with only the text the command printed to stdout"
+
+
+def bash_mode(cli: Cli, sleep=time.sleep) -> None:
+    """Context only, as two quiet frames back to back: the CLI merges them and answers with a zero-turn result; the model
+    sees them on the next prompt."""
+    cli.composed(BASH_INPUT, quiet=True)
+    cli.composed(BASH_OUTPUT, quiet=True)
+    sleep(3)
+    cli.user(BASH_PROMPT)
+    cli.until(result_of(cli.last_uuid()))
+
+
+def bash_mode_respond(cli: Cli, sleep=time.sleep, wait: float = 3.0) -> None:
+    """The `!` Claude answers: the command quiet, then its output as a querying frame, which starts a turn."""
+    cli.composed(BASH_INPUT, quiet=True)
+    if wait:
+        sleep(wait)
+    cli.composed(BASH_OUTPUT, quiet=False)
+    cli.until(result_of(cli.last_uuid()))
+
+
+def bash_mode_respond_together(cli: Cli) -> None:
+    """bash_mode_respond's frames back to back: does a merged quiet + querying batch still get a reply? (spec 12.6)"""
+    bash_mode_respond(cli, wait=0)
+
+
+def bash_mode_context(cli: Cli, sleep=time.sleep) -> None:
+    """Context only as the single frame Tandem sends (spec 12.4's bashContext), then bash_mode's prompt."""
+    cli.composed(BASH_CONTEXT, quiet=True)
+    sleep(3)
+    cli.user(BASH_PROMPT)
+    cli.until(result_of(cli.last_uuid()))
+
+
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
              "permission-mode": permission_mode, "permission-mode-rejected": permission_mode_rejected, "fork": fork,
              "settings": settings, "effort-switch": effort_switch, "permission-mode-auto": permission_mode_auto,
-             "user-image": user_image, "ask-two": ask_two}
+             "user-image": user_image, "ask-two": ask_two,
+             "mcp-connectors": mcp_connectors, "mcp-connectors-all": mcp_connectors_all,
+             "bash-mode": bash_mode, "bash-mode-respond": bash_mode_respond,
+             "bash-mode-respond-together": bash_mode_respond_together, "bash-mode-context": bash_mode_context}
+# Scenarios whose run also takes the connector's name (connector_name).
+CONNECTOR_SCENARIOS = {"mcp-connectors", "mcp-connectors-all"}
 
 # Flags a scenario adds to the caller's. The settings probe loads no user settings: 2.1.301 refuses an update_settings for
 # a source that --setting-sources leaves out, so even a CLI that took the user's settings as the default source would
 # refuse rather than write that file during the probe.
 SCENARIO_FLAGS = {"settings": ["--setting-sources", "project,local"],
                   # Tandem's argv, as the ask-single probe was recorded with (its built-in edit tools are disallowed).
-                  "ask-two": ["--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"]}
+                  "ask-two": ["--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"],
+                  # No configured server but the account's claude.ai connectors (strict mode may drop those too: then
+                  # record mcp-connectors-all). Never --setting-sources: it would hide what the user's settings enable.
+                  "mcp-connectors": ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']}
+# Base flags a scenario removes from Cli's argv: --safe-mode turns MCP servers off.
+SCENARIO_ARGV_DROPS = {"mcp-connectors": ["--safe-mode"], "mcp-connectors-all": ["--safe-mode"]}
 
 
 def main(scenario: str, out: str, extra: list[str]) -> None:
     run = SCENARIOS[scenario]
-    cli = Cli(extra + SCENARIO_FLAGS.get(scenario, []), model=FIRST_MODEL if scenario == "model-switch" else None)
+    args = []
+    if scenario in CONNECTOR_SCENARIOS:
+        name, extra = connector_name(extra)
+        args.append(name)
+        cli = Cli(extra + SCENARIO_FLAGS.get(scenario, []), drop=SCENARIO_ARGV_DROPS.get(scenario, []))
+    else:
+        cli = Cli(extra + SCENARIO_FLAGS.get(scenario, []), model=FIRST_MODEL if scenario == "model-switch" else None)
     try:
         cli.call(INITIALIZE)
-        run(cli)
+        run(cli, *args)
     finally:
         code = cli.close()
         with open(out, "w", encoding="utf-8") as f:
