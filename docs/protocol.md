@@ -403,8 +403,7 @@ session's effort, and `apply_flag_settings` then refuses an effort change ("appl
 overrides effort for this session"); a `maxEffort` setting or an organization's cap also clamps `--effort`. The variable
 passes through `cliEnvironment` (1.2), so the effort badge, which shows what Tandem passed, can disagree with the level
 the CLI runs at. The transcript's `assistant` lines should show the real level (their `effort` followed
-`apply_flag_settings` in the probe above). The effort picker of Phase 4 (the sessions spec's numbering: dialogs and
-control panels) has to handle both cases.
+`apply_flag_settings` in the probe above). The effort picker has to handle both cases.
 
 ### 4.5 Other CLI → host requests
 
