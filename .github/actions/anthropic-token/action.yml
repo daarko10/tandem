@@ -1,14 +1,15 @@
-# Exchanges the run's GitHub OIDC token for a short-lived Anthropic access token through Workload Identity
-# Federation and exports it as ANTHROPIC_AUTH_TOKEN for the steps that follow. The workflow needs
-# `id-token: write` and the four ANTHROPIC_* identifiers below in its environment; they name the federation
-# rule, organization, service account and workspace, and are not secrets. Each GitHub token is single use and
-# lives about five minutes, and the Anthropic token lives ten, so run this right before the step that needs it.
-name: Anthropic access token
-description: Mints a short-lived Anthropic access token from the run's GitHub OIDC token and exports it as ANTHROPIC_AUTH_TOKEN.
+# Fetches the run's GitHub OIDC identity token for Workload Identity Federation and points the Claude Code CLI at it:
+# the CLI exchanges it for a short-lived Anthropic access token itself (it reads ANTHROPIC_FEDERATION_RULE_ID,
+# ANTHROPIC_ORGANIZATION_ID, ANTHROPIC_SERVICE_ACCOUNT_ID, ANTHROPIC_WORKSPACE_ID and ANTHROPIC_IDENTITY_TOKEN_FILE).
+# The workflow needs `id-token: write` and the four ANTHROPIC_* identifiers in its environment; they are not secrets.
+# A GitHub token is single use (its `jti` is accepted once) and lives about five minutes, so run this right before
+# every step that starts the CLI, and never exchange the token here: that would spend it before the CLI can.
+name: Anthropic identity token
+description: Fetches the run's GitHub OIDC token into a file and exports ANTHROPIC_IDENTITY_TOKEN_FILE for the Claude Code CLI's federation exchange.
 runs:
   using: composite
   steps:
-    - name: Exchange the GitHub OIDC token for an Anthropic access token
+    - name: Fetch the GitHub OIDC token for the CLI's federation exchange
       shell: bash
       run: |
         set -euo pipefail
@@ -22,6 +23,10 @@ runs:
           echo "::error title=Workload Identity Federation::No OIDC token endpoint: the job needs the id-token: write permission."
           exit 1
         fi
+        if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+          echo "::error title=Workload Identity Federation::ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is set; it would shadow federation. Unset it."
+          exit 1
+        fi
         jwt="$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
           "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r '.value // empty')"
         if [ -z "$jwt" ]; then
@@ -29,18 +34,8 @@ runs:
           exit 1
         fi
         echo "::add-mask::$jwt"
-        response="$(jq -n --arg jwt "$jwt" \
-          --arg rule "$ANTHROPIC_FEDERATION_RULE_ID" --arg org "$ANTHROPIC_ORGANIZATION_ID" \
-          --arg svac "$ANTHROPIC_SERVICE_ACCOUNT_ID" --arg wrkspc "$ANTHROPIC_WORKSPACE_ID" \
-          '{grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: $jwt, federation_rule_id: $rule,
-            organization_id: $org, service_account_id: $svac, workspace_id: $wrkspc}' \
-          | curl -sS https://api.anthropic.com/v1/oauth/token -H "content-type: application/json" --data @-)"
-        token="$(jq -r '.access_token // empty' <<< "$response" 2>/dev/null || true)"
-        if [ -z "$token" ]; then
-          detail="$(jq -c 'del(.access_token)' <<< "$response" 2>/dev/null || printf '%s' "$response" | head -c 500)"
-          echo "::error title=Workload Identity Federation::Token exchange failed: $detail. The deny reason is on the Claude Console's Workload identity page, History tab."
-          exit 1
-        fi
-        echo "::add-mask::$token"
-        echo "ANTHROPIC_AUTH_TOKEN=$token" >> "$GITHUB_ENV"
-        echo "Minted an Anthropic access token for service account $ANTHROPIC_SERVICE_ACCOUNT_ID, expires in $(jq -r '.expires_in // "?"' <<< "$response") s."
+        file="$(mktemp "${RUNNER_TEMP:-/tmp}/anthropic-identity-token.XXXXXX")"
+        printf '%s' "$jwt" > "$file"
+        echo "ANTHROPIC_IDENTITY_TOKEN_FILE=$file" >> "$GITHUB_ENV"
+        sub="$(printf '%s' "$jwt" | cut -d. -f2 | tr '_-' '/+' | awk '{ l = length($0) % 4; if (l) $0 = $0 substr("==", 1, 4 - l); print }' | base64 -d 2>/dev/null | jq -r '.sub // "?"')"
+        echo "Fetched a GitHub identity token (sub $sub) into $file for the CLI's federation exchange as service account $ANTHROPIC_SERVICE_ACCOUNT_ID."
