@@ -262,7 +262,7 @@ Context breakdown (open the popover, send `get_context_usage`, render; refresh a
 | Window picker | `behaviors.day` (24h), `behaviors.week` (7 days) | recorded; no all-time window exists, the "All" picker has no source |
 | Behaviour percentages | `behaviors[].{key, pct}` with Tandem's own label per key | recorded; unknown keys are hidden |
 | Bars per subagent, skill, plugin, MCP server | `agents[]`, `skills[]`, `plugins[]`, `mcp_servers[]` of `{name, pct}` | recorded |
-| Caveat line | Tandem's text, from the docs (approximate, overlapping, this machine only) | static |
+| Caveat line | Tandem's text, from the docs and the desktop's caveat (approximate, overlapping, this machine only, excludes claude.ai) | static |
 | Tip | `recommendations[0].title` and `detail` | recorded (the CLI's text; the desktop's own tip copy is not on the wire) |
 | Fix prompt | `fix.messages[0]` | recorded; only ever put into the composer for the user to read and send, never sent by Tandem |
 | `behaviors` null (API key, scan failure) | none | hide the section with a one-line reason (hard rule 5) |
