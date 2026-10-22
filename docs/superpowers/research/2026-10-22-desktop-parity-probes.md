@@ -290,7 +290,7 @@ The "+" menu:
 
 - `scripts/redact_fixture.py`: exempt `categories[].id` of `get_context_usage` from `ID_KEYS` (`id` is listed, so a re-run turns the 24 restored ids on `parity-context:2,17,18` back into `<id-N>`); add `submitUuid` to `ID_KEYS` (`transcripts/parity-add-dir.jsonl:3` reads `<leaked-1>`, as `mcp-slash` did); add a rule for the names in `get_usage.behaviors` (`agents`, `skills`, `plugins`, `mcp_servers`, recommendation details, fix messages), which were renamed by hand on `parity-usage:17`; stop `PATH_RE` swallowing a trailing backtick and colon (the day window's fix message on `parity-usage:17` reads ``Add a rule to `<path> when you run``).
 - `docs/protocol.md` (read `docs/launch.md` first): 4.4 rows with the real shapes of `get_context_usage`, `get_usage`, `get_session_cost`, `reload_plugins`, `register_repo_root` (and its two limits) and `add_directory` (containers only); 5.1 `init.plugins`, `skills`, `agents`, `additional_directories`; 6.1 the assistant line's `context_usage`; 10 `rate_limit_event.unifiedWindows` already listed, plus `autocompactSource`, `first_request_input_tokens`; 11 the transcript's `contextUsage` and `cost-state`.
-- Recordings still to make: `--add-dir` at spawn and on a `--resume` respawn; a run with the default setting sources (user memory, user plugins, custom agents); a claude.ai-subscriber run on the owner's Mac for `usage_report`, `rate_limits` and the plan rows.
+- Recordings still to make: `--add-dir` at spawn, on a `--resume` respawn, on a fork and left out of a later resume (open question 4); a run with the default setting sources (user memory, user plugins, custom agents); a claude.ai-subscriber run on the owner's Mac for `usage_report`, `rate_limits` and the plan rows.
 
 ---
 
@@ -299,7 +299,7 @@ The "+" menu:
 1. **Cost and latency of `get_context_usage` `full`**: how long it takes on a long session, whether its token-count calls count against plan usage, and whether the CLI answers it while a turn runs.
 2. **The `get_usage` scan**: how long it takes on a machine with many sessions, and when `behaviors` is null (the types say non-subscribers; this non-subscriber got data).
 3. **Subscriber shapes**: `usage_report`, `get_usage.rate_limits`, `extra_usage`, the plan rows in the /usage text, and whether `/usage` then also emits `system/local_command_output`.
-4. **`--add-dir`**: whether init lists a spawn-time directory in `additional_directories`, what it loads, and whether a `--resume` respawn with a new `--add-dir` keeps the transcript and session id.
+4. **`--add-dir`**: whether init lists a spawn-time directory in `additional_directories`, what it loads, whether a `--resume` respawn with a new `--add-dir` keeps the transcript and session id, whether a fork in Tandem's argv (`--resume <id> --fork-session --session-id <new id> --add-dir <dir>`) lists the folder under the new id, and whether a `--resume` that leaves out a folder passed before drops it or restores it from the session (the parity spec's folder removal, 3.4).
 5. **Desktop semantics**: what "See detailed breakdown" opens, what "Active" time measures, whether the model share is by cost or tokens, and what the "All" picker filters.
 6. **`reload_plugins`**: whether it connects or disconnects plugin MCP servers in a stream-json session, and whether `system/commands_changed` follows it.
 7. **Rows not exercised**: custom agents, MCP server instructions, `systemTools`, `systemPromptSections`, `deferredBuiltinTools`, `over_limit`, `rawMaxTokens` below `maxTokens`, `compact_buffer`.
