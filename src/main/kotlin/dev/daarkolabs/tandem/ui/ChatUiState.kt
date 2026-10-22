@@ -66,6 +66,9 @@ internal class ChatUiState {
 
     val listState: LazyListState = LazyListState()
 
+    /** Whether the session's MCP panel is open over its chat (MCP spec 3.2, 4.4): the header's button and `/mcp` open it. */
+    val mcpPanelOpen: MutableState<Boolean> = mutableStateOf(false)
+
     // The row keys, the rows and the list's height at the list's last emission, and whether the list has had an emission since it
     // last showed this session. Kept here, not in the panel, so that rows added while another session is shown count when this one
     // is shown again (spec 4.16, 7.8). Null keys until the first emission.

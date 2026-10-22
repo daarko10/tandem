@@ -111,6 +111,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         deleteFiles = { deleteTranscript(it) },
     )
 
+    /** Opens an MCP server's sign-in page in the system browser (spec 3.3, 4.4); tests swap in a log line (`tandem.browserOpener`). */
+    val browserOpener: BrowserOpener = BrowserOpeners.default()
+
     // The settings as already loaded: loading them reads a file, which the constructor must not (it may run on the EDT), so when
     // they are not loaded yet the default holds until ensureStarted reads them on IO, before it restores any session.
     private val _rowOptions = MutableStateFlow(

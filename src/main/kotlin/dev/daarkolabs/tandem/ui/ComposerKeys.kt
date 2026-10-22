@@ -22,6 +22,9 @@ internal enum class ComposerAction {
 
     /** Removes the last attached image: Backspace in an empty composer (polish spec 2.7). */
     RemoveLastImage,
+
+    /** Closes the MCP panel: Esc while it is open, before any other rule (MCP spec 3.2, 4.4). */
+    ClosePanel,
 }
 
 /**
@@ -37,6 +40,9 @@ internal enum class ComposerAction {
  * Ctrl/Cmd+V pastes images, busy or not, when [clipboardHasImage] says the clipboard holds a file list or an image without text
  * ([ComposerImages.clipboardHasImage]); it is asked for that key only, and otherwise the text area pastes. Backspace removes the last
  * attached image while the draft is empty ([draftEmpty]) and an image is attached ([hasAttachments]) (polish spec 2.7).
+ *
+ * While the MCP panel is open ([panelOpen]), Esc closes it before every other rule, so it never stops a turn (MCP spec 3.2, 4.4).
+ * Call sites pass the parameters from [draftEmpty] on by name.
  */
 internal fun composerKey(
     key: Key,
@@ -48,12 +54,14 @@ internal fun composerKey(
     cardOpen: Boolean,
     draftEmpty: Boolean = false,
     hasAttachments: Boolean = false,
+    panelOpen: Boolean = false,
     clipboardHasImage: () -> Boolean = { false },
 ): ComposerAction? {
     if (type != KeyEventType.KeyDown) return null
     return when (key) {
         Key.Enter, Key.NumPadEnter -> if (!shift && !alt && !ctrlOrMeta && !busy && !cardOpen) ComposerAction.Send else null
         Key.Escape -> when {
+            panelOpen -> ComposerAction.ClosePanel
             cardOpen -> ComposerAction.CardEscape
             busy -> ComposerAction.Stop
             else -> null

@@ -153,6 +153,7 @@ internal fun PromptBar(
                     ComposerAction.CardEscape -> onCardEscape()
                     ComposerAction.PasteImage -> scope.launch { paste(ui) }
                     ComposerAction.RemoveLastImage -> ui.attachments.removeLastOrNull()
+                    ComposerAction.ClosePanel -> ui.mcpPanelOpen.value = false
                 }
             },
         )
@@ -339,6 +340,7 @@ private fun composerKeyEvent(event: KeyEvent, busy: Boolean, cardOpen: Boolean, 
         cardOpen = cardOpen,
         draftEmpty = draft.text.isEmpty(),
         hasAttachments = ui.attachments.isNotEmpty(),
+        panelOpen = ui.mcpPanelOpen.value,
         clipboardHasImage = { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } },
     )
     if (action != null) {

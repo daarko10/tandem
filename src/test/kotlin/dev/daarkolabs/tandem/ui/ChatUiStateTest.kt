@@ -133,6 +133,20 @@ class ChatUiStateTest {
     }
 
     @Test
+    fun `the panel state is kept per session key`() {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)))
+            presenters.ui("a").mcpPanelOpen.value = true
+
+            assertFalse(presenters.ui("b").mcpPanelOpen.value)
+            assertTrue(presenters.ui("a").mcpPanelOpen.value)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `an opened lone call that joins a group stays open as its sub-row`() {
         val ui = ChatUiState()
         ui.toggle("tool:1", listOf("c:1"), opensWith = "c:1")

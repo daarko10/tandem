@@ -32,9 +32,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.chat.ComposerModel
+import dev.daarkolabs.tandem.chat.mcpBadge
+import dev.daarkolabs.tandem.protocol.McpStatus
+import dev.daarkolabs.tandem.session.McpState
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionHandle
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Icon
 import org.jetbrains.jewel.ui.component.InlineWarningBanner
@@ -54,6 +59,10 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
  *
  * [toggleFocus] lets the tool window give the toggle the focus back when the sidebar it opened over the chat closes, and
  * [newSessionFocus] give the "+" the focus.
+ *
+ * With the session's MCP servers ([mcp], null with no session) the row ends with the `MCP servers` button, which toggles the
+ * session's MCP panel ([onToggleMcp]), and its badge, `connected/total` (MCP spec 3.1). The button is the header's last focusable;
+ * [mcpFocus] lets the tool window give it the focus.
  */
 @Composable
 internal fun SessionHeader(
@@ -68,6 +77,9 @@ internal fun SessionHeader(
     onRename: (title: String) -> Unit,
     toggleFocus: FocusRequester,
     newSessionFocus: FocusRequester = remember { FocusRequester() },
+    mcp: StateFlow<McpState>? = null,
+    onToggleMcp: () -> Unit = {},
+    mcpFocus: FocusRequester = remember { FocusRequester() },
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -105,12 +117,43 @@ internal fun SessionHeader(
                     }
                 }
             }
+            if (mcp != null) McpButton(mcp, onToggleMcp, mcpFocus)
         }
         if (composer != null) {
             val model by composer.collectAsState()
             StatusLine(model)
         }
     }
+}
+
+/**
+ * The `MCP servers` button and its badge, `connected/total` in the footer size, with the tooltip `MCP servers: C of T connected`
+ * (MCP spec 3.1). Before the session lists any server the badge is not drawn and the tooltip reads `MCP servers`. It recomposes only
+ * when the counts change.
+ */
+@Composable
+private fun McpButton(mcp: StateFlow<McpState>, onToggle: () -> Unit, focus: FocusRequester) {
+    val counts by remember(mcp) { mcp.map { McpCounts(it) }.distinctUntilChanged() }.collectAsState(McpCounts(mcp.value))
+    WithTooltip(counts.tooltip) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            IconButton(onClick = onToggle, modifier = Modifier.focusRequester(focus)) {
+                Icon(AllIconsKeys.Webreferences.Server, contentDescription = "MCP servers")
+            }
+            counts.badge?.let { Text(it, style = smallTextStyle(), color = JewelTheme.globalColors.text.info) }
+        }
+    }
+}
+
+/** What the header shows of a session's MCP servers: the badge ([mcpBadge], null when there is none) and the tooltip. */
+private data class McpCounts(val badge: String?, val tooltip: String) {
+    constructor(state: McpState) : this(
+        mcpBadge(state),
+        if (state.servers.isEmpty()) {
+            "MCP servers"
+        } else {
+            "MCP servers: ${state.servers.count { it.status == McpStatus.CONNECTED }} of ${state.servers.size} connected"
+        },
+    )
 }
 
 /**

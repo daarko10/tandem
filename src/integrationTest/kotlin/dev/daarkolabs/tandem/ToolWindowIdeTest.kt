@@ -502,14 +502,19 @@ class ToolWindowIdeTest {
             ui.keyboard { escape() }
             waitFor("Escape closes the sidebar", 30.seconds) { !row("Alpha").present() }
 
-            // The dimmed chat under the sidebar is out of the Tab order: Shift+Tab from "New session" goes to the header's "+",
-            // and Tab from there back to "New session".
+            // The dimmed chat under the sidebar is out of the Tab order: Shift+Tab from "New session" goes to the header's last
+            // focusable, its MCP servers button (a session is selected), then to its "+"; Tab from there stops on MCP servers, and the
+            // next Tab passes the chat by, back to "New session" (MCP spec 3.1).
             openSidebar()
             waitFor("filter focused for Shift+Tab", 30.seconds) { focusedEditable("").present() }
             ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
             waitFor("New session focused", 30.seconds) { focusedButton("New session").present() }
             ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
-            waitFor("Shift+Tab passes the chat by, to the header's +", 30.seconds) { focusedIconButton("New session").present() }
+            waitFor("Shift+Tab passes the chat by, to the header's MCP servers", 30.seconds) { focusedIconButton("MCP servers").present() }
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("Shift+Tab goes on to the header's +", 30.seconds) { focusedIconButton("New session").present() }
+            ui.keyboard { tab() }
+            waitFor("Tab from + stops on MCP servers", 30.seconds) { focusedIconButton("MCP servers").present() }
             ui.keyboard { tab() }
             waitFor("Tab passes the chat by, back to New session", 30.seconds) { focusedButton("New session").present() }
             ui.keyboard { escape() }
@@ -571,6 +576,55 @@ class ToolWindowIdeTest {
         assertEquals(1, spawns.count { "--resume" in it }, spawns.toString())
         assertTrue(sent.any { it["request"]?.jsonObject?.get("subtype")?.jsonPrimitive?.content == "rename_session" })
         assertFalse(configDir.walk().any { it.fileName.toString() == "$seeded.jsonl" }, "the seeded transcript is deleted")
+    }
+
+    @Test
+    fun `the MCP panel lists the servers and Disable sends mcp_toggle`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("mcp-panel", fixtures = listOf("mcp-status"), sentLog = log) {
+            newSession()
+            // The process attaches asynchronously; the button's requests need it (MCP spec 9.5).
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("MCP servers").click(Point(10, 10))
+            // The fake answers the first mcp_status with its pending servers; the panel asks again 2 s later.
+            waitFor("echo listed, connected", 1.minutes) { described("echo, Connected").present() }
+            iconButton("Disable echo").click(Point(10, 10))
+            waitFor("echo disabled after the follow-up refresh", 1.minutes) { described("echo, Disabled").present() }
+            takeScreenshot("mcp-panel")
+            iconButton("Close").click(Point(10, 10))
+            waitFor("the panel closed", 30.seconds) { !described("MCP servers panel").present() }
+        }
+        val toggle = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject }
+            .single { it["subtype"]?.jsonPrimitive?.content == "mcp_toggle" }
+        assertEquals("echo", toggle["serverName"]!!.jsonPrimitive.content)
+        assertEquals("false", toggle["enabled"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `Authenticate opens the browser link and the row connects`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat(
+            "mcp-authenticate",
+            fixtures = listOf("mcp-status"),
+            sentLog = log,
+            // The fake turns authy connected 4 s after its sign-in starts: two of the sign-in poll's 2 s ticks, for the Driver to see the wait.
+            extraEnv = mapOf("TANDEM_FAKE_AUTH_DONE_MS" to "4000"),
+            browserLog = true,
+        ) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("MCP servers").click(Point(10, 10))
+            waitFor("authy listed, needing auth", 1.minutes) { described("authy, Needs auth").present() }
+            iconButton("Authenticate authy").click(Point(10, 10))
+            // The wait's own Cancel: its caption sits inside the row's merged node, whose text starts with the name.
+            waitFor("the sign-in wait, with its Cancel", 1.minutes) { iconButton("Cancel authy").present() }
+            waitFor("authy connected", 1.minutes) { described("authy, Connected").present() }
+        }
+        val browse = sent.filter { it.type == "__browse__" }
+        assertEquals(1, browse.size, browse.toString())
+        val url = browse.single()["url"]!!.jsonPrimitive.content
+        assertTrue(url.startsWith("http://127.0.0.1:33041/authorize?"), url)
+        assertTrue(sent.any { it["request"]?.jsonObject?.get("subtype")?.jsonPrimitive?.content == "mcp_authenticate" })
     }
 
     @Test
@@ -843,6 +897,8 @@ class ToolWindowIdeTest {
      * fixture N of [fixtures] (the last one once they run out). [configDir] becomes the CLI's config directory
      * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists and sleeps
      * [lineDelayMs] before each stream line. The frames go to [sentLog] as the fake CLI reads them, so that [script] can wait for one.
+     * [extraEnv] adds variables to the IDE's environment, which the fake CLI inherits; with [browserLog] a link the plugin opens in
+     * the browser is a `{"type":"__browse__","url":…}` line in [sentLog] instead (`tandem.browserOpener=log`).
      */
     private fun runChat(
         name: String,
@@ -852,9 +908,21 @@ class ToolWindowIdeTest {
         project: Path = newProject(),
         sentLog: Path = Files.createTempFile("tandem-sent", ".ndjson"),
         lineDelayMs: Int? = null,
+        extraEnv: Map<String, String> = emptyMap(),
+        browserLog: Boolean = false,
         script: Driver.() -> Unit,
     ): List<JsonObject> {
-        ideContext(name, fixtures, configDir, gateFile, project, sentLog, lineDelayMs).runTandem(name, script)
+        ideContext(
+            name,
+            fixtures,
+            configDir,
+            gateFile,
+            project,
+            sentLog,
+            lineDelayMs,
+            extraEnv = extraEnv,
+            browserLog = browserLog,
+        ).runTandem(name, script)
         return if (sentLog.exists()) sentLog.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject } else emptyList()
     }
 
@@ -867,6 +935,8 @@ class ToolWindowIdeTest {
         project: Path,
         sentLog: Path,
         lineDelayMs: Int? = null,
+        extraEnv: Map<String, String> = emptyMap(),
+        browserLog: Boolean = false,
     ): IDETestContext =
         Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
@@ -880,6 +950,8 @@ class ToolWindowIdeTest {
                 if (configDir != null) withEnv("CLAUDE_CONFIG_DIR", configDir.toString())
                 if (gateFile != null) withEnv("TANDEM_FAKE_GATE_FILE", gateFile.toString())
                 if (lineDelayMs != null) withEnv("TANDEM_FAKE_LINE_DELAY_MS", lineDelayMs.toString())
+                extraEnv.forEach { (key, value) -> withEnv(key, value) }
+                if (browserLog) addSystemProperty("tandem.browserOpener", "log")
             }
         }
 
@@ -982,6 +1054,10 @@ class ToolWindowIdeTest {
         "//div[@class='ComposeNode' and @contentdescription='$description' and " +
             "((${textPredicate("@text")}) or (${textPredicate("@visible_text")}))]",
     )
+
+    /** The node that assistive technology knows as [description]: an MCP server row (`echo, Connected`), the MCP panel. */
+    private fun Driver.described(description: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @contentdescription='$description']")
 
     /** A tool row (a lone call, a group or a group's sub-row), found by its label, which is what it says to assistive technology. */
     private fun Driver.toolRow(label: String): UiComponent = ui.x("//div[@class='ComposeNode' and @contentdescription='$label']")

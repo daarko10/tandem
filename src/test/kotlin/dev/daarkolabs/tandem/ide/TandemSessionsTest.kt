@@ -18,6 +18,7 @@ import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.McpResult
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.PermissionAnswers
@@ -243,6 +244,27 @@ class TandemSessionsTest {
             while (workspace.knownModels() != models) delay(20)
         }
         awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `refreshing a session's servers through the service's manager sends mcp_status to the fake`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("mcp").createDirectories()
+        val log = tempDir.get().resolve("mcp-sent.ndjson")
+        val listed = openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "mcp-status", "TANDEM_FAKE_LOG" to log.toString())
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            // The process attaches asynchronously; until then the manager answers NotRunning.
+            handle.status.first { it == SessionStatus.IDLE }
+            sessions.manager.refreshMcp(handle.id)
+        }
+        awaitNoOwnFakeCli()
+        assertTrue(listed is McpResult.Ok, listed.toString())
+        val frames = log.readText().split('\n').dropLast(1).filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+        val requests = frames.filter { it["type"]?.jsonPrimitive?.content == "control_request" }
+            .map { it["request"]!!.jsonObject["subtype"]!!.jsonPrimitive.content }
+        assertTrue("mcp_status" in requests, requests.toString())
     }
 
     @Test

@@ -39,8 +39,21 @@ class ComposerKeysTest {
         cardOpen: Boolean = false,
         draftEmpty: Boolean = false,
         hasAttachments: Boolean = false,
+        panelOpen: Boolean = false,
         clipboardHasImage: () -> Boolean = { false },
-    ): ComposerAction? = composerKey(key, type, shift, alt, ctrlOrMeta, busy, cardOpen, draftEmpty, hasAttachments, clipboardHasImage)
+    ): ComposerAction? = composerKey(
+        key,
+        type,
+        shift,
+        alt,
+        ctrlOrMeta,
+        busy,
+        cardOpen,
+        draftEmpty = draftEmpty,
+        hasAttachments = hasAttachments,
+        panelOpen = panelOpen,
+        clipboardHasImage = clipboardHasImage,
+    )
 
     @Test
     fun `Enter sends`() {
@@ -119,6 +132,35 @@ class ComposerKeysTest {
     fun `Esc with a card open routes to the card`() {
         assertEquals(ComposerAction.CardEscape, composer(escape, busy = true, cardOpen = true))
         assertEquals(ComposerAction.CardEscape, composer(escape, busy = false, cardOpen = true))
+    }
+
+    @Test
+    fun `Esc with the panel open closes it, never stops`() {
+        assertEquals(ComposerAction.ClosePanel, composer(escape, busy = true, panelOpen = true))
+        assertEquals(ComposerAction.ClosePanel, composer(escape, busy = true, cardOpen = true, panelOpen = true))
+        assertEquals(ComposerAction.ClosePanel, composer(escape, panelOpen = true))
+        assertNull(composer(escape, type = KeyEventType.KeyUp, busy = true, panelOpen = true))
+        // Only Esc: Enter still sends, Backspace still removes an image.
+        assertEquals(ComposerAction.Send, composer(enter, panelOpen = true))
+        assertEquals(ComposerAction.RemoveLastImage, composer(backspace, draftEmpty = true, hasAttachments = true, panelOpen = true))
+    }
+
+    @Test
+    fun `calls without the new argument behave as before`() {
+        assertEquals(
+            ComposerAction.Stop,
+            composerKey(escape, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = false, busy = true, cardOpen = false),
+        )
+        assertEquals(
+            ComposerAction.CardEscape,
+            composerKey(escape, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = false, busy = true, cardOpen = true),
+        )
+        // The trailing parameters by name, clipboardHasImage as a trailing lambda: it still compiles and still pastes.
+        assertEquals(
+            ComposerAction.PasteImage,
+            composerKey(v, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = true, busy = false, cardOpen = false, draftEmpty = true) { true },
+        )
+        assertNull(composerKey(escape, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = false, busy = false, cardOpen = false))
     }
 
     @Test
