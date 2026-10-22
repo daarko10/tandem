@@ -858,10 +858,11 @@ GRADLE_JOBS = ("build", "build-macos", "verify", "ide-test")
 BASE = {"README.md": "x\n", "src/main/kotlin/A.kt": "a\n", "docs/a.md": "a\n"}
 
 
-def run_filter(head: dict, event: str = "pull_request") -> tuple[int, str, str]:
+def run_filter(head: dict, event: str = "pull_request", edit: tuple[str, str] | None = None) -> tuple[int, str, str]:
     """Runs build.yml's filter step under bash (`shell: bash`) in a git repository whose HEAD^1 holds BASE and whose HEAD
     changes it by `head` (a path to its new text, or None to delete it), as a pull request's merge commit has the base as
-    its first parent. Returns (exit code, stdout and stderr, GITHUB_OUTPUT's text)."""
+    its first parent. `edit` is an (old, new) text replaced in the step's script first, to break it on purpose. Returns
+    (exit code, stdout and stderr, GITHUB_OUTPUT's text)."""
     s = step(load(BUILD), "changes", FILTER)
     with tempfile.TemporaryDirectory() as tmp:
         work, script, output = os.path.join(tmp, "work"), os.path.join(tmp, "step.sh"), os.path.join(tmp, "output")
@@ -879,8 +880,12 @@ def run_filter(head: dict, event: str = "pull_request") -> tuple[int, str, str]:
                     f.write(text)
             subprocess.run(["git", "add", "-A"], cwd=work, env=env, check=True)
             subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "commit"], cwd=work, env=env, check=True)
+        text = s["run"]
+        if edit:
+            assert edit[0] in text, edit[0]
+            text = text.replace(*edit)
         with open(script, "w", encoding="utf-8") as f:
-            f.write(s["run"])
+            f.write(text)
         open(output, "w").close()
         proc = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", script], cwd=work, capture_output=True, text=True, timeout=60,
                               env={**env, "EVENT": event, "GITHUB_OUTPUT": output})
@@ -927,6 +932,19 @@ class BuildWorkflowTest(unittest.TestCase):
             self.assertIn('systemProperty("tandem.ideTestShard", providers.systemProperty("tandem.ideTestShard").getOrElse(""))', f.read())   # reaches the test JVM
 
 
+    def test_every_ide_test_class_is_sharded(self):
+        root = os.path.join(ROOT, "src/integrationTest/kotlin")
+        classes = []
+        for dirpath, _, names in os.walk(root):
+            for name in names:
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                if re.search(r"(?m)^\s*@Test\b", text):
+                    classes.append((os.path.relpath(path, root), "@ExtendWith(IdeTestShard::class)" in text))
+        self.assertTrue(classes, "no IDE test class found")
+        self.assertEqual([], [path for path, sharded in classes if not sharded])      # a class without the extension would run whole in each of the three shards
+
 
 @unittest.skipUnless(yaml and BASH and shutil.which("git"), "PyYAML, bash 4, jq and git are needed to run the filter step")
 class BuildFilterOutcomeTest(unittest.TestCase):
@@ -965,6 +983,12 @@ class BuildFilterOutcomeTest(unittest.TestCase):
     def test_a_push_runs_gradle_whatever_changed(self):
         for event in ("push", "workflow_dispatch"):
             self.assertGradle("true", {"docs/a.md": "b\n"}, event)
+
+    def test_a_grep_error_fails_the_job_and_never_skips_gradle(self):
+        skip = next(l for l in step(load(BUILD), "changes", FILTER)["run"].splitlines() if l.startswith("skip="))
+        rc, out, output = run_filter({"docs/a.md": "b\n"}, edit=(skip, "skip='('"))   # an unbalanced group: grep exits 2 for every input
+        self.assertEqual((True, ""), (rc != 0, output), out)                           # red, and no verdict for the Gradle jobs: the broken pattern is not read as "every path matched"
+        self.assertIn("grep failed with exit code 2", out)
 
     def test_a_failed_diff_fails_the_job(self):
         s = step(load(BUILD), "changes", FILTER)
