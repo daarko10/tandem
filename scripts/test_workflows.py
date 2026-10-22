@@ -1,8 +1,8 @@
-"""Tests for the drift loop's workflows and the skill they run. Run from scripts/: python3 -m unittest
+"""Tests for the workflows: the drift loop's and the skill they run, and build.yml's jobs. Run from scripts/: python3 -m unittest
 
-They read .github/workflows/drift-fix.yml (and cli-contract.yml) with PyYAML, which reads the `on` key as the boolean
-True. Without PyYAML they skip, except under GITHUB_ACTIONS, where a missing PyYAML is an error: these are the only
-tests pinning the workflows, and build.yml's "Script tests" step must never skip them silently.
+They read .github/workflows/drift-fix.yml (and cli-contract.yml, build.yml) with PyYAML, which reads the `on` key as the
+boolean True. Without PyYAML they skip, except under GITHUB_ACTIONS, where a missing PyYAML is an error: these are the
+only tests pinning the workflows, and build.yml's "Script tests" job must never skip them silently.
 
 The outcome tests (StepOutcomeTest) run a step's `run:` block under bash as GitHub does: `bash -e {0}` for a step
 without `shell:` (no pipefail; every multi-command step sets its own), `-o pipefail` added for `shell: bash`, with a stub
@@ -195,8 +195,8 @@ class DriftFixWorkflowTest(unittest.TestCase):
 
     def test_the_fix_job_s_steps_run_in_order(self):
         names = [s.get("name") for s in steps(load(DRIFT), "fix")]
-        expected = ["Free disk space", "Check out main", None, None, "Ensure the labels exist", "Name the red run", "Fetch the recording",
-                    "Mutate a recording for the rehearsal", "Classify before Gradle", "Require a public repository", "Reproduce the red", "Classify",
+        expected = ["Check out main", "Ensure the labels exist", "Name the red run", "Fetch the recording", "Mutate a recording for the rehearsal",
+                    "Classify before Gradle", "Free disk space", None, None, "Reproduce the red", "Classify",
                     "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Require a protected main", "Fix the drift"]
         self.assertEqual(expected, names)                                             # the allowlist step is the enforce job's, after this job
         wf = load(DRIFT)
@@ -212,8 +212,8 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertIn("--rerun", step(wf, "fix", "Reproduce the red")["run"])        # the build cache never replays a pass on another recording
         self.assertEqual(30, step(wf, "fix", "Reproduce the red")["timeout-minutes"])   # a hung download or test is a failed reproduction, not the job's cancellation
         self.assertEqual(5, step(wf, "fix", "Fetch the recording")["timeout-minutes"])   # 75 + 30 + 5 leaves the rest of the job's 120 to the setup
-        for name in ("Name the red run", "Fetch the recording", "Require a public repository", "Report a run the agent cannot fix",
-                     "Skip when a fix is already waiting", "Require a protected main"):
+        for name in ("Name the red run", "Fetch the recording", "Report a run the agent cannot fix", "Skip when a fix is already waiting",
+                     "Require a protected main"):
             self.assertEqual("${{ github.token }}", step(wf, "fix", name)["env"]["GH_TOKEN"])
         self.assertEqual("${{ github.token }}", step(wf, "enforce", "Enforce the edit allowlist")["env"]["GH_TOKEN"])
         self.assertEqual("${{ github.token }}", step(wf, "remind", "Comment on the waiting pull request")["env"]["GH_TOKEN"])
@@ -275,15 +275,6 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual("steps.gate.outputs.proceed == 'true'", protect["if"])
         self.assertIn("set -euo pipefail", protect["run"])                            # a failed read fails the step, and the agent never starts
         self.assertIn('repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"', protect["run"])
-        self.assertNotIn(".private", protect["run"])                                  # read before Gradle, by its own step
-        public = step(wf, "fix", "Require a public repository")
-        self.assertEqual("public", public["id"])
-        self.assertEqual("steps.precheck.outputs.kind != 'cli-did-not-answer'", public["if"])   # a run the CLI did not answer is reported while the repository is private
-        self.assertNotIn("continue-on-error", public)                                 # a refusal fails the job: no Gradle, no agent, no enforce
-        self.assertIn('if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then', public["run"])   # a private repository of a personal account enforces a ruleset only with Pro, which no read here can tell
-        self.assertIn('if [ "$private" != "false" ]; then', public["run"])            # fail closed: only an answer of false passes
-        names = [s.get("name") for s in steps(wf, "fix")]
-        self.assertLess(names.index("Require a public repository"), names.index("Reproduce the red"))   # before the Gradle spend
         self.assertIn('select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")', protect["run"])   # an App can approve a PR it did not author: a code owner's review of the last push is what it cannot give
         self.assertNotIn(".protected", protect["run"])                                # classic protected: true accepts a direct push when no option is ticked
         self.assertIn('if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then', protect["run"])   # fail closed: only one or more ruleset ids pass
@@ -375,6 +366,23 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertLess(name_run.index("=~ ^[0-9]+$"), name_run.index("gh api"))
         self.assertIn("jq -c '[.name, .conclusion, .head_branch, .head_repository.full_name, .event]'", name_run)   # one line: no field starts a workflow command
 
+    def test_a_run_the_cli_did_not_answer_sets_up_no_disk_java_or_gradle(self):
+        fix = steps(load(DRIFT), "fix")
+        names = [s.get("name") for s in fix]
+        precheck, reproduce = names.index("Classify before Gradle"), names.index("Reproduce the red")
+        setup = [i for i, s in enumerate(fix) if s.get("uses", "").split("@")[0] in ("jlumbroso/free-disk-space", "actions/setup-java", "gradle/actions/setup-gradle")]
+        self.assertEqual(3, len(setup))
+        for i in setup:
+            self.assertEqual("steps.precheck.outputs.kind != 'cli-did-not-answer'", fix[i]["if"], fix[i]["uses"])   # skipped on kind 1, as Reproduce the red is
+            self.assertLess(precheck, i, fix[i]["uses"])                              # the kind is known before any of them
+            self.assertLess(i, reproduce, fix[i]["uses"])                             # and they are all set up before Gradle runs
+        for s in fix[:precheck + 1]:
+            self.assertIn(s.get("uses", "actions/checkout@").split("@")[0], ("actions/checkout",), s.get("name"))   # nothing before the precheck needs Java or the room
+            self.assertNotIn("gradlew", s.get("run", ""), s.get("name"))
+        for s in fix:
+            if "gradlew" in s.get("run", ""):
+                self.assertIn("steps.precheck.outputs.kind != 'cli-did-not-answer'", s["if"], s.get("name"))   # Gradle never runs on kind 1
+
     def test_the_gradle_cache_is_read_only(self):
         gradle = [s for s in steps(load(DRIFT), "fix") if s.get("uses", "").startswith("gradle/actions/setup-gradle@")]
         self.assertEqual(1, len(gradle))
@@ -423,7 +431,6 @@ ISSUE_CREATE_HALTED = "issue create --title CLI contract: the CLI did not answer
 HALT_LABEL = "api repos/daarko10/tandem/issues/3/labels -f labels[]=drift-halted"
 HALTED = "issue list --label drift-halted --state open --json number --jq"
 WAITING = "pr list --label contract-drift --state open --json number --jq"
-REPO = "api repos/daarko10/tandem --jq .private"
 CLEAN_FILES = "src/main/kotlin/dev/daarkolabs/tandem/protocol/Ndjson.kt\nsrc/test/resources/fixtures/drift-2026-10-22.ndjson\ndocs/protocol.md\n"
 ENFORCE_ENV = {"GH_TOKEN": "stub", "GH_REPO": "daarko10/tandem", "BRANCH": BRANCH, "RUN_URL": RUN_URL, "KIND": "decoder", "AGENT": "success"}
 RUN_VIEW = {"html_url": RUN_URL, "created_at": "2026-10-21T03:17:09Z", "name": "CLI contract", "conclusion": "failure", "head_branch": "main",
@@ -612,19 +619,6 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertIn("ruleset 17: no App on its bypass list", out)                   # the owner's admin role is how the only code owner merges
         self.assertEqual([RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0], BRANCHES.split(" --jq", 1)[0], HEADS.split(" --jq", 1)[0]],
                          [c.split(" --jq", 1)[0] for c in calls.splitlines()])        # the ruleset first; the stale-branch listing last
-
-    def test_a_private_repository_is_refused_before_gradle(self):
-        for private, message in ((("true\n", 0), "The repository is private (answer 'true')"),   # a ruleset there is enforced only with Pro, which no read here tells
-                                 ((SERVER_ERROR, 1), "Reading the repository failed (HTTP status '502')"),   # red without a verdict, never "public"
-                                 (("", 1), "Reading the repository failed (HTTP status 'none')"),
-                                 (("null\n", 0), "The repository is private (answer 'null')")):   # only false passes
-            rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a public repository", {"GH_TOKEN": "stub"}, [(REPO, private[0], private[1])])
-            self.assertEqual(1, rc, (message, out))
-            self.assertIn(message, out)
-            self.assertEqual(REPO + "\n", calls)
-        rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a public repository", {"GH_TOKEN": "stub"}, [(REPO, "false\n", 0)])
-        self.assertEqual(0, rc, out)
-        self.assertIn("the repository is public", out)
 
     def test_protect_refuses_a_drift_branch_without_an_open_pull_request(self):
         rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), branches=("main\ndrift/2026-10-20-5\ndrift/2026-10-19-4\nfeature/drift\n", 0),
@@ -855,6 +849,158 @@ class NightlyStepOutcomeTest(unittest.TestCase):
     def test_no_test_results_print_nothing(self):
         rc, out = self.name_failures({})                                              # an earlier step failed before Gradle ran
         self.assertEqual((0, ""), (rc, out))
+
+
+
+BUILD = os.path.join(ROOT, ".github/workflows/build.yml")
+FILTER = "Decide whether the Gradle jobs run"
+GRADLE_JOBS = ("build", "build-macos", "verify", "ide-test")
+BASE = {"README.md": "x\n", "src/main/kotlin/A.kt": "a\n", "docs/a.md": "a\n"}
+
+
+def run_filter(head: dict, event: str = "pull_request", edit: tuple[str, str] | None = None) -> tuple[int, str, str]:
+    """Runs build.yml's filter step under bash (`shell: bash`) in a git repository whose HEAD^1 holds BASE and whose HEAD
+    changes it by `head` (a path to its new text, or None to delete it), as a pull request's merge commit has the base as
+    its first parent. `edit` is an (old, new) text replaced in the step's script first, to break it on purpose. Returns
+    (exit code, stdout and stderr, GITHUB_OUTPUT's text)."""
+    s = step(load(BUILD), "changes", FILTER)
+    with tempfile.TemporaryDirectory() as tmp:
+        work, script, output = os.path.join(tmp, "work"), os.path.join(tmp, "step.sh"), os.path.join(tmp, "output")
+        os.mkdir(work)
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": tmp, "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+        subprocess.run(["git", "init", "-q"], cwd=work, env=env, check=True)
+        for commit in (BASE, head):
+            for path, text in commit.items():
+                if text is None:
+                    os.remove(os.path.join(work, path))
+                    continue
+                os.makedirs(os.path.dirname(os.path.join(work, path)) or work, exist_ok=True)
+                with open(os.path.join(work, path), "w", encoding="utf-8") as f:
+                    f.write(text)
+            subprocess.run(["git", "add", "-A"], cwd=work, env=env, check=True)
+            subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "commit"], cwd=work, env=env, check=True)
+        text = s["run"]
+        if edit:
+            assert edit[0] in text, edit[0]
+            text = text.replace(*edit)
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(text)
+        open(output, "w").close()
+        proc = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", script], cwd=work, capture_output=True, text=True, timeout=60,
+                              env={**env, "EVENT": event, "GITHUB_OUTPUT": output})
+        with open(output, encoding="utf-8") as f:
+            return proc.returncode, proc.stdout + proc.stderr, f.read()
+
+
+@unittest.skipUnless(yaml, "PyYAML is not installed")
+class BuildWorkflowTest(unittest.TestCase):
+    """build.yml: which jobs wait for which, and how the IDE test is split across jobs."""
+
+    def test_the_verifier_and_the_ide_test_do_not_wait_for_build_and_test(self):
+        jobs = load(BUILD)["jobs"]
+        for name in ("verify", "ide-test"):
+            self.assertNotIn("build", jobs[name].get("needs", []), name)               # each builds its own plugin ZIP; waiting only lengthened the critical path
+        for name in GRADLE_JOBS:
+            self.assertEqual((["changes"], "needs.changes.outputs.gradle == 'true'"), (jobs[name]["needs"], jobs[name]["if"]), name)
+        self.assertEqual(["changes", "scripts", *GRADLE_JOBS], list(jobs))            # no job is left out of the filter
+        self.assertEqual("${{ steps.filter.outputs.gradle }}", jobs["changes"]["outputs"]["gradle"])
+        checkout = jobs["changes"]["steps"][0]
+        self.assertEqual(("actions/checkout@v7", 2), (checkout["uses"], checkout["with"]["fetch-depth"]))   # the merge commit and its first parent, the base
+        self.assertEqual("${{ github.event_name }}", step(load(BUILD), "changes", FILTER)["env"]["EVENT"])
+        self.assertNotIn("${{", step(load(BUILD), "changes", FILTER)["run"])
+        scripts = jobs["scripts"]
+        self.assertEqual("Script tests", scripts["name"])
+        self.assertNotIn("needs", scripts)                                             # every change runs the script tests, a docs-only one included
+        self.assertNotIn("if", scripts)
+        self.assertEqual("cd scripts && python3 -m unittest -v", step(load(BUILD), "scripts", "Script tests")["run"])
+        self.assertEqual([], [s.get("name") for s in jobs["build"]["steps"] if "unittest" in s.get("run", "")])   # once, in its own job
+        self.assertIn("plugin-distribution", [s.get("with", {}).get("name") for s in jobs["build"]["steps"]])   # the ZIP people download stays Build and test's
+
+    def test_the_ide_test_runs_in_three_shards(self):
+        wf = load(BUILD)
+        job = wf["jobs"]["ide-test"]
+        self.assertEqual({"fail-fast": False, "matrix": {"shard": [1, 2, 3]}}, job["strategy"])   # a red shard never cancels the others
+        self.assertEqual("IDE test (${{ matrix.shard }}/${{ strategy.job-total }})", job["name"])
+        run = step(wf, "ide-test", "Run the IDE test")
+        self.assertEqual("${{ strategy.job-index }}/${{ strategy.job-total }}", run["env"]["IDE_TEST_SHARD"])   # IdeTestShard counts from 0, as job-index does
+        self.assertIn('./gradlew integrationTest -Dtandem.ideTestShard="$IDE_TEST_SHARD"', run["run"])
+        self.assertNotIn("${{", run["run"])                                           # through env, never interpolated into the shell line
+        uploads = [s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")]
+        self.assertEqual(["ide-test-logs-${{ matrix.shard }}"], [s["with"]["name"] for s in uploads])   # an artifact name must be unique in the run
+        with open(os.path.join(ROOT, "build.gradle.kts"), encoding="utf-8") as f:
+            self.assertIn('systemProperty("tandem.ideTestShard", providers.systemProperty("tandem.ideTestShard").getOrElse(""))', f.read())   # reaches the test JVM
+
+
+    def test_every_ide_test_class_is_sharded(self):
+        root = os.path.join(ROOT, "src/integrationTest/kotlin")
+        classes = []
+        for dirpath, _, names in os.walk(root):
+            for name in names:
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                if re.search(r"(?m)^\s*@Test\b", text):
+                    classes.append((os.path.relpath(path, root), "@ExtendWith(IdeTestShard::class)" in text))
+        self.assertTrue(classes, "no IDE test class found")
+        self.assertEqual([], [path for path, sharded in classes if not sharded])      # a class without the extension would run whole in each of the three shards
+
+
+@unittest.skipUnless(yaml and BASH and shutil.which("git"), "PyYAML, bash 4, jq and git are needed to run the filter step")
+class BuildFilterOutcomeTest(unittest.TestCase):
+    """build.yml's filter step under bash in a real git repository: which changes skip the Gradle jobs."""
+
+    def assertGradle(self, expected: str, head: dict, event: str = "pull_request"):
+        rc, out, output = run_filter(head, event)
+        self.assertEqual(0, rc, out)
+        self.assertEqual(f"gradle={expected}\n", output, (head, event, out))
+
+    def test_docs_scripts_skills_and_the_other_workflows_skip_gradle(self):
+        for head in ({"docs/a.md": "b\n"}, {"docs/superpowers/specs/new.md": "b\n"}, {"scripts/test_x.py": "b\n"},
+                     {".claude/skills/s/SKILL.md": "b\n"}, {".github/actions/anthropic-token/action.yml": "b\n"},
+                     {".github/workflows/drift-fix.yml": "b\n"}, {".github/workflows/cli-contract.yml": "b\n"},
+                     {".github/workflows/macos-ide-test.yml": "b\n"}, {".github/CODEOWNERS": "* @x\n"},
+                     {"README.md": "y\n", "CLAUDE.md": "y\n", "LICENSE": "y\n", "docs/a.md": None}):
+            self.assertGradle("false", head)
+
+    def test_code_the_build_files_and_build_yml_run_gradle(self):
+        for head in ({"src/main/kotlin/A.kt": "b\n"}, {"src/test/resources/fixtures/x.ndjson": "{}\n"}, {"build.gradle.kts": "b\n"},
+                     {"settings.gradle.kts": "b\n"}, {"gradle.properties": "b\n"}, {"gradle/wrapper/gradle-wrapper.properties": "b\n"},
+                     {"gradlew": "b\n"}, {".gitignore": "b\n"}, {".github/workflows/build.yml": "b\n"}, {"src/main/kotlin/A.kt": None},
+                     {"src/docs/a.md": "b\n"}, {"README.md.orig": "b\n"}, {"LICENSE.txt": "b\n"},       # anchored: a near miss runs everything
+                     {".github/workflows/drift-fix.yml.bak": "b\n"}, {".github/workflows/new.yml": "b\n"}, {"new-top-level-file": "b\n"}):
+            self.assertGradle("true", head)
+
+    def test_a_mix_runs_gradle(self):
+        self.assertGradle("true", {"docs/a.md": "b\n", "scripts/x.py": "b\n", "src/main/kotlin/A.kt": "b\n"})
+
+    def test_a_move_out_of_src_runs_gradle(self):
+        self.assertGradle("true", {"src/main/kotlin/A.kt": None, "docs/A.kt": "a\n"})   # --no-renames: the deleted source counts, not only the new path
+
+    def test_no_change_runs_gradle(self):
+        self.assertGradle("true", {})
+
+    def test_a_push_runs_gradle_whatever_changed(self):
+        for event in ("push", "workflow_dispatch"):
+            self.assertGradle("true", {"docs/a.md": "b\n"}, event)
+
+    def test_a_grep_error_fails_the_job_and_never_skips_gradle(self):
+        skip = next(l for l in step(load(BUILD), "changes", FILTER)["run"].splitlines() if l.startswith("skip="))
+        rc, out, output = run_filter({"docs/a.md": "b\n"}, edit=(skip, "skip='('"))   # an unbalanced group: grep exits 2 for every input
+        self.assertEqual((True, ""), (rc != 0, output), out)                           # red, and no verdict for the Gradle jobs: the broken pattern is not read as "every path matched"
+        self.assertIn("grep failed with exit code 2", out)
+
+    def test_a_failed_diff_fails_the_job(self):
+        s = step(load(BUILD), "changes", FILTER)
+        with tempfile.TemporaryDirectory() as tmp:
+            script, output = os.path.join(tmp, "step.sh"), os.path.join(tmp, "output")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(s["run"])
+            open(output, "w").close()
+            proc = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", script], cwd=tmp, capture_output=True, text=True, timeout=60,
+                                  env={"PATH": os.environ.get("PATH", ""), "HOME": tmp, "GIT_CEILING_DIRECTORIES": tmp, "EVENT": "pull_request", "GITHUB_OUTPUT": output})
+            with open(output, encoding="utf-8") as f:
+                self.assertEqual((True, ""), (proc.returncode != 0, f.read()), proc.stdout + proc.stderr)   # no repository: red, and no verdict for the Gradle jobs
 
 
 if __name__ == "__main__":

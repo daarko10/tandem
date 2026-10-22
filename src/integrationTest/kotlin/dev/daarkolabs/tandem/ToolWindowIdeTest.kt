@@ -35,6 +35,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.ExtendWith
 import java.awt.GraphicsEnvironment
 import java.awt.Image
 import java.awt.Point
@@ -71,8 +72,9 @@ import kotlin.time.Duration.Companion.seconds
  * the UI sends and logs every frame it receives, so each test checks both the rendered UI and the protocol traffic.
  *
  * Unlike the platform tests, the plugin is loaded by its own plugin classloader here, as it is for users.
- * Run with `xvfb-run ./gradlew integrationTest` when there is no display.
+ * Run with `xvfb-run ./gradlew integrationTest` when there is no display. CI splits the tests across jobs ([IdeTestShard]).
  */
+@ExtendWith(IdeTestShard::class)
 class ToolWindowIdeTest {
     private val pluginZip = Path.of(System.getProperty("tandem.pluginZip"))
     private val fakeClaude = System.getProperty("tandem.fakeClaude")
