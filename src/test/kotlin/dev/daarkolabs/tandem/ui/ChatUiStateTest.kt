@@ -2,6 +2,8 @@
 
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.ui.text.TextRange
 import dev.daarkolabs.tandem.chat.ChatRow
 import dev.daarkolabs.tandem.chat.RowGap
 import dev.daarkolabs.tandem.chat.RowLabel
@@ -10,6 +12,7 @@ import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.chat.UserRow
+import dev.daarkolabs.tandem.chat.paletteFor
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.coroutines.CoroutineScope
@@ -21,6 +24,7 @@ import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -144,6 +148,55 @@ class ChatUiStateTest {
         } finally {
             scope.cancel()
         }
+    }
+
+    // spec: palette state is kept per session key
+    @Test
+    fun `palette state is kept per session key`() {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)))
+            presenters.ui("a").paletteSelection.value = "/m" to 2
+            presenters.ui("a").paletteDismissedFor.value = "/m"
+            presenters.ui("a").menuRequest.value = FooterMenu.MODEL
+
+            assertEquals("" to 0, presenters.ui("b").paletteSelection.value)
+            assertNull(presenters.ui("b").paletteDismissedFor.value)
+            assertNull(presenters.ui("b").menuRequest.value)
+            assertEquals("/m" to 2, presenters.ui("a").paletteSelection.value)
+            assertEquals("/m", presenters.ui("a").paletteDismissedFor.value)
+            assertEquals(FooterMenu.MODEL, presenters.ui("a").menuRequest.value)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    // spec: Esc keeps the palette closed until the draft changes
+    @Test
+    fun `Esc keeps the palette closed until the draft changes`() {
+        val ui = ChatUiState()
+        fun palette(draft: String) =
+            paletteFor(draft, focused = true, ui.paletteDismissedFor.value, ui.paletteSelection.value, emptyList(), emptyList(), emptySet())
+        assertNotNull(palette("/m"))
+
+        // Esc on "/m": PromptBar stores the draft it was pressed on.
+        ui.paletteDismissedFor.value = "/m"
+        assertNull(palette("/m"))
+        // A changed draft shows it again, whatever the stored one.
+        assertNotNull(palette("/mc"))
+        assertNotNull(palette("/"))
+    }
+
+    @Test
+    fun `the Slash commands row puts a slash in an empty draft only`() {
+        val ui = ChatUiState()
+        ui.openPalette()
+        assertEquals("/", ui.draft.text.toString())
+        assertEquals(TextRange(1), ui.draft.selection)
+
+        ui.draft.setTextAndPlaceCursorAtEnd("hello")
+        ui.openPalette()
+        assertEquals("hello", ui.draft.text.toString())
     }
 
     @Test

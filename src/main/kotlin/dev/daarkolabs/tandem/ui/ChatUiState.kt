@@ -2,6 +2,7 @@ package dev.daarkolabs.tandem.ui
 
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -68,6 +69,23 @@ internal class ChatUiState {
 
     /** Whether the session's MCP panel is open over its chat (MCP spec 3.2, 4.4): the header's button and `/mcp` open it. */
     val mcpPanelOpen: MutableState<Boolean> = mutableStateOf(false)
+
+    /**
+     * The slash palette's selection (MCP spec 4.4): the committed draft it was made on and the row's index. It counts only while the
+     * draft is that one (`paletteFor` reads a mismatch as 0), so an Enter right after a keystroke never picks by a stale index.
+     */
+    val paletteSelection: MutableState<Pair<String, Int>> = mutableStateOf("" to 0)
+
+    /** The committed draft Esc closed the palette on: it stays closed until the draft changes (MCP spec 3.4, 4.4). */
+    val paletteDismissedFor: MutableState<String?> = mutableStateOf(null)
+
+    /** A footer menu that `/model`, `/permissions` or `/mode` asked to open; the control opens it and clears the request. */
+    val menuRequest: MutableState<FooterMenu?> = mutableStateOf(null)
+
+    /** The `+` menu's `Slash commands` (MCP spec 3.4): `/` in an empty draft, so the palette opens as typing it does; else nothing. */
+    fun openPalette() {
+        if (draft.text.isEmpty()) draft.setTextAndPlaceCursorAtEnd("/")
+    }
 
     // The row keys, the rows and the list's height at the list's last emission, and whether the list has had an emission since it
     // last showed this session. Kept here, not in the panel, so that rows added while another session is shown count when this one

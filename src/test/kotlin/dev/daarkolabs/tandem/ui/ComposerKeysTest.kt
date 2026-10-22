@@ -28,6 +28,9 @@ class ComposerKeysTest {
     private val escape = key(AwtKeyEvent.VK_ESCAPE)
     private val v = key(AwtKeyEvent.VK_V)
     private val backspace = key(AwtKeyEvent.VK_BACK_SPACE)
+    private val up = key(AwtKeyEvent.VK_UP)
+    private val down = key(AwtKeyEvent.VK_DOWN)
+    private val tab = key(AwtKeyEvent.VK_TAB)
 
     private fun composer(
         key: Key,
@@ -39,6 +42,7 @@ class ComposerKeysTest {
         cardOpen: Boolean = false,
         draftEmpty: Boolean = false,
         hasAttachments: Boolean = false,
+        paletteOpen: Boolean = false,
         panelOpen: Boolean = false,
         clipboardHasImage: () -> Boolean = { false },
     ): ComposerAction? = composerKey(
@@ -51,6 +55,7 @@ class ComposerKeysTest {
         cardOpen,
         draftEmpty = draftEmpty,
         hasAttachments = hasAttachments,
+        paletteOpen = paletteOpen,
         panelOpen = panelOpen,
         clipboardHasImage = clipboardHasImage,
     )
@@ -161,6 +166,79 @@ class ComposerKeysTest {
             composerKey(v, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = true, busy = false, cardOpen = false, draftEmpty = true) { true },
         )
         assertNull(composerKey(escape, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = false, busy = false, cardOpen = false))
+    }
+
+    // spec: palette keys map to the palette actions
+    @Test
+    fun `palette keys map to the palette actions`() {
+        assertEquals(ComposerAction.PaletteUp, composer(up, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteDown, composer(down, paletteOpen = true))
+        assertEquals(ComposerAction.PalettePick, composer(enter, paletteOpen = true))
+        assertEquals(ComposerAction.PalettePick, composer(key(AwtKeyEvent.VK_ENTER, numPad = true), paletteOpen = true))
+        assertEquals(ComposerAction.PaletteInsert, composer(tab, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteClose, composer(escape, paletteOpen = true))
+        // While a turn runs the palette still takes its keys (MCP spec 3.4): pick decides what a busy Enter does, Esc never stops.
+        assertEquals(ComposerAction.PalettePick, composer(enter, busy = true, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteInsert, composer(tab, busy = true, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteClose, composer(escape, busy = true, paletteOpen = true))
+        // Key releases, Shift+Tab (focus traversal) and the arrows with a modifier stay the text area's.
+        assertNull(composer(enter, type = KeyEventType.KeyUp, paletteOpen = true))
+        assertNull(composer(tab, shift = true, paletteOpen = true))
+        assertNull(composer(up, shift = true, paletteOpen = true))
+        assertNull(composer(down, ctrlOrMeta = true, paletteOpen = true))
+        // Closed, the arrows and Tab are the text area's.
+        assertNull(composer(up))
+        assertNull(composer(down))
+        assertNull(composer(tab))
+    }
+
+    // spec: Enter sends when the palette is closed
+    @Test
+    fun `Enter sends when the palette is closed`() {
+        assertEquals(ComposerAction.Send, composer(enter, paletteOpen = false))
+        assertNull(composer(escape, paletteOpen = false))
+    }
+
+    // spec: Esc goes to the palette before the card
+    @Test
+    fun `Esc goes to the palette before the card`() {
+        assertEquals(ComposerAction.PaletteClose, composer(escape, cardOpen = true, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteClose, composer(escape, busy = true, cardOpen = true, paletteOpen = true))
+        assertEquals(ComposerAction.CardEscape, composer(escape, cardOpen = true, paletteOpen = false))
+    }
+
+    // spec: Shift+Enter with the palette open is still a newline
+    @Test
+    fun `Shift+Enter with the palette open is still a newline`() {
+        assertNull(composer(enter, shift = true, paletteOpen = true))
+        assertEquals(ComposerFallback.Newline, fallback(enter, shift = true))
+        assertNull(composer(enter, alt = true, paletteOpen = true))
+        assertNull(composer(enter, ctrlOrMeta = true, paletteOpen = true))
+    }
+
+    // spec: Enter with a card and the palette open picks
+    @Test
+    fun `Enter with a card and the palette open picks`() {
+        assertEquals(ComposerAction.PalettePick, composer(enter, cardOpen = true, paletteOpen = true))
+        assertEquals(ComposerAction.PalettePick, composer(enter, busy = true, cardOpen = true, paletteOpen = true))
+    }
+
+    // spec: Esc with the panel and the palette open closes the panel
+    @Test
+    fun `Esc with the panel and the palette open closes the panel`() {
+        assertEquals(ComposerAction.ClosePanel, composer(escape, paletteOpen = true, panelOpen = true))
+        assertEquals(ComposerAction.ClosePanel, composer(escape, busy = true, cardOpen = true, paletteOpen = true, panelOpen = true))
+        // Only Esc goes to the panel first: the other palette keys still reach the palette.
+        assertEquals(ComposerAction.PalettePick, composer(enter, paletteOpen = true, panelOpen = true))
+    }
+
+    // spec: a call passing clipboardHasImage as a trailing lambda still compiles
+    @Test
+    fun `a call passing clipboardHasImage as a trailing lambda still compiles`() {
+        assertEquals(
+            ComposerAction.Send,
+            composerKey(enter, KeyEventType.KeyDown, false, false, false, busy = false, cardOpen = false, draftEmpty = true, hasAttachments = false) { false },
+        )
     }
 
     @Test

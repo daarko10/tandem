@@ -634,6 +634,58 @@ class ToolWindowIdeTest {
         assertTrue(sent.any { it["request"]?.jsonObject?.get("subtype")?.jsonPrimitive?.content == "mcp_authenticate" })
     }
 
+    // spec: typing slash opens the palette and /mcp opens the panel
+    @Test
+    fun `typing slash opens the palette and mcp opens the panel`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("slash-palette", fixtures = listOf("mcp-slash"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            focusPromptBox()
+            promptBox().keyboard { typeText("/", 20) }
+            waitFor("the palette", 30.seconds) { described("Slash commands").present() }
+            promptBox().keyboard { typeText("mc", 20) }
+            waitFor("the palette narrowed to /mcp", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='/mc']").present() }
+            takeScreenshot("slash-palette")
+            ui.keyboard { enter() }
+            waitFor("the MCP panel", 1.minutes) { described("MCP servers panel").present() }
+            // The fake's fixture has no mcpServers payload: it answers mcp_status as a CLI that does not know it (MCP spec 9.2 (c)).
+            waitForText("Could not list servers: Unknown subtype")
+            waitFor("the composer cleared", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
+        }
+        assertTrue(sent.none { it.type == "user" }, "an intercepted /mcp sends nothing: ${sent.map { it.type }}")
+        assertTrue(sent.any { it["request"]?.jsonObject?.get("subtype")?.jsonPrimitive?.content == "mcp_status" })
+    }
+
+    // spec: local commands show as notices without a footer
+    @Test
+    fun `local commands show as notices without a footer`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // The fake replays mcp-slash's turns in order, one per prompt: /mcp's reply under /usage, /model's under /context, /help's
+        // under /help, and /hello's model turn under /hello (MCP spec 9.5).
+        val sent = runChat("local-commands", fixtures = listOf("mcp-slash"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            for (command in listOf("usage", "context", "help")) {
+                enterPrompt("/$command")
+                waitFor("the notice of /$command", 1.minutes) { described("Reply to /$command").present() }
+                waitForTurnEnd()
+                if (command == "usage") {
+                    // /mcp's recorded block: the CLI's terminal hint becomes the link to the panel.
+                    assertTrue(described("Open the MCP panel").present(), "the /mcp block's notice carries the panel link")
+                }
+                assertFalse(ui.x(FOOTER).present(), "a local command's turn has no footer (after /$command)")
+            }
+            takeScreenshot("local-commands")
+            enterPrompt("/hello")
+            waitForText("hello from the hello command")
+            waitFor("the model turn's footer", 1.minutes) { ui.x(FOOTER).present() }
+        }
+        val prompts = sent.filter { it.type == "user" }.map { it["message"]!!.jsonObject["content"].toString() }
+        assertEquals(4, prompts.size, prompts.toString())
+        listOf("/usage", "/context", "/help", "/hello").forEachIndexed { index, text -> assertTrue(text in prompts[index], prompts.toString()) }
+    }
+
     @Test
     fun `a wide tool window docks the sidebar, which stays collapsed in the next IDE run`() {
         val configDir = Files.createTempDirectory("tandem-config")
@@ -1124,6 +1176,29 @@ class ToolWindowIdeTest {
 
     private fun Driver.waitForText(text: String) {
         waitFor("'$text' rendered", 2.minutes) { ui.x("//div[@class='ComposeNode' and @visible_text='$text']").present() }
+    }
+
+    /** Clicks the prompt box and waits until it has the keyboard focus. */
+    private fun Driver.focusPromptBox() {
+        promptBox().click(Point(20, 20))
+        waitFor("prompt box focused", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
+    }
+
+    /**
+     * Types [text] into the prompt box like a person and sends it with Enter, never with a click on Send: with the slash palette
+     * open, whether a press on Send reaches it is unverified (MCP spec 11 item 14), and Enter picks through the palette.
+     */
+    private fun Driver.enterPrompt(text: String) {
+        focusPromptBox()
+        promptBox().keyboard { typeText(text, 20) }
+        waitFor("prompt box holds '$text'", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='$text']").present() }
+        ui.keyboard { enter() }
+        waitFor("prompt box cleared after Enter", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
+    }
+
+    /** Waits until no turn runs: Send is back in place of Stop, so the next Enter sends (a busy Enter does nothing). */
+    private fun Driver.waitForTurnEnd() {
+        waitFor("the turn ended", 1.minutes) { iconButton("Send").present() && !iconButton("Stop").present() }
     }
 
     /** Types [text] into the prompt box like a person and presses Send, checking each step landed. */

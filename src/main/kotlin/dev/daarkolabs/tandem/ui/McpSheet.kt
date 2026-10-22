@@ -255,7 +255,7 @@ private fun McpServerRow(
                         WithTooltip(row.name) { Text(row.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
                     Text(listOfNotNull(row.label, row.tools, row.version).joinToString(" · "), color = info, maxLines = 1)
-                    row.rawSource?.let { SourcePill(it) }
+                    row.rawSource?.let { TextPill(it) }
                 }
                 if (row.readOnly) {
                     Text("Tandem's own server", color = info, style = smallTextStyle(), maxLines = 1)
@@ -321,11 +321,14 @@ private fun WaitCaption(wait: McpAuthWait) {
     Text(caption.text, color = if (caption.isError) JewelTheme.globalColors.text.error else JewelTheme.globalColors.text.info)
 }
 
-/** An `Other` row's wire source, as a plain text pill (base 4.2 pill style, not a focusable `Chip`). */
+/**
+ * A plain text pill (base 4.2 pill style, not a focusable `Chip`): an `Other` row's wire source, a palette row's scope (MCP spec 3.2,
+ * 3.4).
+ */
 @Composable
-private fun SourcePill(source: String) {
+internal fun TextPill(text: String) {
     Text(
-        source,
+        text,
         color = JewelTheme.globalColors.text.info,
         style = smallTextStyle(),
         maxLines = 1,

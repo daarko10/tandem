@@ -22,16 +22,22 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -53,6 +59,9 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -65,6 +74,15 @@ import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.Attachments
+import dev.daarkolabs.tandem.chat.PaletteItem
+import dev.daarkolabs.tandem.chat.PaletteOutcome
+import dev.daarkolabs.tandem.chat.SlashIntercept
+import dev.daarkolabs.tandem.chat.SlashPalette
+import dev.daarkolabs.tandem.chat.committedDraft
+import dev.daarkolabs.tandem.chat.moved
+import dev.daarkolabs.tandem.chat.paletteFor
+import dev.daarkolabs.tandem.chat.pick
+import dev.daarkolabs.tandem.chat.slashIntercept
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
@@ -84,6 +102,7 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
 import java.awt.datatransfer.DataFlavor
 import java.nio.file.Path
 import java.util.UUID
+import kotlin.math.roundToInt
 
 /**
  * The bottom of a session's chat (spec 4.15, polish spec 2.3): the composer, a text area in a filled rounded box with `+` at its left
@@ -100,6 +119,12 @@ import java.util.UUID
  * [manager], which switches a running process at once and starts a stopped session with it; it becomes the project's last pick in
  * [workspace] too, which a new session starts from. A session whose process ended takes prompts too: the next one starts it again.
  * With [focus] the prompt takes the focus, and then [onFocused] is called.
+ *
+ * A draft that is one slash token opens the slash palette above the box ([SlashPaletteView], MCP spec 3.4): Up and Down move its
+ * selection, Enter picks, Tab inserts, Esc closes it until the draft changes, and a pick only executes what `pick` decides. Every
+ * send, palette or not, first runs the interception table (`slashIntercept`): `/mcp` opens the MCP panel, `/model` the model menu,
+ * `/permissions` and `/mode` the mode menu ([ChatUiState.menuRequest]), `/model <name>` picks that model; each clears the draft,
+ * sends nothing and leaves the attachments for the next prompt.
  */
 @Composable
 internal fun PromptBar(
@@ -117,12 +142,71 @@ internal fun PromptBar(
     val composer by presenter.composer.collectAsState()
     val sending by sender.sending.collectAsState()
     val scope = rememberCoroutineScope()
-    val send = {
+    val sendNow = {
         if (sendDraft(ui, sender)) {
             scope.launch {
                 val last = ui.listState.layoutInfo.totalItemsCount - 1
                 if (last >= 0) ui.listState.animateScrollToItem(last)
             }
+        }
+    }
+    // The interception table (MCP spec 3.4): Tandem's own commands act here and clear the draft, sending nothing and leaving the
+    // attachment strip as it is; anything else is today's send, attachments included.
+    val runIntercept = { intercept: SlashIntercept ->
+        when (intercept) {
+            is SlashIntercept.Send -> sendNow()
+            SlashIntercept.OpenMcp -> ui.mcpPanelOpen.value = true
+            SlashIntercept.PickModel -> ui.menuRequest.value = FooterMenu.MODEL
+            SlashIntercept.PickPermissionMode -> ui.menuRequest.value = FooterMenu.MODE
+            is SlashIntercept.SetModel -> {
+                manager.setModel(handle.id, intercept.model)
+                workspace.state.lastModel = intercept.model
+            }
+        }
+        if (intercept !is SlashIntercept.Send) ui.draft.clearText()
+    }
+    // The send path, Enter or Send, palette or not (a pasted `/mcp` behaves the same): the table runs on the trimmed draft before the
+    // attachments are encoded.
+    val send = { runIntercept(slashIntercept(ui.draft.text.toString().trim(), composer.models)) }
+    // The palette (MCP spec 3.4, 4.4, 7): read where it is used, so a key handler always sees the current text's palette, never a
+    // frame-old filter. It filters on the committed text only, and shows only while the text area has the focus.
+    val inputFocused = remember { mutableStateOf(false) }
+    val paletteOf = { focused: Boolean ->
+        paletteFor(
+            committedText(ui),
+            focused,
+            ui.paletteDismissedFor.value,
+            ui.paletteSelection.value,
+            composer.commands,
+            composer.slashCommandNames,
+            composer.terminalCommands,
+        )
+    }
+    val palette = remember(ui, presenter) { derivedStateOf { paletteOf(inputFocused.value) } }
+    // Esc keeps the palette closed until the draft changes.
+    LaunchedEffect(ui) { snapshotFlow { committedText(ui) }.collect { ui.paletteDismissedFor.value = null } }
+    // A pick's outcome (MCP spec 4.3): the composer only executes it.
+    val execute = { outcome: PaletteOutcome ->
+        when (outcome) {
+            is PaletteOutcome.Intercept -> {
+                // A row's own name never reads as text to send; should one, the send path gets that text, not the typed prefix.
+                (outcome.intercept as? SlashIntercept.Send)?.let { ui.draft.setTextAndPlaceCursorAtEnd(it.text) }
+                runIntercept(outcome.intercept)
+            }
+            is PaletteOutcome.Insert -> ui.draft.setTextAndPlaceCursorAtEnd(outcome.text)
+            is PaletteOutcome.Send -> {
+                ui.draft.setTextAndPlaceCursorAtEnd(outcome.text)
+                send()
+            }
+            PaletteOutcome.Ignored -> Unit
+        }
+    }
+    // A key picks from the palette on screen; a click on a row picks that row, from the palette its click was made on even should
+    // the text area have lost the focus to the press.
+    val pickFrom = { shown: SlashPalette?, item: PaletteItem?, insert: Boolean ->
+        if (shown != null) {
+            val index = item?.let(shown.items::indexOf)?.takeIf { it >= 0 } ?: shown.selected
+            execute(pick(shown.copy(selected = index), insert, busy = composer.busy || sending, composer.models))
         }
     }
     val attachFiles: (List<Path>) -> Unit = { paths ->
@@ -144,6 +228,9 @@ internal fun PromptBar(
             composer.cardOpen,
             focus,
             onFocused,
+            inputFocused = inputFocused,
+            palette = { palette.value },
+            onPalettePick = { item -> pickFrom(paletteOf(true), item, false) },
             onAdd = { scope.launch { attachFiles(ComposerImages.chooseImages(project)) } },
             onDrop = attachFiles,
             onAction = { action ->
@@ -154,6 +241,11 @@ internal fun PromptBar(
                     ComposerAction.PasteImage -> scope.launch { paste(ui) }
                     ComposerAction.RemoveLastImage -> ui.attachments.removeLastOrNull()
                     ComposerAction.ClosePanel -> ui.mcpPanelOpen.value = false
+                    ComposerAction.PaletteUp -> palette.value?.let { ui.paletteSelection.value = it.query to it.moved(-1).selected }
+                    ComposerAction.PaletteDown -> palette.value?.let { ui.paletteSelection.value = it.query to it.moved(1).selected }
+                    ComposerAction.PalettePick -> pickFrom(palette.value, null, false)
+                    ComposerAction.PaletteInsert -> pickFrom(palette.value, null, true)
+                    ComposerAction.PaletteClose -> palette.value?.let { ui.paletteDismissedFor.value = it.query }
                 }
             },
         )
@@ -162,10 +254,14 @@ internal fun PromptBar(
             Modifier.fillMaxWidth().padding(start = 9.dp, end = 10.dp, top = 10.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ModeControl(composer) { mode ->
-                manager.setPermissionMode(handle.id, mode)
-                workspace.state.lastPermissionMode = mode.wire
-            }
+            ModeControl(
+                composer,
+                onPick = { mode ->
+                    manager.setPermissionMode(handle.id, mode)
+                    workspace.state.lastPermissionMode = mode.wire
+                },
+                menuRequest = ui.menuRequest,
+            )
             // Mode at the start, model and effort at the end; on a narrow pane the model label ellipsises, nothing wraps.
             Box(Modifier.weight(1f).padding(start = 8.dp), contentAlignment = Alignment.CenterEnd) {
                 ModelControl(
@@ -178,6 +274,7 @@ internal fun PromptBar(
                         manager.setEffort(handle.id, level)
                         workspace.state.lastEffort = level
                     },
+                    menuRequest = ui.menuRequest,
                 )
             }
             ContextRing(presenter.context)
@@ -187,11 +284,14 @@ internal fun PromptBar(
 
 /**
  * The text area, `+` and Send or Stop in one filled rounded box, as wide as the footer under it, with the attached images above them
- * ([AttachmentStrip]): Stop while [busy]. Keys go through [composerKey] with [busy] or [sending] (a prompt still being encoded) and
- * [cardOpen], and Send is disabled while [sending]; [onAction] does what they return. `+` opens a menu whose `Add files or photos`
- * calls [onAdd]; files dropped on the box go to [onDrop], and the box draws its focused border while a drag of files hovers it. With
- * [focus] the text area takes the focus, and then [onFocused] is called. It takes those fields, not the whole composer model, so
- * that a change to another one leaves it alone.
+ * ([AttachmentStrip]): Stop while [busy]. Keys go through [composerKey] with [busy] or [sending] (a prompt still being encoded),
+ * [cardOpen] and whether the slash palette is open ([palette], read at each key, so never a frame-old one), and Send is disabled
+ * while [sending]; [onAction] does what they return. `+` opens a menu whose `Add files or photos` calls [onAdd] and whose
+ * `Slash commands` puts `/` in an empty draft and focuses the text area; files dropped on the box go to [onDrop], and the box draws
+ * its focused border while a drag of files hovers it. With [focus] the text area takes the focus, and then [onFocused] is called;
+ * whether it has the focus is [inputFocused]. The palette ([SlashPaletteView]) opens above the box, as wide as it, and a click on
+ * one of its rows goes to [onPalettePick]. It takes those fields, not the whole composer model, so that a change to another one
+ * leaves it alone.
  */
 @Composable
 private fun PromptBox(
@@ -201,13 +301,22 @@ private fun PromptBox(
     cardOpen: Boolean,
     focus: Boolean,
     onFocused: () -> Unit,
+    inputFocused: MutableState<Boolean>,
+    palette: () -> SlashPalette?,
+    onPalettePick: (PaletteItem) -> Unit,
     onAdd: () -> Unit,
     onDrop: (List<Path>) -> Unit,
     onAction: (ComposerAction) -> Unit,
 ) {
     val inputFocus = remember { FocusRequester() }
-    var focused by remember { mutableStateOf(false) }
+    val focused = inputFocused.value
     var dragging by remember { mutableStateOf(false) }
+    // The box's width and its top in the window, for the palette above it (MCP spec 3.4: a position provider cannot size a popup).
+    var boxWidth by remember { mutableIntStateOf(0) }
+    var boxTop by remember { mutableIntStateOf(0) }
+    // Asks the text area for the focus once the `+` menu, which held it, has gone.
+    var refocus by remember { mutableIntStateOf(0) }
+    LaunchedEffect(refocus) { if (refocus > 0) inputFocus.requestFocus() }
     val currentOnDrop by rememberUpdatedState(onDrop)
     val currentOnAction by rememberUpdatedState(onAction)
     val imagePaste = remember { ImagePasteProvider { currentOnAction(ComposerAction.PasteImage) } }
@@ -246,6 +355,8 @@ private fun PromptBox(
     // row sits 16 dp above the box (spec 4.1).
     Column(
         Modifier.fillMaxWidth().padding(top = 4.dp)
+            .onSizeChanged { boxWidth = it.width }
+            .onGloballyPositioned { boxTop = it.positionInWindow().y.roundToInt() }
             .heightIn(min = 44.dp)
             .background(chatPalette().bubbleFill, shape)
             .border(1.dp, if (focused || dragging) colors.borders.focused else colors.borders.normal, shape)
@@ -265,12 +376,19 @@ private fun PromptBox(
             Modifier.fillMaxWidth().heightIn(max = 184.dp).padding(start = 8.dp, end = 12.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
-            AddButton(Modifier.padding(end = 5.dp, bottom = 10.dp), onAdd)
+            AddButton(
+                Modifier.padding(end = 5.dp, bottom = 10.dp),
+                onAdd,
+                onSlashCommands = {
+                    ui.openPalette()
+                    refocus++
+                },
+            )
             TextArea(
                 ui.draft,
                 Modifier.weight(1f).heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
                     .focusRequester(inputFocus)
-                    .onFocusChanged { focused = it.hasFocus }
+                    .onFocusChanged { inputFocused.value = it.hasFocus }
                     // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it: while the
                     // clipboard holds images, the focused composer's paste provider takes the paste from the Compose text paste (polish
                     // spec 2.7). Asked for only by a paste, so the clipboard's flavours are not queried on every action update.
@@ -279,10 +397,10 @@ private fun PromptBox(
                             imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
                         }
                     }
-                    .onPreviewKeyEvent { event -> composerKeyEvent(event, busy || sending, cardOpen, ui, onAction) },
+                    .onPreviewKeyEvent { event -> composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, onAction) },
                 lineLimits = TextFieldLineLimits.MultiLine(1, 8),
                 undecorated = true,
-                placeholder = { Text("Describe a task or ask a question", color = colors.text.info) },
+                placeholder = { Text("Type / for commands", color = colors.text.info) },
             )
             // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
             val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
@@ -300,6 +418,15 @@ private fun PromptBox(
                 ) {
                     Text("↵", style = JewelTheme.editorTextStyle, color = if (sending) colors.text.disabled else colors.text.info)
                 }
+            }
+        }
+        // Placed in the box, so that the popup is anchored to the box's own edges.
+        val shown = palette()
+        if (shown != null && boxWidth > 0) {
+            val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
+            SlashPaletteView(shown, boxWidth, maxHeightPx = boxTop - gap) { item ->
+                onPalettePick(item)
+                inputFocus.requestFocus()
             }
         }
     }
@@ -324,10 +451,18 @@ private class ImagePasteProvider(private val onPaste: () -> Unit) : PasteProvide
 
 /**
  * Hands [event] to [composerKey] and runs what it returns, else to [composerFallback]: a newline in [ui]'s draft ([insertNewline]),
- * which the text area would not type, or nothing at all (spec 4.15). Every other key goes to the text area. Ctrl/Cmd+V asks the
- * clipboard for its flavours only (polish spec 2.7): the data is read later, off the EDT.
+ * which the text area would not type, or nothing at all (spec 4.15). Every other key goes to the text area. With the slash palette
+ * open ([paletteOpen]) its keys come first (MCP spec 3.4); a pick that does nothing still takes the key, so a busy Enter types no
+ * newline. Ctrl/Cmd+V asks the clipboard for its flavours only (polish spec 2.7): the data is read later, off the EDT.
  */
-private fun composerKeyEvent(event: KeyEvent, busy: Boolean, cardOpen: Boolean, ui: ChatUiState, onAction: (ComposerAction) -> Unit): Boolean {
+private fun composerKeyEvent(
+    event: KeyEvent,
+    busy: Boolean,
+    cardOpen: Boolean,
+    ui: ChatUiState,
+    paletteOpen: Boolean,
+    onAction: (ComposerAction) -> Unit,
+): Boolean {
     val draft = ui.draft
     val ctrlOrMeta = event.isCtrlPressed || event.isMetaPressed
     val action = composerKey(
@@ -340,6 +475,7 @@ private fun composerKeyEvent(event: KeyEvent, busy: Boolean, cardOpen: Boolean, 
         cardOpen = cardOpen,
         draftEmpty = draft.text.isEmpty(),
         hasAttachments = ui.attachments.isNotEmpty(),
+        paletteOpen = paletteOpen,
         panelOpen = ui.mcpPanelOpen.value,
         clipboardHasImage = { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } },
     )
@@ -368,14 +504,15 @@ private fun composerKeyEvent(event: KeyEvent, busy: Boolean, cardOpen: Boolean, 
 
 /**
  * The `+` at the start of the composer box (polish spec 2.3, 2.7): a 24 dp icon button in the secondary tier, described as `Add`,
- * whose menu opens above it, left-aligned, with one item, `Add files or photos`, which calls [onAdd] once the menu has closed. A click
- * on the `+` while the menu is open closes it, as a footer control's does.
+ * whose menu opens above it, left-aligned, with two items, `Add files or photos`, which calls [onAdd] once the menu has closed, and
+ * `Slash commands` (MCP spec 3.4), which calls [onSlashCommands]. A click on the `+` while the menu is open closes it, as a footer
+ * control's does.
  *
  * [modifier] (the button's padding in the row) goes on an outer box; the menu is placed in the inner, unpadded one, so that
  * [AboveAnchor] measures from the button's own edges, as `FooterControl` places its menu.
  */
 @Composable
-private fun AddButton(modifier: Modifier, onAdd: () -> Unit) {
+private fun AddButton(modifier: Modifier, onAdd: () -> Unit, onSlashCommands: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
@@ -411,6 +548,15 @@ private fun AddButton(modifier: Modifier, onAdd: () -> Unit) {
                         },
                     ) {
                         Text("Add files or photos")
+                    }
+                    selectableItem(
+                        selected = false,
+                        onClick = {
+                            open = false
+                            onSlashCommands()
+                        },
+                    ) {
+                        Text("Slash commands")
                     }
                 }
             }
@@ -507,3 +653,10 @@ private suspend fun attach(ui: ChatUiState, name: String, bytes: ByteArray?) {
     }
     ui.attachments += PendingImage(UUID.randomUUID().toString(), name, mediaType, bytes, thumbnail)
 }
+
+/**
+ * [ui]'s draft without the input method's composition in progress (MCP spec 7, Palette and IME): what the palette filters on, so a
+ * composition never moves its selection.
+ */
+private fun committedText(ui: ChatUiState): String =
+    committedDraft(ui.draft.text.toString(), ui.draft.composition?.let { it.min until it.max })

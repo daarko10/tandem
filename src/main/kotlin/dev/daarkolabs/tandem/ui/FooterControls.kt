@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -334,10 +336,11 @@ private fun RingControl(fraction: Float, value: String) {
 
 /**
  * The footer's mode control (spec 2.3): the session's mode as plain text in the secondary tier, which opens the mode menu above it,
- * left-aligned. A pick other than the checked mode calls [onPick].
+ * left-aligned. A pick other than the checked mode calls [onPick]. A [FooterMenu.MODE] in [menuRequest] opens the menu too
+ * (`/permissions`, `/mode`: MCP spec 3.4).
  */
 @Composable
-internal fun ModeControl(composer: ComposerModel, onPick: (PermissionMode) -> Unit) {
+internal fun ModeControl(composer: ComposerModel, onPick: (PermissionMode) -> Unit, menuRequest: MutableState<FooterMenu?>? = null) {
     val palette = chatPalette()
     val items = remember(composer.permissionMode, composer.autoSupported) { modeMenu(composer) }
     val currentOnPick by rememberUpdatedState(onPick)
@@ -349,6 +352,8 @@ internal fun ModeControl(composer: ComposerModel, onPick: (PermissionMode) -> Un
         alignEnd = false,
         digitPick = { digit -> byDigit(items, digit, ModeItem::digit)?.let(::pick) != null },
         label = { Text(modeLabel(composer), style = smallTextStyle(), color = palette.secondary, maxLines = 1) },
+        request = menuRequest,
+        requestedAs = FooterMenu.MODE,
     ) { menu ->
         passiveItem { Text("Mode", style = smallTextStyle(), color = palette.dim) }
         for (item in items) {
@@ -375,10 +380,16 @@ internal fun ModeControl(composer: ComposerModel, onPick: (PermissionMode) -> Un
  * The footer's model · effort control (spec 2.3): the shown model in the secondary tier and the effort in the dim tier ([modelLabel]),
  * which opens the model menu above it, right-aligned: the models ([modelMenu]), then the `Effort` row, which turns the menu to its
  * effort page ([effortMenu]): `‹ Effort`, which leads back, then the levels. A model pick other than the checked one calls
- * [onPickModel] with what `set_model` sends; an effort pick other than the current one calls [onPickEffort].
+ * [onPickModel] with what `set_model` sends; an effort pick other than the current one calls [onPickEffort]. A [FooterMenu.MODEL] in
+ * [menuRequest] opens the menu too (`/model`: MCP spec 3.4).
  */
 @Composable
-internal fun ModelControl(composer: ComposerModel, onPickModel: (String?) -> Unit, onPickEffort: (String) -> Unit) {
+internal fun ModelControl(
+    composer: ComposerModel,
+    onPickModel: (String?) -> Unit,
+    onPickEffort: (String) -> Unit,
+    menuRequest: MutableState<FooterMenu?>? = null,
+) {
     val palette = chatPalette()
     val models = remember(composer) { modelMenu(composer) }
     val efforts = remember(composer) { effortMenu(composer) }
@@ -397,6 +408,8 @@ internal fun ModelControl(composer: ComposerModel, onPickModel: (String?) -> Uni
         pages = if (efforts != null) 2 else 1,
         digitPick = { digit -> byDigit(models, digit, ModelItem::digit)?.let(::pick) != null },
         label = { Text(text, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        request = menuRequest,
+        requestedAs = FooterMenu.MODEL,
     ) { menu ->
         if (efforts != null && menu.page == EFFORT_PAGE) {
             effortPage(efforts, palette, menu) { level -> currentOnPickEffort(level) }
@@ -441,7 +454,7 @@ private const val EFFORT_PAGE: Int = 1
  * The model menu's effort page (spec 2.3): `‹ Effort`, which leads back to the models, a separator, then the levels, the current one
  * checked. A pick other than the current level closes the menu and calls [onPick] with it.
  */
-private fun MenuScope.effortPage(efforts: EffortMenu, palette: ChatPalette, menu: FooterMenu, onPick: (String) -> Unit) {
+private fun MenuScope.effortPage(efforts: EffortMenu, palette: ChatPalette, menu: FooterMenuHandle, onPick: (String) -> Unit) {
     selectableItem(selected = false, onClick = { menu.show(FIRST_PAGE) }) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("‹", color = palette.dim)
@@ -506,7 +519,10 @@ private const val FIRST_PAGE: Int = 0
  * What a footer menu's items get: the [page] the menu shows, [close], which closes the menu, and [show], which turns it to another
  * page in place, the menu staying open.
  */
-internal class FooterMenu(val page: Int, val close: () -> Unit, val show: (Int) -> Unit)
+internal class FooterMenuHandle(val page: Int, val close: () -> Unit, val show: (Int) -> Unit)
+
+/** A footer control whose menu `/model`, `/permissions` or `/mode` asks to open ([ChatUiState.menuRequest], MCP spec 4.4). */
+internal enum class FooterMenu { MODE, MODEL }
 
 /**
  * The page the arrow key of an AWT key press turns to from [page], or null for any other key or a press with Shift, Ctrl, Alt or
@@ -525,7 +541,7 @@ internal fun pageTurn(event: AwtKeyEvent, page: Int): Int? {
  * One footer control (spec 2.3): [label] on a pill that fills while hovered or while its menu is open and is outlined while focused,
  * semantically a drop-down named [description]. A click, Enter or Space opens its menu above it (left- or right-aligned by
  * [alignEnd]) on its first page, unless it has nothing to list ([opens]); [menu] fills the page it is given and closes the menu, or
- * turns it to another of its [pages], with the [FooterMenu] it is given. While the first page is open a digit picks through
+ * turns it to another of its [pages], with the [FooterMenuHandle] it is given. While the first page is open a digit picks through
  * [digitPick], which says whether it picked, and the menu closes when it did; → and ← turn the pages.
  *
  * The digits and the arrows are taken from AWT's key dispatch while the menu is open, not from a Compose key handler (open item 13):
@@ -546,7 +562,9 @@ private fun FooterControl(
     pages: Int = 1,
     digitPick: (Int) -> Boolean,
     label: @Composable () -> Unit,
-    menu: MenuScope.(FooterMenu) -> Unit,
+    request: MutableState<FooterMenu?>? = null,
+    requestedAs: FooterMenu? = null,
+    menu: MenuScope.(FooterMenuHandle) -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
@@ -563,6 +581,15 @@ private fun FooterControl(
         open = opens
     }
     val close = { open = false }
+    // `/model`, `/permissions` or `/mode` asked for this control's menu (MCP spec 4.4): it opens as a click would, and the request
+    // is cleared, so the same command opens it again next time.
+    val requested = request?.value
+    LaunchedEffect(requested) {
+        if (requested != null && requested == requestedAs) {
+            openMenu()
+            request.value = null
+        }
+    }
     val show = { next: Int ->
         page = next
         turning.value = true
@@ -635,7 +662,7 @@ private fun FooterControl(
                     }
                 },
                 popupPositionProvider = remember(alignEnd, gap) { AboveAnchor(alignEnd, gap) },
-            ) { menu(FooterMenu(page, close, show)) }
+            ) { menu(FooterMenuHandle(page, close, show)) }
         }
     }
 }

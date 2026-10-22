@@ -25,6 +25,21 @@ internal enum class ComposerAction {
 
     /** Closes the MCP panel: Esc while it is open, before any other rule (MCP spec 3.2, 4.4). */
     ClosePanel,
+
+    /** Moves the slash palette's selection up one row (MCP spec 3.4). */
+    PaletteUp,
+
+    /** Moves the slash palette's selection down one row. */
+    PaletteDown,
+
+    /** Picks the palette's selected row: Enter, whatever a turn or a card is doing; `pick` decides what that does. */
+    PalettePick,
+
+    /** Puts the selected row's `/<name> ` in the composer without sending: Tab. */
+    PaletteInsert,
+
+    /** Closes the palette, the text staying: Esc. */
+    PaletteClose,
 }
 
 /**
@@ -42,7 +57,9 @@ internal enum class ComposerAction {
  * attached image while the draft is empty ([draftEmpty]) and an image is attached ([hasAttachments]) (polish spec 2.7).
  *
  * While the MCP panel is open ([panelOpen]), Esc closes it before every other rule, so it never stops a turn (MCP spec 3.2, 4.4).
- * Call sites pass the parameters from [draftEmpty] on by name.
+ * Then, while the slash palette is open ([paletteOpen]), Up and Down move its selection, Enter picks, Tab inserts and Esc closes it,
+ * each without Shift, Alt or Ctrl/Cmd but Esc, before the card's and the turn's rules: Enter never sends through the palette, and
+ * Shift+Enter stays a newline (MCP spec 3.4, 4.4). Call sites pass the parameters from [draftEmpty] on by name.
  */
 internal fun composerKey(
     key: Key,
@@ -54,14 +71,16 @@ internal fun composerKey(
     cardOpen: Boolean,
     draftEmpty: Boolean = false,
     hasAttachments: Boolean = false,
+    paletteOpen: Boolean = false,
     panelOpen: Boolean = false,
     clipboardHasImage: () -> Boolean = { false },
 ): ComposerAction? {
     if (type != KeyEventType.KeyDown) return null
+    if (key == Key.Escape && panelOpen) return ComposerAction.ClosePanel
+    if (paletteOpen) paletteKey(key, modified = shift || alt || ctrlOrMeta)?.let { return it }
     return when (key) {
         Key.Enter, Key.NumPadEnter -> if (!shift && !alt && !ctrlOrMeta && !busy && !cardOpen) ComposerAction.Send else null
         Key.Escape -> when {
-            panelOpen -> ComposerAction.ClosePanel
             cardOpen -> ComposerAction.CardEscape
             busy -> ComposerAction.Stop
             else -> null
@@ -70,6 +89,16 @@ internal fun composerKey(
         Key.Backspace -> if (draftEmpty && hasAttachments) ComposerAction.RemoveLastImage else null
         else -> null
     }
+}
+
+/** The open palette's action for [key], with a modifier held or not ([modified]); null leaves the key to the other rules. */
+private fun paletteKey(key: Key, modified: Boolean): ComposerAction? = when (key) {
+    Key.Escape -> ComposerAction.PaletteClose
+    Key.DirectionUp -> if (modified) null else ComposerAction.PaletteUp
+    Key.DirectionDown -> if (modified) null else ComposerAction.PaletteDown
+    Key.Enter, Key.NumPadEnter -> if (modified) null else ComposerAction.PalettePick
+    Key.Tab -> if (modified) null else ComposerAction.PaletteInsert
+    else -> null
 }
 
 /**
