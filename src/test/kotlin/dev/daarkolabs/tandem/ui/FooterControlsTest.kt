@@ -230,9 +230,10 @@ class FooterControlsTest {
         assertEquals("Mode", modeLabel(composer))
         assertTrue(modeMenu(composer).none { it.checked })
         assertEquals(ModelLabel("Model", null), modelLabel(composer))
-        // No process has listed its models yet: the CLI's own aliases, none checked, none badged.
-        assertEquals(listOf("Opus", "Sonnet", "Haiku"), modelMenu(composer).map { it.label })
-        assertTrue(modelMenu(composer).none { it.checked || it.isDefault })
+        // No process has listed its models yet: the CLI's own aliases, none badged, their Default checked since nothing is picked.
+        assertEquals(listOf("Default", "Opus", "Sonnet", "Haiku"), modelMenu(composer).map { it.label })
+        assertTrue(modelMenu(composer).none { it.isDefault })
+        assertEquals(listOf("Default"), modelMenu(composer).filter { it.checked }.map { it.label })
         assertNull(effortMenu(composer))
     }
 
@@ -249,8 +250,26 @@ class FooterControlsTest {
         // Before any process has answered: the aliases, and the raw id by its alias's name, never "claude-opus-5-5".
         val first = composerModel(resumed)
         assertEquals(ModelLabel("Opus", "Medium"), modelLabel(first))
-        assertEquals(listOf("Opus", "Sonnet", "Haiku"), modelMenu(first).map { it.label })
+        assertEquals(listOf("Default", "Opus", "Sonnet", "Haiku"), modelMenu(first).map { it.label })
         assertEquals(listOf("low", "medium", "high", "max"), effortMenu(first)?.items?.map { it.level })
+    }
+
+    @Test
+    fun `an alias-only menu lists the CLI's default, which sends no model and goes back to it`() {
+        // A stopped session that picked Sonnet from the aliases: Sonnet checked, Default pickable, and picking it sends null.
+        val sonnetPicked = composerModel(ChatState(requestedModel = "sonnet", modelSwitchPending = true))
+        val menu = modelMenu(sonnetPicked)
+        assertEquals(ModelItem(value = null, label = "Default", isDefault = false, checked = false, digit = 1), menu.item("Default"))
+        assertTrue(menu.item("Sonnet").checked)
+        assertEquals(listOf("Default"), menu.filter { it.value == null }.map { it.label })
+        // Back on the default, the popup's own `default` pick included: Default checked, the aliases picked by their values.
+        for (requested in listOf(null, "default")) {
+            val back = modelMenu(composerModel(ChatState(requestedModel = requested)))
+            assertTrue(back.item("Default").checked, "requested $requested")
+            assertEquals(listOf("opus", "sonnet", "haiku"), back.filter { !it.checked }.map { it.value }, "requested $requested")
+        }
+        // A list that resolves its `default` entry badges that entry instead: no Default item of its own.
+        assertTrue(modelMenu(composer()).all { it.isDefault || it.value != null })
     }
 
     @Test

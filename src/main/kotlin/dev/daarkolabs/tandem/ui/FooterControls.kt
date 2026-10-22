@@ -117,22 +117,31 @@ internal data class ModelItem(val value: String?, val label: String, val isDefau
 /**
  * The model menu (spec 2.3): every model of the CLI's list but its `default` entry, in its order. The entry that resolves to the default
  * model carries the chip; picking it sends no model while that model runs or nothing runs yet, and its value while another model
- * runs, so that the pick is never ignored. The shown model is checked in place of its digit; the first nine items have digits. A
- * requested model that no entry stands for is listed last, by its value. Empty only for a composer without models, which
- * [dev.daarkolabs.tandem.chat.composerModel] never gives: it falls back to the models another process listed, then to the CLI's aliases.
+ * runs, so that the pick is never ignored. A `default` entry that resolves to no model (the CLI's aliases,
+ * [dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES]) has no entry to badge, so it is listed in its place, by its name: picking it
+ * sends no model, and it is checked while no model is picked. The shown model is checked in place of its digit; the first nine items
+ * have digits. A requested model that no entry stands for is listed last, by its value. Empty only for a composer without models,
+ * which [dev.daarkolabs.tandem.chat.composerModel] never gives: it falls back to the models another process listed, then to the
+ * CLI's aliases.
  */
 internal fun modelMenu(composer: ComposerModel): List<ModelItem> {
     if (composer.models.isEmpty()) return emptyList()
     val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
     val default = composer.defaultModel
     val defaultRuns = composer.activeModel == null || composer.activeModel == default
-    val entries = composer.models.filter { it.value != DEFAULT_MODEL_ENTRY }
-    val items = entries.map { option ->
-        val isDefault = default != null && option.resolvedModel == default
-        Triple(if (isDefault && defaultRuns) null else option.value, option.displayName, isDefault) to (option == shown)
-    }
     // The new-session popup can pick the CLI's own `default` entry: that one is the Default-badged item, not an item of its own.
     val requested = composer.requestedModel?.takeIf { it != DEFAULT_MODEL_ENTRY }
+    val entries = composer.models.filter { it.value != DEFAULT_MODEL_ENTRY }
+    val items = composer.models.mapNotNull { option ->
+        when {
+            option.value != DEFAULT_MODEL_ENTRY -> {
+                val isDefault = default != null && option.resolvedModel == default
+                Triple(if (isDefault && defaultRuns) null else option.value, option.displayName, isDefault) to (option == shown)
+            }
+            option.resolvedModel == null -> Triple(null, option.displayName, false) to (requested == null)
+            else -> null
+        }
+    }
     val extra = if (requested != null && entries.none { it.value == requested }) listOf(Triple(requested, requested, false) to false) else emptyList()
     return (items + extra).mapIndexed { index, (item, checked) ->
         val (value, label, isDefault) = item
