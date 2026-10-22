@@ -1,6 +1,12 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ControlPayloads
+import dev.daarkolabs.tandem.protocol.Fixtures
+import dev.daarkolabs.tandem.protocol.HostMessages
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.protocol.McpAuthStart
+import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -8,6 +14,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -18,6 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -32,8 +41,10 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /** Runs [ClaudeSession] against a fake CLI (a shell script), so no real `claude` is needed. */
 class ClaudeSessionTest {
@@ -616,6 +627,307 @@ class ClaudeSessionTest {
             real.destroyForcibly()
             output.writer.close()
         }
+    }
+
+    /**
+     * A session on a [ScriptedProcess]: the test writes the CLI's lines with [write], and every frame the host writes lands in
+     * [stdin]. Answers go through the session's own request path (spec 9.2).
+     */
+    private class ScriptedSession(tmp: Path, sessionId: String) {
+        val stdin: File = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > '${stdin.path}'").start())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = sessionId), ProcessLauncher { _, _ -> process })
+
+        fun write(line: String) = process.script.println(line)
+
+        /** A success answer to [requestId]; [payload] is its `response` object, none for a bare success (`mcp-status:19`). */
+        fun success(requestId: String, payload: String? = null) {
+            val response = payload?.let { ""","response":$it""" } ?: ""
+            write("""{"type":"control_response","response":{"subtype":"success","request_id":"$requestId"$response}}""")
+        }
+
+        /** An error answer to [requestId], in the envelope of docs/protocol.md 4.1. */
+        fun error(requestId: String, message: String) =
+            write("""{"type":"control_response","response":{"subtype":"error","request_id":"$requestId","error":"$message"}}""")
+
+        /** The frames the host wrote that contain [part], once there are [count]. */
+        suspend fun written(part: String, count: Int = 1): List<String> = withTimeout(10_000) {
+            var lines = stdin.readLines().filter { part in it }
+            while (lines.size < count) {
+                delay(20)
+                lines = stdin.readLines().filter { part in it }
+            }
+            lines
+        }
+
+        /** The host's [nth] `control_request` of [subtype], once it is written. */
+        suspend fun requestOf(subtype: String, nth: Int = 1): JsonObject =
+            Json.parseToJsonElement(written("\"subtype\":\"$subtype\"", nth)[nth - 1]).jsonObject
+
+        /** The request id of the host's [nth] `control_request` of [subtype], once it is written. */
+        suspend fun requestIdOf(subtype: String, nth: Int = 1): String = requestOf(subtype, nth).getValue("request_id").jsonPrimitive.content
+
+        /**
+         * The chat once every line written so far has been read: an answer nobody waits for goes last, and its notice says the reader
+         * got to it. Its own notice is left out.
+         */
+        suspend fun settled(): ChatState {
+            error("sentinel", "sentinel")
+            val state = withTimeout(10_000) { session.state.first { s -> s.entries.any { it is ChatEntry.Notice && it.text == SENTINEL } } }
+            return state.copy(entries = state.entries.filterNot { it is ChatEntry.Notice && it.text == SENTINEL }, entryIndex = emptyMap())
+        }
+
+        suspend fun close() = scope.coroutineContext.job.cancelAndJoin()
+
+        private companion object {
+            const val SENTINEL = "The CLI rejected a request: sentinel"
+        }
+    }
+
+    private fun ChatState.notices(level: NoticeLevel): List<String> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == level }.map { it.text }
+
+    private fun rejected(error: String): String = "The CLI rejected a request: $error"
+
+    @Test
+    fun `a request completes with the response that carries its id and the reducer never sees it`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val sent = CompletableDeferred<String>()
+        val reply = async { run.session.request(10_000) { sent.complete(it); HostMessages.mcpStatus(it) } }
+        val requestId = withTimeout(10_000) { sent.await() }
+        run.written("\"request_id\":\"$requestId\"")
+        run.error("someone-else", "not this one") // another id: the reducer's
+        run.error(requestId, "Server not found: nosuch")
+
+        val answered = assertIs<Reply.Answered>(withTimeout(10_000) { reply.await() })
+        assertEquals(requestId, answered.response.requestId)
+        assertEquals("Server not found: nosuch", answered.response.error)
+        assertEquals(listOf(rejected("not this one")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `an unregistered error response still reaches the chat`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.error("tandem-99", "Unknown subtype")
+        assertEquals(listOf(rejected("Unknown subtype")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `a request times out and a late answer goes to the reducer`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        var requestId = ""
+        val reply = withTimeout(10_000) { run.session.request(200) { requestId = it; HostMessages.mcpStatus(it) } }
+        assertEquals(Reply.TimedOut, reply)
+
+        run.error(requestId, "late")
+        assertEquals(listOf(rejected("late")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `an answer that races the timeout is returned, not lost`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val timeoutMillis = 60L
+        // Each answer comes at the deadline, a few milliseconds either side: either the caller gets it or the reducer does.
+        val outcomes = (0 until 30).map { i ->
+            val sent = CompletableDeferred<String>()
+            val writer = launch(Dispatchers.IO) {
+                val requestId = sent.await()
+                delay(timeoutMillis + i % 5 - 2)
+                run.error(requestId, "race-$i")
+            }
+            val reply = withTimeout(10_000) { run.session.request(timeoutMillis) { sent.complete(it); HostMessages.mcpStatus(it) } }
+            writer.join()
+            i to reply
+        }
+
+        val reduced = run.settled().notices(NoticeLevel.ERROR)
+        for ((i, reply) in outcomes) {
+            when (reply) {
+                is Reply.Answered -> {
+                    assertEquals("race-$i", reply.response.error)
+                    assertFalse(rejected("race-$i") in reduced, "race-$i went to both the caller and the reducer")
+                }
+                Reply.TimedOut -> assertTrue(rejected("race-$i") in reduced, "race-$i was lost")
+                Reply.Ended -> fail("the session did not end")
+            }
+        }
+        assertEquals(outcomes.count { it.second == Reply.TimedOut }, reduced.size, reduced.toString())
+        run.close()
+    }
+
+    @Test
+    fun `a cancelled request's error answer still reaches the chat`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val sent = CompletableDeferred<String>()
+        val caller = launch { run.session.request(10_000) { sent.complete(it); HostMessages.mcpReconnect(it, "broken") } }
+        val requestId = withTimeout(10_000) { sent.await() }
+        caller.cancelAndJoin() // a panel closed mid-reconnect
+
+        run.error(requestId, "Connection closed")
+        assertEquals(listOf(rejected("Connection closed")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `a process exit fails every waiting request with Ended`() = runBlocking {
+        // Reads initialize and both requests, then exits by itself: nothing closes the bare session.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("read a; read b; read c"))
+        session.start()
+        val replies = List(2) { async { session.request(10_000) { HostMessages.mcpStatus(it) } } }
+
+        assertEquals(listOf<Reply>(Reply.Ended, Reply.Ended), withTimeout(5_000) { replies.awaitAll() })
+        assertTrue(session.state.value.ended)
+        assertTrue(session.job.isActive, "the session was not closed: its process ended")
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `close while a request waits answers Ended`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > /dev/null"))
+        session.start()
+        val sent = CompletableDeferred<Unit>()
+        val reply = async { session.request(10_000) { sent.complete(Unit); HostMessages.mcpStatus(it) } }
+        withTimeout(10_000) { sent.await() }
+
+        session.close()
+        assertEquals(Reply.Ended, withTimeout(5_000) { reply.await() })
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `a failed launch answers Ended`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val asked = CountDownLatch(1)
+        // The launch fails only once the request waits, so the end has to answer it.
+        val launcher = ProcessLauncher { _, _ ->
+            asked.await(10, TimeUnit.SECONDS)
+            throw IOException("No such file or directory")
+        }
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        session.start()
+
+        val reply = withTimeout(10_000) { session.request(10_000) { asked.countDown(); HostMessages.mcpStatus(it) } }
+        assertEquals(Reply.Ended, reply)
+        assertTrue(session.state.value.ended)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `a request after the end answers Ended at once`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("exit 0"))
+        session.start()
+        withTimeout(10_000) { session.state.first { it.ended } }
+        var built = 0
+
+        // The process is gone, the session still open: nothing is written and nothing waits.
+        assertEquals(Reply.Ended, withTimeout(1_000) { session.request(10_000) { built++; HostMessages.mcpStatus(it) } })
+        session.close()
+        assertEquals(Reply.Ended, withTimeout(1_000) { session.request(10_000) { built++; HostMessages.mcpStatus(it) } })
+        assertEquals(0, built, "a request after the end builds no frame")
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `an mcp_status success without mcpServers is Rejected`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val reply = async { run.session.mcpStatus() }
+        // Synthetic: a success whose payload has no mcpServers array.
+        run.success(run.requestIdOf("mcp_status"), """{"servers":[]}""")
+
+        assertEquals(McpResult.Failed(McpError.Rejected("the CLI's answer listed no servers")), withTimeout(10_000) { reply.await() })
+        assertEquals(McpState(), run.settled().mcp)
+        run.close()
+    }
+
+    @Test
+    fun `an mcp_authenticate bare success is Ok without a url`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val reply = async { run.session.mcpAuthenticate("echo") }
+        val frame = Json.parseToJsonElement(run.written("\"subtype\":\"mcp_authenticate\"").single()).jsonObject
+        assertEquals("echo", frame.getValue("request").jsonObject.getValue("serverName").jsonPrimitive.content)
+        run.success(frame.getValue("request_id").jsonPrimitive.content) // the bare success of mcp-status:19
+
+        assertEquals(McpResult.Ok(McpAuthStart(authUrl = null)), withTimeout(10_000) { reply.await() })
+        run.close()
+    }
+
+    @Test
+    fun `the typed mcp requests send the probe frames and map their answers`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        /** Line [n] of the mcp-status fixture, answering [requestId] in place of its recorded id. */
+        fun recorded(n: Int, requestId: String): String = Fixtures.lines("mcp-status")[n - 1].replace(Regex("<request_id-\\d+>"), requestId)
+
+        /** The payload of a recorded answer line. */
+        fun payload(line: String): JsonObject? = (Ndjson.decode(line) as CliMessage.ControlResponse).payload
+
+        val status = async { run.session.mcpStatus() }
+        val listed = recorded(18, run.requestIdOf("mcp_status"))
+        run.write(listed)
+        val servers = assertNotNull(ControlPayloads.mcpStatus(payload(listed))).servers
+        assertEquals(McpResult.Ok(servers), withTimeout(10_000) { status.await() })
+        assertEquals(listOf("echo", "broken", "authy"), servers.map { it.name })
+        assertEquals(McpState(servers, detailed = true), run.session.state.value.mcp)
+
+        val toggle = async { run.session.mcpToggle("echo", enabled = false) }
+        val toggleFrame = run.requestOf("mcp_toggle")
+        assertEquals(Json.parseToJsonElement("""{"subtype":"mcp_toggle","serverName":"echo","enabled":false}"""), toggleFrame.getValue("request"))
+        run.success(toggleFrame.getValue("request_id").jsonPrimitive.content)
+        assertEquals(McpResult.Ok(Unit), withTimeout(10_000) { toggle.await() })
+
+        val reconnect = async { run.session.mcpReconnect("broken") }
+        run.write(recorded(36, run.requestIdOf("mcp_reconnect")))
+        assertEquals(McpResult.Failed(McpError.Rejected("Connection closed")), withTimeout(10_000) { reconnect.await() })
+
+        val signIn = async { run.session.mcpAuthenticate("authy") }
+        val link = recorded(40, run.requestIdOf("mcp_authenticate"))
+        run.write(link)
+        val start = assertNotNull(ControlPayloads.mcpAuthenticate(payload(link)))
+        assertEquals(McpResult.Ok(start), withTimeout(10_000) { signIn.await() })
+        assertTrue(start.authUrl!!.startsWith("http://127.0.0.1:33041/authorize?"), start.authUrl)
+
+        // A link Tandem would not open is never handed on.
+        val local = async { run.session.mcpAuthenticate("authy") }
+        run.success(run.requestIdOf("mcp_authenticate", nth = 2), """{"authUrl":"file:///etc/passwd"}""")
+        assertEquals(McpResult.Failed(McpError.Rejected("the sign-in link is not an http(s) URL")), withTimeout(10_000) { local.await() })
+
+        assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "every answer was its caller's")
+        run.close()
+        assertEquals(McpResult.Failed(McpError.Ended), run.session.mcpToggle("echo", enabled = true))
+    }
+
+    @Test
+    fun `an elicitation request keeps the Unsupported request answer and adds a warning notice`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        // Not recorded: an elicitation request as sdk.d.ts 3976-3999 types it (URL mode), inline. No fixture file: hard rule 6
+        // keeps synthetic-long-reply the only unrecorded fixture.
+        run.write(
+            """{"type":"control_request","request_id":"elicit-1","request":{"subtype":"elicitation","mcp_server_name":"authy",""" +
+                """"message":"Sign in to authy","mode":"url","url":"https://example.test/authorize","elicitation_id":"el-1"}}""",
+        )
+
+        val answer = Json.parseToJsonElement(run.written("\"request_id\":\"elicit-1\"").single())
+        val unsupported = """{"type":"control_response","response":{"subtype":"error","request_id":"elicit-1","error":"Unsupported request: elicitation"}}"""
+        assertEquals(Json.parseToJsonElement(unsupported), answer)
+        val state = run.settled()
+        assertEquals(listOf("An MCP server asked for input Tandem cannot show yet."), state.notices(NoticeLevel.WARNING))
+        assertEquals(emptyList(), state.notices(NoticeLevel.ERROR))
+        run.close()
     }
 
     private fun assertNull(value: Any?) = kotlin.test.assertNull(value)

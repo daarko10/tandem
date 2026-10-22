@@ -4,6 +4,7 @@ import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ContentBlock
 import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.InboundRequest
+import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.protocol.TaskUsage
@@ -59,6 +60,9 @@ sealed interface SessionEvent {
      * as when the IDE exits, so a turn in progress did not fail.
      */
     data class Ended(val detail: String, val isError: Boolean, val endedByHost: Boolean = false, val atMillis: Long = 0L) : SessionEvent
+
+    /** The CLI answered `mcp_status` with [servers]: they replace what `system/init` listed. */
+    data class McpServersListed(val servers: List<McpServerInfo>) : SessionEvent
 }
 
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
@@ -93,6 +97,7 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.PermissionAnswered -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != event.requestId })
     is SessionEvent.HostNotice -> state.notice(event.level, event.text)
     is SessionEvent.Ended -> reduceEnded(state, event)
+    is SessionEvent.McpServersListed -> state.copy(mcp = state.mcp.copy(servers = event.servers, detailed = true))
 }
 
 /**

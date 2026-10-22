@@ -3,16 +3,21 @@ package dev.daarkolabs.tandem.session
 import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.HostMessages
 import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.InboundRequest
+import dev.daarkolabs.tandem.protocol.McpAuthStart
+import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -30,14 +35,31 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import java.io.IOException
 import java.nio.file.Path
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 private val LOG = logger<ClaudeSession>()
+
+/** How long `mcp_status` and `mcp_toggle` wait for their answer. */
+private const val MCP_STATUS_SECONDS = 15
+
+/** How long `mcp_reconnect` and `mcp_authenticate` wait for their answer (a guess: a reconnect that succeeds is unrecorded). */
+private const val MCP_SLOW_SECONDS = 30
+
+/** How a [ClaudeSession.request] came out: the CLI's [Answered] answer, no answer in time, or the process [Ended] first. */
+internal sealed interface Reply {
+    data class Answered(val response: CliMessage.ControlResponse) : Reply
+
+    data object TimedOut : Reply
+
+    data object Ended : Reply
+}
 
 /**
  * How to start the CLI for one chat: a new session ([sessionId]), an existing one ([resumeSessionId]), or a fork of an existing one
@@ -133,6 +155,13 @@ class ClaudeSession(
     private val outbox = Channel<JsonObject>(Channel.UNLIMITED)
     private val nextId = AtomicLong()
 
+    /** The [request]s waiting for their answer, by request id. The reader hands each answer to its waiter, or else to [reduce]. */
+    private val replies = ConcurrentHashMap<String, CompletableDeferred<Reply>>()
+
+    /** Set once the process is over (it exited, never started, or the session was closed): no request is answered any more. */
+    @Volatile
+    private var ended = false
+
     /** Set once Tandem ends the process ([terminate], [killNow]): from then on, its output failing under a read is no failure. */
     @Volatile
     private var stopping = false
@@ -168,10 +197,22 @@ class ClaudeSession(
     var process: Process? = null
         private set
 
+    init {
+        // A backstop: a session cancelled before its process coroutine ran never gets to that coroutine's own end.
+        scope.coroutineContext.job.invokeOnCompletion { endRequests() }
+    }
+
     fun start(): Job {
         // initialize must be the first frame on stdin, ahead of anything the user sends.
         send(HostMessages.initialize(newRequestId()))
-        return scope.launch(Dispatchers.IO + CoroutineName("ClaudeSession.io")) { run() }
+        return scope.launch(Dispatchers.IO + CoroutineName("ClaudeSession.io")) {
+            // Every end of the process passes here: a natural exit, a failed launch, and close() or stop() cancelling it.
+            try {
+                run()
+            } finally {
+                endRequests()
+            }
+        }
     }
 
     private suspend fun run() {
@@ -184,6 +225,7 @@ class ClaudeSession(
             LOG.warn("could not start claude", e)
             val reason = e.message ?: e.javaClass.simpleName
             val text = "Could not start `${config.binary}`: $reason. Is the claude CLI (Claude Code) installed?"
+            ended = true // ahead of the chat saying so: a request made once it shows answers Ended at once
             dispatch(SessionEvent.Ended(text, isError = true, atMillis = clock()))
             return
         }
@@ -202,6 +244,7 @@ class ClaudeSession(
             stderr.join()
             writer.cancel()
             LOG.info("claude exited with code $code")
+            ended = true // ahead of the chat saying so: a request made once it shows answers Ended at once
             dispatch(exitEvent(code))
             this.coroutineContext.job.children.forEach { it.cancel() }
         }
@@ -255,6 +298,89 @@ class ClaudeSession(
 
     /** Shows [text] in this chat as a notice of [level]: something Tandem itself tells the user about this process. */
     internal fun notice(level: NoticeLevel, text: String): Unit = dispatch(SessionEvent.HostNotice(level, text))
+
+    /**
+     * Sends the control request [build] makes for a new request id, and waits up to [timeoutMillis] for the CLI's answer to it. The
+     * id is registered before the frame goes out, so the answer is either this call's or, when it comes after the timeout or after
+     * the caller was cancelled, the reducer's (an error then shows in the chat), never lost. Once the process is over, it answers
+     * [Reply.Ended] and writes nothing; one that ends while this waits answers [Reply.Ended] too.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    internal suspend fun request(timeoutMillis: Long, build: (requestId: String) -> JsonObject): Reply {
+        val id = newRequestId()
+        val waiter = CompletableDeferred<Reply>()
+        replies[id] = waiter
+        try {
+            if (ended || !job.isActive) return Reply.Ended
+            send(build(id))
+            withTimeoutOrNull(timeoutMillis) { waiter.await() }?.let { return it }
+            replies.remove(id)
+            if (!waiter.complete(Reply.TimedOut)) return waiter.getCompleted() // an answer that raced the timeout is the caller's
+            LOG.info("control request $id timed out after $timeoutMillis ms")
+            return Reply.TimedOut
+        } finally {
+            // On every exit, the caller's cancellation included: a later answer finds no waiter and goes to the reducer.
+            replies.remove(id)
+            waiter.cancel()
+        }
+    }
+
+    /** Lists the session's MCP servers (`mcp_status`); a success also replaces the servers of [ChatState.mcp]. */
+    suspend fun mcpStatus(): McpResult<List<McpServerInfo>> {
+        val result = mcpRequest(MCP_STATUS_SECONDS, HostMessages::mcpStatus) { payload ->
+            val listed = ControlPayloads.mcpStatus(payload)
+            if (listed == null) McpResult.Failed(McpError.Rejected("the CLI's answer listed no servers")) else McpResult.Ok(listed.servers)
+        }
+        if (result is McpResult.Ok) dispatch(SessionEvent.McpServersListed(result.value))
+        return result
+    }
+
+    /** Disables or enables the MCP server [name] (`mcp_toggle`). */
+    suspend fun mcpToggle(name: String, enabled: Boolean): McpResult<Unit> =
+        mcpRequest(MCP_STATUS_SECONDS, { HostMessages.mcpToggle(it, name, enabled) }) { McpResult.Ok(Unit) }
+
+    /** Reconnects the MCP server [name] (`mcp_reconnect`). */
+    suspend fun mcpReconnect(name: String): McpResult<Unit> =
+        mcpRequest(MCP_SLOW_SECONDS, { HostMessages.mcpReconnect(it, name) }) { McpResult.Ok(Unit) }
+
+    /**
+     * Starts the MCP server [name]'s sign-in (`mcp_authenticate`): the link to open, if any. A success without one (a bare success)
+     * is [McpResult.Ok] with no `authUrl`; a link that is not an `http(s)` URL is never handed on.
+     */
+    suspend fun mcpAuthenticate(name: String): McpResult<McpAuthStart> =
+        mcpRequest(MCP_SLOW_SECONDS, { HostMessages.mcpAuthenticate(it, name) }) { payload ->
+            val start = ControlPayloads.mcpAuthenticate(payload) ?: McpAuthStart(authUrl = null)
+            if (start.authUrl != null && ControlPayloads.browsableUrl(start.authUrl) == null) {
+                McpResult.Failed(McpError.Rejected("the sign-in link is not an http(s) URL"))
+            } else {
+                McpResult.Ok(start)
+            }
+        }
+
+    /**
+     * One MCP [request] of [seconds]: a success's payload goes to [decode], off the caller's thread; an error answer is
+     * [McpError.Rejected] with the CLI's text.
+     */
+    private suspend fun <T> mcpRequest(seconds: Int, build: (String) -> JsonObject, decode: (JsonObject?) -> McpResult<T>): McpResult<T> =
+        when (val reply = request(seconds * 1_000L, build)) {
+            is Reply.Answered -> {
+                val response = reply.response
+                if (response.isSuccess) {
+                    withContext(Dispatchers.Default) { decode(response.payload) }
+                } else {
+                    McpResult.Failed(McpError.Rejected(response.error ?: "unknown error"))
+                }
+            }
+            Reply.TimedOut -> McpResult.Failed(McpError.TimedOut(seconds))
+            Reply.Ended -> McpResult.Failed(McpError.Ended)
+        }
+
+    /** The process is over: every waiting [request] answers [Reply.Ended], and so does every later one. */
+    private fun endRequests() {
+        ended = true
+        replies.values.forEach { it.complete(Reply.Ended) }
+        replies.clear()
+    }
 
     /**
      * Answers [permission] with [answer] ([PermissionAnswers] makes them): the `control_response` goes to stdin, and the request is
@@ -314,7 +440,13 @@ class ClaudeSession(
                 is CliMessage.ControlRequest -> if (message.request is InboundRequest.Other) {
                     LOG.info("unsupported control request ${message.request.subtype}")
                     send(HostMessages.error(message.requestId, "Unsupported request: ${message.request.subtype}"))
+                    // An MCP server's question (spec 2): answered as unsupported, as before, and no longer silently.
+                    if (message.request.subtype == "elicitation") {
+                        notice(NoticeLevel.WARNING, "An MCP server asked for input Tandem cannot show yet.")
+                    }
                 }
+                // The answer to a request() that waits for it is that call's alone; any other goes to the reducer.
+                is CliMessage.ControlResponse -> if (replies.remove(message.requestId)?.complete(Reply.Answered(message)) == true) continue
                 else -> {}
             }
             dispatch(SessionEvent.Cli(message, at))

@@ -1,9 +1,12 @@
 package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.Delta
+import dev.daarkolabs.tandem.protocol.McpServerInfo
+import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import kotlinx.serialization.json.Json
@@ -1171,6 +1174,21 @@ class ReducerTest {
     fun `an assistant line stamped 0 carries no time`() {
         val state = reduce(ChatState(), SessionEvent.Cli(Ndjson.decode(REPLY_LINE), atMillis = 0L))
         assertNull(state.assistants().single().atMillis)
+    }
+
+    @Test
+    fun `an mcp_status answer replaces the servers and marks them detailed`() {
+        val answer = Ndjson.decode(Fixtures.lines("mcp-status")[18 - 1]) as CliMessage.ControlResponse
+        val servers = assertNotNull(ControlPayloads.mcpStatus(answer.payload)).servers
+        // What an earlier answer or init left: a server no longer listed, and the inits counted so far.
+        val earlier = ChatState(mcp = McpState(servers = listOf(McpServerInfo("gone", McpStatus.FAILED, "failed")), initCount = 2))
+
+        val state = reduce(earlier, SessionEvent.McpServersListed(servers))
+        assertEquals(listOf("echo", "broken", "authy"), state.mcp.servers.map { it.name })
+        assertEquals(servers, state.mcp.servers)
+        assertTrue(state.mcp.detailed)
+        assertEquals(2, state.mcp.initCount)
+        assertEquals(earlier.entries, state.entries)
     }
 }
 

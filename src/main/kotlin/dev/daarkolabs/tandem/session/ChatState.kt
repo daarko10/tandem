@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.PermissionDenial
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.serialization.json.JsonElement
@@ -83,7 +84,15 @@ data class ChatState(
      * and on a reloaded transcript, whose lines' usage is not decoded.
      */
     val context: ContextUsage? = null,
+    /** The session's MCP servers, as the latest `system/init` and `mcp_status` answer report them. */
+    val mcp: McpState = McpState(),
 )
+
+/**
+ * The session's MCP servers: [servers] in the CLI's order; [detailed] once an `mcp_status` answer gave them (errors, config, tools),
+ * not only `system/init`'s thin list; [initCount] counts the `system/init` lines seen.
+ */
+data class McpState(val servers: List<McpServerInfo> = emptyList(), val detailed: Boolean = false, val initCount: Int = 0)
 
 /**
  * How full the context window is: [tokens] is the input of the main thread's latest `message_start` (plain, cache-creation and
