@@ -73,8 +73,10 @@ cancellation (one fixer at a time; a second firing waits), `timeout-minutes: 90`
 (the federation exchange and the Claude GitHub App token exchange), `contents: read` (the checkout, and the drift branch
 read through the API; the fix branch is pushed with the App token, whose scope comes from the App's installation, not
 from the workflow token, and the job runs code the agent wrote, which a writable workflow token would let push tags,
-releases or any unprotected branch as `github-actions[bot]`), `pull-requests: write`, `issues: write` (the kind-1
-report) and `actions: read` (the red run's artifact and log). The `enforce` job narrows them further (step 9). The
+releases or any unprotected branch as `github-actions[bot]`), `pull-requests: read` (the gate's PR list; its comment
+goes through the issues endpoint, so this token, which the agent's test code can read from the runner's memory, holds
+no pull-request write and cannot approve a pull request), `issues: write` (the kind-1 report and the gate's comment)
+and `actions: read` (the red run's artifact and log). The `enforce` job sets its own (step 9). The
 workflow file must
 exist on `main` for `workflow_run` to fire at all, so the first real firing happens only after this branch is merged.
 
@@ -142,14 +144,14 @@ The nightly keeps its name, schedule, steps and artifact name. Four additions:
 
 ### The fixer runtime
 
-One job, `fix`, on `ubuntu-latest`:
+Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
 
 1. `jlumbroso/free-disk-space@v2.0.0` (the same settings as `build.yml`: the platform tests need the room),
    `actions/checkout@v7` with `persist-credentials: false` (so the only GitHub credential the agent holds is the App
    token the action exports; see step 7), `actions/setup-java@v6` (zulu 21), `gradle/actions/setup-gradle@v6` with
    `cache-read-only: true`, against an accidental save: the agent runs test code it wrote in this job, which can
    rewrite the Gradle User Home (build cache entries, dependency jars), and a cache setup-gradle's post step saved
-   from it in `main`'s scope would be restored by `Build` on `main` and on every pull request, past branch protection.
+   from it in `main`'s scope would be restored by `Build` on `main` and on every pull request, past the ruleset's review.
    It does not bind hostile code, which runs with sudo on a job on `main` and could write such a cache itself with the
    runner's cache token (the remaining risk named in "Safeguards").
 2. **Fetch the recording.** `mkdir -p build/drift` first (nothing else creates the directory, and the steps below
@@ -194,15 +196,22 @@ One job, `fix`, on `ubuntu-latest`:
    `kind`, `cli_version` and `detail`. One issue, one comment per red run, no branch, no PR, no agent spend. The job
    ends green: the loop did its work.
 7. **Skip when a fix is already waiting.** `gh pr list --label contract-drift --state open` non-empty → the step
-   comments on that PR ("the nightly of <date> is still red: run <link>") and the job ends. A red that persists for
-   a week opens one PR, not seven. Once the gate proceeds, the step `Require a protected main` (`id: protect`, with
-   `GITHUB_TOKEN`) checks the precondition of "Safeguards" before any spend: the largest
-   `required_approving_review_count` of a `pull_request` rule in `gh api
-   "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"` (the active rulesets' rules, readable with metadata
-   access) must be a number of at least 1. Classic branch protection does not count: the workflow token cannot read its
-   review count (administration access), and `branches/main`'s `protected: true` holds for a classic rule with no
-   option ticked, which still accepts a direct push. Anything else, a failed read or an answer that is not a number
-   included: `::error` and `exit 1`, the agent does not start and step 9 is skipped. A ruleset on a private repository
+   comments on that PR ("the nightly of <date> is still red: run <link>", through `gh api
+   "repos/$GITHUB_REPOSITORY/issues/<n>/comments"`, which `issues: write` covers: the job holds no pull-request write)
+   and the job ends. A red that persists for a week opens one PR, not seven. Once the gate proceeds, the step `Require
+   a protected main` (`id: protect`, with `GITHUB_TOKEN`) checks the precondition of "Safeguards" before any spend: the
+   number of `pull_request` rules in `gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"` (the active
+   rulesets' rules, readable with metadata access) whose `required_approving_review_count` is at least 1,
+   `require_code_owner_review` is `true` and `require_last_push_approval` is `true` must be a number of at least 1, and
+   `main`'s `.github/CODEOWNERS` (read raw through the contents API; `contents: read` covers it) must have a line
+   owning every file (`* @owner`), since the code-owner review binds only files that have an owner. One approving
+   review alone would not do: the App holds pull-request write, so it can approve a pull request it did not author
+   (the owner's open PR after a push to its unprotected head branch, a Dependabot PR) and then merge it, and the
+   agent's test code runs with the App token in its environment; an App is no code owner and cannot approve its own
+   push. Classic branch protection does not count: the workflow token cannot read its review count (administration
+   access), and `branches/main`'s `protected: true` holds for a classic rule with no option ticked, which still
+   accepts a direct push. Anything else, a failed read or an answer that is not a number included: `::error` and
+   `exit 1`, the agent does not start and step 9 is skipped. A ruleset on a private repository
    owned by a personal account is enforced only with GitHub Pro, and what the endpoint lists for an unenforced ruleset
    is not known, so reading the rule does not prove enforcement: the owner's part ("What the owner does") comes first.
    The same step then refuses a drift branch `drift/<date>-<run id>` that already exists (`gh api
@@ -284,22 +293,28 @@ One job, `fix`, on `ubuntu-latest`:
    to print "stays within the allowlist" for a PR that edits `build.gradle.kts`. The job reads the `fix` job's outputs
    `proceed` (the gate), `protected` (the protect step's outcome), `kind`, `agent`, `id`, `url` and `date`; all but
    `agent` were written before the agent started (a step's `GITHUB_OUTPUT` is read when that step ends), and `agent`
-   only appears in a message. Its one `run:` step lists the
-   files the drift branch changed against `main` (`gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/<n>/files"`, each
+   only appears in a message. Its one `run:` step finds the loop's pull requests: the open ones whose head is
+   `drift/<date>-<run id>` or which carry the label `contract-drift` (`gh pr list --state open --limit 100 --json
+   number,headRefName,labels`, selected with `jq --arg branch`; the gate proceeded only when none carried the label,
+   so every one of them was opened during this run). A PR from the branch that lacks the label gets it (the issues
+   labels endpoint), so the gate holds while it is open instead of the next nightly starting a second agent run. For
+   each of them, never only the first, the step lists the
+   files it changed against `main` (`gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/<n>/files"`, each
    `filename` and a rename's `previous_filename`: `gh pr view --json files` stops at 100 files and names only a
    rename's new path) and, when any path is outside
    `src/main/kotlin/dev/daarkolabs/tandem/protocol/`, `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`,
    `src/test/` and `docs/protocol.md`, comments on the PR naming the offending paths, leaves it open and fails the job
-   (`exit 1`). The PR is not closed: the gate of step 7 keys on an open `contract-drift` PR, so a closed one would
+   (`exit 1`). More than one such PR is red too (`exit 1`, after every file list was checked): the agent opens one,
+   and the extra ones are closed by hand. The PR is not closed: the gate of step 7 keys on an open `contract-drift` PR, so a closed one would
    re-arm the loop, and the next nightly (same red, same CLI) would start a fresh agent run that produces the same
    out-of-allowlist fix, one Opus run plus a `Build` run per night until the owner intervened, against the cost
    safeguard below; and to the gate a close by this step is indistinguishable from the owner closing a wrong fix.
-   Left open, the PR holds the gate (step 7 comments on it once per further red), branch protection still blocks its
-   merge, and the owner decides: close it to re-arm the loop, or merge after review, cherry-picking the agent's work
+   Left open, the PR holds the gate (step 7 comments on it once per further red), the ruleset on `main` still blocks
+   its merge, and the owner decides: close it to re-arm the loop, or merge after review, cherry-picking the agent's work
    where the paths named in the comment are worth keeping. The skill says the
    same rule and the deny rules of step 8 enforce most of it before the push; this job is the check that depends
-   neither on the agent obeying either nor on the runner its code ran on. When no `contract-drift` PR is open, the
-   step is red (`exit 1`) in both
+   neither on the agent obeying either nor on the runner its code ran on. When no PR from the branch and none
+   labelled `contract-drift` is open, the step is red (`exit 1`) in both
    remaining cases, so a loop that proceeded past the gate and produced no PR is never green and silent (hard rule 5):
    - It reads the branch through the API, `gh api "repos/$GITHUB_REPOSITORY/branches/drift/<date>-<run id>" --jq
      .name` with `GITHUB_TOKEN` (`contents: read` covers it), never with `git ls-remote`: the job has no checkout
@@ -307,8 +322,9 @@ One job, `fix`, on `ubuntu-latest`:
      401 that `[ -z "$(…)" ]` swallows. A branch without a PR means the agent was stopped after its push (the step's
      `timeout-minutes`, `--max-turns`) and could not keep skill step 9's promise: the step comments on the standing
      issue "CLI contract: the CLI did not answer" (creating it when none is open) naming the branch, the run and the
-     stop, and exits 1. It opens no draft: `GITHUB_TOKEN` can create a pull request only when the repository setting
-     "Allow GitHub Actions to create and approve pull requests" is on, which it is not by default.
+     stop, and exits 1. It opens no draft: `GITHUB_TOKEN` cannot create a pull request while the repository setting
+     "Allow GitHub Actions to create and approve pull requests" is off, and off it stays ("What the owner does"): on,
+     `github-actions[bot]` could approve pull requests, and the `fix` job's token is readable by the agent's test code.
    - No branch either: the classification was `decoder` or `reader` but the agent pushed nothing and opened no PR (a
      denied command, the redactor's leak stop of skill step 3, the action skipped after a workflow-validation error
      without running the agent, or the agent gave up). The step prints `::error title=Drift fix::The classification
@@ -409,22 +425,28 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 ### Safeguards
 
 - **Branch**: `drift/<date>-<run id>`, always from `main`, never `main` itself. The owner creates a ruleset on `main`
-  requiring a pull request and one approving review before the first rehearsal (the first bullet of "What the owner
-  does"), and the workflow refuses to start the agent unless it reads such a rule (runtime step 7, `Require a
-  protected main`; classic branch protection is not read, since the workflow token cannot see its review count).
-  That, not the skill's rule, is what makes "never push to main" and "never merge" true for the App token. A
-  protection that only requires a pull request does not stop a `gh pr merge` by the App: a pull request is what it
-  merges. The App cannot approve its own pull request, so with one review required the merge is refused even if the
-  tool allowlist regresses. (The owner merges their own pull requests through the ruleset's bypass list, which names
-  the repository admin role and never the Claude App.)
+  requiring a pull request, an approving review from a code owner and approval of the most recent reviewable push,
+  before the first rehearsal (the first bullet of "What the owner does"); `.github/CODEOWNERS` owning every file
+  (`* @daarko10`) is on this branch. The workflow refuses to start the agent unless it reads such a rule and such a
+  file (runtime step 7, `Require a protected main`; classic branch protection is not read, since the workflow token
+  cannot see its review count). That, not the skill's rule, is what makes "never push to main" and "never merge" true
+  for the App token. A protection that only requires a pull request does not stop a `gh pr merge` by the App: a pull
+  request is what it merges. One approving review alone does not either: the App cannot approve its own pull request,
+  but it holds pull-request write and can approve any pull request it did not author (the owner's open feature PR
+  after the App pushes commits to its unprotected head branch, a Dependabot or outside PR) and then merge it, and
+  the agent's test code runs with the App token in its environment. An App is no code owner, so the code-owner
+  review is one it cannot give, and approval of the most recent push is one it cannot give for its own push; with
+  both required the merge is refused even if the tool allowlist regresses. (The owner, the only code owner, cannot
+  approve their own pull requests either, so they merge them through the ruleset's bypass list, which names the
+  repository admin role and never the Claude App.)
 - **Tool allowlist and deny rules**: the allowlist names the invocations the skill prescribes, with an exact push rule,
   and the `settings` deny rules keep the agent out of `.github/`, the build files (`build.gradle.kts`,
   `settings.gradle.kts`, `gradle.properties`, `gradle/`), `scripts/`, `.claude/`, `.git/`, `CLAUDE.md` and a second
   CLI (runtime step 8). They guide the agent; they are not what protects `main`. The App token is in the
   agent's environment (`GITHUB_TOKEN`, `GH_TOKEN`) and in the `origin` URL, `Edit` and `Write` are otherwise
   unrestricted, and an allowlist regression is one line, so the guarantee is the ruleset on `main` (a pull request
-  plus one approving review; the App cannot approve its own pull request and, absent from the bypass list, cannot
-  bypass) together with the App's permission scope (contents, pull requests, issues: no administration, no
+  plus a code owner's approving review of the last push; the App is no code owner, cannot approve its own push and,
+  absent from the bypass list, cannot bypass) together with the App's permission scope (contents, pull requests, issues: no administration, no
   workflows). The skill prescribes no command outside the list: in headless mode a denied call is a dead end, not a
   prompt.
 - **One open fix at a time**: an open PR labelled `contract-drift` (rehearsal or real) skips the agent entirely (step 7
@@ -455,16 +477,22 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 ### What the owner does
 
 - Once, before the first rehearsal, in this order: creates a ruleset (Settings | Rules | Rulesets) targeting `main`,
-  enforcement active, with "Require a pull request before merging" and one required approval (the guarantee behind the
-  tool and edit allowlists; no rehearsal is run until it is on, and until it is on every decoder or reader red ends red
-  at `Require a protected main` without starting the agent; classic branch protection alone does not pass that step).
+  enforcement active, with "Require a pull request before merging", one required approval, "Require review from Code
+  Owners" and "Require approval of the most recent reviewable push" (the guarantee behind the tool and edit
+  allowlists; `.github/CODEOWNERS` with `* @daarko10` is on this branch, so `main` owns every file once it is merged;
+  no rehearsal is run until the ruleset is on, and until it is on every decoder or reader red ends red at `Require a
+  protected main` without starting the agent; classic branch protection alone does not pass that step, nor does a
+  ruleset without the two review options). Keeps the repository setting "Allow GitHub Actions to create and approve
+  pull requests" (Settings | Actions | General) off: on, `github-actions[bot]` could approve pull requests, and the
+  `fix` job's token is readable by the agent's test code.
   A ruleset on a private repository owned by a personal account is enforced only with GitHub Pro: on Free, the
   repository goes public before the ruleset and the rehearsals, and the rehearsal (D5) waits for that. Before the
   first rehearsal the owner runs `gh api repos/daarko10/tandem/rules/branches/main` and sees the `pull_request` rule
-  with `required_approving_review_count` of at least 1 (what the endpoint lists for an unenforced ruleset is not
-  known, so the check follows the enforcement, never replaces it).
-  Its bypass list never names the Claude App; whether it names the repository admin role, so the owner can merge their
-  own pull requests, is the owner's to decide. Then checks that the Claude GitHub App is installed on `daarko10/tandem`
+  with `required_approving_review_count` of at least 1, `require_code_owner_review` true and
+  `require_last_push_approval` true (what the endpoint lists for an unenforced ruleset is not known, so the check
+  follows the enforcement, never replaces it).
+  Its bypass list never names the Claude App, and names the repository admin role: the owner is the only code owner
+  and cannot approve their own pull requests, so the bypass is how they merge anything. Then checks that the Claude GitHub App is installed on `daarko10/tandem`
   (open item 1); runs the rehearsal (below). Nothing waits on a scheduled nightly: its actor is already recorded (open
   item 4, closed).
 - Reads the PR. Merges it (squash), or closes it with a comment saying why (the wrong fix, a change Tandem should
@@ -570,7 +598,7 @@ line exists, the milestone is open, whatever the rehearsals showed.
 - Two nightlies red before the owner acts: the second fixer comments on the open PR and stops.
 - The fix edits a file outside the edit allowlist: the allowlist step comments on the PR naming the paths, leaves it
   open and exits 1 (runtime step 9). The open PR holds the gate, so the same red costs no second agent run; closing
-  it is the owner's decision and re-arms the loop; branch protection blocks its merge.
+  it is the owner's decision and re-arms the loop; the ruleset on `main` blocks its merge.
 - The fixer workflow is itself broken (a YAML error, a missing script): GitHub shows it in Actions; the standing issue
   is not touched. `actionlint` on the branch catches the YAML part before merge.
 - The action's human-actor check (`github.actor` of the fixer's `workflow_run` job is the actor of the nightly, and the
