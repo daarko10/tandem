@@ -4,6 +4,7 @@ import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
 import kotlinx.collections.immutable.ImmutableList
@@ -49,8 +50,14 @@ data class ComposerModel(
  * The composer's model of [state]. Its models are the session's own ([ChatState.models]), else, while its process has not listed
  * any (it has none, as a restored session before its first prompt), the [known] ones another process listed
  * ([dev.daarkolabs.tandem.session.SessionManager.models]), else, before any process has, the CLI's own aliases ([CLI_MODEL_ALIASES]).
+ * Its commands, and the terminal-only names the palette leaves out, are the session's own likewise, else those of [knownCommands]
+ * ([dev.daarkolabs.tandem.session.SessionManager.commands]); the session's own replace them once its process offers them.
  */
-fun composerModel(state: ChatState, known: List<ModelOption> = emptyList()): ComposerModel {
+fun composerModel(
+    state: ChatState,
+    known: List<ModelOption> = emptyList(),
+    knownCommands: CommandCatalogue = CommandCatalogue(),
+): ComposerModel {
     val models = state.models.ifEmpty { known }.ifEmpty { CLI_MODEL_ALIASES }
     val shown = shownModel(models, state.requestedModel, state.activeModel, state.modelSwitchPending)
     return ComposerModel(
@@ -68,9 +75,9 @@ fun composerModel(state: ChatState, known: List<ModelOption> = emptyList()): Com
         effortLevels = shown?.effortLevels.orEmpty().toImmutableList(),
         autoSupported = shown?.supportsAutoMode == true,
         modelSwitchPending = state.modelSwitchPending,
-        commands = state.commands.toImmutableList(),
+        commands = state.commands.ifEmpty { knownCommands.commands }.toImmutableList(),
         slashCommandNames = state.slashCommandNames.toImmutableList(),
-        terminalCommands = state.terminalCommands.toImmutableSet(),
+        terminalCommands = state.terminalCommands.ifEmpty { knownCommands.terminal }.toImmutableSet(),
         shellRunning = state.runningShell != null,
     )
 }

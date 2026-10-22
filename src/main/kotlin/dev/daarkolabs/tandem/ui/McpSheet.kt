@@ -50,6 +50,8 @@ import dev.daarkolabs.tandem.chat.McpAction
 import dev.daarkolabs.tandem.chat.McpPanelModel
 import dev.daarkolabs.tandem.chat.McpRowModel
 import dev.daarkolabs.tandem.ide.BrowserOpener
+import dev.daarkolabs.tandem.session.ChatEntry
+import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.McpAuthWait
 import dev.daarkolabs.tandem.session.McpControls
 import dev.daarkolabs.tandem.session.SessionHandle
@@ -85,7 +87,10 @@ internal fun McpPanelHost(
 ) {
     val scope = rememberCoroutineScope()
     val controller = remember(handle) {
-        McpPanelController(handle.id, handle.mcpServers, handle.mcpAuth, handle.mcpLoginHinted, handle.status, controls, opener, scope)
+        McpPanelController(
+            handle.id, handle.mcpServers, handle.mcpAuth, handle.mcpLoginHinted, handle.status, controls, opener, scope,
+            endReason = { endNotice(handle.state.value) },
+        )
     }
     DisposableEffect(controller) { onDispose { controller.close() } }
     val currentOnClose by rememberUpdatedState(onClose)
@@ -104,10 +109,11 @@ internal fun McpPanelHost(
 }
 
 /**
- * The sheet itself: the title with Refresh servers and Close, the title area's error with Retry, then the servers by group, each
- * row with its status, detail, error and actions (spec 3.2). Opening it puts the focus on [firstFocus]: the first enabled action
- * button, else Close ([closeFocus], also the fallback when that button's row has scrolled out of the list). Esc anywhere in it calls
- * [onClose], unless [drawerOver]. The sheet takes every click on it, so that one between its buttons never reaches the scrim.
+ * The sheet itself: the title with Refresh servers and Close, the title area's error with Retry, the notice line ([mcpPanelNotice]:
+ * a start under way, why the session did not start, with Start session), then the servers by group, each row with its status,
+ * detail, error and actions (spec 3.2). Opening it puts the focus on [firstFocus]: the first enabled action button, else Start
+ * session, else Close ([closeFocus], also the fallback when that button's row has scrolled out of the list). Esc anywhere in it
+ * calls [onClose], unless [drawerOver]. The sheet takes every click on it, so that one between its buttons never reaches the scrim.
  */
 @Composable
 internal fun McpSheet(
@@ -127,9 +133,13 @@ internal fun McpSheet(
     val waits by controller.auth.collectAsState()
     val rowErrors by controller.rowErrors.collectAsState()
     val retries by controller.retryActions.collectAsState()
+    val start by controller.start.collectAsState()
+    val notice = mcpPanelNotice(model, start, message)
     val currentOnClose by rememberUpdatedState(onClose)
     val escapeCloses by rememberUpdatedState(!drawerOver)
     val firstKey = firstActionRow(model, busy, waits)
+    // The focus goes to the first enabled row button, else to Start session, else to Close.
+    val startTakesFocus = firstKey == null && notice?.canStart == true
     val shape = RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp)
     Column(
         modifier
@@ -150,7 +160,7 @@ internal fun McpSheet(
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                "MCP servers · ${model.connected} of ${model.total} connected" + (if (refreshing) " · Refreshing…" else "") + titleNote.orEmpty(),
+                model.title + (if (refreshing) " · Refreshing…" else "") + titleNote.orEmpty(),
                 modifier = Modifier.weight(1f),
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 2,
@@ -162,7 +172,8 @@ internal fun McpSheet(
             WithTooltip("Close") {
                 IconButton(
                     onClick = onClose,
-                    modifier = (if (firstKey == null) Modifier.focusRequester(firstFocus) else Modifier).focusRequester(closeFocus),
+                    modifier = (if (firstKey == null && !startTakesFocus) Modifier.focusRequester(firstFocus) else Modifier)
+                        .focusRequester(closeFocus),
                 ) {
                     Icon(AllIconsKeys.General.Close, contentDescription = "Close")
                 }
@@ -177,10 +188,20 @@ internal fun McpSheet(
             }
         }
         val info = JewelTheme.globalColors.text.info
-        if (model.stopped) {
-            Text("The session is not running. Send a prompt to start it, then manage its servers.", color = info)
-        } else if (model.total == 0) {
-            Text("No MCP servers are configured for this session.", color = info)
+        notice?.let { line ->
+            Row(
+                Modifier.fillMaxWidth().padding(end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(line.text, color = if (line.isError) JewelTheme.globalColors.text.error else info, modifier = Modifier.weight(1f))
+                if (line.canStart) {
+                    OutlinedButton(
+                        onClick = controller::startSession,
+                        modifier = described("Start session", firstFocus.takeIf { startTakesFocus }),
+                    ) { Text("Start session") }
+                }
+            }
         }
         if (model.groups.isNotEmpty()) {
             val listState = rememberLazyListState()
@@ -219,6 +240,9 @@ internal fun McpSheet(
         if (!firstFocus.requestFocus(FocusDirection.Enter)) closeFocus.requestFocus()
     }
 }
+
+/** The notice the chat ended with, once the session's process has ended: why it ended, for the panel's failed start. */
+internal fun endNotice(state: ChatState): String? = if (state.ended) (state.entries.lastOrNull() as? ChatEntry.Notice)?.text else null
 
 /** The key of the row whose first button takes the focus when the sheet opens ([mcpRowButtons]); null when none has an enabled one. */
 private fun firstActionRow(model: McpPanelModel, busy: McpBusy?, waits: Map<String, McpAuthWait>): String? =

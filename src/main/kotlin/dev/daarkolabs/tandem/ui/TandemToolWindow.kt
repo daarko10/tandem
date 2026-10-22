@@ -208,6 +208,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     toggleFocus = toggleFocus,
                     newSessionFocus = newSessionFocus,
                     mcp = selected?.mcpServers,
+                    status = selected?.status,
                     // Closing the panel from its button also gives the composer the focus back (MCP spec 3.2).
                     onToggleMcp = { if (sheetOpen) closeMcpPanel() else mcpPanelOpen?.value = true },
                     mcpFocus = mcpFocus,

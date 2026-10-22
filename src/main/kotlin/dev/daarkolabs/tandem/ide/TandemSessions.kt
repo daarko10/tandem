@@ -151,14 +151,15 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
      *   JVM can stop before the sessions' coroutines have ended their processes.
      * - [rowOptions] and [reduceMotion] take the settings ([settingsChanged]), before any session is restored.
      * - The [SessionNotifier] starts.
-     * - The manager offers the models a session's CLI listed last ([TandemWorkspaceState.knownModels]) until a process lists them
-     *   ([SessionManager.seedModels]), so that a session restored without a process offers them too.
+     * - The manager offers the models and the slash commands a session's CLI listed last ([TandemWorkspaceState.knownModels],
+     *   [TandemWorkspaceState.knownCommands]) until a process lists them ([SessionManager.seedModels], [SessionManager.seedCommands]),
+     *   so that a session restored without a process offers them too.
      * - The sessions that were open when the project was last closed open again, without a process: the one that was selected
      *   first, and selected again at once, then the others in their order. One whose transcript is gone, or that fails to open, is
      *   left out; if that is the selected one, the first one opened is selected in its place. Nothing is selected if the user has
      *   selected a session meanwhile.
      * - From then on the open sessions and the selection go to the workspace file ([TandemWorkspaceState]) whenever they change, and
-     *   so do the models a session's CLI lists ([SessionManager.models]).
+     *   so do the models and the commands a session's CLI lists ([SessionManager.models], [SessionManager.commands]).
      * - With `-Dtandem.autoPrompt=<prompt>`, a development hook, a new session is created, selected and sent the prompt.
      */
     fun ensureStarted() {
@@ -167,7 +168,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         scope.launch(Dispatchers.IO + CoroutineName("TandemSessions.start")) {
             settingsChanged()
             SessionNotifier(project, manager, scope).start()
-            manager.seedModels(TandemWorkspaceState.getInstance(project).knownModels())
+            val workspace = TandemWorkspaceState.getInstance(project)
+            manager.seedModels(workspace.knownModels())
+            manager.seedCommands(workspace.knownCommands())
             restore()
             rememberInWorkspace()
             autoPrompt()
@@ -228,8 +231,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         }
 
     /**
-     * Writes the open sessions and the selection to the workspace file whenever they change, and the models whenever a session's CLI
-     * lists them ([SessionManager.models]): every session runs the same `claude`, so the last list stands for all of them.
+     * Writes the open sessions and the selection to the workspace file whenever they change, and the models and the commands whenever
+     * a session's CLI lists them ([SessionManager.models], [SessionManager.commands]): every session of the project runs the same
+     * `claude`, so the last list stands for all of them.
      */
     private fun rememberInWorkspace() {
         val workspace = TandemWorkspaceState.getInstance(project)
@@ -243,6 +247,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         }
         scope.launch(CoroutineName("TandemSessions.models")) {
             manager.models.collect(workspace::rememberModels)
+        }
+        scope.launch(CoroutineName("TandemSessions.commands")) {
+            manager.commands.collect(workspace::rememberCommands)
         }
     }
 

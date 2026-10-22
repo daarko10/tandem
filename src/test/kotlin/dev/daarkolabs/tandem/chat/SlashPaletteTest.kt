@@ -295,12 +295,23 @@ class SlashPaletteTest {
         val hello = fallback.item("hello")
         assertEquals(PaletteItem("hello", "", "", CommandScope.BUILTIN, via = null, intercepted = false), hello)
         assertEquals(CommandScope.PLUGIN, assertNotNull(slashPalette("/", emptyList(), listOf("plug:do"), emptySet())).item("plug:do").scope)
-        // Filtering works the same way; no match reads No matching command.
+        // Filtering works the same way; no match still says the commands load later (the command may exist).
         val mo = assertNotNull(slashPalette("/mo", emptyList(), names, terminal))
         assertEquals(listOf("model", "mode"), mo.names().take(2))
-        assertEquals("No matching command", assertNotNull(slashPalette("/nosuch", emptyList(), names, terminal)).footer)
+        assertEquals("Commands load when the session starts", assertNotNull(slashPalette("/nosuch", emptyList(), names, terminal)).footer)
         // No names yet: Tandem's four alone.
         assertEquals(listOf("mcp", "model", "permissions", "mode"), assertNotNull(slashPalette("/", emptyList(), emptyList(), emptySet())).names())
+    }
+
+    @Test
+    fun `before any process offered commands the palette says they load, also when nothing matches`() {
+        val none = assertNotNull(slashPalette("/", emptyList(), emptyList(), emptySet()))
+        assertEquals(listOf("mcp", "model", "permissions", "mode"), none.names())
+        assertEquals("Commands load when the session starts", none.footer)
+        // The command may well exist: the footer says why it is not listed, not that there is none.
+        val review = assertNotNull(slashPalette("/review", emptyList(), emptyList(), emptySet()))
+        assertTrue(review.items.isEmpty())
+        assertEquals("Commands load when the session starts", review.footer)
     }
 
     @Test

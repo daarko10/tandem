@@ -33,12 +33,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.chat.ComposerModel
 import dev.daarkolabs.tandem.chat.mcpBadge
-import dev.daarkolabs.tandem.protocol.McpStatus
+import dev.daarkolabs.tandem.chat.mcpTooltip
 import dev.daarkolabs.tandem.session.McpState
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionHandle
+import dev.daarkolabs.tandem.session.SessionStatus
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Icon
@@ -61,8 +64,8 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
  * [newSessionFocus] give the "+" the focus.
  *
  * With the session's MCP servers ([mcp], null with no session) the row ends with the `MCP servers` button, which toggles the
- * session's MCP panel ([onToggleMcp]), and its badge, `connected/total` (MCP spec 3.1). The button is the header's last focusable;
- * [mcpFocus] lets the tool window give it the focus.
+ * session's MCP panel ([onToggleMcp]), and its badge, `connected/total` (MCP spec 3.1), drawn only while the session's [status] says a
+ * process runs. The button is the header's last focusable; [mcpFocus] lets the tool window give it the focus.
  */
 @Composable
 internal fun SessionHeader(
@@ -78,6 +81,7 @@ internal fun SessionHeader(
     toggleFocus: FocusRequester,
     newSessionFocus: FocusRequester = remember { FocusRequester() },
     mcp: StateFlow<McpState>? = null,
+    status: StateFlow<SessionStatus>? = null,
     onToggleMcp: () -> Unit = {},
     mcpFocus: FocusRequester = remember { FocusRequester() },
 ) {
@@ -117,7 +121,7 @@ internal fun SessionHeader(
                     }
                 }
             }
-            if (mcp != null) McpButton(mcp, onToggleMcp, mcpFocus)
+            if (mcp != null) McpButton(mcp, status, onToggleMcp, mcpFocus)
         }
         if (composer != null) {
             val model by composer.collectAsState()
@@ -128,12 +132,17 @@ internal fun SessionHeader(
 
 /**
  * The `MCP servers` button and its badge, `connected/total` in the footer size, with the tooltip `MCP servers: C of T connected`
- * (MCP spec 3.1). Before the session lists any server the badge is not drawn and the tooltip reads `MCP servers`. It recomposes only
- * when the counts change.
+ * (MCP spec 3.1). Before the session lists any server the badge is not drawn and the tooltip reads `MCP servers`; while no process
+ * runs ([status] `STOPPED`) it is not drawn either, since its servers are then an earlier process's, and the tooltip says the
+ * session is not running. It recomposes only when the counts change.
  */
 @Composable
-private fun McpButton(mcp: StateFlow<McpState>, onToggle: () -> Unit, focus: FocusRequester) {
-    val counts by remember(mcp) { mcp.map { McpCounts(it) }.distinctUntilChanged() }.collectAsState(McpCounts(mcp.value))
+private fun McpButton(mcp: StateFlow<McpState>, status: StateFlow<SessionStatus>?, onToggle: () -> Unit, focus: FocusRequester) {
+    val live: () -> Boolean = { status?.value != SessionStatus.STOPPED }
+    val counts by remember(mcp, status) {
+        val liveFlow = status?.map { it != SessionStatus.STOPPED } ?: flowOf(true)
+        combine(mcp, liveFlow) { state, running -> McpCounts(state, running) }.distinctUntilChanged()
+    }.collectAsState(McpCounts(mcp.value, live()))
     WithTooltip(counts.tooltip) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             IconButton(onClick = onToggle, modifier = Modifier.focusRequester(focus)) {
@@ -144,16 +153,9 @@ private fun McpButton(mcp: StateFlow<McpState>, onToggle: () -> Unit, focus: Foc
     }
 }
 
-/** What the header shows of a session's MCP servers: the badge ([mcpBadge], null when there is none) and the tooltip. */
+/** What the header shows of a session's MCP servers: the badge ([mcpBadge], null when there is none) and the tooltip ([mcpTooltip]). */
 private data class McpCounts(val badge: String?, val tooltip: String) {
-    constructor(state: McpState) : this(
-        mcpBadge(state),
-        if (state.servers.isEmpty()) {
-            "MCP servers"
-        } else {
-            "MCP servers: ${state.servers.count { it.status == McpStatus.CONNECTED }} of ${state.servers.size} connected"
-        },
-    )
+    constructor(state: McpState, live: Boolean) : this(mcpBadge(state, live), mcpTooltip(state, live))
 }
 
 /**

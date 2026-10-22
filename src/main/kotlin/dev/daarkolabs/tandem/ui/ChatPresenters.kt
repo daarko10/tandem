@@ -6,6 +6,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionHandle
@@ -14,18 +15,20 @@ import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.job
 import kotlinx.coroutines.plus
 
 /**
  * The presenters, senders and UI states of the [open] sessions, which go when their session closes or the tool window's content goes
- * away. Prompts go to [manager], and a session whose process has not listed its models offers [SessionManager.models].
+ * away. Prompts go to [manager], and a session whose process has not listed its models offers [SessionManager.models], one whose
+ * process has not offered its commands [SessionManager.commands].
  */
 @Composable
 internal fun rememberChatPresenters(manager: SessionManager, open: List<SessionHandle>, options: StateFlow<RowOptions>): ChatPresenters {
     val scope = rememberCoroutineScope()
-    val presenters = remember(scope, manager, options) { ChatPresenters(scope, options, manager.models, manager::send) }
+    val presenters = remember(scope, manager, options) { ChatPresenters(scope, options, manager.models, manager::send, manager.commands) }
     LaunchedEffect(presenters, open) { presenters.retain(open) }
     return presenters
 }
@@ -42,6 +45,8 @@ internal class ChatPresenters(
     /** The models another process listed, for a session whose own process has not ([ChatPresenter]): [SessionManager.models]. */
     private val models: StateFlow<List<ModelOption>>,
     private val send: (SessionId, String, List<ImageBlock>) -> Unit = { _, _, _ -> },
+    /** The commands another process offered, for a session whose own process has not: [SessionManager.commands]. */
+    private val commands: StateFlow<CommandCatalogue> = MutableStateFlow(CommandCatalogue()),
 ) {
     private inner class Entry(val handle: SessionHandle, val job: Job, val presenter: ChatPresenter) {
         /** Made on the first prompt: a session never typed in has none. */
@@ -67,7 +72,7 @@ internal class ChatPresenters(
         entries[handle.id]?.takeIf { it.handle === handle }?.let { return it }
         entries.remove(handle.id)?.job?.cancel()
         val job = SupervisorJob(scope.coroutineContext.job)
-        val presenter = ChatPresenter(scope + job, handle.state, options, models = models)
+        val presenter = ChatPresenter(scope + job, handle.state, options, models = models, commands = commands)
         val entry = Entry(handle, job, presenter)
         entries[handle.id] = entry
         ui(handle.id).onExpand = presenter::expandBody

@@ -19,6 +19,7 @@ import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.McpResult
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NewSessionOptions
@@ -274,6 +275,31 @@ class TandemSessionsTest {
             while (workspace.knownModels() != models) delay(20)
         }
         awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `the commands a session's CLI offers are remembered and offered in the next IDE run`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("commands").createDirectories()
+        val offered = openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            // A recording whose `initialize` response lists the commands.
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "mcp-slash")
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            val commands = handle.state.first { it.commands.isNotEmpty() }.commands
+            val workspace = TandemWorkspaceState.getInstance(project)
+            while (workspace.knownCommands().commands != commands) delay(20)
+            commands
+        }
+        awaitNoOwnFakeCli()
+        val next = tempDir.get().resolve("remembered-commands").createDirectories()
+        openProjectAsync(next).useProjectAsync { project ->
+            TandemWorkspaceState.getInstance(project).rememberCommands(CommandCatalogue(offered))
+            val sessions = TandemSessions.get(project)
+            sessions.ensureStarted()
+            // A session restored without a process has no initialize answer of its own: its palette offers these (ChatPresenter).
+            assertEquals(offered, sessions.manager.commands.first { it.commands.isNotEmpty() }.commands)
+        }
     }
 
     @Test

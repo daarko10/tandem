@@ -277,6 +277,20 @@ class McpPanelModelTest {
     }
 
     @Test
+    fun `a session without a process shows no count, and its panel's title marks its rows last known`() {
+        val listed = listed(18)
+        assertNull(mcpBadge(listed, live = false), "an earlier process's counts are never shown as live")
+        assertEquals("MCP servers: the session is not running", mcpTooltip(listed, live = false))
+        assertEquals("MCP servers: 1 of 3 connected", mcpTooltip(listed))
+        assertEquals("MCP servers", mcpTooltip(McpState()))
+
+        assertEquals("MCP servers · 1 of 3 connected", mcpPanel(listed).title)
+        assertEquals("MCP servers · 0 of 0 connected", mcpPanel(McpState()).title)
+        assertEquals("MCP servers · last known: 1 of 3 connected", mcpPanel(listed, live = false).title)
+        assertEquals("MCP servers", mcpPanel(McpState(), live = false).title, "none known: no count at all")
+    }
+
+    @Test
     fun `two entries with the same name keep distinct keys`() {
         val model = panel(
             server("echo"),

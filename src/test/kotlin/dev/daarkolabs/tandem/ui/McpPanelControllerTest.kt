@@ -4,6 +4,7 @@ import dev.daarkolabs.tandem.chat.McpAction
 import dev.daarkolabs.tandem.chat.McpPanelModel
 import dev.daarkolabs.tandem.chat.McpRowModel
 import dev.daarkolabs.tandem.chat.formatDuration
+import dev.daarkolabs.tandem.chat.mcpPanel
 import dev.daarkolabs.tandem.ide.BrowserOpener
 import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.McpServerInfo
@@ -13,9 +14,11 @@ import dev.daarkolabs.tandem.session.McpAuthWait
 import dev.daarkolabs.tandem.session.McpControls
 import dev.daarkolabs.tandem.session.McpError
 import dev.daarkolabs.tandem.session.McpResult
+import dev.daarkolabs.tandem.session.McpStart
 import dev.daarkolabs.tandem.session.McpState
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionStatus
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +27,7 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -35,6 +39,7 @@ import java.util.concurrent.Executors
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -63,8 +68,9 @@ class McpPanelControllerTest {
     private fun controller(
         opener: BrowserOpener = BrowserOpener { },
         dispatcher: CoroutineDispatcher = Dispatchers.Default,
+        endReason: () -> String? = { null },
     ): McpPanelController =
-        McpPanelController(SESSION, servers, auth, loginHinted, status, controls, opener, scope, dispatcher, pendingRepollMillis = 20)
+        McpPanelController(SESSION, servers, auth, loginHinted, status, controls, opener, scope, dispatcher, pendingRepollMillis = 20, endReason = endReason)
 
     private fun test(block: suspend () -> Unit) = runBlocking { withTimeout(10_000) { block() } }
 
@@ -73,6 +79,12 @@ class McpPanelControllerTest {
     }
 
     private fun McpPanelModel.row(name: String): McpRowModel = groups.flatMap { it.rows }.single { it.name == name }
+
+    /** An `mcp_status` answer listing [listed], which the session's state takes, as the manager's does. */
+    private fun listed(vararg listed: McpServerInfo): McpResult<List<McpServerInfo>> {
+        servers.value = McpState(listed.toList(), detailed = true, initCount = servers.value.initCount)
+        return McpResult.Ok(listed.toList())
+    }
 
     /** What the sheet draws at row [name]'s right, from the controller's flows as the sheet reads them. */
     private fun McpPanelController.buttonsOf(name: String): McpRowButtons =
@@ -193,19 +205,138 @@ class McpPanelControllerTest {
     }
 
     @Test
-    fun `a panel opened while the session is stopped refreshes when the process starts`() = test {
+    fun `a panel opened on a session without a process starts it and shows the last known servers until its own list comes`() = test {
+        // A restored session: no servers of its own; the project knows two from another session's mcp_status.
+        servers.value = McpState()
         status.value = SessionStatus.STOPPED
-        controls.refreshAnswer = { McpResult.Failed(McpError.NotRunning) }
+        val known = server("known", McpStatus.CONNECTED)
+        controls.known.value = listOf(known, server("other", McpStatus.FAILED))
+        val started = CompletableDeferred<Unit>()
+        controls.startAnswer = {
+            started.await()
+            status.value = SessionStatus.IDLE // the process attached
+            McpStart.Running
+        }
+        val live = listOf(echo, authy)
+        controls.refreshAnswer = {
+            servers.value = McpState(live, detailed = true) // the session's state takes the answer
+            McpResult.Ok(live)
+        }
+        val controller = controller()
+
+        // At once, before the start answers: the last known rows, marked so, without actions.
+        assertEquals(McpPanelStart.Starting, controller.start.value)
+        val lastKnown = controller.rows.value
+        assertTrue(lastKnown.stopped)
+        assertEquals("MCP servers · last known: 1 of 2 connected", lastKnown.title)
+        assertEquals(listOf("known", "other"), lastKnown.groups.flatMap { it.rows }.map { it.name })
+        assertTrue(lastKnown.groups.flatMap { it.rows }.all { mcpRowButtons(it, null, null, lastKnown.stopped) == McpRowButtons.None })
+        assertEquals(McpPanelNotice("Starting the session…"), mcpPanelNotice(lastKnown, controller.start.value, null))
+        until { controls.count("start") == 1 }
+        assertEquals("start s1 false", controls.calls.single { it.startsWith("start") }, "within the cap")
+        assertEquals(0, controls.count("refresh"), "nothing to list before the process runs")
+
+        started.complete(Unit)
+        until { controller.start.value == McpPanelStart.None }
+        assertEquals(1, controls.count("refresh"), "the start lists the servers once, the status change does not again")
+        until { !controller.rows.value.stopped }
+        assertEquals("MCP servers · 1 of 2 connected", controller.rows.value.title)
+        assertEquals(listOf(McpAction.DISABLE), controller.rows.value.row("echo").actions)
+        assertNull(mcpPanelNotice(controller.rows.value, controller.start.value, null))
+    }
+
+    @Test
+    fun `a start the cap leaves no room for says why and Start session starts it over the cap`() = test {
+        status.value = SessionStatus.STOPPED
+        controls.startAnswer = { McpStart.NoRoom(1) }
+        val controller = controller()
+        until { controller.start.value == McpPanelStart.NoRoom(1) }
+        val notice = assertNotNull(mcpPanelNotice(controller.rows.value, controller.start.value, null))
+        assertTrue(notice.canStart)
+        assertFalse(notice.isError)
+        assertEquals(
+            "Not started: the 1 session that may run is busy (Max live sessions, in Settings | Tools | Tandem). Start this one anyway to manage its servers.",
+            notice.text,
+        )
+        assertTrue(controller.rows.value.stopped, "still the last known rows")
+
+        controls.startAnswer = {
+            status.value = SessionStatus.IDLE
+            McpStart.Running
+        }
+        controls.refreshAnswer = { listed(echo, authy) }
+        controller.startSession()
+        until { controller.start.value == McpPanelStart.None }
+        assertEquals(listOf("start s1 false", "start s1 true"), controls.calls.filter { it.startsWith("start") })
+        assertTrue(
+            mcpPanelNotice(mcpPanel(McpState(), live = false), McpPanelStart.NoRoom(3), null)!!.text.startsWith("Not started: the 3 sessions that may run are all busy"),
+        )
+    }
+
+    @Test
+    fun `a start that fails says why, in the error colour, with Start session`() = test {
+        status.value = SessionStatus.STOPPED
+        controls.startAnswer = { McpStart.Failed("The claude CLI was not found.") }
+        val controller = controller()
+        until { controller.start.value is McpPanelStart.Failed }
+        assertEquals(
+            McpPanelNotice("The claude CLI was not found.", isError = true, canStart = true),
+            mcpPanelNotice(controller.rows.value, controller.start.value, null),
+        )
+        assertEquals(0, controls.count("refresh"))
+    }
+
+    @Test
+    fun `a process that ends before it lists its servers fails the start with the chat's reason`() = test {
+        status.value = SessionStatus.STOPPED
+        controls.startAnswer = { McpStart.Running } // attached, and gone before it answered
+        controls.refreshAnswer = { McpResult.Failed(McpError.Ended) }
+        val controller = controller(endReason = { "claude exited with code 1." })
+        until { controller.start.value is McpPanelStart.Failed }
+        assertEquals(McpPanelStart.Failed("The session could not start. claude exited with code 1."), controller.start.value)
+        assertNull(controller.message.value, "said once, by the start's own failure")
+        assertEquals("The session could not start. Its chat says why.", startEndedText(null))
+    }
+
+    @Test
+    fun `a listing refused after the start leaves the running session's rows and says why in the title area`() = test {
+        status.value = SessionStatus.STOPPED
+        controls.startAnswer = {
+            status.value = SessionStatus.IDLE
+            McpStart.Running
+        }
+        controls.refreshAnswer = { McpResult.Failed(McpError.Rejected("Unknown subtype")) }
+        val controller = controller()
+        until { controller.start.value == McpPanelStart.None && controller.message.value != null }
+        assertEquals("Could not list servers: Unknown subtype", controller.message.value)
+        assertNull(
+            mcpPanelNotice(mcpPanel(McpState()), controller.start.value, controller.message.value),
+            "no claim that none is configured while the list is missing",
+        )
+    }
+
+    @Test
+    fun `a session that stops while the panel is open offers Start session and lists the servers once it runs`() = test {
+        controls.refreshAnswer = { McpResult.Ok(listOf(echo, authy)) }
         val controller = controller()
         until { controls.count("refresh") == 1 }
-        assertNull(controller.message.value, "the stopped sheet says it itself")
-        assertTrue(controller.rows.value.stopped)
+        status.value = SessionStatus.STOPPED
+        until { controller.rows.value.stopped }
+        assertEquals(0, controls.count("start"), "a process that ends is not started again by itself")
+        assertEquals(
+            McpPanelNotice("The session is not running. Start it to manage its servers.", canStart = true),
+            mcpPanelNotice(controller.rows.value, controller.start.value, null),
+        )
+        assertEquals("MCP servers · last known: 1 of 2 connected", controller.rows.value.title)
 
-        controls.refreshAnswer = { McpResult.Ok(listOf(echo, authy)) }
-        status.value = SessionStatus.IDLE
-
-        until { controls.count("refresh") == 2 }
-        until { !controller.rows.value.stopped }
+        controls.startAnswer = {
+            status.value = SessionStatus.IDLE
+            McpStart.Running
+        }
+        controls.refreshAnswer = { listed(echo, authy) }
+        controller.startSession()
+        until { controls.count("refresh") == 2 && controller.start.value == McpPanelStart.None }
+        assertEquals(listOf("start s1 true"), controls.calls.filter { it.startsWith("start") })
     }
 
     @Test
@@ -505,6 +636,18 @@ class McpPanelControllerTest {
 
         override fun cancelMcpAuth(id: SessionId, server: String) {
             calls += "cancel $id $server"
+        }
+
+        val known: MutableStateFlow<List<McpServerInfo>> = MutableStateFlow(emptyList())
+
+        @Volatile
+        var startAnswer: suspend () -> McpStart = { McpStart.Running }
+
+        override val knownMcpServers: StateFlow<List<McpServerInfo>> = known
+
+        override suspend fun startForMcp(id: SessionId, overCap: Boolean): McpStart {
+            calls += "start $id $overCap"
+            return startAnswer()
         }
     }
 

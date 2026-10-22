@@ -7,6 +7,7 @@ import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
@@ -38,6 +39,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -73,6 +75,12 @@ private const val MCP_AUTH_OUTCOME_MILLIS: Long = 5_000
 
 /** What a new session starts with; null leaves it to the CLI. */
 data class NewSessionOptions(val model: String? = null, val effort: String? = null, val permissionMode: PermissionMode? = null)
+
+/**
+ * The slash commands a process offered: its `initialize` answer's [commands] ([ChatState.commands]), and the [terminal] ones its
+ * latest `system/init` named ([ChatState.terminalCommands]), which the palette leaves out.
+ */
+data class CommandCatalogue(val commands: List<SlashCommand> = emptyList(), val terminal: Set<String> = emptySet())
 
 /**
  * The sessions of one project. Each open session has a [SessionHandle] in [sessions], which runs its own `claude` process
@@ -160,6 +168,12 @@ class SessionManager internal constructor(
     /** The models a process listed last, or those [seedModels] gave until one has. */
     private val mutableModels = MutableStateFlow<List<ModelOption>>(emptyList())
 
+    /** The commands a process offered last, or those [seedCommands] gave until one has. */
+    private val mutableCommands = MutableStateFlow(CommandCatalogue())
+
+    /** The servers the last `mcp_status` answer of any process listed, cut to what the panel shows. */
+    private val mutableKnownMcp = MutableStateFlow<List<McpServerInfo>>(emptyList())
+
     /** One listing at a time, so that an older one never replaces a newer one. */
     private val refreshLock = Mutex()
 
@@ -221,6 +235,17 @@ class SessionManager internal constructor(
      * a process to read them.
      */
     val models: StateFlow<List<ModelOption>> = mutableModels.asStateFlow()
+
+    /**
+     * The slash commands the CLI offers, as [models] are kept: the `commands` of the `initialize` answer a process gave last, and the
+     * terminal-only names of the latest `system/init` a process reported (each part kept until a process gives it again); until a
+     * process has, those [seedCommands] gave (remembered from an earlier IDE run); empty while there are neither. A session whose own
+     * process has not offered them ([ChatState.commands]: it has none yet, a restored session for one) offers these in its palette.
+     * Nothing starts a process to read them.
+     */
+    val commands: StateFlow<CommandCatalogue> = mutableCommands.asStateFlow()
+
+    override val knownMcpServers: StateFlow<List<McpServerInfo>> = mutableKnownMcp.asStateFlow()
 
     init {
         // The first signal comes once the folders are watched, so it also gives the first listing.
@@ -300,6 +325,11 @@ class SessionManager internal constructor(
     /** Offers [models], the list remembered from an earlier IDE run, as [SessionManager.models] until a process lists them. */
     fun seedModels(models: List<ModelOption>) {
         mutableModels.compareAndSet(emptyList(), models)
+    }
+
+    /** Offers [catalogue], remembered from an earlier IDE run, as [SessionManager.commands] until a process offers its own. */
+    fun seedCommands(catalogue: CommandCatalogue) {
+        mutableCommands.compareAndSet(CommandCatalogue(), catalogue)
     }
 
     /** Selects session [id], or none; the selected session's [SessionHandle.attention] clears. An [id] that is not open is ignored. */
@@ -541,6 +571,29 @@ class SessionManager internal constructor(
         LOG.info("session $id: sign-in wait for MCP server $server cancelled")
     }
 
+    override suspend fun startForMcp(id: SessionId, overCap: Boolean): McpStart {
+        val handle = handle(id) ?: return McpStart.Failed(CLOSED_TEXT)
+        if (handle.liveSession() != null) return McpStart.Running
+        handle.lastUsed = clock()
+        // In the session's scope, as a sign-in: a panel that closes meanwhile cannot cut the start off half way.
+        val started = handle.scope.async(CoroutineName("SessionManager.mcpStart")) {
+            spawner.start(handle, forPrompts = false, overCapAllowed = overCap)
+        }
+        val outcome = try {
+            started.await()
+        } catch (e: CancellationException) {
+            currentCoroutineContext().ensureActive() // the caller's own cancellation goes on
+            return McpStart.Failed(CLOSED_TEXT) // the session's scope ended first: it was closed
+        }
+        LOG.info("session $id: started for its MCP panel (${outcome.javaClass.simpleName})")
+        return when (outcome) {
+            SpawnOutcome.Running -> McpStart.Running
+            SpawnOutcome.NoRoom -> McpStart.NoRoom(maxLive())
+            is SpawnOutcome.Failed -> McpStart.Failed(outcome.reason)
+            SpawnOutcome.Skipped -> McpStart.Failed(CLOSED_TEXT)
+        }
+    }
+
     /**
      * Kills every process this manager started that has not ended yet, and what it started, at once ([ClaudeSession.killNow]): those
      * of open sessions, and those still being ended, such as a closed or stopped session's. The last resort of a JVM shutdown hook,
@@ -574,6 +627,7 @@ class SessionManager internal constructor(
                     val listed = handle.mcpActions.withLock {
                         handle.liveSession()?.mcpStatus() ?: McpResult.Failed(McpError.NotRunning)
                     }
+                    if (listed is McpResult.Ok) mutableKnownMcp.value = listed.value.map { it.lastKnown() }
                     target.complete(listed)
                     target = synchronized(lock) {
                         refresh.next?.also { refresh.next = null } ?: run {
@@ -817,7 +871,7 @@ class SessionManager internal constructor(
      * starts waiting for a permission, or when a turn ends ([ChatState.turnsEnded] grows: a count, which no conflation of the status
      * hides, and which a permission answered outside a turn or a Stop leaves alone), from [SessionHandle.turnsEndedAtStart] on: a
      * turn that ended before this, as while a resumed-as-new session is taken over, still asks. The models its process lists become
-     * [models].
+     * [models], and the commands it offers [commands].
      */
     private fun watch(handle: SessionHandle) {
         // Undispatched, so that it sees the status from the start: the session's process may start right away.
@@ -840,6 +894,16 @@ class SessionManager internal constructor(
         handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
             handle.state.map { it.models }.distinctUntilChanged().collect { listed ->
                 if (listed.isNotEmpty()) mutableModels.value = listed
+            }
+        }
+        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            handle.state.map { it.commands to it.terminalCommands }.distinctUntilChanged().collect { (offered, terminal) ->
+                mutableCommands.update { known ->
+                    known.copy(
+                        commands = offered.ifEmpty { known.commands },
+                        terminal = terminal.ifEmpty { known.terminal },
+                    )
+                }
             }
         }
     }
@@ -885,6 +949,9 @@ class SessionManager internal constructor(
         internal const val NO_CLI_TEXT: String =
             "The claude CLI was not found. Tandem works with Claude Code: install it from https://code.claude.com, sign in once " +
                 "with `claude` in a terminal, then reopen this tool window."
+
+        /** Why the MCP panel's start found no session to start: it was closed meanwhile. */
+        internal const val CLOSED_TEXT: String = "The session was closed."
 
         /**
          * The chat's notice when a fork without a transcript of its own is to start, and the transcript of the session it forks is

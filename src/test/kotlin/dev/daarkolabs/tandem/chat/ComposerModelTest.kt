@@ -8,6 +8,7 @@ import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.PendingPermission
@@ -203,6 +204,27 @@ class ComposerModelTest {
         assertEquals(persistentListOf(SlashCommand("hello", "Hi (project)")), model.commands)
         assertEquals(persistentListOf("hello", "mcp"), model.slashCommandNames)
         assertEquals(persistentSetOf("doctor"), model.terminalCommands)
+    }
+
+    @Test
+    fun `a session without its own commands offers the known ones until its process offers its own`() {
+        val known = CommandCatalogue(listOf(SlashCommand("hello", "Hi (project)"), SlashCommand("doctor")), terminal = setOf("doctor"))
+        // A restored session: no process, so no initialize answer and no init of its own.
+        val restored = composerModel(ChatState(), knownCommands = known)
+        assertEquals(known.commands, restored.commands)
+        assertEquals(persistentSetOf("doctor"), restored.terminalCommands)
+        val palette = assertNotNull(slashPalette("/", restored.commands, restored.slashCommandNames, restored.terminalCommands))
+        assertTrue(palette.items.any { it.name == "hello" }, palette.toString())
+        assertFalse(palette.items.any { it.name == "doctor" }, "the known terminal-only names stay hidden")
+        assertNull(palette.footer, "a known catalogue is no loading one")
+
+        // Its process answers initialize: its own commands replace the known ones; its init's terminal names come later.
+        val own = listOf(SlashCommand("review", "Review the branch"))
+        val answered = composerModel(ChatState(commands = own), knownCommands = known)
+        assertEquals(own, answered.commands)
+        assertEquals(persistentSetOf("doctor"), answered.terminalCommands, "until its init names its own")
+        val initialized = composerModel(ChatState(commands = own, terminalCommands = setOf("color")), knownCommands = known)
+        assertEquals(persistentSetOf("color"), initialized.terminalCommands)
     }
 
     @Test
