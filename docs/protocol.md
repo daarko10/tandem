@@ -3,7 +3,7 @@
 How Tandem talks to the user's `claude` binary (Claude Code; recorded with CLI 2.1.300 to 2.1.308) over stdin/stdout
 NDJSON. Every claim names the fixture line that shows it and the CLI version it was recorded on, or the source it rests
 on (below); the traps that cost the most time are collected in section 9 (Gotchas): read it first. It keeps its number
-because it cites sections 1 to 8, and the specs and the code cite all of them by these numbers.
+because it cites sections 1 to 8, and the code cites all of them by these numbers.
 
 Sources, in order of authority:
 1. Recorded transcripts in `src/test/resources/fixtures/`, cited as `<name>.ndjson:<line>` (also `<name>:<line>`, and
@@ -71,7 +71,7 @@ then appends optional flags in this order (SDK 0.3.300; only those Tandem cares 
 | `--permission-prompt-tool <mcp tool>` | `permissionPromptToolName` (mutually exclusive with the above) | no |
 | `--permission-prompts <host\|none>` | option | no (default `host`) |
 | `--continue` / `--resume <session-id>` | resume options | `--resume` for an existing session (section 8); no `--continue` |
-| `--allowedTools a,b` / `--disallowedTools a,b` | options | `--disallowedTools Edit,Write,MultiEdit,NotebookEdit` (hard rule 4). `MultiEdit` no longer exists in 2.1.302 (in no `system/init.tools`, `tools-edit.ndjson:6`); naming it is harmless |
+| `--allowedTools a,b` / `--disallowedTools a,b` | options | `--disallowedTools Edit,Write,MultiEdit,NotebookEdit` (Tandem applies edits itself, through the IDE). `MultiEdit` no longer exists in 2.1.302 (in no `system/init.tools`, `tools-edit.ndjson:6`); naming it is harmless |
 | `--tools a,b` / `--tools=default` | `tools` option | optional |
 | `--mcp-config <json>` | non-SDK MCP servers given | yes: our IDE MCP server (see 1.4) |
 | `--setting-sources user,project,local` | option | optional |
@@ -148,7 +148,7 @@ The SDK copies the host environment (or `options.env` if given) and then:
 | `DEBUG` | deleted (or `1` if `DEBUG_CLAUDE_AGENT_SDK`) | |
 | `TRACEPARENT`/`TRACESTATE` | set from the active OTel context | ignore |
 
-Never set or read API keys (hard rule 3); the CLI resolves auth itself.
+Never set or read API keys (Tandem never handles credentials); the CLI resolves auth itself.
 
 What Tandem passes (`cliEnvironment` in `session/CliEnvironment.kt`): the login shell's environment, as the platform
 loads it (`EnvironmentUtil.getEnvironmentMap()`, read off the EDT by `ide/ShellEnvironment.kt`), without the variables
@@ -619,7 +619,7 @@ Emitted **at the start of every turn** (not only once). Fixture line (`plain-rep
 
 | Field | Use |
 |---|---|
-| `model` | **compare with the user's pick every turn** (hard rule 5) |
+| `model` | **compare with the user's pick every turn** (a model change must never go unnoticed) |
 | `session_id` | persist for resume |
 | `cwd`, `tools`, `mcp_servers[{name,status,source?}]` | MCP servers: below |
 | `permissionMode` | sync UI |
@@ -1026,7 +1026,7 @@ Parse them leniently; any of them can change without notice.
 
 The MCP fixtures (CLI 2.1.306, each with its transcript) were recorded by a one-off driver whose frames are now the
 `mcp-status`, `mcp-tool-call` and `mcp-slash` scenarios of `scripts/record-scenario.sh` (`scripts/drive_cli.py`; the nightly
-`cli-contract.yml` records `mcp-status` and `mcp-slash` and `ContractTest` checks them), with `scripts/drive_cli.py`'s argv minus
+`cli-contract.yml` records `mcp-status`, `mcp-tool-call` and `mcp-slash` and `ContractTest` checks them), with `scripts/drive_cli.py`'s argv minus
 `--safe-mode` (which turns MCP servers off), plus `--mcp-config <cwd>/mcp.json --strict-mcp-config --setting-sources
 project,local`, against three local servers: `echo` (stdio, one tool `echo` with an output schema), `broken` (`/bin/false`,
 so it fails at once) and `authy` (local HTTP that always answers 401 with OAuth metadata and dynamic client registration,
@@ -1041,8 +1041,8 @@ committed MCP fixtures stay those of 2.1.306.
 | `mcp-tool-call` | `initialize`; a prompt asking for `mcp__echo__echo` with `hello tandem`, allowed; a prompt asking again with `second`, denied with `The user denied this call.` | the deferred tool's `ToolSearch` (`:22`, `:24`), `tool_use_meta` (`:34`), `can_use_tool` with `mcp_server` and `server_policy_ask_only` (`:35`), the result's `structuredContent` and `_meta` (`:39`), the denial (`:62`, `:73`). Transcript: `mcpMeta` (`transcripts/mcp-tool-call.jsonl:32`), `toolDenialKind` (`:41`) |
 | `mcp-slash` | `initialize`; the prompts `/mcp`, `/model`, `/help`, then `/hello` (a project command, `.claude/commands/hello.md` in the working directory) | the initialize `commands` catalogue (`:1`), `init.slash_commands` and `terminal_slash_commands` (`:4`), three local commands answered without the model (`:5`-`:6`, `:11`-`:12`, `:17`-`:18`) and one project command that runs a turn (`:22`-`:34`). Transcript: the `local_command` lines of 11.2 (`transcripts/mcp-slash.jsonl:5`, `:10`, `:13`, `:14`); `:13`'s `submitUuid` reads `<leaked-1>`, the redactor's safety net (the redactor now replaces that key) |
 
-The shell-escape fixtures are `scripts/record-scenario.sh` scenarios too: `bash-mode` and `bash-mode-respond` (2.1.306;
-the nightly records both again) and `bash-mode-context` (2.1.308). `transcripts/bash-mode.jsonl:5`'s `mergedSendUuids` read
+The shell-escape fixtures are `scripts/record-scenario.sh` scenarios too: `bash-mode` and `bash-mode-respond` (2.1.306)
+and `bash-mode-context` (2.1.308); the nightly records all three again. `transcripts/bash-mode.jsonl:5`'s `mergedSendUuids` read
 `<leaked-1>`, the redactor's safety net: it was replaced by hand with `<command_uuid-4>`, the first quiet frame's uuid (the
 line's own `uuid` is the second's, `<command_uuid-6>`, as `bash-mode.ndjson:3-4` queued them), and the redactor now replaces
 that key.
