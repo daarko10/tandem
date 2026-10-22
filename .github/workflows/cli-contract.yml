@@ -74,36 +74,6 @@ jobs:
               print("::error title=CLI contract::No assistant line although the result holds text: a core type may have been renamed; see the recording.")
               sys.exit(1)
           PY
-      # What Tandem reads beyond a plain turn (launch.md tactic 7), each checked by ContractTest: the MCP requests and their
-      # answers, an MCP tool call's request and the slash-command catalogue and local commands, against
-      # scripts/mcp_probe_servers.py's local servers (mcp-slash, mcp-status, mcp-tool-call), and the shell-escape frames with
-      # their zero-turn results (bash-mode, bash-mode-respond, and bash-mode-context, the one frame Tandem sends with replies
-      # off). Each scenario starts the CLI once, so each is a step of its own with a fresh identity token: a GitHub token is
-      # single use and lives about five minutes (.github/actions/anthropic-token).
-      - name: Fetch a fresh identity token for the CLI
-        uses: ./.github/actions/anthropic-token
-      - name: Record the mcp-slash scenario
-        run: ./scripts/record-scenario.sh mcp-slash build/contract
-      - name: Fetch a fresh identity token for the CLI
-        uses: ./.github/actions/anthropic-token
-      - name: Record the mcp-status scenario
-        run: ./scripts/record-scenario.sh mcp-status build/contract
-      - name: Fetch a fresh identity token for the CLI
-        uses: ./.github/actions/anthropic-token
-      - name: Record the mcp-tool-call scenario
-        run: ./scripts/record-scenario.sh mcp-tool-call build/contract
-      - name: Fetch a fresh identity token for the CLI
-        uses: ./.github/actions/anthropic-token
-      - name: Record the bash-mode scenario
-        run: ./scripts/record-scenario.sh bash-mode build/contract
-      - name: Fetch a fresh identity token for the CLI
-        uses: ./.github/actions/anthropic-token
-      - name: Record the bash-mode-respond scenario
-        run: ./scripts/record-scenario.sh bash-mode-respond build/contract
-      - name: Fetch a fresh identity token for the CLI
-        uses: ./.github/actions/anthropic-token
-      - name: Record the bash-mode-context scenario
-        run: ./scripts/record-scenario.sh bash-mode-context build/contract
       # Tandem names every new session with --session-id and drops inherited session variables (docs/protocol.md 1.2).
       # This checks that the id passed with --session-id names the session and its transcript while one is inherited.
       # Measured with 2.1.301: CLAUDE_CODE_SESSION_ID on its own is ignored; the CLI used an inherited id only inside a
@@ -135,6 +105,36 @@ jobs:
           python3 -I scripts/copy_transcript.py "$work" "$work/raw.ndjson" "$work/transcripts" session-id
           mkdir -p build/contract/transcripts
           python3 -I scripts/redact_fixture.py "$work/transcripts/session-id.jsonl" build/contract/transcripts/session-id.jsonl
+      # What Tandem reads beyond a plain turn (launch.md tactic 7), each checked by ContractTest: the MCP requests and their
+      # answers, an MCP tool call's request and the slash-command catalogue and local commands, against
+      # scripts/mcp_probe_servers.py's local servers (mcp-slash, mcp-status, mcp-tool-call), and the shell-escape frames with
+      # their zero-turn results (bash-mode, bash-mode-respond, and bash-mode-context, the one frame Tandem sends with replies
+      # off). Each scenario starts the CLI once, so each is a step of its own with a fresh identity token: a GitHub token is
+      # single use and lives about five minutes (.github/actions/anthropic-token).
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the mcp-slash scenario
+        run: ./scripts/record-scenario.sh mcp-slash build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the mcp-status scenario
+        run: ./scripts/record-scenario.sh mcp-status build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the mcp-tool-call scenario
+        run: ./scripts/record-scenario.sh mcp-tool-call build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the bash-mode scenario
+        run: ./scripts/record-scenario.sh bash-mode build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the bash-mode-respond scenario
+        run: ./scripts/record-scenario.sh bash-mode-respond build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the bash-mode-context scenario
+        run: ./scripts/record-scenario.sh bash-mode-context build/contract
       # The rehearsal of the drift loop: the live recording is mutated in place (all three files are read before any is
       # written) and a marker file names the mode, so the Gradle step goes red, the real artifact is uploaded and
       # drift-fix.yml fires through workflow_run exactly as for a real red. A scheduled run has no input and records as is.

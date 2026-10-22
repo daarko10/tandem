@@ -771,7 +771,13 @@ class NightlyWorkflowTest(unittest.TestCase):
         drift = wf[True]["workflow_dispatch"]["inputs"]["drift"]
         self.assertEqual(("string", ""), (drift["type"], drift["default"]))
         names = [s.get("name") for s in steps(wf, "contract")]
-        self.assertEqual(names.index("Check --session-id with an inherited CLAUDE_CODE_SESSION_ID") + 1, names.index("Mutate the recording for a rehearsal"))
+        # Every file the fixer promotes (contract-hello and session-id) is recorded before any scenario, which may fail on
+        # its own, and the rehearsal mutates them only after the last scenario, right before the decode step.
+        recorded = [i for i, n in enumerate(names) if n and n.startswith("Record the ") and n.endswith(" scenario")]
+        self.assertTrue(recorded, "no scenario step")
+        self.assertLess(names.index("Check that the CLI authenticated and answered"), names.index("Check --session-id with an inherited CLAUDE_CODE_SESSION_ID"))
+        self.assertLess(names.index("Check --session-id with an inherited CLAUDE_CODE_SESSION_ID"), recorded[0])
+        self.assertLess(recorded[-1], names.index("Mutate the recording for a rehearsal"))
         self.assertEqual(names.index("Mutate the recording for a rehearsal") + 1, names.index("Decode with Tandem's protocol layer and load the transcripts with its reader"))
         mutate = step(wf, "contract", "Mutate the recording for a rehearsal")
         self.assertEqual("inputs.drift != ''", mutate["if"])
