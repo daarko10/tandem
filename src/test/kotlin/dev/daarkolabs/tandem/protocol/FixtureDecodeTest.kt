@@ -756,6 +756,7 @@ class FixtureDecodeTest {
         assertTrue(denied.content.filterIsInstance<ContentBlock.ToolResult>().single().isError)
         assertEquals("permission-rule", denied.toolResultMeta[0].nonExecutionKind)
     }
+
     // spec: bash-mode: the quiet sends end in a zero-turn result naming both uuids
     @Test
     fun `bash-mode - the quiet sends end in a zero-turn result naming both uuids`() {

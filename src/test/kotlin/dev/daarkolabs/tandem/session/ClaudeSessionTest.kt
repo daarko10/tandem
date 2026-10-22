@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
@@ -1034,6 +1035,7 @@ class ClaudeSessionTest {
     }
 
     private fun assertNull(value: Any?) = kotlin.test.assertNull(value)
+
     /** The `user` frames the host wrote so far, parsed. */
     private fun ScriptedSession.userFrames(): List<JsonObject> =
         stdin.readLines().filter { "\"type\":\"user\"" in it }.map { Json.parseToJsonElement(it).jsonObject }
@@ -1041,7 +1043,7 @@ class ClaudeSessionTest {
     private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
 
     /** Lines [from]..[to] (1-based) of fixture [name], with [edit] applied to each as a JSON object. */
-    private fun lines(name: String, from: Int, to: Int, edit: (Int, MutableMap<String, kotlinx.serialization.json.JsonElement>) -> Unit = { _, _ -> }): List<String> =
+    private fun lines(name: String, from: Int, to: Int, edit: (Int, MutableMap<String, JsonElement>) -> Unit = { _, _ -> }): List<String> =
         (from..to).map { n ->
             val fields = Json.parseToJsonElement(Fixtures.lines(name)[n - 1]).jsonObject.toMutableMap()
             edit(n, fields)
@@ -1098,10 +1100,14 @@ class ClaudeSessionTest {
         val run = ScriptedSession(tmp, newSessionId)
         run.session.start()
         run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
-        run.session.interrupt()
+        // The initialize request went out at the start: none may follow it.
+        val requests = { run.stdin.readLines().count { "\"type\":\"control_request\"" in it } }
         run.written("\"type\":\"user\"")
+        val before = requests()
+        run.session.interrupt()
         delay(1_000)
         assertEquals(1, run.userFrames().size)
+        assertEquals(before, requests(), "no control_request after the interrupt")
         assertTrue(run.stdin.readLines().none { "\"interrupt\"" in it }, "no model call runs: no interrupt request")
         val state = run.session.state.value
         assertFalse(state.busy)
@@ -1120,9 +1126,16 @@ class ClaudeSessionTest {
         run.process.destroyForcibly()
         val ended = withTimeout(10_000) { run.session.state.first { it.ended } }
         delay(700) // past the wait: a frame still pending would go out now
+        // A guard only: the destroyed process wrote the file, so a frame sent now could not land in it whatever happened.
         assertEquals(1, run.userFrames().size)
         val end = ended.entries.filterIsInstance<ChatEntry.TurnEnded>().single()
         assertEquals(TurnEnd.FAILED, end.end)
+        // The check that the frame was dropped: an output frame still pending would make interrupt() drop it, with a "Stopped." notice.
+        val stopped = { run.session.state.value.entries.count { it is ChatEntry.Notice && it.text == "Stopped." } }
+        val before = stopped()
+        run.session.interrupt()
+        delay(100)
+        assertEquals(before, stopped(), "nothing was pending")
         run.close()
     }
 

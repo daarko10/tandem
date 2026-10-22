@@ -121,6 +121,7 @@ class SessionHandleTest {
             runQueued()
         }
     }
+
     /** A handle in a scope that runs its coroutines, for tests that close it or attach a process. */
     private fun liveHandle(scope: CoroutineScope): SessionHandle =
         SessionHandle("33333333-3333-4333-8333-333333333333", scope, ChatState(), MutableStateFlow(emptyList()), createdAt = 0)

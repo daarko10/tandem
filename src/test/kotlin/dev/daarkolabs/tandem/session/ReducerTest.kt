@@ -11,6 +11,7 @@ import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -1446,8 +1447,9 @@ class ReducerTest {
         assertEquals("claudeai", later.server("claude.ai Example").source)
         assertEquals(3, later.mcp.initCount)
     }
+
     /** Line [line] (1-based) of fixture [name] as a JSON object, edited by [edit], decoded. */
-    private fun edited(name: String, line: Int, edit: (MutableMap<String, kotlinx.serialization.json.JsonElement>) -> Unit): SessionEvent {
+    private fun edited(name: String, line: Int, edit: (MutableMap<String, JsonElement>) -> Unit): SessionEvent {
         val fields = Json.parseToJsonElement(Fixtures.lines(name)[line - 1]).jsonObject.toMutableMap()
         edit(fields)
         return SessionEvent.Cli(Ndjson.decode(JsonObject(fields).toString()))
@@ -1489,7 +1491,7 @@ class ReducerTest {
         assertTrue(quiet.busy, "the quiet result leaves the reply's turn open")
         assertTrue(quiet.entries.none { it is ChatEntry.TurnEnded })
         assertTrue(quiet.quietSends.isEmpty())
-        val answered = fold(quiet, "bash-mode-respond", 7, 41)
+        val answered = fold(quiet, "bash-mode-respond", 7, 42)
         assertFalse(answered.busy)
         assertEquals(1, answered.entries.count { it is ChatEntry.TurnEnded })
         assertEquals(sent.turnsEnded + 1, answered.turnsEnded)

@@ -11,6 +11,7 @@ import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.PendingPermission
 import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.firstPrompt
 import dev.daarkolabs.tandem.session.reduce
@@ -693,7 +694,7 @@ class TranscriptReaderTest {
             val shown = listOf(
                 SessionEvent.ShellStarted("shell-1", "echo bash-mode-probe && printf err >&2", 0),
                 SessionEvent.ShellOutput("shell-1", "bash-mode-probe\nerr"),
-                SessionEvent.ShellEnded("shell-1", dev.daarkolabs.tandem.session.ShellEnd.Exited(0), 12),
+                SessionEvent.ShellEnded("shell-1", ShellEnd.Exited(0), 12),
                 sent,
             ).fold(ChatState(), ::reduce)
             val streamed = Fixtures.decode(name).fold(shown) { s, m -> reduce(s, SessionEvent.Cli(m)) }
