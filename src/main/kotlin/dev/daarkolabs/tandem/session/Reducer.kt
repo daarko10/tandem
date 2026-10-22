@@ -327,11 +327,13 @@ private fun ChatState.rejectEffortChange(requestId: String, change: EffortChange
 }
 
 /**
- * The CLI answered the `set_model` [change], request [requestId], with [error] and kept the model it had (hard rule 5: the chat says
- * so, and which model it stays on). As [rejectModeChange] does for modes, the next change still waiting now starts from what was shown before [change]; if none
- * waits, the footer goes back to it: the model picked before, whether that pick still waited for its `system/init`, and its warning,
- * unless another pick replaced [change] meanwhile. The CLI answers a control request before it starts the next turn, so no
- * `system/init` comes between a pick and its answer.
+ * The CLI answered the `set_model` [change], request [requestId], with [error] and kept the model it had (hard rule 5: the chat
+ * says so, and which model it stays on). As [rejectModeChange] does for modes, the next change still waiting now starts from
+ * what was shown before [change]; if none waits, the footer goes back to it: the model picked before, whether that pick still
+ * waited for its `system/init`, and its warning, unless another pick replaced [change] meanwhile. The CLI answers a control
+ * request before it starts the next turn, so no `system/init` comes between a pick and its answer. The notice names the model
+ * the CLI stays on: the pick before [change] while that pick, accepted, still waits for its `system/init` (none: the default
+ * model); otherwise what the last `system/init` reported, which follows fallbacks, or that pick when no init has come yet.
  */
 private fun ChatState.rejectModelChange(requestId: String, change: ModelChange, error: String?): ChatState {
     // In the order the requests were sent: the reducer adds each to the end of this map.
@@ -354,9 +356,9 @@ private fun ChatState.rejectModelChange(requestId: String, change: ModelChange, 
     }
     val reason = error?.let { " ($it)" }.orEmpty()
     val target = change.requested?.let { "model $it" } ?: "the default model"
-    // What the CLI runs now, as rejectModeChange says it: with a later pick still waiting, that pick shows, but the CLI stays where
-    // it was. No pick before means the model the session runs (its last system/init), when one is known.
-    val now = (if (next == null) restored.requestedModel else change.previous) ?: activeModel
+    // What the CLI runs now, whatever the footer shows: an accepted pick still waiting for its init (null: the default model),
+    // else the last system/init's model, else the pick before when no init has come yet.
+    val now = if (change.previousPending) change.previous else activeModel ?: change.previous
     val stays = now?.let { "model $it" } ?: "the default model"
     return restored.copy(modelChanges = pending)
         .notice(NoticeLevel.ERROR, "The CLI rejected the switch to $target$reason; it stays on $stays.")

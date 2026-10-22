@@ -534,7 +534,8 @@ class ReducerTest {
         assertFalse(refused.modelSwitchPending, "the footer leaves its pending state")
         assertEquals(before.modelWarning, refused.modelWarning)
         assertEquals(emptyMap(), refused.modelChanges)
-        val text = "The CLI rejected the switch to model opus (Model opus is not available); it stays on model sonnet."
+        // The sonnet pick was confirmed, but the last system/init reported haiku (the footer shows it): the CLI stays on haiku.
+        val text = "The CLI rejected the switch to model opus (Model opus is not available); it stays on model claude-haiku-5-5."
         assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.ERROR, text), refused.entries.last())
 
         val defaultRefused = reduce(reduce(ChatState(), SessionEvent.ModelRequested(null, "r2")), rejection("r2", "no"))
@@ -550,6 +551,16 @@ class ReducerTest {
             "The CLI rejected the switch to model opus (no); it stays on model claude-haiku-5-5.",
             (runningRefused.entries.last() as ChatEntry.Notice).text,
         )
+        // The default pick, accepted and still waiting for its init: the CLI is on the default model, not the one before it.
+        val onSonnet = ChatState(requestedModel = "sonnet", activeModel = "claude-sonnet-5-5")
+        val defaultAccepted = reduce(reduce(onSonnet, SessionEvent.ModelRequested(null, "r1")), success("r1"))
+        val haikuRefused = reduce(reduce(defaultAccepted, SessionEvent.ModelRequested("haiku", "r4")), rejection("r4", "no"))
+        assertEquals(
+            "The CLI rejected the switch to model haiku (no); it stays on the default model.",
+            (haikuRefused.entries.last() as ChatEntry.Notice).text,
+        )
+        assertNull(haikuRefused.requestedModel)
+        assertTrue(haikuRefused.modelSwitchPending, "the default pick still waits for its init")
     }
 
     @Test
