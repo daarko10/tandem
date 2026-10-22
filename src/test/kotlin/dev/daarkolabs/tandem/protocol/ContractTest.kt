@@ -17,39 +17,56 @@ import kotlin.test.assertTrue
 /**
  * Run by the nightly CLI contract workflow against freshly recorded output of the newest CLI (`-Dtandem.contractDir=...`): its
  * stream-json output (`.ndjson` files) and the transcripts it wrote to disk (`.jsonl` files in `transcripts`). Skipped in normal
- * test runs. Beside the checks every recording gets, the scenario recordings the workflow makes (`mcp-slash`, `mcp-status`,
- * `mcp-tool-call`, `bash-mode`, `bash-mode-respond`, `bash-mode-context`) are checked for what Tandem reads in them: the slash
- * catalogue, `init`'s `terminal_slash_commands` and a local command; the `mcp_status`, `mcp_toggle` and `mcp_authenticate` answers
- * and `init`'s `mcp_servers`; an MCP tool's permission request naming its server; and each quiet shell-escape frame's zero-turn
- * result. A check is skipped when its file is not there.
+ * test runs.
+ *
+ * The two `live transcripts` tests read only the recording the drift loop promotes to a fixture
+ * (`.claude/skills/fix-contract-drift`, step 2): [STREAM] and the [TRANSCRIPTS]. `scripts/classify_drift.py` hands their
+ * failures to the fixer by test name, so drift only a scenario recording shows must not fail them. The scenario recordings the
+ * workflow makes (`mcp-slash`, `mcp-status`, `mcp-tool-call`, `bash-mode`, `bash-mode-respond`, `bash-mode-context`) get the
+ * same decode and reader checks in the `scenario` tests, whose red the loop reports on its standing issue instead, and are
+ * checked for what Tandem reads in them: the slash catalogue, `init`'s `terminal_slash_commands` and a local command; the
+ * `mcp_status`, `mcp_toggle` and `mcp_authenticate` answers and `init`'s `mcp_servers`; an MCP tool's permission request naming
+ * its server; and each quiet shell-escape frame's zero-turn result. A check is skipped when its file is not there.
  */
 class ContractTest {
     @Test
     fun `live transcripts decode with every core type recognised`() {
-        val dir = System.getProperty("tandem.contractDir").orEmpty()
-        assumeTrue("no contract transcripts", dir.isNotEmpty())
-        val files = File(dir).listFiles { f -> f.name.endsWith(".ndjson") }.orEmpty()
-        assertTrue(files.isNotEmpty(), "no transcripts in $dir")
-
-        val core = setOf("assistant", "user", "result", "stream_event", "control_request", "control_response")
-        for (file in files) {
-            val messages = file.readLines().filter { it.isNotBlank() }.map(Ndjson::decode)
-            val unrecognised = messages.filterIsInstance<CliMessage.Unknown>().filter { it.type in core || it.type == null }
-            assertTrue(unrecognised.isEmpty(), "${file.name}: ${unrecognised.map { it.type }}")
-            assertTrue(messages.any { it is CliMessage.SystemInit }, "${file.name}: no system/init")
-            assertTrue(messages.any { it is CliMessage.Result }, "${file.name}: no result")
-        }
+        val dir = contractDir()
+        val file = File(dir, STREAM)
+        assertTrue(file.isFile, "no $STREAM in $dir")
+        assertDecodes(file)
     }
 
     @Test
     fun `live transcripts load with the reader`() {
-        val dir = System.getProperty("tandem.contractDir").orEmpty()
-        assumeTrue("no contract transcripts", dir.isNotEmpty())
-        val files = File(dir, "transcripts").listFiles { f -> f.name.endsWith(".jsonl") }.orEmpty()
+        val dir = contractDir()
+        val files = File(dir, "transcripts").listFiles { f -> f.name in TRANSCRIPTS }.orEmpty()
         assertTrue(files.isNotEmpty(), "no transcripts in $dir/transcripts")
 
         for (file in files) {
-            val entries = runBlocking { TranscriptReader.read(file.toPath()) }.state.entries
+            val entries = load(file)
+            assertTrue(entries.any { it is ChatEntry.User }, "${file.name}: no user entry")
+            assertTrue(entries.any { it is ChatEntry.Assistant }, "${file.name}: no assistant entry")
+        }
+    }
+
+    @Test
+    fun `scenario recordings decode with every core type recognised`() {
+        val dir = contractDir()
+        val files = File(dir).listFiles { f -> f.name.endsWith(".ndjson") && f.name != STREAM }.orEmpty().sortedBy { it.name }
+        assumeTrue("no scenario recordings", files.isNotEmpty())
+        files.forEach(::assertDecodes)
+    }
+
+    @Test
+    fun `scenario transcripts load with the reader`() {
+        val dir = contractDir()
+        val files = File(dir, "transcripts").listFiles { f -> f.name.endsWith(".jsonl") && f.name !in TRANSCRIPTS }.orEmpty()
+            .sortedBy { it.name }
+        assumeTrue("no scenario transcripts", files.isNotEmpty())
+
+        for (file in files) {
+            val entries = load(file)
             // A session of shell escapes only (bash-mode-respond) has its prompts as shell rows.
             assertTrue(entries.any { it is ChatEntry.User || it is ChatEntry.Shell }, "${file.name}: no user or shell entry")
             if (file.name.startsWith("bash-mode")) assertTrue(entries.any { it is ChatEntry.Shell }, "${file.name}: no shell entry")
@@ -137,11 +154,26 @@ class ContractTest {
         assertTrue(quiet.all { q -> results.any { it.numTurns == 0 && q in it.userMessageUuids } }, "no zero-turn result names each of $quiet")
     }
 
-    /** The lines of recording [name], or the test is skipped when it was not recorded. */
-    private fun recordingLines(name: String): List<String> {
+    /** The recording's directory, or the test is skipped in a normal test run. */
+    private fun contractDir(): String {
         val dir = System.getProperty("tandem.contractDir").orEmpty()
         assumeTrue("no contract transcripts", dir.isNotEmpty())
-        val file = File(dir, "$name.ndjson")
+        return dir
+    }
+
+    private fun assertDecodes(file: File) {
+        val messages = file.readLines().filter { it.isNotBlank() }.map(Ndjson::decode)
+        val unrecognised = messages.filterIsInstance<CliMessage.Unknown>().filter { it.type in CORE || it.type == null }
+        assertTrue(unrecognised.isEmpty(), "${file.name}: ${unrecognised.map { it.type }}")
+        assertTrue(messages.any { it is CliMessage.SystemInit }, "${file.name}: no system/init")
+        assertTrue(messages.any { it is CliMessage.Result }, "${file.name}: no result")
+    }
+
+    private fun load(file: File): List<ChatEntry> = runBlocking { TranscriptReader.read(file.toPath()) }.state.entries
+
+    /** The lines of recording [name], or the test is skipped when it was not recorded. */
+    private fun recordingLines(name: String): List<String> {
+        val file = File(contractDir(), "$name.ndjson")
         assumeTrue("$name was not recorded", file.isFile)
         return file.readLines().filter { it.isNotBlank() }
     }
@@ -153,4 +185,14 @@ class ContractTest {
         val fields = runCatching { Json.parseToJsonElement(line).jsonObject }.getOrNull() ?: return@mapNotNull null
         if (fields["type"]?.jsonPrimitive?.contentOrNull != "command_lifecycle") null else fields["command_uuid"]?.jsonPrimitive?.contentOrNull
     }.distinct()
+
+    private companion object {
+        /** The stream the drift loop promotes (`scripts/classify_drift.py` reads it too). */
+        const val STREAM: String = "contract-hello.ndjson"
+
+        /** The transcripts the drift loop promotes, under `transcripts`. */
+        val TRANSCRIPTS: Set<String> = setOf("contract-hello.jsonl", "session-id.jsonl")
+
+        val CORE: Set<String> = setOf("assistant", "user", "result", "stream_event", "control_request", "control_response")
+    }
 }

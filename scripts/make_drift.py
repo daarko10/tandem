@@ -3,16 +3,18 @@
 
 Usage: make_drift.py <mode> <out-dir> [--from <recording-dir>]
 
-Writes the layout of the nightly's contract-recording artifact: <out-dir>/contract-hello.ndjson,
-<out-dir>/transcripts/contract-hello.jsonl and <out-dir>/transcripts/session-id.jsonl, plus the marker
-<out-dir>/rehearsal (one line: the mode), which the drift fixer reads as rehearsal=true.
+Writes the three files of the nightly's contract-recording artifact that the drift fixer promotes:
+<out-dir>/contract-hello.ndjson, <out-dir>/transcripts/contract-hello.jsonl and <out-dir>/transcripts/session-id.jsonl,
+plus the marker <out-dir>/rehearsal (one line: the mode), which the drift fixer reads as rehearsal=true. The artifact's
+scenario recordings (<scenario>.ndjson, transcripts/<scenario>.jsonl) are never written: with --from <out-dir> they stay
+as recorded, and ContractTest's decode and reader tests, the ones the mutation fails, do not read them.
 
 The modes, each a drift the current decoder or reader rejects the way a real rename would:
 
 - init-model-key: the system/init line's "model" key becomes "model_id". Ndjson requires "model" on init, so the line
-  decodes to Unknown and ContractTest's decode test fails with "no system/init".
+  decodes to Unknown and ContractTest's decode test fails with "<file>: no system/init".
 - transcript-content-key: every transcript "user" line's message.content becomes message.blocks, so the reader yields
-  no user entry and ContractTest's reader test fails with "no user entry".
+  no user entry and ContractTest's reader test fails with "<file>: no user entry".
 
 Lines are found by content (type, subtype), never by number: a live recording has a varying count of lines before
 system/init. A mutated line is re-serialized compactly; every other line is copied byte for byte.
