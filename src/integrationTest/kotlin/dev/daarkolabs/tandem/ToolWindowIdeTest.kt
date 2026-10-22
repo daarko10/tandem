@@ -29,6 +29,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -114,13 +115,13 @@ class ToolWindowIdeTest {
             answerCard()
             // The card held the focus, so it gives it back to the composer when it closes (spec 4.12).
             waitFor("focus back in the prompt box", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
-            waitFor("tool row", 2.minutes) { toolRow("Ran Create empty fixture file").present() }
+            waitFor("tool row", 2.minutes) { described("Ran Create empty fixture file").present() }
             // The first turn has ended, so Send is back for the next prompt.
             waitForText("done.")
             typePrompt("Now remove it")
             waitForText("Allow Claude to Run rm tandem-fixture.txt?")
             iconButton("Deny").click(Point(10, 10))
-            waitFor("denied row", 2.minutes) { toolRow("Remove fixture file · Denied").present() }
+            waitFor("denied row", 2.minutes) { described("Remove fixture file · Denied").present() }
             waitForText("denied.")
         }
         val answers = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
@@ -161,7 +162,7 @@ class ToolWindowIdeTest {
             }
             // The model's reply, ask-single:31.
             waitForText("Blue")
-            waitFor("Questions row", 2.minutes) { toolRow("Questions").present() }
+            waitFor("Questions row", 2.minutes) { described("Questions").present() }
         }
         val answer = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
             .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-27>" }["response"]!!.jsonObject
@@ -219,7 +220,7 @@ class ToolWindowIdeTest {
             }
             // The model's reply, ask-two:43.
             waitForText("Red and Cheese, Ham")
-            waitFor("Questions row", 2.minutes) { toolRow("Questions").present() }
+            waitFor("Questions row", 2.minutes) { described("Questions").present() }
         }
         val answer = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
             .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-38>" }["response"]!!.jsonObject
@@ -257,7 +258,7 @@ class ToolWindowIdeTest {
                 node("Claude is working") { "contains($it, ' · ') and substring($it, string-length($it)) = 's'" }.present()
             }
             // A lone running call opens on its command (polish spec 2.1) while its permission request is still held back.
-            toolRow("Creating empty fixture file").click(Point(10, 10))
+            described("Creating empty fixture file").click(Point(10, 10))
             waitFor("a lone running call opens on its command", 30.seconds) {
                 ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, '\$ touch tandem-fixture.txt')]").present()
             }
@@ -274,7 +275,7 @@ class ToolWindowIdeTest {
             waitFor("waiting again", 1.minutes) { workingRow("Claude is waiting for you").present() }
             iconButton("Deny").click(Point(10, 10))
             waitFor("denied row and footer, working row gone", 2.minutes) {
-                toolRow("Remove fixture file · Denied").present() && ui.x(FOOTER).present() &&
+                described("Remove fixture file · Denied").present() && ui.x(FOOTER).present() &&
                     !workingRow("Claude is working").present() && !workingRow("Claude is waiting for you").present()
             }
         }
@@ -292,9 +293,9 @@ class ToolWindowIdeTest {
             typePrompt("Read the file")
             waitFor("running group row", 1.minutes) { runningGroupRow().present() }
             runningGroupRow().click(Point(10, 10))
-            waitFor("finished sub-row inside the open box", 30.seconds) { toolRow("Read <path>").present() }
+            waitFor("finished sub-row inside the open box", 30.seconds) { described("Read <path>").present() }
             waitFor("the group finished with its box still open", 1.minutes) {
-                toolRow("Read a file, found files, searched for a pattern").present() && toolRow("Searched for seven · 1 match").present()
+                described("Read a file, found files, searched for a pattern").present() && described("Searched for seven · 1 match").present()
             }
         }
     }
@@ -588,6 +589,11 @@ class ToolWindowIdeTest {
             iconButton("MCP servers").click(Point(10, 10))
             // The fake answers the first mcp_status with its pending servers; the panel asks again 2 s later.
             waitFor("echo listed, connected", 1.minutes) { described("echo, Connected").present() }
+            // A click on the sheet where it has nothing to click (its title) never reaches the scrim under it: the panel stays open.
+            ui.x("//div[@class='ComposeNode' and (starts-with(@visible_text,'MCP servers ·') or starts-with(@text,'MCP servers ·'))]")
+                .click(Point(10, 10))
+            Thread.sleep(1_000)
+            assertTrue(described("MCP servers panel").present(), "a click on the sheet's title leaves the panel open")
             iconButton("Disable echo").click(Point(10, 10))
             waitFor("echo disabled after the follow-up refresh", 1.minutes) { described("echo, Disabled").present() }
             takeScreenshot("mcp-panel")
@@ -597,7 +603,8 @@ class ToolWindowIdeTest {
         val toggle = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject }
             .single { it["subtype"]?.jsonPrimitive?.content == "mcp_toggle" }
         assertEquals("echo", toggle["serverName"]!!.jsonPrimitive.content)
-        assertEquals("false", toggle["enabled"]!!.jsonPrimitive.content)
+        assertEquals(false, toggle["enabled"]!!.jsonPrimitive.booleanOrNull)
+        assertFalse(toggle["enabled"]!!.jsonPrimitive.isString, "enabled is a JSON boolean")
     }
 
     @Test
@@ -1055,12 +1062,12 @@ class ToolWindowIdeTest {
             "((${textPredicate("@text")}) or (${textPredicate("@visible_text")}))]",
     )
 
-    /** The node that assistive technology knows as [description]: an MCP server row (`echo, Connected`), the MCP panel. */
+    /**
+     * The node that assistive technology knows as [description]: a tool row (a lone call, a group or a group's sub-row) by its label,
+     * an MCP server row (`echo, Connected`), the MCP panel.
+     */
     private fun Driver.described(description: String): UiComponent =
         ui.x("//div[@class='ComposeNode' and @contentdescription='$description']")
-
-    /** A tool row (a lone call, a group or a group's sub-row), found by its label, which is what it says to assistive technology. */
-    private fun Driver.toolRow(label: String): UiComponent = ui.x("//div[@class='ComposeNode' and @contentdescription='$label']")
 
     /**
      * The header of a running group, a row only a running group has: its sentence ends with `…` and reads `Reading <count>…` or
