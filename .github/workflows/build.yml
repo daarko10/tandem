@@ -156,10 +156,16 @@ jobs:
           name: plugin-verifier-report
           path: ./build/reports/pluginVerifier
 
+  # Each IDE test starts its own IDE (about 1.5 minutes or more), so the tests are split across three jobs that run side
+  # by side: a job runs the tests whose position in their class, sorted by name, is its index modulo three (IdeTestShard).
   ide-test:
-    name: IDE test
+    name: IDE test (${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [ build ]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ 1, 2, 3 ]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v2.0.0
@@ -176,7 +182,9 @@ jobs:
           cache-read-only: true
       # Starts a real IDE with the built plugin installed (IDE Starter + UI Driver); it needs a display.
       - name: Run the IDE test
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" ./gradlew integrationTest
+        env:
+          IDE_TEST_SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" ./gradlew integrationTest -Dtandem.ideTestShard="$IDE_TEST_SHARD"
       - name: Report IDE test failures
         if: ${{ failure() }}
         shell: bash
@@ -190,7 +198,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
-          name: ide-test-logs
+          name: ide-test-logs-${{ matrix.shard }}
           path: |
             out/ide-tests/tests/**/log/**
             build/reports/tests/integrationTest

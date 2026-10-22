@@ -851,5 +851,28 @@ class NightlyStepOutcomeTest(unittest.TestCase):
         self.assertEqual((0, ""), (rc, out))
 
 
+
+BUILD = os.path.join(ROOT, ".github/workflows/build.yml")
+
+
+@unittest.skipUnless(yaml, "PyYAML is not installed")
+class BuildWorkflowTest(unittest.TestCase):
+    """build.yml: how the IDE test is split across jobs."""
+
+    def test_the_ide_test_runs_in_three_shards(self):
+        wf = load(BUILD)
+        job = wf["jobs"]["ide-test"]
+        self.assertEqual({"fail-fast": False, "matrix": {"shard": [1, 2, 3]}}, job["strategy"])   # a red shard never cancels the others
+        self.assertEqual("IDE test (${{ matrix.shard }}/${{ strategy.job-total }})", job["name"])
+        run = step(wf, "ide-test", "Run the IDE test")
+        self.assertEqual("${{ strategy.job-index }}/${{ strategy.job-total }}", run["env"]["IDE_TEST_SHARD"])   # IdeTestShard counts from 0, as job-index does
+        self.assertIn('./gradlew integrationTest -Dtandem.ideTestShard="$IDE_TEST_SHARD"', run["run"])
+        self.assertNotIn("${{", run["run"])                                           # through env, never interpolated into the shell line
+        uploads = [s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")]
+        self.assertEqual(["ide-test-logs-${{ matrix.shard }}"], [s["with"]["name"] for s in uploads])   # an artifact name must be unique in the run
+        with open(os.path.join(ROOT, "build.gradle.kts"), encoding="utf-8") as f:
+            self.assertIn('systemProperty("tandem.ideTestShard", providers.systemProperty("tandem.ideTestShard").getOrElse(""))', f.read())   # reaches the test JVM
+
+
 if __name__ == "__main__":
     unittest.main()
