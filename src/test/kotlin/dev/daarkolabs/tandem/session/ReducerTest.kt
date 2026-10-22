@@ -1400,6 +1400,52 @@ class ReducerTest {
         assertNull(idle.turn)
         assertNull(idle.localNotices().single().command)
     }
+
+    @Test
+    fun `a failed local command says so once, and not after Stop`() {
+        // Synthetic (no fixture has a failed local command): its result says so (hard rule 5), still without a footer.
+        val failure = """{"type":"result","subtype":"error_during_execution","is_error":true,"local_command":"x","result":"boom","session_id":"s1"}"""
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "/x"))
+        val failed = reduce(sent, cli(failure))
+        val errors = failed.entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == NoticeLevel.ERROR }
+        assertEquals(listOf("The turn failed (error_during_execution): boom"), errors.map { it.text })
+        assertTrue(failed.turnEnds().isEmpty())
+        assertEquals(0, failed.turnsEnded)
+        assertNull(failed.lastTurnEnd)
+        assertFalse(failed.busy)
+        assertNull(failed.turn)
+
+        // After Stop the interrupt already said "Stopped.": by the marker line, or by the result's terminal reason.
+        val marker = """{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"""
+        val stopped = reduce(reduce(sent, cli(marker)), cli(failure))
+        assertEquals(listOf(NoticeLevel.INFO to "Stopped."), stopped.entries.filterIsInstance<ChatEntry.Notice>().map { it.level to it.text })
+        assertFalse(stopped.turnInterrupted)
+        assertTrue(stopped.turnEnds().isEmpty())
+        assertEquals(0, stopped.turnsEnded)
+        val aborted = reduce(sent, cli(failure.replace("\"is_error\":true", "\"is_error\":true,\"terminal_reason\":\"aborted_streaming\"")))
+        assertTrue(aborted.entries.none { it is ChatEntry.Notice })
+        assertTrue(aborted.turnEnds().isEmpty())
+        assertFalse(aborted.busy)
+    }
+
+    @Test
+    fun `an init entry without a source keeps the stored connector source`() {
+        val connector = McpServerInfo("claude.ai Example", McpStatus.CONNECTED, "connected", source = "claudeai")
+        val stored = ChatState().let { it.copy(mcp = it.mcp.copy(servers = listOf(connector))) }
+        fun init(servers: String) = cli("""{"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5","mcp_servers":[$servers]}""")
+
+        // The same status without a source: the entry stays as it was.
+        val same = reduce(stored, init("""{"name":"claude.ai Example","status":"connected"}"""))
+        assertEquals(listOf(connector), same.mcp.servers)
+        // A new status without a source: the source stays too, so a later init that leaves it out still keeps it.
+        val failed = reduce(same, init("""{"name":"claude.ai Example","status":"failed"}"""))
+        assertEquals("claudeai", failed.server("claude.ai Example").source)
+        assertEquals(McpStatus.FAILED, failed.server("claude.ai Example").status)
+        val later = reduce(failed, init("""{"name":"echo","status":"connected","source":"dynamic"}"""))
+        assertEquals(listOf("echo", "claude.ai Example"), later.mcp.servers.map { it.name })
+        assertEquals("claudeai", later.server("claude.ai Example").source)
+        assertEquals(3, later.mcp.initCount)
+    }
 }
 
 /** A complete main-thread `assistant` line with one text block. */

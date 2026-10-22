@@ -621,9 +621,11 @@ private fun reduceResult(state: ChatState, result: CliMessage.Result): ChatState
 /**
  * The result of a turn the CLI answered itself: it names a local command (`local_command`), or the turn was flagged local by the
  * command's own line. The turn ends without a [ChatEntry.TurnEnded], and [ChatState.turnsEnded] and [ChatState.lastTurnEnd] stay
- * as they are, so it draws no footer, attention or notification. An error result still says so (hard rule 5).
+ * as they are, so it draws no footer, attention or notification. An error result still says so (hard rule 5), unless the turn was
+ * interrupted: the interrupt already showed "Stopped.", as [reduceResult] has it.
  */
 private fun reduceLocalResult(state: ChatState, result: CliMessage.Result): ChatState {
+    val interrupted = result.terminalReason == "aborted_streaming" || state.turnInterrupted
     val next = state.finishStreaming().copy(
         busy = false,
         sessionId = result.sessionId ?: state.sessionId,
@@ -631,7 +633,7 @@ private fun reduceLocalResult(state: ChatState, result: CliMessage.Result): Chat
         turnInterrupted = false,
         turn = null,
     )
-    return if (result.isError) next.failed(result) else next
+    return if (result.isError && !interrupted) next.failed(result) else next
 }
 
 /** This state with the error notice of [result], a failed one. */
