@@ -20,6 +20,11 @@ if yaml is None and os.environ.get("GITHUB_ACTIONS"):
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 DRIFT = os.path.join(ROOT, ".github/workflows/drift-fix.yml")
 SKILL = os.path.join(ROOT, ".claude/skills/fix-contract-drift/SKILL.md")
+DENY = {"Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)",
+        "Write(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)",
+        "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew compileKotlin:*)",
+        "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"}
+ALLOWLIST = "'^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\\.md$)'"
 
 
 def load(path: str) -> dict:
@@ -89,6 +94,7 @@ class DriftFixWorkflowTest(unittest.TestCase):
         for key in ("anthropic_federation_rule_id", "anthropic_organization_id", "anthropic_service_account_id", "anthropic_workspace_id"):
             self.assertEqual("${{ env." + key.upper() + " }}", agent["with"][key])
         self.assertNotIn("github_token", agent["with"])
+        self.assertEqual("steps.gate.outputs.proceed == 'true' && steps.protect.outcome == 'success'", agent["if"])   # never on an unprotected main
         self.assertTrue(agent["with"]["prompt"].startswith("/fix-contract-drift run="))
         for part in ("recording=build/drift/recording", "classification=build/drift/classification.json", "rehearsal=", "date="):
             self.assertIn(part, agent["with"]["prompt"])
@@ -104,14 +110,21 @@ class DriftFixWorkflowTest(unittest.TestCase):
         names = [s.get("name") for s in steps(load(DRIFT), "fix")]
         expected = ["Free disk space", "Check out main", None, None, "Ensure the labels exist", "Name the red run", "Fetch the recording",
                     "Mutate a recording for the rehearsal", "Classify before Gradle", "Reproduce the red", "Classify",
-                    "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Fix the drift", "Enforce the edit allowlist"]
+                    "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Require a protected main", "Fix the drift",
+                    "Enforce the edit allowlist"]
         self.assertEqual(expected, names)
         wf = load(DRIFT)
         self.assertTrue(step(wf, "fix", "Reproduce the red")["continue-on-error"])
+        self.assertIn("--rerun", step(wf, "fix", "Reproduce the red")["run"])        # the build cache never replays a pass on another recording
         self.assertTrue(step(wf, "fix", "Enforce the edit allowlist")["if"].startswith("always()"))
-        for name in ("Name the red run", "Fetch the recording", "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Enforce the edit allowlist"):
+        for name in ("Name the red run", "Fetch the recording", "Report a run the agent cannot fix", "Skip when a fix is already waiting",
+                     "Require a protected main", "Enforce the edit allowlist"):
             self.assertEqual("${{ github.token }}", step(wf, "fix", name)["env"]["GH_TOKEN"])
-        self.assertIn("conclusion", step(wf, "fix", "Name the red run")["run"])      # a green or foreign run is refused before any spend
+        name_run = step(wf, "fix", "Name the red run")["run"]
+        self.assertIn("conclusion", name_run)                                         # a green or foreign run is refused before any spend
+        self.assertIn("headBranch", name_run)                                         # so is a run of another branch, whose recording that branch produced
+        for s in steps(wf, "fix"):
+            self.assertNotIn("${{", s.get("run", ""), s.get("name"))                 # inputs and outputs reach the shell through env only
         mutate = step(wf, "fix", "Mutate a recording for the rehearsal")
         self.assertIn("scripts/make_drift.py", mutate["run"])
         self.assertEqual("${{ inputs.mode }}", mutate["env"]["MODE"])                 # through env, never interpolated into the shell line
@@ -140,13 +153,29 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertNotIn("git ls-remote", enforce["run"])
         self.assertNotIn("gh pr close", enforce["run"])                               # an offending PR is commented on and left open: closing would re-arm the loop nightly
         self.assertIn("gh pr comment", enforce["run"])
-        self.assertIn('files="$(gh pr view "$pr" --json files', enforce["run"])      # a failed read of the PR's files fails the step, never "within the allowlist"
+        self.assertIn('files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$pr/files"', enforce["run"])   # a failed read fails the step; REST pages past 100 files
+        self.assertIn("previous_filename", enforce["run"])                            # a rename from outside the allowlist names its old path
+        self.assertNotIn("gh pr view", enforce["run"])
+        self.assertIn(ALLOWLIST, enforce["run"])                                      # the edit allowlist, exactly
+        self.assertIn("steps.protect.outcome == 'success'", enforce["if"])            # no "pushed no branch" when the agent never started
         self.assertNotIn('no branch was pushed"; exit 0', enforce["run"])              # no PR after the gate proceeded is red, never green and silent
         self.assertIn("pushed no branch and opened no PR", enforce["run"])
         self.assertIn("pushed $BRANCH but opened no PR", enforce["run"])
         self.assertEqual("${{ steps.classify.outputs.kind }}", enforce["env"]["KIND"])
         self.assertEqual("${{ steps.agent.outputs.conclusion }}", enforce["env"]["AGENT"])
         self.assertIn("rehearsal=${{ steps.precheck.outputs.rehearsal }}", step(wf, "fix", "Fix the drift")["with"]["prompt"])
+
+    def test_the_agent_never_starts_on_an_unprotected_main(self):
+        wf = load(DRIFT)
+        protect = step(wf, "fix", "Require a protected main")
+        self.assertEqual("protect", protect["id"])
+        self.assertEqual("steps.gate.outputs.proceed == 'true'", protect["if"])
+        self.assertIn("set -euo pipefail", protect["run"])                            # a failed read fails the step, and the agent never starts
+        self.assertIn('repos/$GITHUB_REPOSITORY/branches/main" --jq .protected', protect["run"])
+        self.assertIn('repos/$GITHUB_REPOSITORY/rules/branches/main"', protect["run"])
+        self.assertIn('select(.type == "pull_request") | .parameters.required_approving_review_count', protect["run"])
+        self.assertIn('[ "$protected" != "true" ] && [ "$reviews" -lt 1 ]', protect["run"])
+        self.assertIn("exit 1", protect["run"])
 
     def test_the_only_push_is_exact_and_the_broad_rules_are_gone(self):
         allowed = tools(step(load(DRIFT), "fix", "Fix the drift")["with"]["claude_args"])
@@ -161,9 +190,8 @@ class DriftFixWorkflowTest(unittest.TestCase):
         agent = step(load(DRIFT), "fix", "Fix the drift")
         self.assertEqual("agent", agent["id"])
         deny = json.loads(agent["with"]["settings"])["permissions"]["deny"]
-        for rule in ("Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)",
-                     "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Bash(claude:*)"):
-            self.assertIn(rule, deny)
+        self.assertEqual(DENY, set(deny))                                             # the spec's list, exactly: nothing dropped, nothing unexplained
+        self.assertEqual(len(DENY), len(deny))
         self.assertEqual({"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, json.loads(agent["with"]["settings"])["env"])   # ./gradlew check outlives the Bash tool's two-minute default
 
 

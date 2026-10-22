@@ -2,9 +2,10 @@
 # (scripts/classify_drift.py), and runs the repository skill fix-contract-drift with Workload Identity Federation (the same
 # four identifiers as cli-contract.yml; the federation rule admits runs on main only). A run the CLI did not answer is
 # reported on the issue "CLI contract: the CLI did not answer" instead, and an open PR labelled contract-drift skips the
-# agent. Nothing here merges or publishes. Rehearsal: `gh workflow run cli-contract.yml -f drift=<mode>` makes the nightly
-# mutate its own recording, so this workflow fires as for a real red; workflow_dispatch with rehearse=true runs the fixer
-# alone on a mutated fixture. CLAUDE.md names the loop.
+# agent. The agent never starts unless main is protected (a pull request plus one approving review): that protection,
+# not the tool allowlist, keeps the App token off main. Nothing here merges or publishes. Rehearsal: `gh workflow run
+# cli-contract.yml -f drift=<mode>` makes the nightly mutate its own recording, so this workflow fires as for a real red;
+# workflow_dispatch with rehearse=true runs the fixer alone on a mutated fixture. CLAUDE.md names the loop.
 name: Drift fix
 
 on:
@@ -77,7 +78,8 @@ jobs:
         run: |
           gh label create contract-drift --force --color B60205 --description "Opened or reported by the drift loop (drift-fix.yml)"
           gh label create rehearsal --force --color FBCA04 --description "A drift-loop rehearsal: close, do not merge"
-      # Outputs: id, url and UTC date of the red run (this run itself when rehearse=true), and rehearse=true|false.
+      # Outputs: id, url and UTC date of the red run (this run itself when rehearse=true), and rehearse=true|false. A run_id
+      # must name a failed CLI contract run on main: a branch's run carries that branch's own recording.
       - name: Name the red run
         id: run
         env:
@@ -92,10 +94,10 @@ jobs:
           else
             id="${EVENT_RUN_ID:-$INPUT_RUN_ID}"
             if [ -z "$id" ]; then echo "::error title=Drift fix::No run to fix: pass run_id, or rehearse=true."; exit 1; fi
-            view="$(gh run view "$id" --json url,createdAt,conclusion,workflowName)"
+            view="$(gh run view "$id" --json url,createdAt,conclusion,workflowName,headBranch)"
             url="$(jq -r .url <<<"$view")"; date="$(jq -r '.createdAt[0:10]' <<<"$view")"
-            if [ "$(jq -r .workflowName <<<"$view")" != "CLI contract" ] || [ "$(jq -r .conclusion <<<"$view")" != "failure" ]; then
-              echo "::error title=Drift fix::Run $id is not a failed CLI contract run: $(jq -r '[.workflowName, .conclusion] | join(", ")' <<<"$view")."; exit 1
+            if [ "$(jq -r .workflowName <<<"$view")" != "CLI contract" ] || [ "$(jq -r .conclusion <<<"$view")" != "failure" ] || [ "$(jq -r .headBranch <<<"$view")" != "main" ]; then
+              echo "::error title=Drift fix::Run $id is not a failed CLI contract run on main: $(jq -r '[.workflowName, .conclusion, .headBranch] | join(", ")' <<<"$view")."; exit 1
             fi
           fi
           printf 'id=%s\nurl=%s\ndate=%s\nrehearse=%s\n' "$id" "$url" "$date" "$([ "$REHEARSE" = "true" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
@@ -133,10 +135,12 @@ jobs:
           echo "kind=$(jq -r .kind build/drift/precheck.json)" >> "$GITHUB_OUTPUT"
           echo "rehearsal=$([ -f build/drift/recording/rehearsal ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       # Reproduces the red here and leaves the assertion messages in build/test-results/test for the classification.
+      # --rerun: the build cache (org.gradle.caching, restored by setup-gradle) keys the task on the code and the path, not
+      # the recording's contents, so without it a ContractTest that passed once on this commit could replay from the cache.
       - name: Reproduce the red
         if: steps.precheck.outputs.kind != 'cli-did-not-answer'
         continue-on-error: true
-        run: ./gradlew test --tests '*ContractTest*' -Dtandem.contractDir="$PWD/build/drift/recording"
+        run: ./gradlew test --tests '*ContractTest*' --rerun -Dtandem.contractDir="$PWD/build/drift/recording"
       - name: Classify
         id: classify
         if: steps.precheck.outputs.kind != 'cli-did-not-answer'
@@ -175,15 +179,35 @@ jobs:
           else
             echo "proceed=true" >> "$GITHUB_OUTPUT"
           fi
+      # The precondition the whole loop rests on, checked before any spend: the App token the action exports can push to
+      # any unprotected branch, main included. Classic protection counts when present (the workflow token cannot read its
+      # review count, which needs administration access); a ruleset counts when its pull_request rule requires at least one
+      # approving review. A failed read fails the step too. Either way the run is red and the agent does not start.
+      - name: Require a protected main
+        id: protect
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          protected="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)"
+          reviews="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main" --jq '[.[] | select(.type == "pull_request") | .parameters.required_approving_review_count] | max // 0')"
+          if [ "$protected" != "true" ] && [ "$reviews" -lt 1 ]; then
+            echo "::error title=Drift fix::main is not protected (a pull request plus one approving review); the agent is not started."; exit 1
+          fi
+          echo "main is protected (classic: $protected, ruleset reviews: $reviews)"
       # No github_token input: the action authenticates as the Claude GitHub App, sets the origin URL and the commit identity
       # before the CLI starts, and the PR it opens starts the Build workflow. The allowlist names the invocations the skill
       # prescribes; the push rule is exact (a :* rule matches the prefix followed by a space, so drift/:* would never match
-      # the push). The deny rules keep the agent out of the files that run code before the push and out of a second CLI.
-      # Neither is what protects main: branch protection on main (a pull request plus one approving review) and the App
-      # token's scope are.
+      # the push). The deny rules keep the CLI's Edit and Write tools out of the files that run code before the push and
+      # out of a second CLI. `cp` is not bound by them, so the allowlist step below checks the result. The action also loads
+      # the project's .claude/settings.json, whose allow rules are merged in; the deny rules below take back the Gradle
+      # tasks and ktlint it allows that the skill never prescribes, and `./gradlew check -x`. Neither list is what protects
+      # main: branch protection on main (a pull request plus one approving review, required by the step above) and the
+      # App token's scope are.
       - name: Fix the drift
         id: agent
-        if: steps.gate.outputs.proceed == 'true'
+        if: steps.gate.outputs.proceed == 'true' && steps.protect.outcome == 'success'
         uses: anthropics/claude-code-action@v1
         timeout-minutes: 75
         with:
@@ -197,7 +221,7 @@ jobs:
             --max-turns 120
             --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
           settings: |
-            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}}
+            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}}
       # The check that does not depend on the agent obeying the skill: a PR touching anything outside the allowlist is
       # commented on, left open and the run is red. It is never closed: the gate above keys on an open contract-drift PR, so
       # a close would re-arm the loop and the next nightly would produce the same fix again, every night.
@@ -207,9 +231,11 @@ jobs:
       # has persist-credentials: false, the action revokes its App token before this step, and the repository is private, so
       # git itself would get a 401 here. No draft is opened: GITHUB_TOKEN cannot create a pull request unless the repository
       # setting "Allow GitHub Actions to create and approve pull requests" is on. The PR's file list is read on its own line,
-      # so a failed read fails the step instead of passing as "no offending path".
+      # so a failed read fails the step instead of passing as "no offending path". It comes from the REST files list, paged
+      # (up to 3000 files), with the old path of each rename: GraphQL's `files` (gh pr view) stops at 100 and names only a
+      # rename's new path, so a file moved into src/test/ from outside the allowlist would pass.
       - name: Enforce the edit allowlist
-        if: always() && steps.gate.outputs.proceed == 'true'
+        if: always() && steps.gate.outputs.proceed == 'true' && steps.protect.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
@@ -230,7 +256,7 @@ jobs:
             fi
             echo "::error title=Drift fix::The classification was $KIND but the agent pushed no branch and opened no PR (its step ended '${AGENT:-skipped}'): a denied command, a redactor stop (see the standing issue), the action skipped after a workflow-validation error, or the agent gave up; read the Fix the drift step's log."; exit 1
           fi
-          files="$(gh pr view "$pr" --json files --jq '.files[].path')"
+          files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$pr/files" --jq '.[] | .filename, (.previous_filename // empty)')"
           offending="$(grep -vE '^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\.md$)' <<<"$files" || true)"
           if [ -n "$offending" ]; then
             gh pr comment "$pr" --body "$(printf 'drift-fix.yml: this fix edits files outside the allowlist (protocol/, session/transcript/, src/test/, docs/protocol.md); it is left open so the loop holds (the gate skips while it is open) and the owner decides. Close it to re-arm the loop, or merge after review.\n\n%s' "$offending")"
