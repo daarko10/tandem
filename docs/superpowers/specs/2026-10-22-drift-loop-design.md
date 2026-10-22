@@ -208,7 +208,10 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    rulesets' rules, readable with metadata access) whose `required_approving_review_count` is at least 1,
    `require_code_owner_review` is `true` and `require_last_push_approval` is `true` must be a number of at least 1, and
    `main`'s `.github/CODEOWNERS` (read raw through the contents API; `contents: read` covers it) must have a line
-   owning every file (`* @owner`), since the code-owner review binds only files that have an owner. One approving
+   owning every file (`* @owner`), since the code-owner review binds only files that have an owner. That read is
+   decided by `gh`'s exit status like the branch read below: a body whose `status` is `404` is a missing file, which
+   owns nothing (the "no line owning every file" refusal), and any other failure (a 5xx, a rate limit, no body) is
+   `::error … Reading main's .github/CODEOWNERS failed` and `exit 1`, never read as "no owner line". One approving
    review alone would not do: the App holds pull-request write, so it can approve a pull request it did not author
    (the owner's open PR after a push to its unprotected head branch, a Dependabot PR) and then merge it, and the
    agent's test code runs with the App token in its environment; an App is no code owner and cannot approve its own
