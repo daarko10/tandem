@@ -99,6 +99,10 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
                 checkBox("Show thinking rows")
                     .bindSelected({ settings.state.showThinking }, { settings.state.showThinking = it })
             }
+            row {
+                checkBox("Reduce motion")
+                    .bindSelected({ settings.state.reduceMotion }, { settings.state.reduceMotion = it })
+            }.rowComment("The spark beside Claude's working line stands still.")
         }
         check()
         return page

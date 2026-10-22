@@ -18,8 +18,11 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.util.IdentityHashMap
 
-/** What the rows show beyond the state: [showThinking] is the `Show thinking` setting. */
-data class RowOptions(val showThinking: Boolean)
+/**
+ * What the rows show beyond the state: [showThinking] is the `Show thinking rows` setting, [reduceMotion] the `Reduce motion` one
+ * (the working row's spark stands still; the rows themselves do not depend on it).
+ */
+data class RowOptions(val showThinking: Boolean, val reduceMotion: Boolean = false)
 
 /**
  * The chat list's rows, the pending request shown as a card, and how many more requests wait behind it. [latestReply] is the entry id

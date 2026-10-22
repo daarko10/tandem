@@ -32,8 +32,8 @@ The existing options were studied in October 2026:
         │  collects StateFlows, calls SessionManager
         ▼
  TandemSessions (ide/)  project service: owns the SessionManager in its coroutine scope, restores the open sessions
-        │               from TandemWorkspaceState, reads TandemSettings (claude path, max live sessions, show thinking rows; Settings |
-        │               Tools | Tandem), runs SessionNotifier (IDE notifications)
+        │               from TandemWorkspaceState, reads TandemSettings (claude path, max live sessions, show thinking rows,
+        │               reduce motion; Settings | Tools | Tandem), runs SessionNotifier (IDE notifications)
         ▼
  SessionManager (session/)  the project's sessions: StateFlow<List<SessionHandle>> and the selection, the live cap,
         │                   create / open / fork / rename / delete / close, the resume-id mismatch rule. It raises the

@@ -13,6 +13,7 @@ import dev.daarkolabs.tandem.chat.ThinkingRow
 import dev.daarkolabs.tandem.chat.ToolKind
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
+import dev.daarkolabs.tandem.chat.WorkingIndicator
 import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.AssistantBlock
@@ -226,6 +227,29 @@ class TandemSessionsTest {
             }
         }
         awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `the working row animates unless Reduce motion is on`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("motion").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            val row = WorkingRow(turnUuid = "turn", startedAtMillis = 0, step = "Pondering", outputTokens = 0, waiting = false)
+            fun animated(): Boolean = WorkingIndicator.view(row, 1_000, 1_000, sessions.rowOptions.value.reduceMotion).animated
+            assertFalse(sessions.rowOptions.value.reduceMotion)
+            assertTrue(animated(), "the spark moves on a default IDE")
+            try {
+                TandemSettings.getInstance().state.reduceMotion = true
+                sessions.settingsChanged()
+                assertTrue(sessions.rowOptions.value.reduceMotion)
+                assertFalse(animated(), "the spark stands still")
+            } finally {
+                // The settings are the application's: no other test may see reduceMotion = true.
+                TandemSettings.getInstance().loadState(TandemSettings.State())
+                sessions.settingsChanged()
+            }
+            assertTrue(animated())
+        }
     }
 
     @Test

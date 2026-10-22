@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -43,6 +44,7 @@ import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
+import dev.daarkolabs.tandem.ui.rows.LocalReducedMotion
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -87,6 +89,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val selectedId by manager.selected.collectAsState()
     val selected = open.firstOrNull { it.id == selectedId }
     val presenters = rememberChatPresenters(manager, open, sessions.rowOptions)
+    val rowOptions by sessions.rowOptions.collectAsState()
     var collapsed by remember { mutableStateOf(workspace.state.sidebarCollapsed) }
     // The sidebar over the chat, in a window too narrow to dock it.
     var drawerOpen by remember { mutableStateOf(false) }
@@ -211,20 +214,22 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                 }
                             }
                             Box(Modifier.onFocusChanged { chatFocused = it.hasFocus }.then(chatFocus)) {
-                                ChatPane(
-                                    project,
-                                    selected,
-                                    manager,
-                                    workspace,
-                                    presenter,
-                                    ui,
-                                    actions,
-                                    sender,
-                                    focusPrompt = promptFocusFor == selected.id,
-                                    onPromptFocused = { promptFocusFor = null },
-                                    onFocusComposer = { promptFocusFor = selected.id },
-                                    cardTakesFocus = chatHoldsFocus,
-                                )
+                                CompositionLocalProvider(LocalReducedMotion provides rowOptions.reduceMotion) {
+                                    ChatPane(
+                                        project,
+                                        selected,
+                                        manager,
+                                        workspace,
+                                        presenter,
+                                        ui,
+                                        actions,
+                                        sender,
+                                        focusPrompt = promptFocusFor == selected.id,
+                                        onPromptFocused = { promptFocusFor = null },
+                                        onFocusComposer = { promptFocusFor = selected.id },
+                                        cardTakesFocus = chatHoldsFocus,
+                                    )
+                                }
                             }
                         }
                     }

@@ -191,6 +191,14 @@ class WorkingIndicatorTest {
     }
 
     @Test
+    fun `animated by default`() {
+        assertFalse(RowOptions(showThinking = true).reduceMotion, "Reduce motion is off unless the setting says so")
+        val view = WorkingIndicator.view(row(), now, now, reducedMotion = RowOptions(showThinking = true).reduceMotion)
+        assertEquals(WorkingIndicator.Mode.RUNNING, view.mode)
+        assertTrue(view.animated)
+    }
+
+    @Test
     fun `not animated under reduced motion`() {
         val view = WorkingIndicator.view(row(), now, now, reducedMotion = true)
         assertEquals(WorkingIndicator.Mode.RUNNING, view.mode)

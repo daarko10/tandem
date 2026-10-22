@@ -117,7 +117,10 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         ApplicationManager.getApplication().serviceIfCreated<TandemSettings>()?.let(::rowOptionsOf) ?: RowOptions(showThinking = true),
     )
 
-    /** What the chat rows show beyond the session's state: the `Show thinking rows` setting, as last applied ([settingsChanged]). */
+    /**
+     * What the chat rows show beyond the session's state: the `Show thinking rows` and `Reduce motion` settings, as last applied
+     * ([settingsChanged]).
+     */
     val rowOptions: StateFlow<RowOptions> = _rowOptions.asStateFlow()
 
     private val started = AtomicBoolean(false)
@@ -244,8 +247,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     }
 
     /**
-     * Takes the settings the chat rows depend on ([TandemSettings.State.showThinking]) into [rowOptions], so that every open chat
-     * rebuilds its rows; called when the settings page applies. Safe on the EDT: it reads the settings in memory and sets a flow.
+     * Takes the settings the chat rows depend on ([TandemSettings.State.showThinking], [TandemSettings.State.reduceMotion]) into
+     * [rowOptions], so that every open chat rebuilds its rows; called when the settings page applies. Safe on the EDT: it reads the
+     * settings in memory and sets a flow.
      */
     fun settingsChanged() {
         _rowOptions.value = rowOptionsOf(TandemSettings.getInstance())
@@ -281,4 +285,5 @@ private fun configDir(): Path =
         ?: TranscriptFolder.configDir(ShellEnvironment.get())
 
 /** The chat rows' options as [settings] say. */
-private fun rowOptionsOf(settings: TandemSettings): RowOptions = RowOptions(showThinking = settings.state.showThinking)
+private fun rowOptionsOf(settings: TandemSettings): RowOptions =
+    RowOptions(showThinking = settings.state.showThinking, reduceMotion = settings.state.reduceMotion)
