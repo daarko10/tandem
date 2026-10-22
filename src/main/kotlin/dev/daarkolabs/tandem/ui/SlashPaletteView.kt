@@ -7,6 +7,7 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -24,6 +25,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -53,7 +55,9 @@ private const val MAX_ROWS: Int = 8
  * takes the focus and no click outside dismisses it, so every key still reaches the text area and a press outside goes to what it
  * lands on; it has no dismiss rule of its own, the composer shows it while the palette is open. Its rows list at most 8 rows and at
  * most [maxHeightPx] with the footer, the space above the box, scrolling past that, never placed over the box; the selected row is
- * scrolled into view. A click on a row calls [onPick] with it.
+ * scrolled into view. A click on a row calls [onPick] with it. Every row is as tall as the others, and the list is given its exact
+ * height (its rows, at most 8): Jewel's scroll container measures its scrollbar at the height it may take, and a popup does not clip
+ * it, so with only a maximum the scrollbar ran down over the box and the footer. Nothing it draws leaves its bounds.
  *
  * A row: `/<name>` in the editor font, the argument hint after it and ` · via /<alias>` when only an alias matched, both in the info
  * colour, the description under it a size smaller, and the scope (`project`, `user`, `plugin`; nothing for a built-in) as a plain
@@ -68,12 +72,13 @@ internal fun SlashPaletteView(palette: SlashPalette, widthPx: Int, maxHeightPx: 
     Popup(popupPositionProvider = position, properties = PopupProperties(focusable = false, dismissOnClickOutside = false)) {
         val colors = JewelTheme.globalColors
         val shape = RoundedCornerShape(8.dp)
-        // The tallest row seen: 8 of them cap the list, so a list of one-line rows shows a few more before it scrolls.
+        // The rows' height (each reserves its description line, so all are as tall), measured: the list is exactly its rows, at most
+        // 8 of them and at most the space above the box. Until the first row is measured only that space caps it.
         var rowHeightPx by remember { mutableIntStateOf(0) }
-        val listMaxPx = if (rowHeightPx > 0) min(MAX_ROWS * rowHeightPx, maxHeightPx) else maxHeightPx
         Column(
             Modifier.width(with(density) { widthPx.toDp() })
                 .heightIn(max = with(density) { max(0, maxHeightPx).toDp() })
+                .clipToBounds()
                 .testTag("slash-palette")
                 .semantics { contentDescription = "Slash commands" }
                 .background(colors.panelBackground, shape)
@@ -83,10 +88,14 @@ internal fun SlashPaletteView(palette: SlashPalette, widthPx: Int, maxHeightPx: 
             if (palette.items.isNotEmpty()) {
                 val listState = rememberLazyListState()
                 LaunchedEffect(palette.query, palette.selected) { scrollIntoView(listState, palette.selected) }
-                VerticallyScrollableContainer(
-                    listState,
-                    Modifier.weight(1f, fill = false).heightIn(max = with(density) { max(0, listMaxPx).toDp() }),
-                ) {
+                val listSize = if (rowHeightPx > 0) {
+                    val listPx = min(min(palette.items.size, MAX_ROWS) * rowHeightPx, maxHeightPx)
+                    Modifier.height(with(density) { max(0, listPx).toDp() })
+                } else {
+                    Modifier.heightIn(max = with(density) { max(0, maxHeightPx).toDp() })
+                }
+                // The weight leaves the footer its line when the space above the box is short; the height is then cut to what is left.
+                VerticallyScrollableContainer(listState, Modifier.weight(1f, fill = false).then(listSize).clipToBounds()) {
                     LazyColumn(state = listState) {
                         itemsIndexed(palette.items, key = { _, item -> item.name }) { index, item ->
                             PaletteRow(
@@ -128,18 +137,17 @@ private fun PaletteRow(item: PaletteItem, selected: Boolean, modifier: Modifier,
                     if (item.argumentHint.isNotEmpty()) append(' ').append(item.argumentHint)
                     item.via?.let { append(" · via /").append(it) }
                 }
-                if (trailing.isNotEmpty()) Text(trailing, color = info, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(trailing, color = info, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            if (item.description.isNotEmpty()) {
-                Text(item.description, style = smallTextStyle(), color = info, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
+            // Always laid out, empty or not, so that a row without a description is as tall as one with it (8 rows are 8 rows).
+            Text(item.description, style = smallTextStyle(), color = info, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         scopeLabel(item.scope)?.let { TextPill(it) }
     }
 }
 
 /** The scope pill's text (MCP spec 3.4); none for a built-in. */
-internal fun scopeLabel(scope: CommandScope): String? = when (scope) {
+private fun scopeLabel(scope: CommandScope): String? = when (scope) {
     CommandScope.BUILTIN -> null
     CommandScope.PROJECT -> "project"
     CommandScope.USER -> "user"
