@@ -4,7 +4,7 @@
 
 **Goal:** A red nightly `CLI contract` run becomes a pull request the same night, without a human: the fixer workflow downloads the red run's recording, classifies the red, and a repository skill promotes the recording to a fixture, patches the decoder or the reader, runs the tests and opens the PR; a run the CLI did not answer is reported on a standing issue instead.
 
-**Architecture:** Two pure-Python scripts under `scripts/` (`classify_drift.py` tells the three kinds of red apart from the recording and the JUnit XML; `make_drift.py` mutates the committed `history-reply` fixture pair into a rehearsal recording), a repository skill `.claude/skills/fix-contract-drift/SKILL.md` that prescribes the fix procedure, and a workflow `.github/workflows/drift-fix.yml` (`workflow_run` of `CLI contract` plus a `workflow_dispatch` rehearsal) that runs the scripts, guards against double fixes, runs `anthropics/claude-code-action@v1` with Workload Identity Federation and enforces an edit allowlist afterwards. The nightly gets two small additions (a redacted `session-id.jsonl`, failure messages as annotations). Nothing merges, publishes or posts outside the repository.
+**Architecture:** Two pure-Python scripts under `scripts/` (`classify_drift.py` tells the three kinds of red apart from the recording and the JUnit XML; `make_drift.py` mutates the committed `history-reply` fixture pair into a rehearsal recording), a repository skill `.claude/skills/fix-contract-drift/SKILL.md` that prescribes the fix procedure, and a workflow `.github/workflows/drift-fix.yml` (`workflow_run` of `CLI contract` plus a `workflow_dispatch` rehearsal) that runs the scripts, guards against double fixes, runs `anthropics/claude-code-action@v1` with Workload Identity Federation and enforces an edit allowlist afterwards. The nightly gets four additions (a redacted `session-id.jsonl`, failure messages as annotations, the renamed-core-type case in its check step, and a `drift` input whose run mutates its own recording for the rehearsal). Nothing merges, publishes or posts outside the repository.
 
 **Tech Stack:** GitHub Actions (`workflow_run`, `workflow_dispatch`, OIDC `id-token`), `anthropics/claude-code-action@v1` with federation inputs, `gh` CLI, Python 3 `unittest` (`-I`-safe scripts, `xml.etree`, `json`), PyYAML for the workflow tests, the existing `scripts/redact_fixture.py`, Gradle `ContractTest`.
 
@@ -19,10 +19,10 @@ Time matters here: do not spend time that can be avoided, and the earlier a corr
 - Model tiers: Tasks D1, D2, D3 and D5 run on Opus with an Opus per-task reviewer; Task D4 (docs) runs on Sonnet; the final whole-branch review runs on Fable. A task that fails review twice moves to Fable.
 - Hard rules of `CLAUDE.md` 6 and 8: every protocol change gets a fixture test; unknown message types parse to `Unknown(raw)`, never throw; the product is "Tandem", which works with Claude Code. Nothing in this plan changes Kotlin: `./gradlew check` stays as it is.
 - `docs/launch.md` is not edited (its milestone bullet "Drift loop closed" is appended by the owner after the first real merged fix); `docs/protocol.md` is not edited (the fixer edits it per drift); nothing under `.github/` is ever edited by the fixer.
-- Exact values from the spec: workflow name `Drift fix`; job `fix`; `concurrency.group: drift-fix`, `cancel-in-progress: false`; job `timeout-minutes: 90`, action step `timeout-minutes: 75`; permissions `id-token: write`, `contents: write`, `pull-requests: write`, `issues: write`, `actions: read`; artifact `contract-recording`; recording dir `build/drift/recording`; classification `build/drift/classification.json`; re-recording dir (unused today) `build/drift/recorded`; labels `contract-drift` and `rehearsal`; standing issue title `CLI contract: the CLI did not answer`; branch `drift/<YYYY-MM-DD>-<run id>`; fixture names `drift-<YYYY-MM-DD>` and `rehearsal-<YYYY-MM-DD>` (UTC date of the red run); kinds `cli-did-not-answer`, `decoder`, `reader`, `unknown`; detail cut at 400 characters; `--model claude-opus-5-5`, `--max-turns 60`; the tool allowlist `Read,Grep,Glob,Edit,Write,Bash(./gradlew:*),Bash(python3:*),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin drift/:*),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)` (24 entries, verbs not programs); edit allowlist `src/main/kotlin/dev/daarkolabs/tandem/protocol/`, `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`, `src/test/`, `docs/protocol.md`; the four Anthropic identifiers exactly as `cli-contract.yml` carries them in `env:` (`fdrl_019BGJmAMDiAL6DmAQENbhfk`, `8336fe5f-a7f7-4255-9fe0-7f594d5a8ec8`, `svac_01F45vdtRBnPSRZHXY8ek1fn`, `wrkspc_012JJzfEG8tDKeta7pe3CCa5`).
+- Exact values from the spec: workflow name `Drift fix`; job `fix`; `concurrency.group: drift-fix`, `cancel-in-progress: false`; job `timeout-minutes: 90`, action step `timeout-minutes: 75`; permissions `id-token: write`, `contents: write`, `pull-requests: write`, `issues: write`, `actions: read`; artifact `contract-recording`; recording dir `build/drift/recording`; classification `build/drift/classification.json`; re-recording dir (unused today) `build/drift/recorded`; labels `contract-drift` and `rehearsal`; standing issue title `CLI contract: the CLI did not answer`; branch `drift/<YYYY-MM-DD>-<run id>`; fixture names `drift-<YYYY-MM-DD>` and `rehearsal-<YYYY-MM-DD>` (UTC date of the red run); kinds `cli-did-not-answer`, `decoder`, `reader`, `unknown`; detail cut at 400 characters; `--model claude-opus-5-5`, `--max-turns 60`; the tool allowlist `Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)` (27 entries: the invocations the skill prescribes, the push exact); the action's `settings` input `{"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)"]}}` (13 rules); the action step `id: agent`; edit allowlist `src/main/kotlin/dev/daarkolabs/tandem/protocol/`, `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`, `src/test/`, `docs/protocol.md`; the four Anthropic identifiers exactly as `cli-contract.yml` carries them in `env:` (`fdrl_019BGJmAMDiAL6DmAQENbhfk`, `8336fe5f-a7f7-4255-9fe0-7f594d5a8ec8`, `svac_01F45vdtRBnPSRZHXY8ek1fn`, `wrkspc_012JJzfEG8tDKeta7pe3CCa5`).
 - The workflow passes `date=<YYYY-MM-DD>` (the red run's UTC date) as the prompt's fifth argument, so the skill never needs `actions: read` through the App token to look the run up. Run by hand, `date=` defaults to today in UTC. The prompt's `rehearsal=` comes from the marker file `rehearsal` in the recording (written by `make_drift.py`), not from a dispatch input: the real rehearsal arrives through `workflow_run` like any red.
-- The fixer's tool allowlist names verbs, not programs (spec, runtime step 8): with the App token no merge, close, force push, branch deletion or push outside `drift/` is possible. The skill prescribes no command outside the list and no compound command whose parts are not all on it (in headless mode a denied call is a dead end, not a prompt): the script tests run as `python3 -m unittest discover -s scripts -t scripts` from the repository root, the leak stop removes copies with `git clean -f --`, the labels are created by the workflow and never by the skill, the push is `git push -u origin drift/…`, and no `gh auth setup-git` or identity fallback exists (the action sets the `origin` URL and `user.name`/`user.email` before the CLI starts).
-- `scripts/*.py` run under `python3 -I` and import only the standard library (PyYAML only in `test_workflows.py`, which skips itself when PyYAML is missing). Tests run with `python3 -m unittest discover -s scripts -t scripts -v` from the worktree root (the skill's spelling), the same set `build.yml`'s "Script tests" step runs as `cd scripts && python3 -m unittest`.
+- The fixer's tool allowlist names the invocations the skill prescribes (spec, runtime step 8), and the push rule is exact: `Bash(git push -u origin HEAD)`. The installed CLI matches a rule without `*` as the whole command and a `:*` rule as the command itself or the prefix followed by a space, so `Bash(git push -u origin drift/:*)` would never match `git push -u origin drift/<date>-<run id>` and the loop could never open a PR. The list guides the agent; what protects `main` is branch protection (a pull request plus one approving review) and the App token's scope, since the token is in the agent's environment and the `origin` URL. The skill prescribes no command outside the list and no compound command whose parts are not all on it (in headless mode a denied call is a dead end, not a prompt): the script tests run as `python3 -m unittest discover -s scripts -t scripts` from the repository root, the leak stop removes copies with `git clean -f --`, the labels are created by the workflow and never by the skill, the push is `git push -u origin HEAD` from the `drift/…` branch, and no `gh auth setup-git` or identity fallback exists (the action sets the `origin` URL and `user.name`/`user.email` before the CLI starts). The deny rules of the action's `settings` input keep the agent out of `.github/`, the build files, `scripts/`, `.claude/`, `CLAUDE.md` and a second `claude` before the push; the allowlist step checks after it.
+- `scripts/*.py` run under `python3 -I` and import only the standard library (PyYAML only in `test_workflows.py`, which skips itself when PyYAML is missing, except under `GITHUB_ACTIONS`, where it raises). Tests run with `python3 -m unittest discover -s scripts -t scripts -v` from the worktree root (the skill's spelling), the same set `build.yml`'s "Script tests" step runs as `cd scripts && python3 -m unittest`.
 - The federation rule admits only `refs/heads/main`: the rehearsal (D5) can run only after `ci/drift-loop` is merged. Everything else is verified on the branch before that, so the merge is not a wait: D1 proves both rehearsal modes against the real decoder locally, D2 and D3 prove the YAML, and the rehearsal follows the merge immediately.
 
 ## Review Focus
@@ -61,7 +61,7 @@ Time matters here: do not spend time that can be avoided, and the earlier a corr
   def main(argv: list[str]) -> int                    # prints json.dumps(classify(...)) and returns 0; returns 2 on a usage error (usage on stderr)
 
   # scripts/make_drift.py                Usage: make_drift.py <mode> <out-dir> [--from <recording-dir>]
-  FIXTURES = <repo>/src/test/resources/fixtures      # from __file__, normpath
+  FIXTURES = <repo>/src/test/resources/fixtures      # from os.path.dirname(os.path.abspath(__file__)): `python3 -I scripts/make_drift.py` gives a relative __file__
   SOURCE = "history-reply"
   MODES = ("init-model-key", "transcript-content-key")
   MARKER = "rehearsal"
@@ -284,7 +284,7 @@ Expected: `ModuleNotFoundError: No module named 'make_drift'`
 
 - [ ] **Step 7: Implement `scripts/make_drift.py`**
 
-Docstring: usage (`make_drift.py <mode> <out-dir> [--from <recording-dir>]`), the two modes and what each breaks (`init-model-key`: `system/init.model` → `model_id`, so `Ndjson` decodes the line to `Unknown` and the decode test fails with "no system/init"; `transcript-content-key`: every transcript `user` line's `message.content` → `message.blocks`, so the reader yields no user entry), the `--from` form (the nightly's rehearsal mutates its own `build/contract` in place), the marker `rehearsal` (the fixer reads it as `rehearsal=true`), and that it never writes under `src/test/resources/fixtures`. A mutated line is re-serialized with `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` plus `"\n"` (the redactor's format); every other line is copied byte for byte. `main` checks `mode in MODES` (else `sys.exit(f"make_drift: unknown mode {mode!r}; one of {', '.join(MODES)}")`), then refuses when `os.path.realpath(out_dir)` equals or starts with `os.path.realpath(FIXTURES) + os.sep` (`sys.exit(f"make_drift: refusing to write under the fixtures directory: {out_dir}")`), then reads every source into memory before writing anything: without `source`, the two fixture files (the twin serves as both transcripts); with `source`, `<source>/contract-hello.ndjson`, `<source>/transcripts/contract-hello.jsonl` and `<source>/transcripts/session-id.jsonl`, each mutated from its own lines (`sys.exit(f"make_drift: no {rel} in {source}")` when one is missing, before any write, so an in-place run never half-mutates). Then it writes the three outputs and `<out>/rehearsal` holding `mode + "\n"` (`os.makedirs(..., exist_ok=True)`) and prints `wrote <path>` per file to stderr. Argument parsing under `if __name__ == "__main__":`: `sys.argv[1:]` is `[mode, out]` or `[mode, out, "--from", dir]`; anything else prints `__doc__` to stderr and exits 2.
+Docstring: usage (`make_drift.py <mode> <out-dir> [--from <recording-dir>]`), the two modes and what each breaks (`init-model-key`: `system/init.model` → `model_id`, so `Ndjson` decodes the line to `Unknown` and the decode test fails with "no system/init"; `transcript-content-key`: every transcript `user` line's `message.content` → `message.blocks`, so the reader yields no user entry), the `--from` form (the nightly's rehearsal mutates its own `build/contract` in place), the marker `rehearsal` (the fixer reads it as `rehearsal=true`), and that it never writes under `src/test/resources/fixtures`. `FIXTURES` is computed from `os.path.dirname(os.path.abspath(__file__))` (as `test_workflows.py`'s `ROOT` is): `python3 -I scripts/make_drift.py` gives a relative `__file__`, and a relative `FIXTURES` would make the fixture reads depend on the caller's cwd. A mutated line is re-serialized with `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` plus `"\n"` (the redactor's format); every other line is copied byte for byte. `main` checks `mode in MODES` (else `sys.exit(f"make_drift: unknown mode {mode!r}; one of {', '.join(MODES)}")`), then refuses when `os.path.realpath(out_dir)` equals or starts with `os.path.realpath(FIXTURES) + os.sep` (`sys.exit(f"make_drift: refusing to write under the fixtures directory: {out_dir}")`), then reads every source into memory before writing anything: without `source`, the two fixture files (the twin serves as both transcripts); with `source`, `<source>/contract-hello.ndjson`, `<source>/transcripts/contract-hello.jsonl` and `<source>/transcripts/session-id.jsonl`, each mutated from its own lines (`sys.exit(f"make_drift: no {rel} in {source}")` when one is missing, before any write, so an in-place run never half-mutates). Then it writes the three outputs and `<out>/rehearsal` holding `mode + "\n"` (`os.makedirs(..., exist_ok=True)`) and prints `wrote <path>` per file to stderr. Argument parsing under `if __name__ == "__main__":`: `sys.argv[1:]` is `[mode, out]` or `[mode, out, "--from", dir]`; anything else prints `__doc__` to stderr and exits 2.
 
 - [ ] **Step 8: Run the tests to verify they pass, with the skill's own command**
 
@@ -313,7 +313,7 @@ Frontmatter and body below; the body is the spec's procedure and the commands ar
 ---
 name: fix-contract-drift
 description: "Turn a red nightly CLI contract run into a pull request carrying the recording as a fixture and the minimal decoder or reader change. Arguments: run=<url> recording=<dir> classification=<file> rehearsal=<true|false> date=<YYYY-MM-DD>."
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(./gradlew:*), Bash(python3:*), Bash(gh pr create:*), Bash(gh issue list:*), Bash(gh issue create:*), Bash(gh issue comment:*), Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git switch:*), Bash(git clean:*), Bash(git push -u origin drift/:*), Bash(cp:*), Bash(ls:*), Bash(cat:*), Bash(grep:*), Bash(date:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(./gradlew check), Bash(./gradlew test:*), Bash(python3 -I scripts/classify_drift.py:*), Bash(python3 -I scripts/redact_fixture.py:*), Bash(python3 -m unittest discover -s scripts -t scripts), Bash(gh pr create:*), Bash(gh issue list:*), Bash(gh issue create:*), Bash(gh issue comment:*), Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git switch:*), Bash(git clean:*), Bash(git push -u origin HEAD), Bash(cp:*), Bash(ls:*), Bash(cat:*), Bash(grep:*), Bash(date:*)
 ---
 
 # Fix contract drift
@@ -326,7 +326,7 @@ segment of `run=`. Time matters here: do not spend time that can be avoided, and
 obtained, the better.
 
 You never fix authentication, never guess, never merge, never edit `.github/`, `build.gradle.kts` or `CLAUDE.md`,
-never lower the coverage bound, and never re-record: the recording is the fixture. A re-recorded scenario, when the
+never lower the coverage bound, never start a second `claude`, and never re-record: the recording is the fixture. A re-recorded scenario, when the
 workflow records one, appears under `build/drift/recorded`; today it records none. Only the commands named here are
 allowed (the tool list above). In the workflow a denied command is a dead end, not a prompt: try no other, and run no
 compound command (`cd … && …`) whose parts are not all on the list.
@@ -339,7 +339,8 @@ assertion message(s), both when both tests failed (decoder first). A `decoder` w
 result text present` comes with a green decode test: the reply arrived under a type `Ndjson` does not know (see 5).
 
 ## 2. Name the fixture and copy the recording
-Name `drift-<date>`, or `rehearsal-<date>` when `rehearsal=true`. Copy `<recording>/contract-hello.ndjson` to
+Name `drift-<date>`, or `rehearsal-<date>` when `rehearsal=true`. If `src/test/resources/fixtures/<name>.ndjson` exists
+already, use `<name>-<run id>` for every file of this fix. Copy `<recording>/contract-hello.ndjson` to
 `src/test/resources/fixtures/<name>.ndjson` and `<recording>/transcripts/contract-hello.jsonl` to
 `src/test/resources/fixtures/transcripts/<name>.jsonl`. For reader drift, always copy
 `<recording>/transcripts/session-id.jsonl` to `src/test/resources/fixtures/transcripts/<name>-session-id.jsonl` too,
@@ -353,8 +354,9 @@ nothing). Any `unredacted id` or `<leaked-N>` on stderr is a stop: remove the co
 open no PR, and comment on the open issue titled "CLI contract: the CLI did not answer" (`gh issue list --label
 contract-drift --state open --json number,title`; `gh issue create` with that title and the label `contract-drift`
 when none is open) naming the key path the redactor printed, never the value. Then
-`grep -nE '@|[0-9a-f]{8}-[0-9a-f]{4}-|toolu_|msg_|fv-az|runner' <copies>`: an e-mail address, a UUID, an API id, a
-hostname or an account name is the same stop; a package name with `@` inside reply text is not.
+`grep -nE '@|[0-9a-f]{8}-[0-9a-f]{4}-|toolu_|msg_|fv-az|runner|<leaked-' <copies>`: an e-mail address, a UUID, an API
+id, a hostname, an account name or a `<leaked-N>` placeholder (the nightly's redactor already caught a leak; your run
+leaves the placeholder alone and prints nothing) is the same stop; a package name with `@` inside reply text is not.
 
 ## 4. Add the fixture to the tests
 The stream joins `FixtureDecodeTest` and `RobustnessTest` by directory listing (`Fixtures.names()`), so the decode
@@ -384,7 +386,8 @@ is still possible. No reference to any spec or plan.
 ## 7. Verify
 `./gradlew check` and, from the repository root, `python3 -m unittest discover -s scripts -t scripts` (the same tests
 as `cd scripts && python3 -m unittest`, which you cannot run: `cd` is not on the list). If `check` fails for a reason
-unrelated to the drift (a flaky platform test, disk space), run it once more; still red: go on and say so in the PR.
+unrelated to the drift (a flaky platform test, disk space), run it once more; still red: open the PR as a draft
+(section 8, add `--draft`) and name the failing test and that it is unrelated to the drift, so the owner decides.
 The live contract check cannot run on the branch (the federation rule admits `main` only); the evidence is the red
 run's artifact plus `check` here, and the next nightly after the merge is the real proof.
 
@@ -392,7 +395,8 @@ run's artifact plus `check` here, and the next nightly after the merge is the re
 Branch `drift/<date>-<run id>` from the current `HEAD` of `main` (`git switch -c drift/<date>-<run id>`). One commit,
 no trailers, subject `fix(protocol): follow CLI <version>: <what changed>` or `fix(transcript): …`. The author and the
 push credential are set before you start (in the workflow, the Claude GitHub App: `claude[bot]`, and the App token in
-the `origin` URL): set no identity and run no `gh auth setup-git`. `git push -u origin drift/<date>-<run id>`. Write
+the `origin` URL): set no identity and run no `gh auth setup-git`. `git push -u origin HEAD`, spelled exactly so (`HEAD`
+is the branch you just created; `HEAD:main`, a refspec or a flag is a different command and is denied). Write
 the body to `build/drift/pr-body.md` (`build/` is gitignored, so it cannot end up in the commit), then
 `gh pr create --base main --label contract-drift --title "<subject>" --body-file build/drift/pr-body.md` (add
 `--draft --label rehearsal` and the title prefix `[rehearsal] ` in a rehearsal, whose body starts with the line "This
@@ -411,7 +415,7 @@ you start; by hand, the owner created `contract-drift` and `rehearsal` once. The
 ## 9. Stop
 No merge, no second PR, no comment anywhere else. If a step after the push fails, still open the PR, as a draft, and
 name the failing step in the body: a half-done branch is more useful than silence. (If you are stopped before you can,
-the workflow opens an `[incomplete]` draft for the pushed branch and goes red.)
+the workflow reports the pushed branch on the standing issue and goes red.)
 ````
 
 - [ ] **Step 11: Check the skill is well-formed**
@@ -422,7 +426,7 @@ text = open(".claude/skills/fix-contract-drift/SKILL.md", encoding="utf-8").read
 front = yaml.safe_load(re.match(r"---\n(.*?)\n---\n", text, re.S).group(1))
 print(front["name"], "|", len(front["allowed-tools"].split(",")), "tools")
 PY`
-Expected: `fix-contract-drift | 24 tools`
+Expected: `fix-contract-drift | 27 tools`
 - [ ] **Step 12: Commit**
 
 ```bash
@@ -439,12 +443,12 @@ git commit -m "feat(ci): classify a red contract run, mutate a rehearsal recordi
 - Test: `scripts/test_workflows.py`
 
 **Interfaces:**
-- Consumes: `scripts/classify_drift.py` and `scripts/make_drift.py` (D1, command lines as in their usage), the skill name and argument string (D1), `anthropics/claude-code-action@v1` inputs `prompt`, `claude_args`, `anthropic_federation_rule_id`, `anthropic_organization_id`, `anthropic_service_account_id`, `anthropic_workspace_id` (verified against the action's `action.yml` at tag `v1`; the action exposes a `github_token` output and revokes it after the run, so later steps use `github.token`).
+- Consumes: `scripts/classify_drift.py` and `scripts/make_drift.py` (D1, command lines as in their usage), the skill name and argument string (D1), `anthropics/claude-code-action@v1` inputs `prompt`, `claude_args`, `settings`, `anthropic_federation_rule_id`, `anthropic_organization_id`, `anthropic_service_account_id`, `anthropic_workspace_id` (verified against the action's `action.yml` at tag `v1`; the action exposes `conclusion` and `github_token` outputs and revokes the token after the run, so later steps use `github.token`).
 - Produces: the workflow as below; `scripts/test_workflows.py` with `load(path) -> dict` (PyYAML; note that PyYAML reads the `on` key as the boolean `True`) and `allowed_tools(text) -> set[str]`, which D3 extends.
 
 - [ ] **Step 1: Write the failing workflow tests**
 
-`scripts/test_workflows.py`, guarded by `yaml = importlib.import_module("yaml")` in a `try` and `@unittest.skipUnless(yaml, "PyYAML is not installed")` on the class (`build.yml`'s "Script tests" step shows whether it ran: its lines say `ok`, not `skipped`). `ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")`; `DRIFT = os.path.join(ROOT, ".github/workflows/drift-fix.yml")`; `SKILL = os.path.join(ROOT, ".claude/skills/fix-contract-drift/SKILL.md")`. Helpers: `load(path)` (`yaml.safe_load`), `steps(workflow, job)`, `step(workflow, job, name)`, `frontmatter(path)` (the YAML between the first two `---` lines), `tools(text)` (`{t.strip() for t in text.split(",")}` of the value after `--allowedTools`, quotes stripped).
+`scripts/test_workflows.py`, guarded by `yaml = importlib.import_module("yaml")` in a `try` (`yaml = None` on `ImportError`), followed at import time by `if yaml is None and os.environ.get("GITHUB_ACTIONS"): raise RuntimeError("PyYAML is required in CI")`, so the only tests pinning both workflows never skip silently in `build.yml`'s "Script tests" step, and `@unittest.skipUnless(yaml, "PyYAML is not installed")` on the class for a machine without it. Imports `json` as well (the `settings` input is JSON). `ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")`; `DRIFT = os.path.join(ROOT, ".github/workflows/drift-fix.yml")`; `SKILL = os.path.join(ROOT, ".claude/skills/fix-contract-drift/SKILL.md")`. Helpers: `load(path)` (`yaml.safe_load`), `steps(workflow, job)`, `step(workflow, job, name)`, `frontmatter(path)` (the YAML between the first two `---` lines), `tools(text)` (`{t.strip() for t in text.split(",")}` of the value after `--allowedTools`, quotes stripped).
 
 ```python
 def test_the_fixer_listens_to_the_nightly_only(self):
@@ -521,10 +525,32 @@ def test_the_fetch_the_precheck_and_the_allowlist_step_fail_loudly(self):
     report = step(wf, "fix", "Report a run the agent cannot fix")
     self.assertIn("steps.precheck.outputs.kind == 'cli-did-not-answer'", report["if"])
     self.assertIn("precheck.json", report["run"])
-    enforce = step(wf, "fix", "Enforce the edit allowlist")["run"]
-    self.assertIn("git ls-remote --heads origin", enforce)                        # a pushed branch without a PR gets a draft and a red run
-    self.assertIn("[incomplete] drift fix for run", enforce)
+    enforce = step(wf, "fix", "Enforce the edit allowlist")
+    self.assertIn('repos/$GITHUB_REPOSITORY/branches/$BRANCH', enforce["run"])    # the branch is read through the API with GH_TOKEN: git has no credential here
+    self.assertNotIn("git ls-remote", enforce["run"])
+    self.assertNotIn('no branch was pushed"; exit 0', enforce["run"])              # no PR after the gate proceeded is red, never green and silent
+    self.assertIn("pushed no branch and opened no PR", enforce["run"])
+    self.assertIn("pushed $BRANCH but opened no PR", enforce["run"])
+    self.assertEqual("${{ steps.classify.outputs.kind }}", enforce["env"]["KIND"])
+    self.assertEqual("${{ steps.agent.outputs.conclusion }}", enforce["env"]["AGENT"])
     self.assertIn("rehearsal=${{ steps.precheck.outputs.rehearsal }}", step(wf, "fix", "Fix the drift")["with"]["prompt"])
+
+def test_the_only_push_is_exact_and_the_broad_rules_are_gone(self):
+    allowed = tools(step(load(DRIFT), "fix", "Fix the drift")["with"]["claude_args"])
+    self.assertIn("Bash(git push -u origin HEAD)", allowed)                        # a :* rule matches prefix + space; drift/:* never matched the push
+    self.assertEqual([], [t for t in allowed if t.startswith("Bash(git push") and t.endswith(":*)")])
+    for broad in ("Bash(python3:*)", "Bash(./gradlew:*)", "Bash(gh pr:*)", "Bash(gh issue:*)", "Bash(git:*)"):
+        self.assertNotIn(broad, allowed)
+    for exact in ("Bash(./gradlew check)", "Bash(python3 -m unittest discover -s scripts -t scripts)"):
+        self.assertIn(exact, allowed)
+
+def test_the_agent_cannot_edit_the_build_or_start_a_second_cli(self):
+    agent = step(load(DRIFT), "fix", "Fix the drift")
+    self.assertEqual("agent", agent["id"])
+    deny = json.loads(agent["with"]["settings"])["permissions"]["deny"]
+    for rule in ("Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)",
+                 "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Bash(claude:*)"):
+        self.assertIn(rule, deny)
 ```
 
 (The two `None` names are the `actions/setup-java@v6` and `gradle/actions/setup-gradle@v6` steps, unnamed as in `build.yml`.)
@@ -713,9 +739,12 @@ jobs:
             echo "proceed=true" >> "$GITHUB_OUTPUT"
           fi
       # No github_token input: the action authenticates as the Claude GitHub App, sets the origin URL and the commit identity
-      # before the CLI starts, and the PR it opens starts the Build workflow. The tool allowlist names verbs: with the App
-      # token the agent can create one PR, list, create and comment on issues, and push to drift/; nothing else.
+      # before the CLI starts, and the PR it opens starts the Build workflow. The allowlist names the invocations the skill
+      # prescribes; the push rule is exact (a :* rule matches the prefix followed by a space, so drift/:* would never match
+      # the push). The deny rules keep the agent out of the files that run code before the push and out of a second CLI.
+      # Neither is what protects main: branch protection and the App token's scope are (the spec's Safeguards).
       - name: Fix the drift
+        id: agent
         if: steps.gate.outputs.proceed == 'true'
         uses: anthropics/claude-code-action@v1
         timeout-minutes: 75
@@ -728,24 +757,37 @@ jobs:
           claude_args: |
             --model claude-opus-5-5
             --max-turns 60
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew:*),Bash(python3:*),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin drift/:*),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
+          settings: |
+            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)"]}}
       # The check that does not depend on the agent obeying the skill: a PR touching anything outside the allowlist is closed.
-      # A pushed drift branch without a PR (the agent was stopped by the timeout or the turn limit) gets a draft and a red
-      # run. The repository is public, so the remote read works without credentials (persist-credentials: false).
+      # Once the gate proceeded, no PR is a red run: a pushed branch without one (the agent was stopped by the timeout or the
+      # turn limit) is reported on the standing issue; no branch at all is a denied command, a redactor stop, an action that
+      # skipped the agent, or an agent that gave up. The branch is read through the API with the workflow token: the checkout
+      # has persist-credentials: false, the action revokes its App token before this step, and the repository is private, so
+      # git itself would get a 401 here. No draft is opened: GITHUB_TOKEN cannot create a pull request unless the repository
+      # setting "Allow GitHub Actions to create and approve pull requests" is on.
       - name: Enforce the edit allowlist
         if: always() && steps.gate.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
-          RUN_ID: ${{ steps.run.outputs.id }}
+          RUN_URL: ${{ steps.run.outputs.url }}
+          KIND: ${{ steps.classify.outputs.kind }}
+          AGENT: ${{ steps.agent.outputs.conclusion }}
         run: |
           set -euo pipefail
           pr="$(gh pr list --label contract-drift --state open --json number,headRefName --jq '[.[] | select(.headRefName | startswith("drift/"))][0].number // empty')"
           if [ -z "$pr" ]; then
-            if [ -z "$(git ls-remote --heads origin "$BRANCH")" ]; then echo "no drift pull request is open and no branch was pushed"; exit 0; fi
-            gh pr create --draft --base main --head "$BRANCH" --label contract-drift --title "[incomplete] drift fix for run $RUN_ID" \
-              --body "The agent stopped before opening this PR (timeout or turn limit); review the branch. Opened by drift-fix.yml with the workflow token, so no Build run starts here."
-            echo "::error title=Drift fix::The agent pushed $BRANCH but opened no PR; a draft was opened for it."; exit 1
+            branch="$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name 2>/dev/null || true)"
+            if [ -n "$branch" ]; then
+              title="CLI contract: the CLI did not answer"
+              body="The drift fix for $RUN_URL pushed the branch $BRANCH but opened no pull request: the agent was stopped (timeout or turn limit; its step ended '${AGENT:-skipped}'). Review the branch by hand."
+              issue="$(gh issue list --label contract-drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+              if [ -z "$issue" ]; then gh issue create --title "$title" --label contract-drift --body "$body"; else gh issue comment "$issue" --body "$body"; fi
+              echo "::error title=Drift fix::The agent pushed $BRANCH but opened no PR; reported on the standing issue."; exit 1
+            fi
+            echo "::error title=Drift fix::The classification was $KIND but the agent pushed no branch and opened no PR (its step ended '${AGENT:-skipped}'): a denied command, a redactor stop (see the standing issue), the action skipped after a workflow-validation error, or the agent gave up; read the Fix the drift step's log."; exit 1
           fi
           offending="$(gh pr view "$pr" --json files --jq '.files[].path' \
             | grep -vE '^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\.md$)' || true)"
@@ -759,7 +801,7 @@ jobs:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree/scripts && python3 -m unittest test_workflows -v`
-Expected: `Ran 7 tests` … `OK` (not `skipped`: PyYAML 6 is installed in this sandbox).
+Expected: `Ran 9 tests` … `OK` (not `skipped`: PyYAML 6 is installed in this sandbox).
 - [ ] **Step 5: Lint the YAML**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree && if command -v actionlint >/dev/null; then actionlint .github/workflows/drift-fix.yml .github/workflows/cli-contract.yml; else python3 -c 'import yaml,sys; [yaml.safe_load(open(p)) for p in sys.argv[1:]]; print("yaml ok")' .github/workflows/drift-fix.yml .github/workflows/cli-contract.yml; fi`
@@ -859,7 +901,7 @@ In the `--session-id` step replace the last line with:
           mkdir -p build/contract/transcripts
           python3 -I scripts/redact_fixture.py "$work/transcripts/session-id.jsonl" build/contract/transcripts/session-id.jsonl
 ```
-and a comment above the step's `run:` that the copy is redacted before upload because the artifact of a public repository is kept for fourteen days and the fixer promotes it as it is. After that step, before the Gradle step:
+and a comment above the step's `run:` that the copy is redacted before upload because the fixer promotes the artifact as a fixture and the fixtures will be public (`docs/launch.md` tactic 4; the repository is private today, so the artifact itself is not). After that step, before the Gradle step:
 ```yaml
       # The rehearsal of the drift loop: the live recording is mutated in place (all three files are read before any is
       # written) and a marker file names the mode, so the Gradle step goes red, the real artifact is uploaded and
@@ -949,18 +991,18 @@ git commit -m "docs: CLAUDE.md names the drift loop and its rehearsal"
 - None in the repository (the rehearsal's own pull requests are opened by the loop and closed by the owner).
 
 **Interfaces:**
-- Consumes: D1–D4 merged to `main`; the owner's one-time preparation (the Claude GitHub App installed on `daarko10/tandem`; branch protection on `main` requiring a pull request and one approving review, so that the App, which cannot approve its own PR, can never merge one even if the tool allowlist regresses; the owner, an administrator, still merges their own PRs unless "Do not allow bypassing the above settings" is on).
+- Consumes: D1–D4 merged to `main`; the owner's one-time preparation, in this order and before any rehearsal: branch protection on `main` requiring a pull request and one approving review (so that the App, which cannot approve its own PR and is not an administrator, can never merge one even if the tool allowlist regresses; the owner, an administrator, still merges their own PRs unless "Do not allow bypassing the above settings" is on), then the Claude GitHub App installed on `daarko10/tandem`.
 
 - [ ] **Step 1: Open the pull request for `ci/drift-loop` and hand the merge to the owner**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree && git push -u origin ci/drift-loop && gh pr create --base main --title "ci: the drift loop" --body-file <body>`
-Body: context (a red nightly becomes a PR; what each file does), approach (the recording is the fixture; kind 1 is reported, not fixed; one open fix at a time; the tool allowlist of verbs; the edit-allowlist step and its `[incomplete]` draft), testing notes (`python3 -m unittest discover -s scripts -t scripts` green, both rehearsal modes reproduced against the real decoder locally in D1 step 9, YAML parsed; not verified: the `workflow_run` firing and the rehearsal itself, which need `main`), and the two owner steps before the first rehearsal. No attribution lines.
+Body: context (a red nightly becomes a PR; what each file does), approach (the recording is the fixture; kind 1 is reported, not fixed; one open fix at a time; the tool allowlist of the skill's own invocations with an exact push rule, the deny rules of the action's `settings` input; the edit-allowlist step, red whenever the gate proceeded and no PR exists), testing notes (`python3 -m unittest discover -s scripts -t scripts` green, both rehearsal modes reproduced against the real decoder locally in D1 step 9, YAML parsed; not verified: the `workflow_run` firing and the rehearsal itself, which need `main`), and the two owner steps before the first rehearsal. No attribution lines.
 Expected: a PR URL; `Build` green. The owner merges (squash). Nothing waits on this beyond the merge itself: the rehearsals start the moment `main` has the workflows.
 
 - [ ] **Step 2: Rehearse the decoder drift through the real trigger**
 
 Run: `gh workflow run cli-contract.yml --ref main -f drift=init-model-key && sleep 20 && gh run list --workflow cli-contract.yml --limit 1 --json databaseId --jq '.[0].databaseId' | xargs -I{} gh run watch {}; sleep 30; gh run list --workflow drift-fix.yml --limit 1 --json databaseId --jq '.[0].databaseId' | xargs -I{} gh run watch {} --exit-status`
-Expected: the `CLI contract` run is red at "Decode with Tandem's protocol layer…": its "Mutate the recording for a rehearsal" step printed `wrote build/contract/…` four times, "Name the failed assertions" printed `live transcripts decode with every core type recognised: contract-hello.ndjson: no system/init`, and `contract-recording` was uploaded. A `Drift fix` run fired by `workflow_run` follows (`gh run view <id> --json event` says `workflow_run`); in its log (`gh run view <id> --log`): "Name the red run" prints `fixing run <the nightly's url> (<today>)`; "Fetch the recording" downloads the artifact (no "the run left no recording"); "Classify before Gradle" prints `"kind": "unknown"` (no test results yet: only kind 1 is told here) and sets `rehearsal=true` from the marker; "Classify" prints `"kind": "decoder"` with detail `contract-hello.ndjson: no system/init`; "Fix the drift" shows the action's federation line with the OIDC subject of a `workflow_run` job (expected `repo:daarko10/tandem:ref:refs/heads/main`; record it in open item 2 of the spec); "Enforce the edit allowlist" prints `PR #<n> stays within the allowlist`; the run is green. Then `gh pr list --label contract-drift --json number,title,isDraft,labels,headRefName`: one draft PR, title starting `[rehearsal] fix(protocol): follow CLI <the run's claude --version>:`, labels `contract-drift` and `rehearsal`, head `drift/<today>-<the nightly's run id>`, with `src/test/resources/fixtures/rehearsal-<today>.ndjson` (recorded by the newest CLI, not `history-reply`), its transcript twin, tests, `Ndjson.kt` reading `model_id` as well as `model`, and a `docs/protocol.md` change; its commit authored by `claude[bot]` (set by the action). `gh pr checks <n>` shows the `Build` workflow running (the App token worked). If no `Build` run appears on the PR at all, the App is not installed and the action fell back to `GITHUB_TOKEN` (spec open item 1); there is no approval button to look for.
+Expected: the `CLI contract` run is red at "Decode with Tandem's protocol layer…": its "Mutate the recording for a rehearsal" step printed `wrote build/contract/…` four times, "Name the failed assertions" printed `live transcripts decode with every core type recognised: contract-hello.ndjson: no system/init`, and `contract-recording` was uploaded. A `Drift fix` run fired by `workflow_run` follows (`gh run view <id> --json event` says `workflow_run`); in its log (`gh run view <id> --log`): "Name the red run" prints `fixing run <the nightly's url> (<today>)`; "Fetch the recording" downloads the artifact (no "the run left no recording"); "Classify before Gradle" prints `"kind": "unknown"` (no test results yet: only kind 1 is told here) and sets `rehearsal=true` from the marker; "Classify" prints `"kind": "decoder"` with detail `contract-hello.ndjson: no system/init`; "Fix the drift" shows the action's federation line with the OIDC subject of a `workflow_run` job (expected `repo:daarko10/tandem:ref:refs/heads/main`; record it in open item 2 of the spec); "Enforce the edit allowlist" prints `PR #<n> stays within the allowlist`; the run is green. Then `gh pr list --label contract-drift --json number,title,isDraft,labels,headRefName`: one draft PR, title starting `[rehearsal] fix(protocol): follow CLI <the run's claude --version>:`, labels `contract-drift` and `rehearsal`, head `drift/<today>-<the nightly's run id>`, with `src/test/resources/fixtures/rehearsal-<today>.ndjson` (recorded by the newest CLI, not `history-reply`), its transcript twin, tests, `Ndjson.kt` reading `model_id` as well as `model`, and a `docs/protocol.md` change; its commit authored by `claude[bot]` (set by the action). `gh pr checks <n>` shows the `Build` workflow running (the App token worked). If the "Fix the drift" step is red at "Exchanging OIDC token for app token", the Claude GitHub App is not installed (spec open item 1): the action never falls back to `GITHUB_TOKEN`. If that step is green but "Enforce the edit allowlist" is red with `pushed no branch and opened no PR`, read the action's log: a denied command, or the action's workflow-validation skip.
 
 - [ ] **Step 3: The owner closes the rehearsal PR, then rehearse the reader drift**
 
@@ -972,6 +1014,6 @@ Expected: "Classify" prints `"kind": "reader"` with a detail ending `: no user e
 With the second rehearsal PR still open, run the fixer alone: `gh workflow run drift-fix.yml --ref main -f rehearse=true -f mode=init-model-key` and watch it.
 Expected: "Mutate a recording for the rehearsal" writes the four files; "Classify before Gradle" sets `rehearsal=true`; "Classify" prints `"kind": "decoder"`; the run is green without an agent step: "Skip when a fix is already waiting" comments `The nightly of <today> is still red: …` on the open PR and "Fix the drift" is skipped. Then the owner closes that PR.
 
-- [ ] **Step 5: Record what the rehearsal answered, and the scheduled run's actor**
+- [ ] **Step 5: Record what the rehearsal answered**
 
-Anything the rehearsal showed that differs from the skill or the workflow (the token subject line, a `gh` command that needed a different flag) goes into a follow-up PR on a branch `ci/drift-loop-fixes` with the same tests, and a rehearsal of the mode it touched is repeated after it. After the first scheduled nightly (03:17 UTC) the owner records `gh api 'repos/daarko10/tandem/actions/runs?event=schedule' --jq '.workflow_runs[0].actor.login'` in open item 4 of the spec (the same follow-up); if it is not a User with write access, that PR gives the fixer the action's `allowed_bots` input or a `workflow_dispatch` relay before the first real firing is trusted. The milestone bullet in `docs/launch.md` stays as it is: it closes only when a non-rehearsal `contract-drift` PR has been merged and the next nightly was green, and the owner appends the PR number, CLI version and fixture name then.
+Anything the rehearsal showed that differs from the skill or the workflow (the token subject line, a `gh` command that needed a different flag) goes into a follow-up PR on a branch `ci/drift-loop-fixes` with the same tests, and a rehearsal of the mode it touched is repeated after it. Nothing waits on a scheduled run: the actor of a scheduled nightly is already recorded as `daarko10` (six scheduled runs, 2026-10-17 to 2026-10-21; spec open item 4, closed), so the first real firing is trusted as soon as both rehearsals passed. The schedule fires hours after 03:17 UTC under load; the date the fixer takes from the run's `createdAt` tolerates that. The milestone bullet in `docs/launch.md` stays as it is: it closes only when a non-rehearsal `contract-drift` PR has been merged and the next nightly was green, and the owner appends the PR number, CLI version and fixture name then.

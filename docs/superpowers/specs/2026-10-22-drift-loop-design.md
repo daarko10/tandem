@@ -75,11 +75,16 @@ three reasons:
    were redacted by `scripts/record-fixture.sh` in the red run itself (ids as `<key-N>`, paths as `<path>`, the
    `system/init` lists emptied), with the `<session_id-N>` placeholders the fake CLI expects. They are a fixture already;
    a re-recording could reproduce a different reply, a different model or a different shape.
-2. **No nested CLI can authenticate inside the fixer.** `anthropics/claude-code-action` removes `ACTIONS_ID_TOKEN_REQUEST_URL`
-   and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` from the environment of the `claude` it runs, so a `claude` started by the
-   agent (as `record-fixture.sh` would) cannot fetch a GitHub identity token; the token file it inherits has a `jti`
-   the action's own CLI has already spent (one exchange per token), and a token fetched earlier is dead within five
-   minutes. Recording inside the agent is a dead end, not a configuration problem.
+2. **A nested CLI would record on the action's credential, racily and without a bound.** `anthropics/claude-code-action`
+   removes `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` from the environment of the `claude` it
+   runs, so a `claude` started by the agent (as `record-fixture.sh` would) cannot fetch a GitHub identity token of its
+   own; but it inherits `ANTHROPIC_IDENTITY_TOKEN_FILE` (rewritten by the action every four minutes) and
+   `ANTHROPIC_CONFIG_DIR` plus `ANTHROPIC_PROFILE`, a federation profile whose on-disk credential cache every `claude`
+   the action spawns shares. A nested CLI authenticates from that cache and re-exchanges from the refreshed file when
+   it expires; a `jti_reused` 401 happens only when it races the agent's own exchange. Recording inside the agent is
+   therefore possible, racy, and bounded in spend only by the workspace limit, which is why the fixer denies
+   `Bash(claude:*)` (runtime step 8) and why a re-recording, when it is added, runs in a workflow step with its own
+   `anthropic-token` fetch before the action (below).
 3. **No second identity token, no second process, no second spend.** The fixer's only live CLI is the agent itself.
 
 A re-recording is still needed when the drift is in something the one-shot recording does not show: a control response,
@@ -95,8 +100,9 @@ place a re-recording appears, and the follow-up adds the step together with the 
 The nightly keeps its name, schedule, steps and artifact name. Four additions:
 
 - `transcripts/session-id.jsonl` is redacted before upload. Today the `--session-id` step copies it with `copy_transcript.py`
-  alone, so the artifact of a public repository carries the runner's paths, the literal session id, API message ids,
-  the branch name and the prompt for fourteen days, and a fixer would be promoting raw data. The step copies into the
+  alone, so the artifact carries the runner's paths, the literal session id, API message ids, the branch name and the
+  prompt for fourteen days, and a fixer would be promoting raw data into a fixture that will be public (`docs/launch.md`
+  tactic 4; the repository itself is private today, which is not what justifies the redaction). The step copies into the
   temporary directory and runs `scripts/redact_fixture.py` into `build/contract/transcripts/session-id.jsonl`, the
   same two commands `record-fixture.sh` runs.
 - A step with `if: failure()` after the Gradle step prints every `<failure message="…">` from `build/test-results/test/*.xml`
@@ -181,30 +187,54 @@ One job, `fix`, on `ubuntu-latest`:
    ```
    --model claude-opus-5-5
    --max-turns 60
-   --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew:*),Bash(python3:*),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin drift/:*),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
+   --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
    ```
 
+   and the action's `settings` input (JSON, merged into the CLI's permissions for this run only; the project's
+   `.claude/settings.json` is loaded as well) with `permissions.deny`: `Edit(.github/**)`, `Write(.github/**)`,
+   `Edit(build.gradle.kts)`, `Write(build.gradle.kts)`, `Edit(settings.gradle.kts)`, `Write(settings.gradle.kts)`,
+   `Edit(scripts/**)`, `Write(scripts/**)`, `Edit(.claude/**)`, `Write(.claude/**)`, `Edit(CLAUDE.md)`,
+   `Write(CLAUDE.md)` and `Bash(claude:*)`. The step has `id: agent`, so step 9 can read
+   `steps.agent.outputs.conclusion`.
+
    Opus is the tier for an implementation task. `Edit` and `Write` here are the CLI's own tools on the runner's
-   checkout, not Tandem's. The allowlist names verbs, not programs, because the GitHub credential behind them is the
-   App's installation token with write access to contents, pull requests and issues: `Bash(gh pr:*)` would admit
-   `gh pr merge` of the agent's own PR and `gh pr close` of any other, `Bash(gh issue:*)` the closing of any issue, and
-   `Bash(git:*)` a `git push -f`, a `git push origin --delete <branch>` or a push to any unprotected branch (the
-   project's `.claude/settings.json`, which the action loads, denies only the prefix `git push --force`). The only push
-   on the list is `git push -u origin drift/…`. In headless mode a denied call is a dead end, not a prompt, so every
-   command the skill prescribes is on the list and nothing else is. The step has `timeout-minutes: 75` inside the
-   job's 90.
-9. **Enforce the edit allowlist.** After the action, `if: always()`, a `run:` step lists the files the drift branch
-   changed against `main` and fails the job, comments on the PR naming the offending files and closes it, when any
-   path is outside `src/main/kotlin/dev/daarkolabs/tandem/protocol/`,
+   checkout, not Tandem's. The allowlist names the invocations the skill prescribes, not programs, because the GitHub
+   credential behind them is the App's installation token with write access to contents, pull requests and issues,
+   and the action puts it into the CLI's environment as `GITHUB_TOKEN` and `GH_TOKEN` and into the `origin` URL:
+   `Bash(gh pr:*)` would admit `gh pr merge` of the agent's own PR and `gh pr close` of any other, `Bash(gh issue:*)`
+   the closing of any issue, `Bash(git:*)` a `git push -f`, a `git push origin --delete <branch>` or a push to any
+   unprotected branch (the project's `.claude/settings.json` denies only the prefix `git push --force`),
+   `Bash(python3:*)` a `python3 -c` that runs `gh` or `git` with that token, and `Bash(./gradlew:*)` any task. The
+   deny rules keep the agent out of the files that would run code before the push (`build.gradle.kts`, `scripts/`,
+   the hooks in `.claude/`) and out of a second CLI. The push rule is exact: `Bash(git push -u origin HEAD)` admits
+   that command and nothing appended to it (no `--force`, no refspec such as `drift/x:main`), because the installed
+   CLI (2.1.307) matches a rule without `*` as the whole command (`n===e.command`) and a `:*` rule as the command
+   itself or the prefix followed by a space (`n.startsWith(e.prefix+" ")`): `Bash(git push -u origin drift/:*)` would
+   never match `git push -u origin drift/2026-10-22-123`, and in headless mode a denied call is a dead end, not a
+   prompt. Every command the skill prescribes is on the list exactly as the skill spells it, and nothing else is. What
+   bounds the loop whatever the agent decides is branch protection on `main` and the App token's scope
+   ("Safeguards"), not this list. The step has `timeout-minutes: 75` inside the job's 90.
+9. **Enforce the edit allowlist.** After the action, `if: always()` once the gate proceeded, a `run:` step lists the
+   files the drift branch changed against `main` and fails the job, comments on the PR naming the offending files and
+   closes it, when any path is outside `src/main/kotlin/dev/daarkolabs/tandem/protocol/`,
    `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`, `src/test/` and `docs/protocol.md`. The skill says the
-   same rule; this step is the check that does not depend on the agent obeying it. When no `contract-drift` PR is
-   open, the step runs `git ls-remote --heads origin "drift/<date>-<run id>"`: a branch without a PR means the agent
-   was stopped after its push (the step's `timeout-minutes`, `--max-turns`) and could not keep skill step 9's promise.
-   The step then opens the draft PR itself with `GITHUB_TOKEN` (`gh pr create --draft --head drift/… --label
-   contract-drift --title "[incomplete] drift fix for run <id>"`, body: the agent stopped before opening this PR,
-   timeout or turn limit, review the branch; no `Build` run starts on a PR opened with the workflow token, acceptable
-   for a failure draft) and exits 1, so the run is red and the pushed branch is never silent with a green loop (hard
-   rule 5).
+   same rule and the deny rules of step 8 enforce most of it before the push; this step is the check that does not
+   depend on the agent obeying either. When no `contract-drift` PR is open, the step is red (`exit 1`) in both
+   remaining cases, so a loop that proceeded past the gate and produced no PR is never green and silent (hard rule 5):
+   - It reads the branch through the API, `gh api "repos/$GITHUB_REPOSITORY/branches/drift/<date>-<run id>" --jq
+     .name` with `GITHUB_TOKEN` (`contents: write` covers it), never with `git ls-remote`: the checkout has
+     `persist-credentials: false`, the action rewrites `origin` to carry its App token and revokes that token in its
+     post step before this one runs, and the repository is private, so git itself would get a 401 that
+     `[ -z "$(…)" ]` swallows. A branch without a PR means the agent was stopped after its push (the step's
+     `timeout-minutes`, `--max-turns`) and could not keep skill step 9's promise: the step comments on the standing
+     issue "CLI contract: the CLI did not answer" (creating it when none is open) naming the branch, the run and the
+     stop, and exits 1. It opens no draft: `GITHUB_TOKEN` can create a pull request only when the repository setting
+     "Allow GitHub Actions to create and approve pull requests" is on, which it is not by default.
+   - No branch either: the classification was `decoder` or `reader` but the agent pushed nothing and opened no PR (a
+     denied command, the redactor's leak stop of skill step 3, the action skipped after a workflow-validation error
+     without running the agent, or the agent gave up). The step prints `::error title=Drift fix::The classification
+     was <kind> but the agent pushed no branch and opened no PR …` with `steps.agent.outputs.conclusion` and exits 1.
+     The leak stop therefore ends as a red run plus the issue comment, which is the signal to look.
 
 Secrets: none. The four Anthropic identifiers are workflow `env`, the GitHub credential is the App's, the Anthropic
 credential is minted from the run's OIDC token.
@@ -219,7 +249,9 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
    workflow passed its output, but the skill is also run by hand). `cli-did-not-answer` or `unknown`: stop; open no
    branch; if run by hand, say what the detail is. The skill never fixes authentication, and it never guesses.
 2. **Name the fixture.** `drift-<YYYY-MM-DD>` with the date of the red run in UTC; the rehearsal uses `rehearsal-<date>`.
-   Copy `contract-hello.ndjson` to `src/test/resources/fixtures/<name>.ndjson` and `transcripts/contract-hello.jsonl` to
+   If `src/test/resources/fixtures/<name>.ndjson` exists already (a second red on the same UTC date, after a merged
+   fix), the name is `<name>-<run id>` for every file of this fix. Copy `contract-hello.ndjson` to
+   `src/test/resources/fixtures/<name>.ndjson` and `transcripts/contract-hello.jsonl` to
    `src/test/resources/fixtures/transcripts/<name>.jsonl`. For reader drift, copy `transcripts/session-id.jsonl` to
    `transcripts/<name>-session-id.jsonl` as well, always: `ContractTest` stops at the first failing transcript in
    directory order (`File.listFiles`, unspecified), so its message names one of the two files by chance while both
@@ -231,10 +263,11 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
    run over redacted output changes nothing; the raw-by-mistake case is caught). Any `<leaked-N>` or `unredacted id`
    line on stderr is a stop: remove the copies (`git clean -f -- <copies>`; they are untracked, and `rm` is not on the
    tool allowlist), open no PR, and comment on the standing issue with the key path the redactor printed, never the
-   value. Then `grep -nE '@|[0-9a-f]{8}-[0-9a-f]{4}-|toolu_|msg_|fv-az|runner'` over the copies, the hand check of
-   `docs/launch.md` tactic 4 done by the agent: a hit that is an e-mail address, a UUID, an API id, a hostname or an
-   account name is the same stop; a hit inside reply text (a package name with `@`) is not. The rule is the tactic's:
-   a warning is a stop, not a note.
+   value. Then `grep -nE '@|[0-9a-f]{8}-[0-9a-f]{4}-|toolu_|msg_|fv-az|runner|<leaked-'` over the copies, the hand check
+   of `docs/launch.md` tactic 4 done by the agent: a hit that is an e-mail address, a UUID, an API id, a hostname, an
+   account name or a `<leaked-N>` placeholder is the same stop (a placeholder means the nightly's own redactor already
+   caught a leak; the second run leaves it alone and prints nothing, so only the grep sees it); a hit inside reply
+   text (a package name with `@`) is not. The rule is the tactic's: a warning is a stop, not a note.
 4. **Add the fixture to the tests.** The stream joins `FixtureDecodeTest` and `RobustnessTest` by directory listing
    (`Fixtures.names()`), so the decode test is red now, which is the failing test the fix must turn green. The
    transcript twin joins only by name: add `<name>` (and `<name>-session-id` when copied) to the list in
@@ -260,14 +293,17 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 7. **Verify.** `./gradlew check` (unit, fixture and headless platform tests, `koverVerify`) and
    `python3 -m unittest discover -s scripts -t scripts` from the repository root (the same tests `build.yml` runs as
    `cd scripts && python3 -m unittest`; the skill cannot use that spelling, since `cd` is not on the tool allowlist and
-   a compound command needs every part allowed). The live contract check cannot run on the branch: the federation rule
-   admits only `main`, so the evidence is the red run's artifact plus `check` on the branch, and the next nightly after
-   the merge is the real proof. The PR says so.
+   a compound command needs every part allowed). A `check` red for a reason unrelated to the drift (a flaky platform
+   test, disk space) is run once more; still red, the PR of step 8 is opened as a draft (`--draft`) naming the failing
+   test and that it is unrelated, so the owner decides. The live contract check cannot run on the branch: the
+   federation rule admits only `main`, so the evidence is the red run's artifact plus `check` on the branch, and the
+   next nightly after the merge is the real proof. The PR says so.
 8. **Commit and open the pull request.** Branch `drift/<YYYY-MM-DD>-<run id>` from `main` (`git switch -c`), one
    commit, Conventional Commit `fix(protocol): follow CLI <version>: <what changed>` or `fix(transcript): …`, with no
    trailers; the author is the App identity (`claude[bot]`), which the action configured together with the remote URL
    before the CLI started (runtime step 8), so the skill sets no identity and runs no `gh auth setup-git`.
-   `git push -u origin drift/<YYYY-MM-DD>-<run id>`, the one push the allowlist admits, then
+   `git push -u origin HEAD` (`HEAD` is that branch; the exact rule admits this spelling and no other, so no
+   `HEAD:main`, no refspec, no flag), then
    `gh pr create --base main --label contract-drift --title "<the commit subject>" --body-file build/drift/pr-body.md`
    (`build/` is gitignored, so the body can never land in the commit; the labels exist already: the workflow creates
    both before the agent starts, and by hand the owner creates `contract-drift` and `rehearsal` once). The body,
@@ -287,28 +323,36 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 9. **Stop.** No merge, no second PR, no comment anywhere else. If any step fails after the branch was pushed, the
    PR is still opened, marked draft, and its body names the failing step; a half-done branch is more useful than
    silence (hard rule 5). When the agent itself is stopped (the step's timeout, the turn limit) it cannot keep that
-   promise; runtime step 9 keeps it for the pushed branch.
+   promise; runtime step 9 reports the pushed branch on the standing issue and reds the run.
 
 ### Safeguards
 
 - **Branch**: `drift/<date>-<run id>`, always from `main`, never `main` itself. The owner enables branch protection on
-  `main` requiring a pull request and one approving review; that, not the skill's rule, is what makes "never push to
-  main" and "never merge" true for the App token. A protection that only requires a pull request does not stop a
+  `main` requiring a pull request and one approving review before the first rehearsal (the first bullet of "What the
+  owner does"); that, not the skill's rule, is what makes "never push to main" and "never merge" true for the App
+  token. A protection that only requires a pull request does not stop a
   `gh pr merge` by the App: a pull request is what it merges. The App cannot approve its own pull request, so with one
   review required the merge is refused even if the tool allowlist regresses. (The owner, an administrator, still
   merges their own pull requests unless "Do not allow bypassing the above settings" is on.)
-- **Tool allowlist**: verbs, not programs (runtime step 8). With the App token the agent can create a pull request,
-  list, create and comment on issues, and push to `drift/…`; no merge, close, force push, branch deletion or push
-  elsewhere is possible, whatever the agent decides. The skill prescribes no command outside the list: in headless
-  mode a denied call is a dead end, not a prompt.
+- **Tool allowlist and deny rules**: the allowlist names the invocations the skill prescribes, with an exact push rule,
+  and the `settings` deny rules keep the agent out of `.github/`, the build files, `scripts/`, `.claude/`, `CLAUDE.md`
+  and a second CLI (runtime step 8). They guide the agent; they are not what protects `main`. The App token is in the
+  agent's environment (`GITHUB_TOKEN`, `GH_TOKEN`) and in the `origin` URL, `Edit` and `Write` are otherwise
+  unrestricted, and an allowlist regression is one line, so the guarantee is branch protection on `main` (a pull
+  request plus one approving review; the App cannot approve its own pull request and, not being an administrator,
+  cannot bypass) together with the App's permission scope (contents, pull requests, issues: no administration, no
+  workflows). The skill prescribes no command outside the list: in headless mode a denied call is a dead end, not a
+  prompt.
 - **One open fix at a time**: an open PR labelled `contract-drift` (rehearsal or real) skips the agent entirely (step 7
   of the runtime). Closing or merging it re-arms the loop.
-- **Edit allowlist**: `protocol/`, `session/transcript/`, `src/test/`, `docs/protocol.md`; enforced after the action
-  by the workflow (step 9), which closes an offending PR. The allowlist keeps the fixer out of `.github/`, so no bot
+- **Edit allowlist**: `protocol/`, `session/transcript/`, `src/test/`, `docs/protocol.md`; enforced before the push by
+  the deny rules of step 8 and after the action by the workflow (step 9), which closes an offending PR. The allowlist
+  keeps the fixer out of `.github/`, so no bot
   ever becomes the last editor of the cron line, which is what GitHub's documented rule attributes a schedule run to
   (see "Errors and edge cases" on the actor check).
-- **A stopped agent**: a pushed `drift/` branch without a pull request gets an `[incomplete]` draft from the workflow
-  and a red run (runtime step 9), never a green loop and silence.
+- **A stopped agent**: a pushed `drift/` branch without a pull request is reported on the standing issue and the run
+  is red; no branch and no pull request after the gate proceeded is red as well (runtime step 9): never a green loop
+  and silence.
 - **No retrigger**: the nightly has no `push`/`pull_request` trigger; the fixer listens to `CLI contract` only.
 - **Cost**: `--max-turns 60`, `timeout-minutes` on the step and the job, one concurrency slot, kind-1 and unknown
   reds never start the agent, the open-PR skip, and the workspace spend limit the owner sets in the Claude Console
@@ -318,16 +362,18 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 
 ### What the owner does
 
+- Once, before the first rehearsal, in this order: enables branch protection on `main` requiring a pull request and
+  one approving review (the guarantee behind the tool and edit allowlists; no rehearsal is run until it is on; the
+  App is not an administrator and cannot bypass it, and whether the owner keeps their own administrator bypass is
+  theirs to decide); checks that the Claude GitHub App is installed on `daarko10/tandem` (open item 1); runs the
+  rehearsal (below). Nothing waits on a scheduled nightly: its actor is already recorded (open item 4, closed).
 - Reads the PR. Merges it (squash), or closes it with a comment saying why (the wrong fix, a change Tandem should
   handle differently, a fixture to re-record by hand). Either re-arms the loop. A merge is followed by the next
   nightly, which is the real verification; if it is red again the loop opens the next PR.
 - On a comment on the standing issue "CLI contract: the CLI did not answer": fixes the cause (the federation rule,
   the service account, the spend limit, a pinned CLI version while a broken publish lasts) and closes the issue; the
-  next kind-1 red opens it again.
-- Once, before the first real firing: installs the Claude GitHub App on `daarko10/tandem`, enables branch protection
-  on `main` requiring a pull request and one approving review, and runs the rehearsal (below). After the first
-  scheduled nightly (03:17 UTC) records which actor GitHub attributed it to (open item 4), before the first real
-  firing is trusted.
+  next kind-1 red opens it again. The same issue carries the loop's other reports: a leak the redactor found (skill
+  step 3) and a branch pushed without a pull request (runtime step 9).
 
 ### The rehearsal
 
@@ -396,12 +442,17 @@ line exists, the milestone is open, whatever the rehearsals showed.
   the skill reads both messages from the XML.
 - The agent exceeds `--max-turns` or the step's `timeout-minutes` kills it: the action step fails; the allowlist step
   still runs. If the skill got as far as its PR, that PR is a draft naming the failure; if the branch was pushed and no
-  PR exists, the allowlist step opens the `[incomplete]` draft for it and exits 1 (runtime step 9). The job is red
+  PR exists, the allowlist step reports the branch on the standing issue and exits 1 (runtime step 9). The job is red
   either way, which is the signal to look.
+- The gate proceeded (`decoder` or `reader`) but the agent pushed no branch and opened no PR (a denied command, the
+  leak stop of skill step 3, the action skipped after a workflow-validation error without running the agent, or the
+  agent gave up): the allowlist step exits 1 naming the classification and `steps.agent.outputs.conclusion` (runtime
+  step 9). Never a green `Drift fix` run that did nothing.
 - The artifact is listed but `gh run download` fails (a 403, an API outage, a renamed artifact): the job is red at the
   fetch step and the standing issue is not touched; GitHub shows it in Actions. It is never reported as "the CLI did
   not answer".
-- The redactor prints a leak: no PR, a comment on the standing issue naming the key path only.
+- The redactor prints a leak, or the recording already holds a `<leaked-N>` placeholder: no PR, a comment on the
+  standing issue naming the key path only, and a red run (the bullet above).
 - The CLI renamed or stopped emitting `assistant` in `-p` mode: the nightly's check step reds the run with "No
   assistant line although the result holds text", the classification is `decoder` by rule 3 (the decode test itself is
   green), and the skill's first test decodes the new fixture and asserts an `Assistant` message (skill step 5).
@@ -411,14 +462,13 @@ line exists, the milestone is open, whatever the rehearsals showed.
 - The fixer workflow is itself broken (a YAML error, a missing script): GitHub shows it in Actions; the standing issue
   is not touched. `actionlint` on the branch catches the YAML part before merge.
 - The action's human-actor check (`github.actor` of the fixer's `workflow_run` job is the actor of the nightly, and the
-  action checks `workflow_run.actor.login` as well): not verified yet. GitHub's documented rule attributes a `schedule`
-  run to the user who last modified the cron line (`daarko10`, who has write access), which would pass the chain
-  schedule → red run → `workflow_run`; but `CLI contract` has only ever run by `workflow_dispatch` (actor `daarko10`),
-  never on schedule. After the first scheduled run (03:17 UTC) the owner records
-  `gh api 'repos/daarko10/tandem/actions/runs?event=schedule' --jq '.workflow_runs[0].actor.login'` in open item 4.
-  If it is not a User with write access, the fixer needs the action's `allowed_bots` input or a `workflow_dispatch`
-  relay, and that is settled before the first real firing is trusted. The edit allowlist keeps the cron line's last
-  editor human.
+  action checks `workflow_run.actor.login` as well): answered. GitHub attributes a `schedule` run to the user who last
+  modified the cron line, and the six scheduled `CLI contract` runs so far (2026-10-17 to 2026-10-21, all red) carry
+  `actor` and `triggering_actor` `daarko10`, a User with admin access (`gh api
+  'repos/daarko10/tandem/actions/runs?event=schedule' --jq '.workflow_runs[].actor.login'`), so the action's
+  `checkHumanActor` and `checkWritePermissions` pass for the chain schedule → red run → `workflow_run`. The edit
+  allowlist keeps the cron line's last editor human. The schedule fires hours after 03:17 UTC under load; the date the
+  fixer takes from the run's `createdAt` tolerates that.
 
 ## Testing
 
@@ -432,9 +482,12 @@ line exists, the milestone is open, whatever the rehearsals showed.
   same bytes as the fixture-sourced run; the refusal to write under the fixtures directory; the `<session_id-N>`
   placeholders survive.
 - `scripts/test_workflows.py`: the fixer's trigger, permissions, step order and guards (the fetch's `mkdir`, the
-  presence check and the absence of `|| echo`; the Gradle and classification guards on the precheck; the
-  `[incomplete]` draft in the allowlist step; the input passed through `env:`); the nightly's `drift` input, mutate
-  step, check step and redaction; the skill's `allowed-tools` equal to the action's.
+  presence check and the absence of `|| echo`; the Gradle and classification guards on the precheck; the allowlist
+  step's branch read through the API and its `exit 1` whenever no PR exists; the exact push rule and the absence of
+  any `Bash(git push…:*)` or broad `Bash(python3:*)`/`Bash(./gradlew:*)` rule; the deny rules of the `settings` input
+  and the step id `agent`; the input passed through `env:`); the nightly's `drift` input, mutate step, check step and
+  redaction; the skill's `allowed-tools` equal to the action's. Under `GITHUB_ACTIONS` a missing PyYAML is an error,
+  not a skip.
 - `actionlint` over both workflows when it is installed; otherwise the push's own parse and the rehearsal.
 - The rehearsal, both modes, through `cli-contract.yml` with `drift=<mode>` on `main` after merge: proves the
   `workflow_run` trigger and the job `if`, the action's actor checks for that event, the artifact listing and the
@@ -444,9 +497,8 @@ line exists, the milestone is open, whatever the rehearsals showed.
 - `./gradlew check` unchanged: the new scripts and workflows do not touch Kotlin.
 - Not testable before merge: the `workflow_run` firing itself (the workflow must be on `main`), the federation
   exchange of a `workflow_run` job (inferred from GitHub's subject rules; the first fixer run's federation log line
-  names the subject, and the Console's authentication history shows a mismatch if not), and the actor of a scheduled
-  nightly (open item 4). The first rehearsal through the nightly answers the first two; the first scheduled run
-  answers the third.
+  names the subject, and the Console's authentication history shows a mismatch if not). The first rehearsal through
+  the nightly answers both.
 
 ## Follow-up: widening the nightly
 
@@ -466,19 +518,22 @@ type is not core, so a new top-level type or `system` subtype passes. After the 
 3. Diff the set of `Unknown` types and the keys of `system/init` and `result` against the undocumented-fields table
    and annotate additions.
 4. Add the re-recording `run:` step to the fixer for those scenarios, as described under "The red run's recording is
-   the new fixture", and let the skill promote from `build/drift/recorded`.
+   the new fixture" (a workflow step with its own `anthropic-token` fetch before the action, never a `claude` started
+   by the agent, which the deny rules refuse), and let the skill promote from `build/drift/recorded`.
 
 ## Open items
 
 1. Whether the Claude GitHub App is installed on `daarko10/tandem`; the owner checks before the rehearsal. Without it
-   the action falls back to `GITHUB_TOKEN`, and the symptom is that no `Build` run appears on the fix PR at all
-   (events raised with the workflow token never trigger workflows), not a run waiting for approval.
+   the action does not fall back to `GITHUB_TOKEN`: its App token exchange throws after retries and the step fails
+   before the CLI starts, so the symptom is a red "Fix the drift" step at "Exchanging OIDC token for app token". The
+   one exchange error the action swallows is a workflow-validation error, after which the step ends green without
+   running the agent (output `skipped_due_to_workflow_validation_mismatch=true`); the allowlist step then finds no PR
+   and no branch and exits 1 (runtime step 9), so that case is red too.
 2. The exact OIDC subject of a `workflow_run` job on `main`, confirmed by the federation log line of the fixer run the
    first rehearsal through the nightly triggers.
 3. The Opus model id to pin in `claude_args`: `claude-opus-5-5` is the `default` the 2.1.301 fixtures' `initialize`
    response lists; the id current at implementation time is used.
-4. The actor GitHub attributes a scheduled `CLI contract` run to, recorded after the first scheduled run as
-   `gh api 'repos/daarko10/tandem/actions/runs?event=schedule' --jq '.workflow_runs[0].actor.login'` (see "Errors and
-   edge cases"). Answered elsewhere, no longer open: the push identity. The action sets the `origin` URL with the App
-   token and `user.name`/`user.email` from `bot_name`/`bot_id` before the CLI starts, so neither `gh auth setup-git`
+4. Closed: the actor GitHub attributes a scheduled `CLI contract` run to is `daarko10` (six scheduled runs, 2026-10-17
+   to 2026-10-21; see "Errors and edge cases"), so nothing waits on a scheduled run. Also closed: the push identity. The action sets the
+   `origin` URL with the App token and `user.name`/`user.email` from `bot_name`/`bot_id` before the CLI starts, so neither `gh auth setup-git`
    nor an identity fallback is needed.
