@@ -926,8 +926,8 @@ by an interrupt has `isAbortedMidStream: true` where its stdout line has `aborte
 ### 11.3 The current history
 
 A rewind or an edited prompt leaves the abandoned turns in the file, so the history is not simply every line. A first
-pass (`TranscriptChain`) works out which conversational lines (`user` or `assistant`, neither `isSidechain` nor
-`isMeta`) belong to it:
+pass (`TranscriptChain`) works out which conversational lines (`user` or `assistant`, and a local command's `system`
+line with `subtype: local_command`, neither `isSidechain` nor `isMeta`) belong to it:
 
 1. The current history is the `parentUuid` chain that ends at the last conversational line with a `uuid`. The chain runs through lines
    of any type (in the fixtures every `assistant` line's parent is an `attachment` line), so every line with a `uuid` is

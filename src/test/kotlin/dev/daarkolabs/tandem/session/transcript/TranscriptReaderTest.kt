@@ -155,14 +155,14 @@ class TranscriptReaderTest {
         f.writeLines(
             // The typed command without a uuid, then its error output (unrecorded: no fixture has <local-command-stderr>).
             """{"type":"system","subtype":"local_command","content":"/nope now","submitUuid":"s1","timestamp":"2026-10-21T10:23:55.130Z"}""",
-            """{"type":"system","subtype":"local_command","uuid":"o1","content":"<local-command-stderr>Unknown command: /nope</local-command-stderr>"}""",
+            """{"type":"system","subtype":"local_command","uuid":"o1","parentUuid":null,"content":"<local-command-stderr>Unknown command: /nope</local-command-stderr>"}""",
             // Bare content without a submitUuid, a meta line and a line without content are no rows.
-            """{"type":"system","subtype":"local_command","uuid":"x1","content":"just text"}""",
-            """{"type":"system","subtype":"local_command","uuid":"x2","isMeta":true,"content":"<local-command-stdout>hidden</local-command-stdout>"}""",
-            """{"type":"system","subtype":"local_command","uuid":"x3","commandRun":{"command":"mcp"}}""",
-            """{"type":"system","subtype":"informational","uuid":"x4","content":"<local-command-stdout>other</local-command-stdout>"}""",
+            """{"type":"system","subtype":"local_command","uuid":"x1","parentUuid":"o1","content":"just text"}""",
+            """{"type":"system","subtype":"local_command","uuid":"x2","parentUuid":"x1","isMeta":true,"content":"<local-command-stdout>hidden</local-command-stdout>"}""",
+            """{"type":"system","subtype":"local_command","uuid":"x3","parentUuid":"x2","commandRun":{"command":"mcp"}}""",
+            """{"type":"system","subtype":"informational","uuid":"x4","parentUuid":"x3","content":"<local-command-stdout>other</local-command-stdout>"}""",
             // Output with a run and no wrapper is still the command's.
-            """{"type":"system","subtype":"local_command","uuid":"o2","content":"plain","commandRun":{"command":"cost","args":""}}""",
+            """{"type":"system","subtype":"local_command","uuid":"o2","parentUuid":"x4","content":"plain","commandRun":{"command":"cost","args":""}}""",
         )
         val loaded = TranscriptReader.read(f).state
         assertEquals(listOf("user: /nope now", "INFO: Unknown command: /nope", "INFO: plain"), loaded.shape())
@@ -173,6 +173,35 @@ class TranscriptReaderTest {
         assertEquals(listOf("nope", "nope"), notices.map { it.command })
         assertEquals(listOf(null, "cost"), notices.map { it.runCommand })
         assertFalse(loaded.busy)
+    }
+
+    @Test
+    fun `a local command on a rewound branch is left out and one at the end of the file is kept`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("32323232-3232-4232-8232-323232323232.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"one"}]}}""",
+            // The abandoned branch, in the recorded shapes of transcripts/mcp-slash.jsonl:4-5 and :13-14: /mcp with its output,
+            // then a typed /help (no <command-name> line) with its output.
+            """{"type":"user","uuid":"c1","parentUuid":"a1","message":{"role":"user","content":"<command-name>/mcp</command-name>\n            <command-message>mcp</command-message>\n            <command-args></command-args>"}}""",
+            """{"type":"system","subtype":"local_command","uuid":"o1","parentUuid":"c1","isMeta":false,"content":"<local-command-stdout>old servers</local-command-stdout>","commandRun":{"command":"mcp","args":""}}""",
+            """{"type":"system","subtype":"local_command","uuid":"h1","parentUuid":"o1","isMeta":false,"content":"/help","submitUuid":"s1"}""",
+            """{"type":"system","subtype":"local_command","uuid":"h2","parentUuid":"h1","isMeta":false,"content":"<local-command-stdout>old help</local-command-stdout>","commandOutcome":{"kind":"unavailable_headless"}}""",
+            // Rewound to a1 in the terminal: the next prompt continues from there, and the four lines above stay in the file.
+            """{"type":"user","uuid":"u2","parentUuid":"a1","message":{"role":"user","content":"second"}}""",
+            """{"type":"assistant","uuid":"a2","parentUuid":"u2","message":{"id":"msg_2","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"two"}]}}""",
+        )
+        assertEquals(listOf("user: first", "assistant: one", "user: second", "assistant: two"), TranscriptReader.read(f).state.shape())
+
+        // A file whose last lines are a typed /help and its output: they end the current history, so they load.
+        val g = dir.resolve("33333333-3333-4333-8333-333333333333.jsonl")
+        g.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"one"}]}}""",
+            """{"type":"system","subtype":"local_command","uuid":"h1","parentUuid":"a1","isMeta":false,"content":"/help","submitUuid":"s1"}""",
+            """{"type":"system","subtype":"local_command","uuid":"h2","parentUuid":"h1","isMeta":false,"content":"<local-command-stdout>help text</local-command-stdout>","commandOutcome":{"kind":"unavailable_headless"}}""",
+        )
+        assertEquals(listOf("user: first", "assistant: one", "user: /help", "INFO: help text"), TranscriptReader.read(g).state.shape())
     }
 
     @Test
