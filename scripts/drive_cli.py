@@ -77,8 +77,10 @@ PARENT_SESSION_PREFIXES = ("CLAUDE_CODE_REMOTE", "CLAUDE_CODE_MESSAGING_", "CLAU
 
 
 def child_environment() -> dict[str, str]:
+    # The probe's connector name (CONNECTOR_VARIABLE) is for this script and the redactor only: claude never needs it.
     env = {name: value for name, value in os.environ.items()
-           if name not in PARENT_SESSION_VARIABLES and not name.startswith(PARENT_SESSION_PREFIXES)}
+           if name not in PARENT_SESSION_VARIABLES and not name.startswith(PARENT_SESSION_PREFIXES)
+           and name != CONNECTOR_VARIABLE}
     env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-tandem"
     return env
 
@@ -408,8 +410,9 @@ def mcp_status_of(answer: dict, name: str) -> str | None:
 
 
 def mcp_connectors(cli: Cli, connector: str, sleep=time.sleep, every: float = 2.0, timeout: float = 180.0) -> None:
-    """A claude.ai connector driven as Tandem's MCP panel drives it (spec 10 item 6, 11 items 1 and 13). Every request but
-    the first status is allowed to fail: the answer is what the recording is for."""
+    """A claude.ai connector driven as Tandem's MCP panel drives it (spec 10 item 6, 11 items 1 and 13). mcp_authenticate,
+    the toggles and the reconnect may fail: the answer is what the recording is for. An error answer to an mcp_status
+    ends the run."""
     status = {"subtype": "mcp_status"}
 
     def toggle(enabled: bool) -> dict:
@@ -419,16 +422,17 @@ def mcp_connectors(cli: Cli, connector: str, sleep=time.sleep, every: float = 2.
     answer = cli.call({"subtype": "mcp_authenticate", "serverName": connector}, allow_error=True)
     response = answer.get("response", {})
     if response.get("subtype") == "error":
-        # Nothing to sign in to: polling for 3 minutes would only delay the rest.
-        print("mcp_authenticate was refused; not waiting for a sign-in", file=sys.stderr)
+        # Spec 3.3 step 4's way out, a terminal login and then Reconnect, is unrecorded: the poll below is the window for it.
+        print(f"mcp_authenticate was refused: {response.get('error')}; run claude mcp login \"{connector}\" in a terminal "
+              f"within 3 minutes", file=sys.stderr)
     else:
         link = (response.get("response") or {}).get("authUrl")
         if link:
             print(f"open this link within 3 minutes: {link}", file=sys.stderr)
-        waited = 0.0
-        while mcp_status_of(cli.call(status), connector) == "needs-auth" and waited < timeout:
-            sleep(every)
-            waited += every
+    waited = 0.0
+    while mcp_status_of(cli.call(status), connector) == "needs-auth" and waited < timeout:
+        sleep(every)
+        waited += every
     cli.call(toggle(False), allow_error=True)
     cli.call(toggle(True), allow_error=True)
     cli.call({"subtype": "mcp_reconnect", "serverName": connector}, allow_error=True)
@@ -445,6 +449,9 @@ def mcp_connectors(cli: Cli, connector: str, sleep=time.sleep, every: float = 2.
 
     cli.user("ping")
     cli.until(result_of(cli.last_uuid()), on_message=during)
+    if not sent_mid_turn:
+        print("no system/init came before the ping's result, so the mid-turn mcp_status and mcp_toggle were not sent",
+              file=sys.stderr)
     cli.call(toggle(True), allow_error=True)
 
 

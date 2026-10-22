@@ -158,7 +158,6 @@ class RedactTest(unittest.TestCase):
         self.assertIn("line 1: not a JSON object, dropped", err)
         self.assertIn("line 2: not a JSON object, dropped", err)
 
-
     def test_other_fixtures_still_empty_the_init_lists(self):
         (out,), _ = self.redact(init(mcp_servers=[{"name": "echo", "status": "connected", "source": "user"}],
                                      slash_commands=["review"], plugins=[{"name": "p"}]), name="permission")
@@ -248,6 +247,38 @@ class RedactTest(unittest.TestCase):
                 "subtype": "error", "request_id": "r", "error": "Server not found: claude.ai Example"}},
                 name="mcp-connectors")
         self.assertEqual("Server not found: claude.ai Connector-1", out["response"]["error"])
+
+    def test_a_name_inside_a_placeholder_is_not_renamed_again(self):
+        # "claude.ai Con" is a prefix of "claude.ai Connector-1": one pass renames each name once.
+        (answer, call), _ = self.redact(
+            status(connector("claude.ai Example"), connector("claude.ai Con")),
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_01A", "name": "mcp__claude_ai_Example__search", "input": {}},
+                {"type": "tool_use", "id": "toolu_01B", "name": "mcp__claude_ai_Con__list", "input": {}}]}},
+            name="mcp-connectors")
+        self.assertEqual(["claude.ai Connector-1", "claude.ai Connector-2"],
+                         [s["name"] for s in answer["response"]["response"]["mcpServers"]])
+        self.assertEqual(["mcp__claude_ai_Connector-1__search", "mcp__claude_ai_Connector-2__list"],
+                         [block["name"] for block in call["message"]["content"]])
+
+    def test_main_warns_when_a_connector_fixture_is_redacted_without_the_probe_name(self):
+        src = os.path.join(self.dir.name, "in.ndjson")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "control_response", "response": {
+                "subtype": "error", "request_id": "r", "error": "Server not found: claude.ai Example"}}) + "\n")
+        dst = os.path.join(self.dir.name, "mcp-connectors.ndjson")
+        other = os.path.join(self.dir.name, "permission.ndjson")
+        for env, paths, warned in (({}, [src, dst], True), ({}, [src, other], False),
+                                   ({"TANDEM_PROBE_CONNECTOR": "claude.ai Example"}, [src, dst], False)):
+            importlib.reload(redact_fixture)
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err):
+                if not env:
+                    os.environ.pop("TANDEM_PROBE_CONNECTOR", None)
+                redact_fixture.main(paths)
+            self.assertEqual(warned, "TANDEM_PROBE_CONNECTOR is not set" in err.getvalue(), (env, paths[1]))
+        with open(dst, encoding="utf-8") as f:
+            self.assertIn("Server not found: claude.ai Connector-1", f.read(), "the last run had the name")
 
     def test_oauth_values_get_url_safe_placeholders(self):
         auth = {"type": "control_response", "response": {"subtype": "success", "request_id": "r", "response": {

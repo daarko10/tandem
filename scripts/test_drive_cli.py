@@ -6,6 +6,8 @@ import io
 import json
 import os
 import queue
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -210,13 +212,16 @@ class LoggingQueue(queue.Queue):
 class ConnectorCli(FakeCli):
     """A CLI with one connector (`name`, source claudeai) beside a user-scope stdio server. mcp_status lists both, the
     connector needs-auth until the `connected_on`-th mcp_status after mcp_authenticate (never, when None);
-    mcp_authenticate answers with a sign-in link on a vendor host; a prompt streams an init and a delta before its
-    result. `log` holds what was sent and read, in order; `lines` holds what the CLI printed, as Cli.lines does."""
+    mcp_authenticate answers with a sign-in link on a vendor host (an error when `auth_error`); a prompt streams an init
+    (unless not `init`) and a delta before its result. `log` holds what was sent and read, in order; `lines` holds what
+    the CLI printed, as Cli.lines does."""
 
-    def __init__(self, name: str = CONNECTOR, connected_on: int | None = 1):
+    def __init__(self, name: str = CONNECTOR, connected_on: int | None = 1, auth_error: bool = False, init: bool = True):
         super().__init__(self.respond)
         self.name = name
         self.connected_on = connected_on
+        self.auth_error = auth_error
+        self.init = init
         self.log: list = []
         self.inbox = LoggingQueue(self.log)
         self.lines: list[str] = []
@@ -241,6 +246,9 @@ class ConnectorCli(FakeCli):
             body = {"mcpServers": self.servers()}
         elif subtype == "mcp_authenticate":
             self.polls = 0
+            if self.auth_error:
+                return {"type": "control_response",
+                        "response": {"subtype": "error", "request_id": request_id, "error": "Unknown subtype"}}
             body = {"authUrl": "https://auth.example-vendor.com/authorize?code_challenge=abc&state=xyz",
                     "requiresUserAction": True, "state": "xyz"}
         return {"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": body}}
@@ -255,12 +263,67 @@ class ConnectorCli(FakeCli):
         if msg.get("type") == "control_request":
             self.emit(self.answer(msg["request_id"], msg["request"]))
         elif msg.get("type") == "user":
-            self.emit({"type": "system", "subtype": "init", "session_id": "s",
-                       "tools": ["Bash", f"mcp__{self.name.replace('.', '_').replace(' ', '_')}__search", "mcp__echo__echo"],
-                       "mcp_servers": [{"name": self.name, "status": "connected", "source": "claudeai"},
-                                       {"name": "echo", "status": "connected", "source": "user"}]})
+            if self.init:
+                self.emit({"type": "system", "subtype": "init", "session_id": "s",
+                           "tools": ["Bash", f"mcp__{self.name.replace('.', '_').replace(' ', '_')}__search",
+                                     "mcp__echo__echo"],
+                           "mcp_servers": [{"name": self.name, "status": "connected", "source": "claudeai"},
+                                           {"name": "echo", "status": "connected", "source": "user"}]})
             self.emit({"type": "stream_event", "event": {"type": "content_block_delta"}})
             self.emit({"type": "result", "subtype": "success", "num_turns": 1})
+
+
+class QuietResultCli(FakeCli):
+    """Answers as the CLI does once the quiet frames are merged (bash-mode.ndjson:8): a querying frame gets a zero-turn
+    result listing the quiet frames' uuids, then its own result listing its uuid, then a marker nothing should read."""
+
+    def __init__(self):
+        super().__init__(success)
+        self.log: list = []
+        self.inbox = LoggingQueue(self.log)
+        self.quiet: list[str] = []
+
+    def send(self, msg: dict) -> None:
+        self.sent.append(msg)
+        if msg.get("shouldQuery") is False:
+            self.quiet.append(msg["uuid"])
+            return
+        self.inbox.put({"type": "result", "subtype": "success", "num_turns": 0, "user_message_uuids": self.quiet})
+        self.inbox.put({"type": "result", "subtype": "success", "num_turns": 1, "user_message_uuids": [msg["uuid"]]})
+        self.inbox.put({"type": "marker"})
+
+
+# A claude for record-scenario.sh: strict mode has dropped the connector, every request on it fails naming it, the ping
+# streams an init and a result, and the transcript is written where copy_transcript.py looks for it.
+FAKE_CLAUDE = r"""#!python3
+import json, os, re, sys
+if "--version" in sys.argv:
+    print("0.0.0 (fake)")
+    sys.exit(0)
+session = "fake-session"
+folder = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(".")))
+os.makedirs(folder, exist_ok=True)
+transcript = open(os.path.join(folder, session + ".jsonl"), "w", encoding="utf-8")
+def out(msg):
+    print(json.dumps(msg), flush=True)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg["type"] == "control_request":
+        request = msg["request"]
+        if "serverName" in request:
+            answer = {"subtype": "error", "request_id": msg["request_id"],
+                      "error": "Server not found: " + request["serverName"]}
+            transcript.write(json.dumps({"type": "system", "sessionId": session, "content": answer["error"]}) + "\n")
+        else:
+            body = {"mcpServers": []} if request["subtype"] == "mcp_status" else {}
+            answer = {"subtype": "success", "request_id": msg["request_id"], "response": body}
+        out({"type": "control_response", "response": answer})
+    elif msg["type"] == "user":
+        transcript.write(json.dumps({"type": "user", "sessionId": session, "uuid": msg["uuid"]}) + "\n")
+        out({"type": "system", "subtype": "init", "session_id": session, "tools": [], "mcp_servers": []})
+        out({"type": "result", "subtype": "success", "num_turns": 1, "session_id": session})
+transcript.close()
+"""
 
 
 def requests(cli: FakeCli) -> list[dict]:
@@ -337,9 +400,12 @@ class ConnectorScenarioTest(unittest.TestCase):
         os.environ["TANDEM_PROBE_CONNECTOR"] = CONNECTOR
         argvs = []
 
+        environments = []
+
         class Popen:  # a claude that exits at once: main fails on initialize, after the argv is built
-            def __init__(self, argv, **_kwargs):
+            def __init__(self, argv, **kwargs):
                 argvs.append(argv)
+                environments.append(kwargs["env"])
                 self.stdin, self.stdout = io.StringIO(), io.StringIO("")
 
             def wait(self, timeout=None):
@@ -358,6 +424,9 @@ class ConnectorScenarioTest(unittest.TestCase):
             self.assertNotIn(flag, all_)
         self.assertIn("--safe-mode", permission_)
         self.assertNotIn(CONNECTOR, " ".join(connectors + all_))
+        for env in environments:  # the name is the scripts' own: claude never gets it
+            self.assertNotIn("TANDEM_PROBE_CONNECTOR", env)
+            self.assertNotIn(CONNECTOR, env.values())
 
     def test_the_connector_scenario_sends_status_and_toggle_while_ping_streams(self):
         cli = ConnectorCli()
@@ -399,6 +468,59 @@ class ConnectorScenarioTest(unittest.TestCase):
         self.assertEqual(4, count)
         self.assertEqual([2.0, 2.0, 2.0], slept)
 
+    def test_a_refused_authenticate_still_polls_and_runs_the_rest(self):
+        # The poll is the window for spec 3.3 step 4's terminal login (plan M5r: mcp_status every 2 s in every case).
+        cli = ConnectorCli(connected_on=2, auth_error=True)
+        slept: list[float] = []
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            drive_cli.mcp_connectors(cli, CONNECTOR, sleep=slept.append)
+        toggle = {"subtype": "mcp_toggle", "serverName": CONNECTOR}
+        self.assertEqual(
+            [{"subtype": "mcp_status"}, {"subtype": "mcp_authenticate", "serverName": CONNECTOR},
+             {"subtype": "mcp_status"}, {"subtype": "mcp_status"},
+             {**toggle, "enabled": False}, {**toggle, "enabled": True}, {"subtype": "mcp_reconnect", "serverName": CONNECTOR},
+             {"subtype": "mcp_status"}, {**toggle, "enabled": False}, {**toggle, "enabled": True}], requests(cli))
+        self.assertEqual([2.0], slept)
+        self.assertEqual(1, sum(m["type"] == "user" for m in cli.sent), "the ping ran")
+        self.assertIn(f'mcp_authenticate was refused: Unknown subtype; run claude mcp login "{CONNECTOR}" in a terminal',
+                      err.getvalue())
+        self.assertNotIn("open this link", err.getvalue())
+
+    def test_a_ping_without_init_says_the_mid_turn_requests_were_not_sent(self):
+        cli = ConnectorCli(init=False)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            drive_cli.mcp_connectors(cli, CONNECTOR, sleep=lambda s: None)
+        ping = next(i for i, m in enumerate(cli.sent) if m["type"] == "user")
+        self.assertEqual([{"subtype": "mcp_toggle", "serverName": CONNECTOR, "enabled": True}],
+                         [m["request"] for m in cli.sent[ping + 1:]])
+        self.assertIn("no system/init came before the ping's result", err.getvalue())
+
+    def test_record_scenario_hands_the_connector_flag_to_the_redactor(self):
+        """record-scenario.sh with --connector and no TANDEM_PROBE_CONNECTOR, against a claude double whose strict mode
+        drops the connector and whose errors name it: the committed files never hold the name."""
+        name = "claude.ai Probe"
+        fake_bin = os.path.join(self.dir, "bin")
+        os.makedirs(fake_bin)
+        claude = os.path.join(fake_bin, "claude")
+        with open(claude, "w", encoding="utf-8") as f:
+            f.write(FAKE_CLAUDE.replace("#!python3", "#!" + sys.executable, 1))
+        os.chmod(claude, 0o755)
+        out = os.path.join(self.dir, "out")
+        env = {k: v for k, v in os.environ.items() if k != "TANDEM_PROBE_CONNECTOR"}
+        env.update(PATH=fake_bin + os.pathsep + env.get("PATH", ""), CLAUDE_CONFIG_DIR=os.path.join(self.dir, "config"))
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "record-scenario.sh")
+        done = subprocess.run(["bash", script, "mcp-connectors", out, "--connector", name], env=env,
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertNotIn("is not set", done.stderr, "the redactor got the name")
+        for path in ("mcp-connectors.ndjson", os.path.join("transcripts", "mcp-connectors.jsonl")):
+            with open(os.path.join(out, path), encoding="utf-8") as f:
+                text = f.read()
+            self.assertNotIn("Probe", text, path)
+            self.assertIn("Server not found: claude.ai Connector-1", text, path)
+
     def test_the_bash_scenarios_send_the_probe_frames(self):
         command = "<bash-input>echo bash-mode-probe && printf err >&2</bash-input>"
         output = "<bash-stdout>bash-mode-probe\nerr</bash-stdout><bash-stderr></bash-stderr>"
@@ -423,14 +545,43 @@ class ConnectorScenarioTest(unittest.TestCase):
                          frames(drive_cli.bash_mode, sleep=True))
         self.assertEqual(([(command, False, True), (output, "absent", True)], [3.0]),
                          frames(drive_cli.bash_mode_respond, sleep=True))
-        with mock.patch.object(drive_cli.time, "sleep", side_effect=AssertionError("slept between the respond frames")):
-            self.assertEqual(([(command, False, True), (output, "absent", True)], []),
-                             frames(drive_cli.bash_mode_respond_together))
+        original = drive_cli.bash_mode_respond
+        slept: list[float] = []
+        with mock.patch.object(drive_cli, "bash_mode_respond",
+                               side_effect=lambda cli, **kw: original(cli, sleep=slept.append, **kw)) as respond:
+            sent, _ = frames(drive_cli.bash_mode_respond_together)
+        self.assertEqual([(command, False, True), (output, "absent", True)], sent)
+        respond.assert_called_once()
+        self.assertEqual(0, respond.call_args.kwargs["wait"], "together: no wait between the frames")
+        self.assertEqual([], slept)
         self.assertEqual(([(context, False, True), (prompt, "absent", "absent")], [3]),
                          frames(drive_cli.bash_mode_context, sleep=True))
         for name in ("bash-mode", "bash-mode-respond", "bash-mode-respond-together", "bash-mode-context",
                      "mcp-connectors", "mcp-connectors-all"):
             self.assertIn(name, drive_cli.SCENARIOS)
+
+    def test_result_of_matches_the_result_that_lists_the_uuid(self):
+        ends = drive_cli.result_of("u")
+        self.assertTrue(ends({"type": "result", "user_message_uuids": ["q", "u"]}))
+        self.assertFalse(ends({"type": "result", "user_message_uuids": ["q1", "q2"]}))
+        self.assertTrue(ends({"type": "result"}), "a CLI that lists no uuids ends it with its next result")
+        self.assertTrue(ends({"type": "result", "user_message_uuids": []}))
+        self.assertFalse(ends({"type": "assistant", "user_message_uuids": ["u"]}))
+
+    def test_the_bash_scenarios_wait_past_the_quiet_frames_result(self):
+        for run in (drive_cli.bash_mode, drive_cli.bash_mode_respond, drive_cli.bash_mode_respond_together,
+                    drive_cli.bash_mode_context):
+            cli = QuietResultCli()
+            if run is drive_cli.bash_mode_respond_together:
+                run(cli)
+            else:
+                run(cli, sleep=lambda s: None)
+            read = [m for kind, m in cli.log if kind == "read"]
+            self.assertEqual(2, len(read), run.__name__)
+            self.assertEqual(0, read[0]["num_turns"], run.__name__)
+            self.assertEqual([cli.sent[-1]["uuid"]], read[1]["user_message_uuids"], run.__name__)
+            self.assertEqual({"type": "marker"}, cli.inbox.get_nowait(), run.__name__)
+            self.assertTrue(cli.inbox.empty(), run.__name__)
 
 
 if __name__ == "__main__":

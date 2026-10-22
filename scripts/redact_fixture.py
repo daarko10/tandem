@@ -18,7 +18,8 @@ Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
   its `authUrl`) with URL-safe placeholders, REDACTED_STATE and REDACTED_CODE_CHALLENGE, so the link still parses.
 - The claude.ai connector fixtures (mcp-connectors, mcp-connectors-all) keep only the `source: claudeai` servers and
   the tools of those, drop `env` and `headers` from every server config, rename every connector to
-  "claude.ai Connector-N" wherever its name occurs (also the probe's own, $TANDEM_PROBE_CONNECTOR), and give every
+  "claude.ai Connector-N" wherever its name occurs (also the probe's own, $TANDEM_PROBE_CONNECTOR, which
+  record-scenario.sh also sets from --connector; without it a warning goes to stderr), and give every
   `authUrl` and `config.url` a placeholder host and path with REDACTED_<KEY> query values, `config.id` and every
   `config.args` element a REDACTED_ placeholder.
 - Keeps every message type, field name and ordering, which is what the protocol tests care about.
@@ -199,15 +200,24 @@ def renames() -> list[tuple[str, str]]:
     return sorted(pairs.items(), key=lambda pair: -len(pair[0]))
 
 
-def rename(node, pairs: list[tuple[str, str]]):
+def renamer():
+    """A function that renames every connector in a string in one pass (renames()), so a replacement is never matched
+    again: a name that is a prefix of a placeholder ("claude.ai Con") leaves "claude.ai Connector-1" alone."""
+    pairs = [(old, new) for old, new in renames() if old]
+    if not pairs:
+        return lambda text: text
+    mapping = dict(pairs)
+    pattern = re.compile("|".join(re.escape(old) for old, _ in pairs))  # longest first: the first match is the longest
+    return lambda text: pattern.sub(lambda m: mapping[m.group(0)], text)
+
+
+def rename(node, sub):
     if isinstance(node, dict):
-        return {rename(k, pairs): rename(v, pairs) for k, v in node.items()}
+        return {rename(k, sub): rename(v, sub) for k, v in node.items()}
     if isinstance(node, list):
-        return [rename(v, pairs) for v in node]
+        return [rename(v, sub) for v in node]
     if isinstance(node, str):
-        for old, new in pairs:
-            if old in node:
-                node = node.replace(old, new)
+        return sub(node)
     return node
 
 
@@ -255,8 +265,12 @@ def strip_attachment(msg: dict) -> None:
         msg["rendered"] = ""
 
 
+def fixture_name(dst: str) -> str:
+    return os.path.splitext(os.path.basename(dst))[0]
+
+
 def redact(src: str, dst: str) -> None:
-    fixture = os.path.splitext(os.path.basename(dst))[0]
+    fixture = fixture_name(dst)
     keep = INIT_KEEP.get(fixture, set())
     lines = []
     with open(src, encoding="utf-8") as f:
@@ -279,11 +293,12 @@ def redact(src: str, dst: str) -> None:
         probe = os.environ.get(CONNECTOR_VARIABLE)
         if probe:
             connectors.setdefault(probe, f"claude.ai Connector-{len(connectors) + 1}")
+    sub = renamer()
     out = []
     for number, msg in lines:
         if fixture in CONNECTOR_FIXTURES:
             filter_connectors(msg)
-            msg = rename(msg, renames())
+            msg = rename(msg, sub)
         else:
             redact_nonces(msg)
         if msg.get("type") == "system" and msg.get("subtype") == "init":
@@ -304,8 +319,16 @@ def redact(src: str, dst: str) -> None:
         f.write("\n".join(out) + "\n")
 
 
+def main(paths: list[str]) -> None:
+    """Redacts each <in> <out> pair of `paths`, in one run."""
+    if not os.environ.get(CONNECTOR_VARIABLE) and any(fixture_name(dst) in CONNECTOR_FIXTURES for dst in paths[1::2]):
+        print(f"warning: {CONNECTOR_VARIABLE} is not set, so the probe's connector is renamed only where a source: claudeai "
+              "entry names it; read the output for its real name before committing it", file=sys.stderr)
+    for i in range(0, len(paths), 2):
+        redact(paths[i], paths[i + 1])
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3 or len(sys.argv) % 2 == 0:
         sys.exit(__doc__)
-    for i in range(1, len(sys.argv), 2):
-        redact(sys.argv[i], sys.argv[i + 1])
+    main(sys.argv[1:])
