@@ -64,8 +64,9 @@ star swaps or vote rings, ever): GitHub removes them, and the project's credibil
 - **Launch-ready**: every launch gate below is green, in any order after Milestone 2.
 - **Launch**: Show HN, once. Unlocks: Milestone 3 (parity), with real users filing the backlog.
 - **Drift loop closed.** Done when a red `cli-contract.yml` run promotes its recording to a fixture, patches the
-  decoder, runs the tests and opens a pull request without a human, and that has happened once on a real CLI change.
-  Unlocks: the drift-loop article.
+  decoder, runs the tests and opens a pull request without a human, and that has happened once on a real CLI change,
+  the owner merged it and the next nightly was green (the owner appends the PR number, the CLI version and the fixture
+  name here). Unlocks: the drift-loop article.
 
 ## Launch gates (all required; none is waived by speed)
 - **Marketplace listing** approved and installable. Review is outside our control; a ZIP-only launch is not a

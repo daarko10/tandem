@@ -13,7 +13,7 @@ work out what changed, re-record a fixture and patch the decoder. After this cha
 does that work the same night and leaves the owner one decision: merge the pull request or close it with a comment.
 
 The milestone in `docs/launch.md` is met when such a pull request has been opened for a real CLI change, not a
-rehearsal, and the owner has merged it.
+rehearsal, the owner has merged it and the following nightly was green (see the section on the "closed" criterion).
 
 ## Non-goals (deferred)
 
@@ -73,8 +73,10 @@ cancellation (one fixer at a time; a second firing waits), `timeout-minutes: 120
 before it: the disk, the checkout, Java, the Gradle cache restore, the `gh` calls and `Reproduce the red`, a Kotlin
 compile plus the IntelliJ Platform on a cold cache; the newest green nightly, which runs the same Gradle step, took 23
 minutes end to end, so inside 90 the job's timeout would have cancelled the agent step before the step's own 75 did, and
-a cancelled job's outputs are not guaranteed to reach `enforce`; with 120 the step's timeout fires first and the job ends
-normally, with its outputs), and these permissions: `id-token: write`
+a cancelled job's outputs are not guaranteed to reach `enforce`. `Reproduce the red` has `timeout-minutes: 30` and
+`Fetch the recording` `timeout-minutes: 5`, which leaves 10 minutes of the 120 for the steps without a timeout of their
+own, so a hung platform download or a stuck test ends as a failed reproduction, not as the job's cancellation, and the
+step's timeout fires first and the job ends normally, with its outputs), and these permissions: `id-token: write`
 (the federation exchange and the Claude GitHub App token exchange), `contents: read` (the checkout, and the drift branch
 read through the API; the fix branch is pushed with the App token, whose scope comes from the App's installation, not
 from the workflow token, and the job runs code the agent wrote, which a writable workflow token would let push tags,
@@ -168,7 +170,8 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    no recording" and ends, and step 3 classifies it. Otherwise `gh run download $id -n contract-recording -D
    build/drift/recording`, and any failure of that download (a 403, an API outage, a renamed artifact, an expired
    retention) fails the job: it is never read as "the CLI did not answer", which would report the loop's first real
-   drift as authentication with a green job (hard rule 5). In a fixer-only rehearsal (`workflow_dispatch` with
+   drift as authentication with a green job (hard rule 5). The step has `timeout-minutes: 5` (the artifact is a few
+   small files). In a fixer-only rehearsal (`workflow_dispatch` with
    `rehearse=true`) this step is replaced by `scripts/make_drift.py` (see "The rehearsal").
 3. **Classify before Gradle.** `python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test`
    (a directory that does not exist yet) into `build/drift/precheck.json`. Rules 1–3 of the classification (step 5)
@@ -176,10 +179,21 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    compiles for several minutes, never runs for the commonest red (authentication, an outage). The step also outputs
    `rehearsal=true` when the marker `build/drift/recording/rehearsal` exists (written by `make_drift.py`, in the
    nightly or in the fixer), else `false`; that is what the prompt passes to the skill.
+   Then **Require a public repository** (`id: public`, with `GITHUB_TOKEN`), `if` the precheck's kind is not
+   `cli-did-not-answer`: the repository must answer `private: false` (`gh api "repos/$GITHUB_REPOSITORY" --jq
+   .private`, decided by `gh`'s exit status; a failed read, or any answer but `false`, is `::error` and `exit 1`). A
+   ruleset on a private repository owned by a personal account is enforced only with GitHub Pro, and no read open to
+   the workflow token tells Pro from Free or an enforced ruleset from a listed one, so the loop refuses a private
+   repository whatever the plan ("What the owner does": the repository goes public before the ruleset). The check
+   needs nothing from the classification or the gate, so it runs before the Gradle step: a private repository costs
+   no Gradle setup, and a run the CLI did not answer, which needs neither Gradle nor the agent, is still reported while
+   the repository is private. A refusal fails the job, so no later step runs and step 9 is skipped.
 4. **Run the contract test against the recording**, `if` the precheck's kind is not `cli-did-not-answer`:
-   `./gradlew test --tests '*ContractTest*' --rerun -Dtandem.contractDir="$PWD/build/drift/recording"`, `continue-on-error: true`
+   `./gradlew test --tests '*ContractTest*' --rerun -Dtandem.contractDir="$PWD/build/drift/recording"`, `continue-on-error: true`,
+   `timeout-minutes: 30`
    (`--rerun`: the build cache keys the task on the code and the path, not the recording, so a pass on this commit
-   would otherwise replay from the cache).
+   would otherwise replay from the cache; the timeout hands a hung platform download or a stuck test to the
+   classification as a failed reproduction instead of running into the job's 120).
    This reproduces the red locally and leaves the assertion messages in `build/test-results/test/`.
 5. **Classify**, under the same guard. `python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test`
    prints one JSON object, kept as `build/drift/classification.json`: `kind` (`cli-did-not-answer`, `decoder`, `reader`
@@ -214,12 +228,8 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    outputs `waiting`, `url` and `date`). The comment is not the gate's own: commenting on a pull request needs
    `pull-requests: write` even through the issues endpoint (`issues: write` alone is a 403), and the `fix` job's token
    must hold no such write. A red that persists for a week opens one PR, not seven. Once the gate proceeds, the step `Require
-   a protected main` (`id: protect`, with `GITHUB_TOKEN`) checks the precondition of "Safeguards" before any spend.
-   First the repository must answer `private: false` (`gh api "repos/$GITHUB_REPOSITORY" --jq .private`, decided by
-   `gh`'s exit status; a failed read, or any answer but `false`, is `::error` and `exit 1`): a ruleset on a private
-   repository owned by a personal account is enforced only with GitHub Pro, and no read open to the workflow token
-   tells Pro from Free or an enforced ruleset from a listed one, so the step refuses a private repository whatever the
-   plan ("What the owner does": the repository goes public before the ruleset). Then the
+   a protected main` (`id: protect`, with `GITHUB_TOKEN`) checks the precondition of "Safeguards" before the agent's
+   spend (the repository's visibility was read before Gradle, step 3). The
    `pull_request` rules in `gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"` (the active
    rulesets' rules, readable with metadata access) whose `required_approving_review_count` is at least 1,
    `require_code_owner_review` is `true` and `require_last_push_approval` is `true` must name at least one ruleset (the
@@ -244,8 +254,8 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    accepts a direct push. Anything else, a failed read or an answer that is not a number included: `::error` and
    `exit 1`, the agent does not start and step 9 is skipped. A ruleset on a private repository
    owned by a personal account is enforced only with GitHub Pro, and what the endpoint lists for an unenforced ruleset
-   is not known, so reading the rule does not prove enforcement: that is why the step refuses a private repository
-   first, and the owner's part ("What the owner does") comes before any rehearsal.
+   is not known, so reading the rule does not prove enforcement: that is why `Require a public repository` (step 3)
+   refuses a private repository, and the owner's part ("What the owner does") comes before any rehearsal.
    The same step then refuses a drift branch `drift/<date>-<run id>` that already exists (`gh api
    "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name` exits 0: a closed pull request whose branch was kept, and
    the same run dispatched again), with `::error … delete it to retry` and `exit 1`: the agent's `git push -u origin
@@ -302,14 +312,23 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    well) with `permissions.deny`: `Edit(.github/**)`, `Edit(build.gradle.kts)`, `Edit(settings.gradle.kts)`,
    `Edit(gradle.properties)`, `Edit(gradle/**)`, `Read(.git/**)` (the App token sits in the `origin` URL of
    `.git/config`; the action masks it in the job log, but a read would put it into the model's context and from there
-   into a PR body or an issue comment), `Edit(.git/**)`, `Edit(scripts/**)`, `Edit(.claude/**)`, `Edit(CLAUDE.md)`,
+   into a PR body or an issue comment; the rule binds the `Read`, `Grep` and `Glob` tools and the file commands the
+   CLI recognises in Bash, `cat`, `head`, `tail`, `sed` and `tee`, not a Bash `grep`, which `Bash(grep:*)` admits),
+   `Edit(.git/**)`, `Edit(scripts/**)`, `Edit(.claude/**)`, `Edit(CLAUDE.md)`,
    `Bash(claude:*)`, `Bash(cp *..*)`, `Bash(cp * * *)`, `Bash(python3 -I scripts/redact_fixture.py *..*)`,
    `Bash(python3 -I scripts/redact_fixture.py * * *)`, and, since the project's `.claude/settings.json` allow rules
    are merged in (among them the prefix rules `Bash(./gradlew check:*)` and `Bash(./gradlew test:*)`),
    `Bash(./gradlew check -x:*)`,
    `Bash(./gradlew check --exclude-task:*)`, `Bash(./gradlew check *-*)`, `Bash(./gradlew test *check*)`,
    `Bash(./gradlew compileKotlin:*)`, `Bash(./gradlew compileTestKotlin:*)`, `Bash(./gradlew buildPlugin:*)`,
-   `Bash(./gradlew verifyPlugin:*)` and `Bash(ktlint:*)` (24 rules). No `Write(path)` rule is listed: the installed
+   `Bash(./gradlew verifyPlugin:*)`, `Bash(ktlint:*)`, and for a Bash `grep` of the token `Bash(grep *.git/*)`,
+   `Bash(grep -r*)`, `Bash(grep * -r*)`, `Bash(grep -R*)` and `Bash(grep * -R*)` (29 rules). The `grep` rules take
+   back a `.git/` path and a recursive grep as plainly spelled; the skill's only `grep`, `grep -nE '<pattern>'
+   <copies>` over the fixture copies, matches none of them, and a combined flag (`-nr`) or a glob (`.gi?/`) still
+   passes. The token is the agent's own and the action revokes it in its post step, so what remains is its exposure in
+   a PR body or a comment, not a capability. `python3 -I scripts/classify_drift.py` reads only a
+   `contract-hello.ndjson` and `TEST-*.xml` files under the directories it is given, none of which `.git/` holds, so
+   pointed at `.git/` it prints file names only. No `Write(path)` rule is listed: the installed
    CLI (2.1.308, its settings help) matches every file-writing tool (`Write`, `Edit`, `NotebookEdit`) against
    `Edit(path)` rules and an output redirection's target against the same rules, and never consults a `Write(path)`
    rule, so each `Edit(path)` rule above covers all of them. The three
@@ -319,13 +338,16 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    spelling, `./gradlew test check -x koverVerify`, which the merged `Bash(./gradlew test:*)` would admit (the
    prescribed test command, `./gradlew test --tests '*ContractTest*' …`, contains no `check`). None of them is what
    guarantees the coverage bound: the real `./gradlew check` is `Build` on the pull request, not the agent's report.
-   `env`: `BASH_DEFAULT_TIMEOUT_MS` `900000` and
-   `BASH_MAX_TIMEOUT_MS` `1800000`; and `attribution`: `{"commit": "", "pr": ""}`, which switches off the CLI's own
+   `env`: `BASH_DEFAULT_TIMEOUT_MS` `1800000` and
+   `BASH_MAX_TIMEOUT_MS` `2700000` (both under the step's 75 minutes); and `attribution`: `{"commit": "", "pr": ""}`, which switches off the CLI's own
    co-author trailer and "Generated with" line (the installed CLI's settings schema, 2.1.308: "Empty string hides
    attribution"; `includeCoAuthoredBy` is deprecated in favour of it), so the skill's "no trailers" does not depend
    on the model preferring the skill over the CLI's system prompt. The CLI's Bash tool times a command out after two minutes by default (the model can
-   raise it to ten), and `./gradlew check` takes about three minutes on a warm runner (`Build` run 39706160759: 2m44s),
-   so without those values the first `check` is killed and its retry costs turns. The turn budget is 120: a real fixture
+   raise it to ten), and `./gradlew check` takes about three minutes on a warm runner (`Build` run 39706160759: 2m44s)
+   but runs the platform tests and the coverage check on a runner whose only Gradle step so far was the contract test
+   (the nightly's took 23 minutes end to end on a cold cache), so without those values the first `check` can be killed
+   inside the tool, read as an unrelated red, and the fix arrive as a draft with a false "check failed" note; the skill
+   also passes the Bash tool's `timeout` of 1800000 to `check` (skill step 7). The turn budget is 120: a real fixture
    from the newest CLI also reds tests the skill names in its step 4 beyond the contract test, each needing reads and
    edits, and one retry of `check` must fit; the step's 75 minutes and the workspace limit still bound spend. The step
    has `id: agent`, so the `fix` job's output `agent` carries `steps.agent.outputs.conclusion` to step 9.
@@ -597,9 +619,9 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
   of a `drift/` branch without an open pull request (runtime step 7); a closed fix's branch is deleted by hand
   (`gh pr close <n> --delete-branch`).
   A ruleset on a private repository owned by a personal account is enforced only with GitHub Pro: the repository
-  goes public before the ruleset and the rehearsals, and the rehearsal (D5) waits for that. `Require a protected
-  main` checks it: it reads the repository's `private` first and refuses while it is not `false`, whatever the plan,
-  since it cannot tell Pro from Free. Before the
+  goes public before the ruleset and the rehearsals, and the rehearsal (D5) waits for that. `Require a public
+  repository` checks it before the Gradle step: it reads the repository's `private` and refuses while it is not
+  `false`, whatever the plan, since it cannot tell Pro from Free. Before the
   first rehearsal the owner runs `gh api repos/daarko10/tandem/rules/branches/main` and sees the `pull_request` rule
   with `required_approving_review_count` of at least 1, `require_code_owner_review` true and
   `require_last_push_approval` true (what the endpoint lists for an unenforced ruleset is not known, so the check
@@ -684,7 +706,11 @@ line exists, the milestone is open, whatever the rehearsals showed.
   scripts -t scripts` from the repository root (the skill's spelling) and by `cd scripts && python3 -m unittest`
   (`build.yml`'s script-tests step); the same tests either way.
 - `.claude/skills/fix-contract-drift/SKILL.md`: the procedure.
-- `docs/protocol.md`: no change in this design; the fixer edits it per drift.
+- `docs/protocol.md`: no change in this design, except one parenthetical that referred a stranger to a spec's
+  numbering (section 4.4, the effort picker), dropped; the fixer edits it per drift.
+- `docs/launch.md`: only tactic 7 and the milestone bullet "Drift loop closed" change wording, from re-recording the
+  fixture to promoting the run's recording, and the bullet states the closed criterion below (merged by the owner,
+  the next nightly green); the milestone's closing line is appended by the owner after the first real merged fix.
 - `CLAUDE.md`: one line under "Commands" naming `drift-fix.yml`, the skill and the rehearsal, so a session that finds a
   red run knows the loop exists before fixing by hand (tactic 7 still says a red run is the first thing to fix in any
   session: by then the loop has usually opened the PR, and the session reviews it instead).
@@ -737,7 +763,8 @@ line exists, the milestone is open, whatever the rehearsals showed.
 - `scripts/test_classify_drift.py`: each rule in order against hand-built recordings and test XML (no recording,
   `is_error`, no assistant line with an empty result, no assistant line with result text, decode failure message,
   reader failure message, both, neither, no XML); the `cli_version` from `system/init`; the first-400-characters cut;
-  a stream line that is not JSON is skipped as the nightly's check skips it; a failure in another test class is not
+  a stream line that is not JSON is skipped (the nightly's check fails on such a line, so the classifier skips it to
+  still classify the red); a failure in another test class is not
   drift (pinned by a contract test name under another class).
 - `scripts/test_make_drift.py`: each mode changes exactly the lines it names and nothing else (line count and every
   other line byte-identical); the output layout with the marker; `--from` on a recording mutated in place gives the
@@ -752,7 +779,9 @@ line exists, the milestone is open, whatever the rehearsals showed.
   no checkout, the comment); the protect step's refusal of an existing drift
   branch; the exact push rule and the absence of
   any `Bash(git push…:*)` or broad `Bash(python3:*)`/`Bash(./gradlew:*)` rule; the allowlist (the 24 entries,
-  exactly) and the deny rules of the `settings` input (the list, exactly, with no `Write(path)` rule) and the step id `agent`; the protection step before the agent, which the agent and the allowlist
+  exactly) and the deny rules of the `settings` input (the 29 rules, exactly, with no `Write(path)` rule), its `env`
+  timeouts and the step id `agent`; the timeouts of `Fetch the recording` (5) and `Reproduce the red` (30); the
+  visibility step before `Reproduce the red`; the protection step before the agent, which the agent and the allowlist
   step depend on; the REST file list with renames' old paths and the exact edit allowlist; `--rerun`; a `run_id` on
   `main`; no `${{` in any `run:` block); the nightly's `drift` input, mutate step, check step and
   redaction; the skill's `allowed-tools` equal to the action's. Under `GITHUB_ACTIONS` a missing PyYAML is an error,
@@ -770,9 +799,9 @@ line exists, the milestone is open, whatever the rehearsals showed.
   (`proceed=false` and no `waiting`, the PR list unread) and with a failed or malformed list; the reminder's
   comment and its refusal of a missing number; "Name the red run" with the nightly's own run (the four outputs), a
   fork's, a green one, another branch's, another event's, another workflow's (exit 1, nothing in `GITHUB_OUTPUT`),
-  an id that is not a number (exit 1 before any call) and a rehearsal (no call); the protect step with a public
-  repository, the ruleset, the owner line and a 404 (green, the visibility read first, then the ruleset), with a
-  private repository, a `null` answer or a failed read (exit 1 before any other read), and without each of the others, with a ruleset whose bypass list
+  an id that is not a number (exit 1 before any call) and a rehearsal (no call); "Require a public repository" with
+  `private: false` (green) and with a private repository, a `null` answer or a failed read (exit 1); the protect step
+  with the ruleset, the owner line and a 404 (green, the ruleset read first), and without each of them, with a ruleset whose bypass list
   names an App (exit 1, the actor's type and id named), names only a role (green), is withheld (green, said in the
   log) or fails to read (exit 1 without a verdict), with two rulesets of which the second names an App, with a kept
   branch and with a failed read, with a `drift/` branch that has no open pull request (exit 1 naming it and not the
@@ -800,7 +829,8 @@ line exists, the milestone is open, whatever the rehearsals showed.
   downloaded, so the fetch step reds the job by design: that is the fetch-failure path, not kind 1). Expected: "Name
   the red run" prints that run's url and date; "Fetch the recording" prints `the run left no recording` (or downloads
   a stream whose `result` has `is_error: true`); "Classify before Gradle" prints `"kind": "cli-did-not-answer"`;
-  "Reproduce the red", "Classify", the gate, "Fix the drift" and the allowlist step are skipped; "Report a run the
+  "Require a public repository", "Reproduce the red", "Classify", the gate, "Fix the drift" and the allowlist step
+  are skipped; "Report a run the
   agent cannot fix" creates the issue "CLI contract: the CLI did not answer" with the label `contract-drift` (or
   comments on it); the job is green with no Gradle and no agent spend; `gh issue view` shows the bold first line
   `The CLI did not answer.`, the run link, `kind`, the CLI version, `detail` and `files`. The issue may stay open or be closed; either is fine for the next rehearsal.

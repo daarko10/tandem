@@ -18,12 +18,12 @@ Time matters here: do not spend time that can be avoided, and the earlier a corr
 - Commits are authored by Dago Kogos with no trailers of any kind (no `Co-Authored-By`, no `Claude-Session`, no "Generated with" line). Before the first commit, once: `git config user.name "Dago Kogos" && git config user.email "$(git log -1 --format=%ae 72ae807)"` (the spec commit's author). Conventional Commits.
 - Model tiers: Tasks D1, D2, D3 and D5 run on Opus with an Opus per-task reviewer; Task D4 (docs) runs on Sonnet; the final whole-branch review runs on Fable. A task that fails review twice moves to Fable.
 - Hard rules of `CLAUDE.md` 6 and 8: every protocol change gets a fixture test; unknown message types parse to `Unknown(raw)`, never throw; the product is "Tandem", which works with Claude Code. Nothing in this plan changes Kotlin: `./gradlew check` stays as it is.
-- `docs/launch.md` is not edited (its milestone bullet "Drift loop closed" is appended by the owner after the first real merged fix); `docs/protocol.md` is not edited (the fixer edits it per drift); nothing under `.github/` is ever edited by the fixer.
-- Exact values from the spec: workflow name `Drift fix`; job `fix`; `concurrency.group: drift-fix`, `cancel-in-progress: false`; job `timeout-minutes: 120` (the agent step's 75 plus a cold-cache setup, which a nightly running the same Gradle step took 23 minutes for, so the step's timeout fires first and the job ends with the outputs `enforce` reads), action step `timeout-minutes: 75`; permissions `id-token: write`, `contents: read`, `pull-requests: read`, `issues: write`, `actions: read` (the `fix` job's token holds no pull-request write: a comment on a pull request needs it even through the issues endpoint, so the gate only writes `proceed=false` and `waiting=<n>`); job `remind` (`needs: fix`, `if: needs.fix.outputs.proceed == 'false' && needs.fix.outputs.waiting != ''`, `timeout-minutes: 5`, job permissions `pull-requests: write`, `issues: write`, no checkout, `GH_REPO: ${{ github.repository }}`) holding the step `Comment on the waiting pull request`, which reads the `fix` job's outputs `waiting`, `url` and `date`; job `enforce` (`needs: fix`, `timeout-minutes: 10`, job permissions `contents: read`, `pull-requests: write`, `issues: write`, no checkout, `GH_REPO: ${{ github.repository }}`) holding the step `Enforce the edit allowlist`, which reads the `fix` job's outputs `proceed`, `protected`, `kind`, `agent`, `id`, `url`, `date` (`waiting` is the `remind` job's); artifact `contract-recording`; recording dir `build/drift/recording`; classification `build/drift/classification.json`; re-recording dir (unused today) `build/drift/recorded`; labels `contract-drift`, `rehearsal` and `drift-halted` (set by `enforce` on the standing issue when an agent run left no branch and no pull request; the gate skips the agent while an open issue carries it, with no `waiting=`); standing issue title `CLI contract: the CLI did not answer`; branch `drift/<YYYY-MM-DD>-<run id>`; fixture names `drift-<YYYY-MM-DD>` and `rehearsal-<YYYY-MM-DD>` (UTC date of the red run); kinds `cli-did-not-answer`, `decoder`, `reader`, `unknown`; detail cut at 400 characters; `--model claude-opus-5-5`, `--max-turns 120`; the tool allowlist `Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp build/drift/recording/* src/test/resources/fixtures/*),Bash(grep:*)` (24 entries: the invocations the skill prescribes, the push exact, `cp` a wildcard pattern from the recording into the fixtures only and the redactor one from the fixtures onto the fixtures only, no `cat`, `ls` or `date`); the action's `settings` input `{"permissions": {"deny": ["Edit(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)", "Edit(gradle.properties)", "Edit(gradle/**)", "Read(.git/**)", "Edit(.git/**)", "Edit(scripts/**)", "Edit(.claude/**)", "Edit(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, "attribution": {"commit": "", "pr": ""}}` (24 deny rules, no `Write(path)` rule: the CLI, 2.1.308, matches the Write, Edit and NotebookEdit tools and an output redirection's target against `Edit(path)` rules and never consults a `Write(path)` rule; two `env` values: the CLI's Bash tool times a command out after two minutes by default, under `./gradlew check`'s three minutes on a warm runner, so `check` and its one retry run to completion; and `attribution` with empty `commit` and `pr`, which hides the CLI's own co-author trailer and "Generated with" line, the installed CLI's current form of the deprecated `includeCoAuthoredBy`); the action step `id: agent`; edit allowlist `src/main/kotlin/dev/daarkolabs/tandem/protocol/`, `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`, `src/test/`, `docs/protocol.md`; the four Anthropic identifiers exactly as `cli-contract.yml` carries them in `env:` (`fdrl_019BGJmAMDiAL6DmAQENbhfk`, `8336fe5f-a7f7-4255-9fe0-7f594d5a8ec8`, `svac_01F45vdtRBnPSRZHXY8ek1fn`, `wrkspc_012JJzfEG8tDKeta7pe3CCa5`).
+- `docs/launch.md`: only tactic 7 and the milestone bullet change wording from re-recording to promoting the run's recording (commit 26aec6b), and the bullet states the closed criterion of the spec (merged by the owner, the next nightly green); the milestone's closing line is appended by the owner after the first real merged fix. `docs/protocol.md` loses one parenthetical that pointed a stranger at a spec's numbering (section 4.4) and is otherwise not edited (the fixer edits it per drift); nothing under `.github/` is ever edited by the fixer.
+- Exact values from the spec: workflow name `Drift fix`; job `fix`; `concurrency.group: drift-fix`, `cancel-in-progress: false`; job `timeout-minutes: 120` (the agent step's 75 plus a cold-cache setup, which a nightly running the same Gradle step took 23 minutes for, so the step's timeout fires first and the job ends with the outputs `enforce` reads), `Reproduce the red` `timeout-minutes: 30` and `Fetch the recording` `timeout-minutes: 5` (a hung download or test cannot eat the agent's share of the 120), action step `timeout-minutes: 75`; the step `Require a public repository` (`id: public`, `if: steps.precheck.outputs.kind != 'cli-did-not-answer'`) between `Classify before Gradle` and `Reproduce the red`, which refuses unless the repository answers `private: false`, before any Gradle spend; permissions `id-token: write`, `contents: read`, `pull-requests: read`, `issues: write`, `actions: read` (the `fix` job's token holds no pull-request write: a comment on a pull request needs it even through the issues endpoint, so the gate only writes `proceed=false` and `waiting=<n>`); job `remind` (`needs: fix`, `if: needs.fix.outputs.proceed == 'false' && needs.fix.outputs.waiting != ''`, `timeout-minutes: 5`, job permissions `pull-requests: write`, `issues: write`, no checkout, `GH_REPO: ${{ github.repository }}`) holding the step `Comment on the waiting pull request`, which reads the `fix` job's outputs `waiting`, `url` and `date`; job `enforce` (`needs: fix`, `timeout-minutes: 10`, job permissions `contents: read`, `pull-requests: write`, `issues: write`, no checkout, `GH_REPO: ${{ github.repository }}`) holding the step `Enforce the edit allowlist`, which reads the `fix` job's outputs `proceed`, `protected`, `kind`, `agent`, `id`, `url`, `date` (`waiting` is the `remind` job's); artifact `contract-recording`; recording dir `build/drift/recording`; classification `build/drift/classification.json`; re-recording dir (unused today) `build/drift/recorded`; labels `contract-drift`, `rehearsal` and `drift-halted` (set by `enforce` on the standing issue when an agent run left no branch and no pull request; the gate skips the agent while an open issue carries it, with no `waiting=`); standing issue title `CLI contract: the CLI did not answer`; branch `drift/<YYYY-MM-DD>-<run id>`; fixture names `drift-<YYYY-MM-DD>` and `rehearsal-<YYYY-MM-DD>` (UTC date of the red run); kinds `cli-did-not-answer`, `decoder`, `reader`, `unknown`; detail cut at 400 characters; `--model claude-opus-5-5`, `--max-turns 120`; the tool allowlist `Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp build/drift/recording/* src/test/resources/fixtures/*),Bash(grep:*)` (24 entries: the invocations the skill prescribes, the push exact, `cp` a wildcard pattern from the recording into the fixtures only and the redactor one from the fixtures onto the fixtures only, no `cat`, `ls` or `date`); the action's `settings` input `{"permissions": {"deny": ["Edit(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)", "Edit(gradle.properties)", "Edit(gradle/**)", "Read(.git/**)", "Edit(.git/**)", "Edit(scripts/**)", "Edit(.claude/**)", "Edit(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)", "Bash(grep *.git/*)", "Bash(grep -r*)", "Bash(grep * -r*)", "Bash(grep -R*)", "Bash(grep * -R*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "1800000", "BASH_MAX_TIMEOUT_MS": "2700000"}, "attribution": {"commit": "", "pr": ""}}` (29 deny rules, no `Write(path)` rule: the CLI, 2.1.308, matches the Write, Edit and NotebookEdit tools and an output redirection's target against `Edit(path)` rules and never consults a `Write(path)` rule; the five `grep` rules take back a Bash `grep` of a `.git/` path or a recursive one as plainly spelled, which `Read(.git/**)` (the Read, Grep and Glob tools and the file commands the CLI recognises in Bash) does not cover; two `env` values: the CLI's Bash tool times a command out after two minutes by default, under `./gradlew check`'s three minutes on a warm runner and well under its platform tests on the fixer's runner, so `check` gets 30 minutes (at most 45) and the skill passes that `timeout` too; and `attribution` with empty `commit` and `pr`, which hides the CLI's own co-author trailer and "Generated with" line, the installed CLI's current form of the deprecated `includeCoAuthoredBy`); the action step `id: agent`; edit allowlist `src/main/kotlin/dev/daarkolabs/tandem/protocol/`, `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`, `src/test/`, `docs/protocol.md`; the four Anthropic identifiers exactly as `cli-contract.yml` carries them in `env:` (`fdrl_019BGJmAMDiAL6DmAQENbhfk`, `8336fe5f-a7f7-4255-9fe0-7f594d5a8ec8`, `svac_01F45vdtRBnPSRZHXY8ek1fn`, `wrkspc_012JJzfEG8tDKeta7pe3CCa5`).
 - The workflow passes `date=<YYYY-MM-DD>` (the red run's UTC date) as the prompt's fifth argument, so the skill never needs `actions: read` through the App token to look the run up. Run by hand, `date=` defaults to today in UTC. The prompt's `rehearsal=` comes from the marker file `rehearsal` in the recording (written by `make_drift.py`), not from a dispatch input: the real rehearsal arrives through `workflow_run` like any red.
-- The fixer's tool allowlist names the invocations the skill prescribes (spec, runtime step 8), and the push rule is exact: `Bash(git push -u origin HEAD)`. The installed CLI matches a rule without `*` as the whole command and a `:*` rule as the command itself or the prefix followed by a space, so `Bash(git push -u origin drift/:*)` would never match `git push -u origin drift/<date>-<run id>` and the loop could never open a PR. The list guides the agent; what protects `main` is a ruleset on `main` requiring a pull request, an approving review from a code owner and approval of the most recent reviewable push, with `main`'s `.github/CODEOWNERS` owning every file (`* @daarko10`, created by D2; the step `Require a protected main` reads the rule and the file and starts no agent without both; classic branch protection is not read, and one approving review alone is not enough: the App can approve a pull request it did not author, but it is no code owner and cannot approve its own push) and the App token's scope, since the token is in the agent's environment and the `origin` URL. The skill prescribes no command outside the list and no compound command whose parts are not all on it (in headless mode a denied call is a dead end, not a prompt): the script tests run as `python3 -m unittest discover -s scripts -t scripts` from the repository root, the leak stop removes copies with `git clean -f --`, the labels are created by the workflow and never by the skill, the push is `git push -u origin HEAD` from the `drift/…` branch, and no `gh auth setup-git` or identity fallback exists (the action sets the `origin` URL and `user.name`/`user.email` before the CLI starts). The deny rules of the action's `settings` input keep the CLI's `Edit`, `Write` and `NotebookEdit` tools (all matched against `Edit(path)` rules) out of `.github/`, the build files (`build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, `gradle/`), `scripts/`, `.claude/`, `.git/` and `CLAUDE.md`, and keep out a second `claude`, any flag after `./gradlew check` and a `./gradlew test … check …`; `Read(.git/**)` keeps the App token in the `origin` URL of `.git/config` out of the model's context; the allowlist's own write commands are `cp`, the pattern rule `Bash(cp build/drift/recording/* src/test/resources/fixtures/*)`, and the redactor, `Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*)` (it writes its output path itself, which no `Edit` rule sees), each with deny rules that take back a `..` and a third word, since a `*` matches anything, spaces included; whether a kept prefix rule followed by an output redirection (`grep … > .github/x`) meets the `Edit` deny rules rests on the CLI's parsing of the redirection, so the list is not where that write is stopped, and test code under `src/test/` runs anyway with sudo and can change what a later step of the same job sees, so the `enforce` job checks the result after the push on a fresh runner, from the `fix` job's outputs. The real `./gradlew check` is `Build` on the pull request.
+- The fixer's tool allowlist names the invocations the skill prescribes (spec, runtime step 8), and the push rule is exact: `Bash(git push -u origin HEAD)`. The installed CLI matches a rule without `*` as the whole command and a `:*` rule as the command itself or the prefix followed by a space, so `Bash(git push -u origin drift/:*)` would never match `git push -u origin drift/<date>-<run id>` and the loop could never open a PR. The list guides the agent; what protects `main` is a ruleset on `main` requiring a pull request, an approving review from a code owner and approval of the most recent reviewable push, with `main`'s `.github/CODEOWNERS` owning every file (`* @daarko10`, created by D2; the step `Require a protected main` reads the rule and the file and starts no agent without both; classic branch protection is not read, and one approving review alone is not enough: the App can approve a pull request it did not author, but it is no code owner and cannot approve its own push) and the App token's scope, since the token is in the agent's environment and the `origin` URL. The skill prescribes no command outside the list and no compound command whose parts are not all on it (in headless mode a denied call is a dead end, not a prompt): the script tests run as `python3 -m unittest discover -s scripts -t scripts` from the repository root, the leak stop removes copies with `git clean -f --`, the labels are created by the workflow and never by the skill, the push is `git push -u origin HEAD` from the `drift/…` branch, and no `gh auth setup-git` or identity fallback exists (the action sets the `origin` URL and `user.name`/`user.email` before the CLI starts). The deny rules of the action's `settings` input keep the CLI's `Edit`, `Write` and `NotebookEdit` tools (all matched against `Edit(path)` rules) out of `.github/`, the build files (`build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, `gradle/`), `scripts/`, `.claude/`, `.git/` and `CLAUDE.md`, and keep out a second `claude`, any flag after `./gradlew check` and a `./gradlew test … check …`; `Read(.git/**)` keeps the App token in the `origin` URL of `.git/config` out of the Read, Grep and Glob tools, and the `grep` deny rules out of a plainly spelled Bash `grep` of `.git/` or a recursive one; the allowlist's own write commands are `cp`, the pattern rule `Bash(cp build/drift/recording/* src/test/resources/fixtures/*)`, and the redactor, `Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*)` (it writes its output path itself, which no `Edit` rule sees), each with deny rules that take back a `..` and a third word, since a `*` matches anything, spaces included; whether a kept prefix rule followed by an output redirection (`grep … > .github/x`) meets the `Edit` deny rules rests on the CLI's parsing of the redirection, so the list is not where that write is stopped, and test code under `src/test/` runs anyway with sudo and can change what a later step of the same job sees, so the `enforce` job checks the result after the push on a fresh runner, from the `fix` job's outputs. The real `./gradlew check` is `Build` on the pull request.
 - `scripts/*.py` run under `python3 -I` and import only the standard library (PyYAML only in `test_workflows.py`, which skips itself when PyYAML is missing, except under `GITHUB_ACTIONS`, where it raises). Tests run with `python3 -m unittest discover -s scripts -t scripts -v` from the worktree root (the skill's spelling), the same set `build.yml`'s "Script tests" step runs as `cd scripts && python3 -m unittest`.
-- The federation rule admits only `refs/heads/main`: the rehearsal (D5) can run only after `ci/drift-loop` is merged. Everything else is verified on the branch before that, so the merge is not a wait: D1 proves both rehearsal modes against the real decoder locally, D2 and D3 prove the YAML, and the rehearsal follows the merge immediately, with one exception: a ruleset on a private repository owned by a personal account is enforced only with GitHub Pro, so the repository goes public before the ruleset and the rehearsals, and D5 waits for that (`Require a protected main` reads the repository's `private` first and refuses unless it is `false`).
+- The federation rule admits only `refs/heads/main`: the rehearsal (D5) can run only after `ci/drift-loop` is merged. Everything else is verified on the branch before that, so the merge is not a wait: D1 proves both rehearsal modes against the real decoder locally, D2 and D3 prove the YAML, and the rehearsal follows the merge immediately, with one exception: a ruleset on a private repository owned by a personal account is enforced only with GitHub Pro, so the repository goes public before the ruleset and the rehearsals, and D5 waits for that (`Require a public repository` reads the repository's `private` before the Gradle step and refuses unless it is `false`).
 
 ## Review Focus
 
@@ -418,10 +418,12 @@ changed shape in the section that describes it, citing the fixture by name and t
 is still possible. No reference to any spec or plan.
 
 ## 7. Verify
-`./gradlew check` and, from the repository root, `python3 -m unittest discover -s scripts -t scripts` (the same tests
-as `cd scripts && python3 -m unittest`, which you cannot run: `cd` is not on the list). If `check` fails for a reason
-unrelated to the drift (a flaky platform test, disk space), run it once more; still red: open the PR as a draft
-(section 8, add `--draft`) and name the failing test and that it is unrelated to the drift, so the owner decides.
+`./gradlew check`, run with the Bash tool's `timeout` set to 1800000 (it runs the platform tests and the coverage
+check, which can outlast the tool's default), and, from the repository root,
+`python3 -m unittest discover -s scripts -t scripts` (the same tests as `cd scripts && python3 -m unittest`, which you
+cannot run: `cd` is not on the list). If `check` fails for a reason unrelated to the drift (a flaky platform test, disk
+space), run it once more; still red: open the PR as a draft (section 8, add `--draft`) and name the failing test and
+that it is unrelated to the drift, so the owner decides.
 The live contract check cannot run on the branch (the federation rule admits `main` only); the evidence is the red
 run's artifact plus `check` here, and the next nightly after the merge is the real proof.
 
@@ -537,7 +539,7 @@ DENY = {"Edit(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)
         "Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)",
         "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)",
         "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)",
-        "Bash(ktlint:*)"}
+        "Bash(ktlint:*)", "Bash(grep *.git/*)", "Bash(grep -r*)", "Bash(grep * -r*)", "Bash(grep -R*)", "Bash(grep * -R*)"}
 # The invocations the skill prescribes, exactly: a rule added to both the skill and the action fails here.
 ALLOWED = {"Read", "Grep", "Glob", "Edit", "Write", "Bash(./gradlew check)", "Bash(./gradlew test:*)", "Bash(python3 -I scripts/classify_drift.py:*)",
            "Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*)",
@@ -681,10 +683,10 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual("fix-contract-drift", front["name"])
         self.assertEqual({t.strip() for t in front["allowed-tools"].split(",")}, tools(step(load(DRIFT), "fix", "Fix the drift")["with"]["claude_args"]))
 
-    def test_the_steps_run_in_the_spec_s_order(self):
+    def test_the_fix_job_s_steps_run_in_order(self):
         names = [s.get("name") for s in steps(load(DRIFT), "fix")]
         expected = ["Free disk space", "Check out main", None, None, "Ensure the labels exist", "Name the red run", "Fetch the recording",
-                    "Mutate a recording for the rehearsal", "Classify before Gradle", "Reproduce the red", "Classify",
+                    "Mutate a recording for the rehearsal", "Classify before Gradle", "Require a public repository", "Reproduce the red", "Classify",
                     "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Require a protected main", "Fix the drift"]
         self.assertEqual(expected, names)                                             # the allowlist step is the enforce job's, after this job
         wf = load(DRIFT)
@@ -698,8 +700,10 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual(["Comment on the waiting pull request"], [s.get("name") for s in steps(wf, "remind")])
         self.assertTrue(step(wf, "fix", "Reproduce the red")["continue-on-error"])
         self.assertIn("--rerun", step(wf, "fix", "Reproduce the red")["run"])        # the build cache never replays a pass on another recording
-        for name in ("Name the red run", "Fetch the recording", "Report a run the agent cannot fix", "Skip when a fix is already waiting",
-                     "Require a protected main"):
+        self.assertEqual(30, step(wf, "fix", "Reproduce the red")["timeout-minutes"])   # a hung download or test is a failed reproduction, not the job's cancellation
+        self.assertEqual(5, step(wf, "fix", "Fetch the recording")["timeout-minutes"])   # 75 + 30 + 5 leaves the rest of the job's 120 to the setup
+        for name in ("Name the red run", "Fetch the recording", "Require a public repository", "Report a run the agent cannot fix",
+                     "Skip when a fix is already waiting", "Require a protected main"):
             self.assertEqual("${{ github.token }}", step(wf, "fix", name)["env"]["GH_TOKEN"])
         self.assertEqual("${{ github.token }}", step(wf, "enforce", "Enforce the edit allowlist")["env"]["GH_TOKEN"])
         self.assertEqual("${{ github.token }}", step(wf, "remind", "Comment on the waiting pull request")["env"]["GH_TOKEN"])
@@ -761,9 +765,15 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual("steps.gate.outputs.proceed == 'true'", protect["if"])
         self.assertIn("set -euo pipefail", protect["run"])                            # a failed read fails the step, and the agent never starts
         self.assertIn('repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"', protect["run"])
-        self.assertIn('if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then', protect["run"])   # a private repository of a personal account enforces a ruleset only with Pro, which no read here can tell
-        self.assertIn('if [ "$private" != "false" ]; then', protect["run"])          # fail closed: only an answer of false passes
-        self.assertLess(protect["run"].index("--jq .private"), protect["run"].index("rules/branches/main"))
+        self.assertNotIn(".private", protect["run"])                                  # read before Gradle, by its own step
+        public = step(wf, "fix", "Require a public repository")
+        self.assertEqual("public", public["id"])
+        self.assertEqual("steps.precheck.outputs.kind != 'cli-did-not-answer'", public["if"])   # a run the CLI did not answer is reported while the repository is private
+        self.assertNotIn("continue-on-error", public)                                 # a refusal fails the job: no Gradle, no agent, no enforce
+        self.assertIn('if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then', public["run"])   # a private repository of a personal account enforces a ruleset only with Pro, which no read here can tell
+        self.assertIn('if [ "$private" != "false" ]; then', public["run"])            # fail closed: only an answer of false passes
+        names = [s.get("name") for s in steps(wf, "fix")]
+        self.assertLess(names.index("Require a public repository"), names.index("Reproduce the red"))   # before the Gradle spend
         self.assertIn('select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")', protect["run"])   # an App can approve a PR it did not author: a code owner's review of the last push is what it cannot give
         self.assertNotIn(".protected", protect["run"])                                # classic protected: true accepts a direct push when no option is ticked
         self.assertIn('if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then', protect["run"])   # fail closed: only one or more ruleset ids pass
@@ -862,7 +872,7 @@ class DriftFixWorkflowTest(unittest.TestCase):
 
     def test_the_only_push_is_exact_and_the_broad_rules_are_gone(self):
         allowed = tools(step(load(DRIFT), "fix", "Fix the drift")["with"]["claude_args"])
-        self.assertEqual(ALLOWED, allowed)                                              # the spec's 24 entries, exactly; the checks below say why
+        self.assertEqual(ALLOWED, allowed)                                              # the 24 invocations the skill prescribes, exactly; the checks below say why
         self.assertEqual(24, len(ALLOWED))
         self.assertIn("Bash(git push -u origin HEAD)", allowed)                        # a :* rule matches prefix + space; drift/:* never matched the push
         self.assertEqual([], [t for t in allowed if t.startswith("Bash(git push") and t.endswith(":*)")])
@@ -879,13 +889,15 @@ class DriftFixWorkflowTest(unittest.TestCase):
         agent = step(load(DRIFT), "fix", "Fix the drift")
         self.assertEqual("agent", agent["id"])
         deny = json.loads(agent["with"]["settings"])["permissions"]["deny"]
-        self.assertEqual(DENY, set(deny))                                             # the spec's list, exactly: nothing dropped, nothing unexplained
+        self.assertEqual(DENY, set(deny))                                             # the deny list the agent step's comment explains, exactly: nothing dropped, nothing unexplained
         self.assertEqual(len(DENY), len(deny))
-        self.assertEqual(24, len(deny))
+        self.assertEqual(29, len(deny))
         self.assertEqual([], [d for d in deny if d.startswith("Write(")])              # never consulted by the CLI: Edit(path) covers Write
         for rule in ("Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)"):
             self.assertIn(rule, deny)                                                 # each path pattern on the allowlist loses `..` and a third argument
-        self.assertEqual({"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, json.loads(agent["with"]["settings"])["env"])   # ./gradlew check outlives the Bash tool's two-minute default
+        for rule in ("Bash(grep *.git/*)", "Bash(grep -r*)", "Bash(grep * -r*)", "Bash(grep -R*)", "Bash(grep * -R*)"):
+            self.assertIn(rule, deny)                                                 # Read(.git/**) binds the Read tool, not a Bash grep of .git/config
+        self.assertEqual({"BASH_DEFAULT_TIMEOUT_MS": "1800000", "BASH_MAX_TIMEOUT_MS": "2700000"}, json.loads(agent["with"]["settings"])["env"])   # ./gradlew check (platform tests, coverage) outlives the Bash tool's two-minute default; 30 minutes, under the step's 75
         self.assertEqual({"commit": "", "pr": ""}, json.loads(agent["with"]["settings"])["attribution"])   # the CLI's own co-author trailer and "Generated with" line stay out of the commit and the PR body (2.1.308: an empty string hides attribution; includeCoAuthoredBy is deprecated)
 
 
@@ -1077,11 +1089,10 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertEqual("", calls)
 
     def protect(self, rules: str, owners: str | tuple[str, int], branch: tuple[str, int], ruleset: tuple[str, int] = (ROLE_ONLY, 0),
-                branches: tuple[str, int] = ("main\nci/drift-loop\n", 0), heads: tuple[str, int] = ("", 0),
-                private: tuple[str, int] = ("false\n", 0)) -> tuple[int, str, str, str]:
+                branches: tuple[str, int] = ("main\nci/drift-loop\n", 0), heads: tuple[str, int] = ("", 0)) -> tuple[int, str, str, str]:
         owners = owners if isinstance(owners, tuple) else (owners, 0)
         return run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
-                        [(REPO, private[0], private[1]), (RULES, rules, 0), (RULESET, ruleset[0], ruleset[1]), (CODEOWNERS, owners[0], owners[1]),
+                        [(RULES, rules, 0), (RULESET, ruleset[0], ruleset[1]), (CODEOWNERS, owners[0], owners[1]),
                          (BRANCH_READ, branch[0], branch[1]), (BRANCHES, branches[0], branches[1]), (HEADS, heads[0], heads[1])])
 
     def test_protect_passes_a_ruleset_an_owner_and_a_missing_branch(self):
@@ -1089,18 +1100,21 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertIn("main requires a pull request, an approving review from a code owner and approval of the last push (ruleset 17)", out)
         self.assertIn("ruleset 17: no App on its bypass list", out)                   # the owner's admin role is how the only code owner merges
-        self.assertEqual([REPO.split(" --jq", 1)[0], RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0], BRANCHES.split(" --jq", 1)[0], HEADS.split(" --jq", 1)[0]],
-                         [c.split(" --jq", 1)[0] for c in calls.splitlines()])        # the visibility first, then the ruleset; the stale-branch listing last
+        self.assertEqual([RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0], BRANCHES.split(" --jq", 1)[0], HEADS.split(" --jq", 1)[0]],
+                         [c.split(" --jq", 1)[0] for c in calls.splitlines()])        # the ruleset first; the stale-branch listing last
 
-    def test_protect_refuses_a_private_repository_or_a_failed_read(self):
+    def test_a_private_repository_is_refused_before_gradle(self):
         for private, message in ((("true\n", 0), "The repository is private (answer 'true')"),   # a ruleset there is enforced only with Pro, which no read here tells
                                  ((SERVER_ERROR, 1), "Reading the repository failed (HTTP status '502')"),   # red without a verdict, never "public"
                                  (("", 1), "Reading the repository failed (HTTP status 'none')"),
                                  (("null\n", 0), "The repository is private (answer 'null')")):   # only false passes
-            rc, out, _, calls = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), private=private)
+            rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a public repository", {"GH_TOKEN": "stub"}, [(REPO, private[0], private[1])])
             self.assertEqual(1, rc, (message, out))
             self.assertIn(message, out)
-            self.assertEqual(REPO + "\n", calls)                                       # refused before any other read
+            self.assertEqual(REPO + "\n", calls)
+        rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a public repository", {"GH_TOKEN": "stub"}, [(REPO, "false\n", 0)])
+        self.assertEqual(0, rc, out)
+        self.assertIn("the repository is public", out)
 
     def test_protect_refuses_a_drift_branch_without_an_open_pull_request(self):
         rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), branches=("main\ndrift/2026-10-20-5\ndrift/2026-10-19-4\nfeature/drift\n", 0),
@@ -1133,7 +1147,7 @@ class StepOutcomeTest(unittest.TestCase):
 
     def test_protect_reads_every_qualifying_ruleset(self):
         rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
-                                     [(REPO, "false\n", 0), (RULES, "17 23\n", 0), (RULESET, ROLE_ONLY, 0), ("api repos/daarko10/tandem/rulesets/23", APP_BYPASS, 0)])
+                                     [(RULES, "17 23\n", 0), (RULESET, ROLE_ONLY, 0), ("api repos/daarko10/tandem/rulesets/23", APP_BYPASS, 0)])
         self.assertEqual(1, rc, out)
         self.assertIn("The ruleset 23 on main lets an App bypass it", out)
         self.assertNotIn("CODEOWNERS", calls)
@@ -1284,9 +1298,10 @@ env:
 jobs:
   fix:
     runs-on: ubuntu-latest
-    # The agent step's own 75 minutes plus the setup before it (disk, checkout, Java, the Gradle cache, the gh calls and
-    # `Reproduce the red`, a compile plus the IntelliJ Platform: a nightly running the same Gradle step took 23 minutes
-    # end to end), so the step's timeout always fires first and the job ends normally, with the outputs enforce reads.
+    # The agent step's own 75 minutes plus the setup before it: `Reproduce the red` (a compile plus the IntelliJ Platform;
+    # a nightly running the same Gradle step took 23 minutes end to end) is bounded at 30 and `Fetch the recording` at
+    # 5, which leaves 10 for the disk, the checkout, Java, the Gradle cache and the gh calls, so the agent step's timeout
+    # fires first and the job ends normally, with the outputs enforce reads.
     timeout-minutes: 120
     # Read by the enforce and remind jobs. All but agent were written before the agent started, and a step's
     # GITHUB_OUTPUT is read when that step ends, so no later step of this job can rewrite them through GITHUB_OUTPUT;
@@ -1376,9 +1391,11 @@ jobs:
       # No artifact at all is a red of kind 1 (the record step wrote nothing), classified below; not an error here. Any
       # other failure of the download (a 403, an API outage, a renamed artifact, an expired retention) fails the job: it is
       # not "the CLI did not answer". build/drift is created here because the steps below write into it. gh's --jq prints
-      # null as an empty line, hence tostring: the absent artifact reads "null", never "".
+      # null as an empty line, hence tostring: the absent artifact reads "null", never "". Bounded at 5 minutes (the artifact
+      # is a few small files), so a hung download cannot eat the agent's share of the job's 120.
       - name: Fetch the recording
         if: steps.run.outputs.rehearse != 'true'
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ steps.run.outputs.id }}
@@ -1405,11 +1422,36 @@ jobs:
           python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test | tee build/drift/precheck.json
           echo "kind=$(jq -r .kind build/drift/precheck.json)" >> "$GITHUB_OUTPUT"
           echo "rehearsal=$([ -f build/drift/recording/rehearsal ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      # Before any Gradle spend: a ruleset on a private repository owned by a personal account is enforced only with
+      # GitHub Pro, and no read open to the workflow token tells Pro from Free or an enforced ruleset from a listed one, so
+      # the loop goes no further unless the repository answers private: false (a failed read refuses too); the repository
+      # goes public before the ruleset. A run the CLI did not answer needs neither Gradle nor the agent, so it skips this
+      # step and is still reported while the repository is private. A refusal fails the job: no later step runs, and
+      # enforce, which needs `Require a protected main` to have succeeded, is skipped.
+      - name: Require a public repository
+        id: public
+        if: steps.precheck.outputs.kind != 'cli-did-not-answer'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then
+            status="$(jq -r '.status // empty' <<<"$private" 2>/dev/null || true)"
+            echo "::error title=Drift fix::Reading the repository failed (HTTP status '${status:-none}'), so whether it is public is not known; the agent is not started."; exit 1
+          fi
+          if [ "$private" != "false" ]; then
+            echo "::error title=Drift fix::The repository is private (answer '$private'): a ruleset on a private repository of a personal account is enforced only with GitHub Pro and this workflow cannot tell, so make the repository public first. The agent is not started."; exit 1
+          fi
+          echo "the repository is public"
       # Reproduces the red here and leaves the assertion messages in build/test-results/test for the classification.
       # --rerun: the build cache (org.gradle.caching, restored by setup-gradle) keys the task on the code and the path, not
       # the recording's contents, so without it a ContractTest that passed once on this commit could replay from the cache.
+      # Bounded at 30 minutes: a hung platform download or a stuck test ends here as a failed reproduction, which
+      # continue-on-error hands to the classification (unknown, or what the results hold) and the standing issue, instead
+      # of running into the job's 120, whose cancellation could leave enforce without the outputs it reads.
       - name: Reproduce the red
         if: steps.precheck.outputs.kind != 'cli-did-not-answer'
+        timeout-minutes: 30
         continue-on-error: true
         run: ./gradlew test --tests '*ContractTest*' --rerun -Dtandem.contractDir="$PWD/build/drift/recording"
       - name: Classify
@@ -1479,9 +1521,8 @@ jobs:
       # edit the ruleset, which the workflow token never can (it has no administration permission), so on a real run
       # the list is withheld, the step says so in its log, and keeping the App off it stays the owner's part. A ruleset on a
       # private repository owned by a personal account is enforced only with GitHub Pro, and what this endpoint lists for
-      # an unenforced ruleset is not known, so reading the rule does not prove enforcement. So the step reads the
-      # repository first and refuses unless it answers private: false (a failed read refuses too): it cannot tell Pro
-      # from Free, and the repository goes public before the ruleset. The same step refuses a drift branch that already
+      # an unenforced ruleset is not known, so reading the rule does not prove enforcement: `Require a public repository`
+      # refused a private repository before Gradle. The same step refuses a drift branch that already
       # exists (a closed PR whose branch was kept, and the same run dispatched again): the agent's `git push -u origin
       # HEAD` would be rejected as non-fast-forward after the spend, and the enforce job would misread the old branch as
       # a stopped agent. Only a 404 means "no branch": gh prints the error body on stdout and exits 1 on any HTTP error,
@@ -1500,13 +1541,6 @@ jobs:
           BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
         run: |
           set -euo pipefail
-          if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then
-            status="$(jq -r '.status // empty' <<<"$private" 2>/dev/null || true)"
-            echo "::error title=Drift fix::Reading the repository failed (HTTP status '${status:-none}'), so whether it is public is not known; the agent is not started."; exit 1
-          fi
-          if [ "$private" != "false" ]; then
-            echo "::error title=Drift fix::The repository is private (answer '$private'): a ruleset on a private repository of a personal account is enforced only with GitHub Pro and this step cannot tell, so make the repository public first. The agent is not started."; exit 1
-          fi
           ids="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100" --jq '[.[] | select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")')"
           if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then
             echo "main requires a pull request, an approving review from a code owner and approval of the last push (ruleset $ids)"
@@ -1569,8 +1603,16 @@ jobs:
       # rules. The `Edit(path)` deny rules keep the CLI's Edit, Write and NotebookEdit tools, and an output redirection's
       # target, out of some of the files that run code before the push (the build scripts, gradle.properties and the
       # wrapper, scripts/, the hooks in .claude/ and .git/): the CLI (2.1.308) matches every file-writing tool against
-      # `Edit(path)` rules and never consults a `Write(path)` rule, so none is listed. `Read(.git/**)` keeps the Read tool
-      # out of .git/ (the App token is in the origin URL of .git/config) and `claude:*` a second CLI out. Whether a
+      # `Edit(path)` rules and never consults a `Write(path)` rule, so none is listed. `Read(.git/**)` keeps the Read,
+      # Grep and Glob tools and the file commands the CLI recognises in Bash (cat, head, tail, sed, tee) out of .git/ (the
+      # App token is in the origin URL of .git/config), but not a Bash `grep`, which `Bash(grep:*)` admits: the deny
+      # rules `grep *.git/*`, `grep -r*`, `grep * -r*`, `grep -R*` and `grep * -R*` take back a .git/ path and a recursive
+      # grep as plainly spelled (the skill's only grep, `grep -nE '<pattern>' <copies>`, names the fixture copies and
+      # matches none of them); a combined flag (`-nr`) or a glob (`.gi?/`) still passes. The token is the agent's own and
+      # is revoked in the action's post step, so what that leaves is its exposure in a PR body or a comment, not a
+      # capability. `python3 -I scripts/classify_drift.py` reads only a contract-hello.ndjson and TEST-*.xml files under
+      # the directories it is given, none of which .git/ holds, so pointed at .git/ it prints file names only.
+      # `claude:*` keeps a second CLI out. Whether a
       # redirection after a kept prefix rule (`grep … > file`, `git log … > file`) reaches its target past them rests
       # on the CLI's parsing of the command, and test code under src/test runs anyway, so the enforce job checks the
       # result on a fresh runner: that file list, the App token's missing workflows permission and the ruleset on main
@@ -1600,7 +1642,7 @@ jobs:
             --max-turns 120
             --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp build/drift/recording/* src/test/resources/fixtures/*),Bash(grep:*)"
           settings: |
-            {"permissions": {"deny": ["Edit(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)", "Edit(gradle.properties)", "Edit(gradle/**)", "Read(.git/**)", "Edit(.git/**)", "Edit(scripts/**)", "Edit(.claude/**)", "Edit(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, "attribution": {"commit": "", "pr": ""}}
+            {"permissions": {"deny": ["Edit(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)", "Edit(gradle.properties)", "Edit(gradle/**)", "Read(.git/**)", "Edit(.git/**)", "Edit(scripts/**)", "Edit(.claude/**)", "Edit(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)", "Bash(grep *.git/*)", "Bash(grep -r*)", "Bash(grep * -r*)", "Bash(grep -R*)", "Bash(grep * -R*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "1800000", "BASH_MAX_TIMEOUT_MS": "2700000"}, "attribution": {"commit": "", "pr": ""}}
   # The reminder on the pull request the gate found waiting, once per further red. Commenting on a pull request needs
   # pull-requests: write even through the issues endpoint (issues: write alone gets a 403), and the fix job's token must
   # hold no such write (the agent's test code can read it), so the comment is posted here, in a job that runs no agent
@@ -1727,7 +1769,7 @@ jobs:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree/scripts && python3 -m unittest test_workflows -v`
-Expected: `Ran 42 tests` … `OK` (not `skipped`: PyYAML 6, bash 5 and jq are installed in this sandbox; `StepOutcomeTest` runs the steps under bash with a stub `gh`).
+Expected: `Ran 46 tests` … `OK` (not `skipped`: PyYAML 6, bash 5 and jq are installed in this sandbox; `StepOutcomeTest` runs the steps under bash with a stub `gh`).
 - [ ] **Step 5: Lint the YAML**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree && if command -v actionlint >/dev/null; then actionlint .github/workflows/drift-fix.yml .github/workflows/cli-contract.yml; else python3 -c 'import yaml,sys; [yaml.safe_load(open(p)) for p in sys.argv[1:]]; print("yaml ok")' .github/workflows/drift-fix.yml .github/workflows/cli-contract.yml; fi`
@@ -1878,7 +1920,8 @@ git commit -m "ci: the nightly redacts session-id.jsonl before upload and names 
 
 **Files:**
 - Modify: `CLAUDE.md` ("Commands" list, after the `scripts/record-scenario.sh` bullet; one sentence under "Working in this repo")
-- Unchanged, checked: `docs/launch.md`, `docs/protocol.md`
+- Modify: `docs/launch.md` (tactic 7 and the milestone bullet "Drift loop closed" only: promoting the run's recording instead of re-recording the fixture, commit 26aec6b, and the closed criterion of the spec; the milestone's closing line is the owner's, after the first real merged fix)
+- Modify: `docs/protocol.md` (section 4.4: the parenthetical naming a spec's numbering is dropped; nothing else)
 
 **Interfaces:**
 - Consumes: the skill's argument string (D1), the dispatch inputs `rehearse` and `mode` (D2).
@@ -1900,7 +1943,7 @@ Under "Working in this repo", after the "Work on a feature branch" bullet, add e
 - [ ] **Step 2: Check the docs that stay unchanged**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree && git diff --stat 72ae807 -- docs/launch.md docs/protocol.md && grep -c 'drift-fix.yml' CLAUDE.md`
-Expected: no diff lines for the two docs; `1` (the one Commands bullet; `grep -c` counts lines).
+Expected: `docs/launch.md` changed in tactic 7 and the milestone bullet only, `docs/protocol.md` in one line of section 4.4 only; `1` (the one Commands bullet; `grep -c` counts lines).
 
 - [ ] **Step 3: Commit**
 

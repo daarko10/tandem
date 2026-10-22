@@ -30,7 +30,8 @@ The rules, in order:
 
 Only test cases of ContractTest count: the results directory holds every test class's XML when the whole test task
 ran. A message is the assertion's own, without the exception class Gradle writes before it. Lines of the stream that
-are not JSON objects are skipped, as the nightly's own check skips them.
+are not JSON objects are skipped: the nightly's check fails on such a line, so the classifier skips it to still
+classify the red.
 """
 import glob
 import json
