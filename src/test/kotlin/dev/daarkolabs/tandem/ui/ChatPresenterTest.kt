@@ -428,7 +428,6 @@ class ChatPresenterTest {
         }
     }
 
-    /** The 2 x 2 PNG the `user-image` fixture sent, as its transcript line holds it. */
     /**
      * A grey 8-bit PNG whose IHDR says [width] x [height], with one IDAT of at most four zero rows: the whole image when it is that
      * small, else a truncated one, whose header is all `Image.makeFromEncoded` reads. Each chunk carries its CRC-32.
@@ -458,6 +457,7 @@ class ChatPresenterTest {
         return out.toByteArray()
     }
 
+    /** The 2 x 2 PNG the `user-image` fixture sent, as its transcript line holds it. */
     private fun fixturePng(): String = Fixtures.transcript("user-image").readLines().filter { it.isNotBlank() }.map(Ndjson::decode)
         .filterIsInstance<CliMessage.User>().first().content.filterIsInstance<ContentBlock.Image>().single().data
 

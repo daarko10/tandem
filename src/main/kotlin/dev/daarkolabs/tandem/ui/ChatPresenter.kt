@@ -427,9 +427,9 @@ internal fun decodeUserImage(image: UserImage): ImageBitmap? = runCatching { dec
 
 /**
  * The most pixels an image may claim to be decoded for its thumbnail: 50 million, room for an 8K screenshot (33 million) and a
- * 48-megapixel photo. A decode holds width x height x 4 bytes (N32) whatever the thumbnail's size, so the cap bounds it at 200 MB,
- * 400 MB for the two decodes [ChatPresenter] runs at once. The attachment checks cap the file, not its canvas: a uniform 30,000 x
- * 30,000 PNG fits in a few MB and would decode to 3.6 GB.
+ * 48-megapixel photo. A decode holds width x height x 4 bytes (N32) whatever the thumbnail's size, so the cap bounds each one at
+ * 200 MB: the chat decodes its thumbnails two at a time ([ChatPresenter]), the composer one per pasted or dropped image. The
+ * attachment checks cap the file, not its canvas: a uniform 30,000 x 30,000 PNG fits in a few MB and would decode to 3.6 GB.
  */
 internal const val MAX_IMAGE_PIXELS: Long = 50_000_000L
 

@@ -116,11 +116,14 @@ class FooterControlsTest {
 
     @Test
     fun `a session started with a model pick reads that model before its first init, Model with none`() {
-        // NewSessionOptions.model: no system/init and no initialize answer yet, so no list and no active model (spec 2.3, <Model> 3 and 4).
+        // NewSessionOptions.model: no system/init and no initialize answer yet, so no list and no active model (spec 2.3, <Model> 3
+        // and 4).
         assertEquals("opus", modelLabel(composer(models = emptyList(), requestedModel = "opus")).model)
-        assertEquals("Model", modelLabel(composer(models = emptyList(), requestedModel = "default")).model, "the CLI's own default is no pick")
+        val defaultPick = modelLabel(composer(models = emptyList(), requestedModel = "default")).model
+        assertEquals("Model", defaultPick, "the CLI's own default is no pick")
         assertEquals("Model", modelLabel(composer(models = emptyList())).model)
-        assertEquals(sonnet, modelLabel(composer(models = emptyList(), activeModel = sonnet, requestedModel = "opus")).model, "then what the CLI runs")
+        val running = modelLabel(composer(models = emptyList(), activeModel = sonnet, requestedModel = "opus")).model
+        assertEquals(sonnet, running, "then what the CLI runs")
         assertEquals("Opus 5.5", modelLabel(composer(requestedModel = "opus")).model, "with the list, the requested entry's name")
     }
 
