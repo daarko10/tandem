@@ -70,8 +70,12 @@ covers a `run_id` passed by dispatch.
 
 The whole job is guarded by `github.repository == 'daarko10/tandem'`, a `concurrency` group `drift-fix` without
 cancellation (one fixer at a time; a second firing waits), `timeout-minutes: 90`, and these permissions: `id-token: write`
-(the federation exchange and the Claude GitHub App token exchange), `contents: write` (the fix branch), `pull-requests:
-write`, `issues: write` (the kind-1 report) and `actions: read` (the red run's artifact and log). The workflow file must
+(the federation exchange and the Claude GitHub App token exchange), `contents: read` (the checkout, and the drift branch
+read through the API; the fix branch is pushed with the App token, whose scope comes from the App's installation, not
+from the workflow token, and the job runs code the agent wrote, which a writable workflow token would let push tags,
+releases or any unprotected branch as `github-actions[bot]`), `pull-requests: write`, `issues: write` (the kind-1
+report) and `actions: read` (the red run's artifact and log). The `enforce` job narrows them further (step 9). The
+workflow file must
 exist on `main` for `workflow_run` to fire at all, so the first real firing happens only after this branch is merged.
 
 The fix pull request cannot restart the loop: `cli-contract.yml` has no `push` or `pull_request` trigger, `drift-fix.yml`
@@ -143,9 +147,11 @@ One job, `fix`, on `ubuntu-latest`:
 1. `jlumbroso/free-disk-space@v2.0.0` (the same settings as `build.yml`: the platform tests need the room),
    `actions/checkout@v7` with `persist-credentials: false` (so the only GitHub credential the agent holds is the App
    token the action exports; see step 7), `actions/setup-java@v6` (zulu 21), `gradle/actions/setup-gradle@v6` with
-   `cache-read-only: true`: the agent runs test code it wrote in this job, which can rewrite the Gradle User Home
-   (build cache entries, dependency jars), and a cache this job saved in `main`'s scope would be restored by `Build`
-   on `main` and on every pull request, past branch protection.
+   `cache-read-only: true`, against an accidental save: the agent runs test code it wrote in this job, which can
+   rewrite the Gradle User Home (build cache entries, dependency jars), and a cache setup-gradle's post step saved
+   from it in `main`'s scope would be restored by `Build` on `main` and on every pull request, past branch protection.
+   It does not bind hostile code, which runs with sudo on a job on `main` and could write such a cache itself with the
+   runner's cache token (the remaining risk named in "Safeguards").
 2. **Fetch the recording.** `mkdir -p build/drift` first (nothing else creates the directory, and the steps below
    write into it under `set -euo pipefail`). Then, with `GITHUB_TOKEN` and the run id from `github.event.workflow_run.id`
    or the `run_id` input, the step asks whether the run has the artifact at all:
@@ -164,7 +170,7 @@ One job, `fix`, on `ubuntu-latest`:
    `rehearsal=true` when the marker `build/drift/recording/rehearsal` exists (written by `make_drift.py`, in the
    nightly or in the fixer), else `false`; that is what the prompt passes to the skill.
 4. **Run the contract test against the recording**, `if` the precheck's kind is not `cli-did-not-answer`:
-   `./gradlew test --tests '*ContractTest*' --rerun -Dtandem.contractDir=build/drift/recording`, `continue-on-error: true`
+   `./gradlew test --tests '*ContractTest*' --rerun -Dtandem.contractDir="$PWD/build/drift/recording"`, `continue-on-error: true`
    (`--rerun`: the build cache keys the task on the code and the path, not the recording, so a pass on this commit
    would otherwise replay from the cache).
    This reproduces the red locally and leaves the assertion messages in `build/test-results/test/`.
@@ -196,8 +202,14 @@ One job, `fix`, on `ubuntu-latest`:
    access) must be a number of at least 1. Classic branch protection does not count: the workflow token cannot read its
    review count (administration access), and `branches/main`'s `protected: true` holds for a classic rule with no
    option ticked, which still accepts a direct push. Anything else, a failed read or an answer that is not a number
-   included: `::error` and `exit 1`, the agent does not start and step 9 is skipped. Steps 8 and 9 run only when this
-   step succeeded.
+   included: `::error` and `exit 1`, the agent does not start and step 9 is skipped. A ruleset on a private repository
+   owned by a personal account is enforced only with GitHub Pro, and what the endpoint lists for an unenforced ruleset
+   is not known, so reading the rule does not prove enforcement: the owner's part ("What the owner does") comes first.
+   The same step then refuses a drift branch `drift/<date>-<run id>` that already exists (`gh api
+   "repos/$GITHUB_REPOSITORY/branches/$BRANCH"` succeeds: a closed pull request whose branch was kept, and the same run
+   dispatched again), with `::error … delete it to retry` and `exit 1`: the agent's `git push -u origin HEAD` would be
+   rejected as non-fast-forward after the spend, and step 9 would misread the old branch as a stopped agent. Steps 8
+   and 9 run only when this step succeeded.
 8. **The agent.** `anthropics/claude-code-action@v1` with the federation inputs `anthropic_federation_rule_id`,
    `anthropic_organization_id`, `anthropic_service_account_id` and `anthropic_workspace_id` set to the same four
    identifiers `cli-contract.yml` carries in `env:` (they are not secrets), and no `github_token` input, so the action
@@ -219,21 +231,26 @@ One job, `fix`, on `ubuntu-latest`:
    and the action's `settings` input (JSON, merged into the CLI's permissions for this run only; the project's
    `.claude/settings.json` is loaded as well) with `permissions.deny`: `Edit(.github/**)`, `Write(.github/**)`,
    `Edit(build.gradle.kts)`, `Write(build.gradle.kts)`, `Edit(settings.gradle.kts)`, `Write(settings.gradle.kts)`,
-   `Edit(scripts/**)`, `Write(scripts/**)`, `Edit(.claude/**)`, `Write(.claude/**)`, `Edit(CLAUDE.md)`,
-   `Write(CLAUDE.md)`, `Bash(claude:*)`, and, since the project's `.claude/settings.json` allow rules are merged in
-   (among them the prefix rule `Bash(./gradlew check:*)`), `Bash(./gradlew check -x:*)`,
-   `Bash(./gradlew check --exclude-task:*)`, `Bash(./gradlew check *-*)`, `Bash(./gradlew compileKotlin:*)`,
-   `Bash(./gradlew compileTestKotlin:*)`, `Bash(./gradlew buildPlugin:*)`, `Bash(./gradlew verifyPlugin:*)` and
-   `Bash(ktlint:*)` (21 rules). The three `check` rules refuse any flag after `./gradlew check`, so the agent never
-   reports a `check` that skipped `koverVerify`: a rule whose `*` is not a trailing `:*` is a wildcard pattern in the
-   installed CLI (2.1.307), so `*-*` covers `--exclude-task=koverVerify`, `--init-script` and the rest, and the two
-   prefix rules hold on a CLI that reads it as an exact command. `env`: `BASH_DEFAULT_TIMEOUT_MS` `900000` and
+   `Edit(gradle.properties)`, `Write(gradle.properties)`, `Edit(gradle/**)`, `Write(gradle/**)`, `Edit(.git/**)`,
+   `Write(.git/**)`, `Edit(scripts/**)`, `Write(scripts/**)`, `Edit(.claude/**)`, `Write(.claude/**)`,
+   `Edit(CLAUDE.md)`, `Write(CLAUDE.md)`, `Bash(claude:*)`, and, since the project's `.claude/settings.json` allow
+   rules are merged in (among them the prefix rules `Bash(./gradlew check:*)` and `Bash(./gradlew test:*)`),
+   `Bash(./gradlew check -x:*)`, `Bash(./gradlew check --exclude-task:*)`, `Bash(./gradlew check *-*)`,
+   `Bash(./gradlew test *check*)`, `Bash(./gradlew compileKotlin:*)`, `Bash(./gradlew compileTestKotlin:*)`,
+   `Bash(./gradlew buildPlugin:*)`, `Bash(./gradlew verifyPlugin:*)` and `Bash(ktlint:*)` (28 rules). The three
+   `check` rules refuse any flag after `./gradlew check`: a rule whose `*` is not a trailing `:*` is a wildcard pattern
+   in the installed CLI (2.1.307), so `*-*` covers `--exclude-task=koverVerify`, `--init-script` and the rest, and the
+   two prefix rules hold on a CLI that reads it as an exact command. `Bash(./gradlew test *check*)` refuses the other
+   spelling, `./gradlew test check -x koverVerify`, which the merged `Bash(./gradlew test:*)` would admit (the
+   prescribed test command, `./gradlew test --tests '*ContractTest*' …`, contains no `check`). None of them is what
+   guarantees the coverage bound: the real `./gradlew check` is `Build` on the pull request, not the agent's report.
+   `env`: `BASH_DEFAULT_TIMEOUT_MS` `900000` and
    `BASH_MAX_TIMEOUT_MS` `1800000`. The CLI's Bash tool times a command out after two minutes by default (the model can
    raise it to ten), and `./gradlew check` takes about three minutes on a warm runner (`Build` run 39706160759: 2m44s),
    so without those values the first `check` is killed and its retry costs turns. The turn budget is 120: a real fixture
    from the newest CLI also reds tests the skill names in its step 4 beyond the contract test, each needing reads and
    edits, and one retry of `check` must fit; the step's 75 minutes and the workspace limit still bound spend. The step
-   has `id: agent`, so step 9 can read `steps.agent.outputs.conclusion`.
+   has `id: agent`, so the `fix` job's output `agent` carries `steps.agent.outputs.conclusion` to step 9.
 
    Opus is the tier for an implementation task. `Edit` and `Write` here are the CLI's own tools on the runner's
    checkout, not Tandem's. The allowlist names the invocations the skill prescribes, not programs, because the GitHub
@@ -244,9 +261,11 @@ One job, `fix`, on `ubuntu-latest`:
    unprotected branch, `main` included while it is unprotected (the project's `.claude/settings.json` denies only the
    prefix `git push --force`),
    `Bash(python3:*)` a `python3 -c` that runs `gh` or `git` with that token, and `Bash(./gradlew:*)` any task. The
-   deny rules keep the CLI's `Edit` and `Write` tools out of the files that would run code before the push
-   (`build.gradle.kts`, `scripts/`, the hooks in `.claude/`) and out of a second CLI; `Bash(cp:*)` is not bound by
-   them, so step 9 checks the result. The push rule is exact: `Bash(git push -u origin HEAD)` admits
+   deny rules keep the CLI's `Edit` and `Write` tools out of some of the files that would run code before the push
+   (`build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, `gradle/`, `scripts/`, the hooks in `.claude/`
+   and `.git/`) and out of a second CLI; test code under `src/test/` runs anyway, and `Bash(cp:*)` is not bound by
+   them, so the `enforce` job (step 9) checks the result on a fresh runner. The push rule is exact:
+   `Bash(git push -u origin HEAD)` admits
    that command and nothing appended to it (no `--force`, no refspec such as `drift/x:main`), because the installed
    CLI (2.1.307) matches a rule without `*` as the whole command (`n===e.command`) and a `:*` rule as the command
    itself or the prefix followed by a space (`n.startsWith(e.prefix+" ")`): `Bash(git push -u origin drift/:*)` would
@@ -256,7 +275,16 @@ One job, `fix`, on `ubuntu-latest`:
    `./gradlew check` followed by a task name, `git status`, `git diff`, `git log`), less the deny rules above. That is
    acceptable because what bounds the loop whatever the agent decides is the ruleset on `main` and the App token's
    scope ("Safeguards"), not this list. The step has `timeout-minutes: 75` inside the job's 90.
-9. **Enforce the edit allowlist.** After the action, `if: always()` once the gate proceeded, a `run:` step lists the
+9. **Enforce the edit allowlist.** A second job, `enforce`: `needs: fix`, `if: always() && needs.fix.outputs.proceed
+   == 'true' && needs.fix.outputs.protected == 'success'`, `timeout-minutes: 10`, job permissions `contents: read`,
+   `pull-requests: write` and `issues: write` (no `id-token`, no `actions`), no checkout and no action, `GH_REPO` set
+   because `gh` has no remote to infer the repository from. A fresh runner, because the `fix` job runs test code the
+   agent wrote (`./gradlew test`) with sudo, and that code can change what a later step of the same job sees (a `gh`
+   first on `PATH`, `BASH_ENV`, which `bash -e {0}` sources, `GITHUB_PATH`, `GITHUB_ENV`): a step there could be made
+   to print "stays within the allowlist" for a PR that edits `build.gradle.kts`. The job reads the `fix` job's outputs
+   `proceed` (the gate), `protected` (the protect step's outcome), `kind`, `agent`, `id`, `url` and `date`; all but
+   `agent` were written before the agent started (a step's `GITHUB_OUTPUT` is read when that step ends), and `agent`
+   only appears in a message. Its one `run:` step lists the
    files the drift branch changed against `main` (`gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/<n>/files"`, each
    `filename` and a rename's `previous_filename`: `gh pr view --json files` stops at 100 files and names only a
    rename's new path) and, when any path is outside
@@ -269,14 +297,14 @@ One job, `fix`, on `ubuntu-latest`:
    Left open, the PR holds the gate (step 7 comments on it once per further red), branch protection still blocks its
    merge, and the owner decides: close it to re-arm the loop, or merge after review, cherry-picking the agent's work
    where the paths named in the comment are worth keeping. The skill says the
-   same rule and the deny rules of step 8 enforce most of it before the push; this step is the check that does not
-   depend on the agent obeying either. When no `contract-drift` PR is open, the step is red (`exit 1`) in both
+   same rule and the deny rules of step 8 enforce most of it before the push; this job is the check that depends
+   neither on the agent obeying either nor on the runner its code ran on. When no `contract-drift` PR is open, the
+   step is red (`exit 1`) in both
    remaining cases, so a loop that proceeded past the gate and produced no PR is never green and silent (hard rule 5):
    - It reads the branch through the API, `gh api "repos/$GITHUB_REPOSITORY/branches/drift/<date>-<run id>" --jq
-     .name` with `GITHUB_TOKEN` (`contents: write` covers it), never with `git ls-remote`: the checkout has
-     `persist-credentials: false`, the action rewrites `origin` to carry its App token and revokes that token in its
-     post step before this one runs, and the repository is private, so git itself would get a 401 that
-     `[ -z "$(…)" ]` swallows. A branch without a PR means the agent was stopped after its push (the step's
+     .name` with `GITHUB_TOKEN` (`contents: read` covers it), never with `git ls-remote`: the job has no checkout
+     and no git credential (the action revoked its App token in the `fix` job's post step), so git itself would get a
+     401 that `[ -z "$(…)" ]` swallows. A branch without a PR means the agent was stopped after its push (the step's
      `timeout-minutes`, `--max-turns`) and could not keep skill step 9's promise: the step comments on the standing
      issue "CLI contract: the CLI did not answer" (creating it when none is open) naming the branch, the run and the
      stop, and exits 1. It opens no draft: `GITHUB_TOKEN` can create a pull request only when the repository setting
@@ -390,8 +418,9 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
   tool allowlist regresses. (The owner merges their own pull requests through the ruleset's bypass list, which names
   the repository admin role and never the Claude App.)
 - **Tool allowlist and deny rules**: the allowlist names the invocations the skill prescribes, with an exact push rule,
-  and the `settings` deny rules keep the agent out of `.github/`, the build files, `scripts/`, `.claude/`, `CLAUDE.md`
-  and a second CLI (runtime step 8). They guide the agent; they are not what protects `main`. The App token is in the
+  and the `settings` deny rules keep the agent out of `.github/`, the build files (`build.gradle.kts`,
+  `settings.gradle.kts`, `gradle.properties`, `gradle/`), `scripts/`, `.claude/`, `.git/`, `CLAUDE.md` and a second
+  CLI (runtime step 8). They guide the agent; they are not what protects `main`. The App token is in the
   agent's environment (`GITHUB_TOKEN`, `GH_TOKEN`) and in the `origin` URL, `Edit` and `Write` are otherwise
   unrestricted, and an allowlist regression is one line, so the guarantee is the ruleset on `main` (a pull request
   plus one approving review; the App cannot approve its own pull request and, absent from the bypass list, cannot
@@ -401,8 +430,9 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 - **One open fix at a time**: an open PR labelled `contract-drift` (rehearsal or real) skips the agent entirely (step 7
   of the runtime). Closing or merging it re-arms the loop.
 - **Edit allowlist**: `protocol/`, `session/transcript/`, `src/test/`, `docs/protocol.md`; enforced before the push by
-  the deny rules of step 8 and after the action by the workflow (step 9), which comments on an offending PR naming the
-  paths, leaves it open so the gate holds, and reds the run; never closes it. The allowlist keeps the fixer out of
+  the deny rules of step 8 and after the action by the `enforce` job (step 9) on a fresh runner, which comments on an
+  offending PR naming the paths, leaves it open so the gate holds, and reds the run; never closes it. The allowlist
+  keeps the fixer out of
   `.github/`, so no bot
   ever becomes the last editor of the cron line, which is what GitHub's documented rule attributes a schedule run to
   (see "Errors and edge cases" on the actor check).
@@ -414,6 +444,12 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
   reds never start the agent, the open-PR skip, and the workspace spend limit the owner sets in the Claude Console
   for `wrkspc_012JJzfEG8tDKeta7pe3CCa5` as the ceiling nothing in the repository can raise.
 - **Missing artifact**: the fixer refuses (kind 1 path) rather than recording.
+- **Remaining risk, the Actions cache**: the agent's test code runs with sudo in a job on `main`, so it can write a
+  cache in `main`'s scope (with the runner's cache token, or by rewriting setup-gradle's post step under `_actions/`)
+  that `Build` restores on `main` and on every pull request; `cache-read-only: true` stops only setup-gradle's own
+  save. Nothing in the repository closes this while the agent runs on `main`. The ruleset and the App token's scope
+  still keep the agent off `main` and out of a merge, and the owner can clear the caches (Actions | Caches) after a
+  suspect run.
 - **Nothing outward-facing**: the PR and the issue are inside the repository; nothing is published, posted or merged.
 
 ### What the owner does
@@ -422,6 +458,11 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
   enforcement active, with "Require a pull request before merging" and one required approval (the guarantee behind the
   tool and edit allowlists; no rehearsal is run until it is on, and until it is on every decoder or reader red ends red
   at `Require a protected main` without starting the agent; classic branch protection alone does not pass that step).
+  A ruleset on a private repository owned by a personal account is enforced only with GitHub Pro: on Free, the
+  repository goes public before the ruleset and the rehearsals, and the rehearsal (D5) waits for that. Before the
+  first rehearsal the owner runs `gh api repos/daarko10/tandem/rules/branches/main` and sees the `pull_request` rule
+  with `required_approving_review_count` of at least 1 (what the endpoint lists for an unenforced ruleset is not
+  known, so the check follows the enforcement, never replaces it).
   Its bypass list never names the Claude App; whether it names the repository admin role, so the owner can merge their
   own pull requests, is the owner's to decide. Then checks that the Claude GitHub App is installed on `daarko10/tandem`
   (open item 1); runs the rehearsal (below). Nothing waits on a scheduled nightly: its actor is already recorded (open
@@ -556,7 +597,9 @@ line exists, the milestone is open, whatever the rehearsals showed.
   placeholders survive.
 - `scripts/test_workflows.py`: the fixer's trigger, permissions, step order and guards (the fetch's `mkdir`, the
   presence check and the absence of `|| echo`; the Gradle and classification guards on the precheck; the allowlist
-  step's branch read through the API and its `exit 1` whenever no PR exists; the exact push rule and the absence of
+  step in its own job `enforce` (`needs`, `if`, permissions, no checkout, `GH_REPO`, the `fix` job's outputs), its
+  branch read through the API and its `exit 1` whenever no PR exists; the protect step's refusal of an existing drift
+  branch; the exact push rule and the absence of
   any `Bash(git push…:*)` or broad `Bash(python3:*)`/`Bash(./gradlew:*)` rule; the deny rules of the `settings` input
   (the list, exactly) and the step id `agent`; the protection step before the agent, which the agent and the allowlist
   step depend on; the REST file list with renames' old paths and the exact edit allowlist; `--rerun`; a `run_id` on
