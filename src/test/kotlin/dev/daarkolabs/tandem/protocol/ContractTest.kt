@@ -3,15 +3,22 @@ package dev.daarkolabs.tandem.protocol
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
  * Run by the nightly CLI contract workflow against freshly recorded output of the newest CLI (`-Dtandem.contractDir=...`): its
  * stream-json output (`.ndjson` files) and the transcripts it wrote to disk (`.jsonl` files in `transcripts`). Skipped in normal
- * test runs.
+ * test runs. Beside the checks every recording gets, the scenario recordings the workflow makes (`mcp-slash`, `mcp-status`,
+ * `bash-mode`, `bash-mode-respond`) are checked for what Tandem reads in them; a check is skipped when its file is not there.
  */
 class ContractTest {
     @Test
@@ -40,8 +47,72 @@ class ContractTest {
 
         for (file in files) {
             val entries = runBlocking { TranscriptReader.read(file.toPath()) }.state.entries
-            assertTrue(entries.any { it is ChatEntry.User }, "${file.name}: no user entry")
+            // A session of shell escapes only (bash-mode-respond) has its prompts as shell rows.
+            assertTrue(entries.any { it is ChatEntry.User || it is ChatEntry.Shell }, "${file.name}: no user or shell entry")
+            if (file.name.startsWith("bash-mode")) assertTrue(entries.any { it is ChatEntry.Shell }, "${file.name}: no shell entry")
             assertTrue(entries.any { it is ChatEntry.Assistant }, "${file.name}: no assistant entry")
         }
     }
+
+    @Test
+    fun `mcp-slash - the slash catalogue and a local command decode`() {
+        val messages = recording("mcp-slash")
+        val catalogue = messages.filterIsInstance<CliMessage.ControlResponse>().firstNotNullOfOrNull { ControlPayloads.initialize(it.payload) }
+        assertTrue(assertNotNull(catalogue, "no initialize answer with commands").commands.isNotEmpty(), "the initialize commands are empty")
+        assertTrue(messages.filterIsInstance<CliMessage.SystemInit>().any { it.slashCommands.isNotEmpty() }, "no init lists slash commands")
+        // The first prompt is /mcp: the CLI answers it itself, with a local-command line and a result that names it.
+        val local = messages.indexOfFirst { it is CliMessage.Assistant && it.localCommand != null }
+        assertTrue(local >= 0, "no assistant line carries local_command_*")
+        assertEquals("mcp", (messages[local] as CliMessage.Assistant).localCommand!!.command)
+        val result = messages.drop(local).filterIsInstance<CliMessage.Result>().first()
+        assertEquals("mcp", result.localCommand)
+        assertEquals(0, result.numTurns)
+    }
+
+    @Test
+    fun `mcp-status - mcp_status and mcp_toggle answers decode`() {
+        val responses = recording("mcp-status").filterIsInstance<CliMessage.ControlResponse>()
+        val listings = responses.mapNotNull { ControlPayloads.mcpStatus(it.payload) }
+        assertTrue(listings.isNotEmpty(), "no mcp_status answer with an mcpServers array")
+        assertTrue(
+            listings.any { listing -> listing.servers.any { it.name == "echo" && it.status == McpStatus.CONNECTED } },
+            "echo is never connected: ${listings.map { l -> l.servers.map { it.name to it.statusText } }}",
+        )
+        // mcp_toggle's success is bare (docs/protocol.md 4.4); the scenario toggles echo off and on.
+        assertTrue(responses.count { it.isSuccess && it.payload.isNullOrEmpty() } >= 2, "no bare success for the two mcp_toggle requests")
+    }
+
+    @Test
+    fun `bash-mode-respond - the quiet frame gets a zero-turn result naming its uuid`() {
+        val lines = recordingLines("bash-mode-respond")
+        val quiet = commandUuids(lines).first()
+        val results = lines.map(Ndjson::decode).filterIsInstance<CliMessage.Result>()
+        assertTrue(results.any { it.numTurns == 0 && it.userMessageUuids == listOf(quiet) }, "no zero-turn result names $quiet")
+        assertTrue(results.any { (it.numTurns ?: 0) > 0 && quiet !in it.userMessageUuids }, "the output frame ran no turn of its own")
+    }
+
+    @Test
+    fun `bash-mode - the two quiet frames get one zero-turn result naming both`() {
+        val lines = recordingLines("bash-mode")
+        val quiet = commandUuids(lines).take(2)
+        val results = lines.map(Ndjson::decode).filterIsInstance<CliMessage.Result>()
+        assertTrue(results.any { it.numTurns == 0 && it.userMessageUuids.toSet() == quiet.toSet() }, "no zero-turn result names $quiet")
+    }
+
+    /** The lines of recording [name], or the test is skipped when it was not recorded. */
+    private fun recordingLines(name: String): List<String> {
+        val dir = System.getProperty("tandem.contractDir").orEmpty()
+        assumeTrue("no contract transcripts", dir.isNotEmpty())
+        val file = File(dir, "$name.ndjson")
+        assumeTrue("$name was not recorded", file.isFile)
+        return file.readLines().filter { it.isNotBlank() }
+    }
+
+    private fun recording(name: String): List<CliMessage> = recordingLines(name).map(Ndjson::decode)
+
+    /** The user frames' uuids in the order the CLI first queued them (`command_lifecycle`, not decoded by Tandem). */
+    private fun commandUuids(lines: List<String>): List<String> = lines.mapNotNull { line ->
+        val fields = runCatching { Json.parseToJsonElement(line).jsonObject }.getOrNull() ?: return@mapNotNull null
+        if (fields["type"]?.jsonPrimitive?.contentOrNull != "command_lifecycle") null else fields["command_uuid"]?.jsonPrimitive?.contentOrNull
+    }.distinct()
 }

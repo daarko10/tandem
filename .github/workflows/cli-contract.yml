@@ -42,6 +42,16 @@ jobs:
         run: |
           mkdir -p build/contract
           ./scripts/record-fixture.sh contract-hello "Reply with the single word: pong" build/contract
+      # What Tandem reads beyond a plain turn (launch.md tactic 7), each checked by ContractTest: the MCP requests and their
+      # answers and the slash-command catalogue and local commands, against scripts/mcp_probe_servers.py's local servers
+      # (mcp-status, mcp-slash), and the shell-escape frames with their zero-turn results (bash-mode, bash-mode-respond).
+      - name: Mint a fresh Anthropic access token
+        uses: ./.github/actions/anthropic-token
+      - name: Record the MCP, slash-command and shell-escape scenarios
+        run: |
+          for scenario in mcp-slash mcp-status bash-mode bash-mode-respond; do
+            ./scripts/record-scenario.sh "$scenario" build/contract
+          done
       # Tandem names every new session with --session-id and drops inherited session variables (docs/protocol.md 1.2).
       # This checks that the id passed with --session-id names the session and its transcript while one is inherited.
       # Measured with 2.1.301: CLAUDE_CODE_SESSION_ID on its own is ignored; the CLI used an inherited id only inside a
