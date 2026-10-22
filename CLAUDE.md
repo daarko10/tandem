@@ -19,9 +19,11 @@ Read `docs/launch.md` before any work described as ship, release, publish, launc
 - `protocol/` pure Kotlin: NDJSON codec, typed messages, control requests. No IntelliJ imports, so it unit-tests fast.
 - `session/` `SessionManager` owns the project's sessions (`SessionHandle`), each with one `ClaudeSession` per live process: spawns the CLI, owns stdin/stdout, reconciles partial and complete messages, exposes `StateFlow`s. Imports only the JDK, kotlinx.coroutines, kotlinx.serialization.json, the platform's kotlinx.collections.immutable and `com.intellij.openapi.diagnostic`.
 - `session/transcript/` the CLI's own transcripts, `<config>/projects/<key>/<id>.jsonl` (`docs/protocol.md` 11): folder key, index, reader. Read-only, except a rename's `custom-title` line and delete.
-- `chat/` pure Kotlin presentation of a `ChatState`: the row model (`ChatRowsBuilder`, tool labels, states and bodies). Imports only the JDK, kotlinx.collections.immutable, kotlinx.serialization.json and `session/`/`protocol/` types: no Compose, no Jewel, no IntelliJ.
+- `chat/` pure Kotlin presentation of a `ChatState`: the row model (`ChatRowsBuilder`, tool labels, states and bodies), the footer menus' models (`Modes`, `ComposerModel`, `ContextFormat`), `ShellTokens` for Bash bodies and `Attachments`' image checks.
+  Imports only the JDK, kotlinx.collections.immutable, kotlinx.serialization.json and `session/`/`protocol/` types: no Compose, no Jewel, no IntelliJ.
 - `ide/` IDE-side integration: the `TandemSessions` project service, the settings page (Settings | Tools | Tandem: `claude` path, max live sessions, show thinking rows), workspace state, notifications. Later the MCP server with edit tools, diff and file context.
-- `ui/` Jewel tool window. Renders state from `session/`; holds no protocol logic.
+- `ui/` Jewel tool window. Renders state from `session/`; holds no protocol logic. Includes `FooterControls` (mode, model and effort menus, the context ring),
+  the composer's attachment strip, the hover action row under a reply (`rows/MessageActionsRow`) and the question card's Next flow.
 
 ## Commands
 - `./gradlew test` unit, fixture and headless platform tests (no real `claude`; a fake CLI replays fixtures).
