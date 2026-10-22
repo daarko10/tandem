@@ -254,7 +254,7 @@ Tandem sends this shape for attachments (`HostMessages.userMessage`): the text b
 
 Fixture `user-image` (CLI 2.1.306) sends exactly this with a 2 × 2 PNG. The transcript's user line keeps both blocks, the
 image's `data` verbatim, under the uuid the host sent; the CLI adds an `isMeta` user line after it naming where it cached the
-image, which the reader skips as it skips every `isMeta` line (section 11). Tandem omits the text block when the text is blank.
+image, which the reader skips as it skips every `isMeta` line (section 11).
 
 Slash commands are sent as plain text (`"/compact"`) unless `client_composed:true`.
 Messages sent while a turn is running are queued and may be folded into the running turn; `result.user_message_uuids` lists which sends a turn consumed.
@@ -316,7 +316,7 @@ Success `response` payload (`SDKControlInitializeResponse`):
 | `commands` | `SlashCommand[]` |
 | `agents` | `AgentInfo[]` |
 | `output_style`, `available_output_styles` | string, string[] |
-| `models` | `ModelInfo[]` (use this to populate the model picker) |
+| `models` | `ModelInfo[]`: `value`, `displayName`, `description`, and per model `resolvedModel` (the wire id an alias or the `default` entry stands for: the footer labels the entry whose `resolvedModel` equals `init.model`, never the `default` entry), `supportsAutoMode` (`auto` is offered only while the shown model has it; `agent-sync.ndjson:2`: true on every model but Haiku 4.5), `supportsEffort` and `supportedEffortLevels` (the effort page; `low` to `max`, no `xhigh` on Opus 4.6 and Sonnet 4.6). Decoded leniently in `Reducer.modelOption`: an entry without a string `value` is skipped, a missing `displayName` reads as the `value`, a missing flag reads false, and the levels count only with `supportsEffort` true |
 | `account` | `AccountInfo` (display only; never store) |
 | `claude_code_version` | string (absent on older CLIs) |
 | `fast_mode_state`, `fast_mode_disabled_reason` | optional |
@@ -742,6 +742,8 @@ Exactly one per turn, after that turn's `assistant`/`user`/`stream_event` lines;
  "stop_reason":"end_turn","total_cost_usd":0.0092643,"usage":{...},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":2,"outputTokens":4,"costUSD":0.0091409,"contextWindow":1000000,...}},
  "permission_denials":[],"terminal_reason":"completed","session_id":"<sid>","uuid":"<uuid>","result_index":0,"queued_turn_count":0}
 ```
+
+`modelUsage[<model>].contextWindow` is the context ring's window (`Result.contextWindows`, `misc-image.ndjson:66`: 1000000): the active model's, else the largest listed; a `result` without any keeps the ring as it was. The ring's tokens are the last main-thread `message_start` input sum (section 6.3).
 
 | subtype | Meaning |
 |---|---|

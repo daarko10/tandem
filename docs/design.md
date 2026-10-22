@@ -26,8 +26,9 @@ The existing options were studied in October 2026:
 
 ```
  Jewel tool window (ui/)  session sidebar, header; the chat: a keyed list of rows (bubbles, Markdown, tool, thinking,
-        │                 working and footer rows), the permission / question / plan cards, and the composer with the
-        │                 model and permission-mode pickers
+        │                 working and footer rows), a hover row under each reply (Copy, Fork from here, time), the
+        │                 permission / question / plan cards, the composer (the `+` attach button, the thumbnail strip,
+        │                 the text area) and its footer: the mode control, the model · effort control and the context ring
         │  collects StateFlows, calls SessionManager
         ▼
  TandemSessions (ide/)  project service: owns the SessionManager in its coroutine scope, restores the open sessions
@@ -92,8 +93,13 @@ Key choices:
    indicator, the permission / question / plan cards, intent-based autoscroll, subagent nesting, reload parity; spec
    docs/superpowers/specs/2026-10-19-chat-redesign-design.md. **Status: implemented on feat/chat-redesign**, covered by
    fixture, pure-presentation (chat/), platform and IDE Starter tests; feel is checked by hand (spec 10.7).
+
+   **Phase 2a polish** (spec docs/superpowers/specs/2026-10-21-chat-polish-design.md): live tool states and Show more /
+   Show less, the desktop-style composer and footer menus with the context ring, coloured Bash bodies and the inline code
+   pill, the hover action row, image attachments by paste, drop and the `+` menu. **Status: implemented on
+   feat/chat-redesign.**
 2. **IDE-native edits.** MCP edit tools, diff preview, undo.
-3. **Parity.** Slash commands, plan mode, AskUserQuestion, images, context meter, rewind, subagent status.
+3. **Parity.** Slash commands, plan mode, AskUserQuestion, rewind, subagent status.
 4. **Hardening.** Windows/WSL, Remote Development, IDE matrix in CI, published benchmarks.
 
 ## Open questions

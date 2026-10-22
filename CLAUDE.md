@@ -32,6 +32,7 @@ Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` befo
 - `./gradlew verifyPlugin` Plugin Verifier against every supported IDE release.
 - `./gradlew buildPlugin` installable ZIP in `build/distributions/`.
 - `scripts/record-fixture.sh <name> "<prompt>"` records a real CLI transcript as a test fixture. Needs a logged-in `claude`.
+- `scripts/record-scenario.sh <scenario> [out-dir]` records a bidirectional scenario (control requests answered by `scripts/drive_cli.py`), plus the CLI's own transcript: permission, interrupt, model-switch, permission-mode, permission-mode-rejected, fork, effort-switch, permission-mode-auto, user-image, ask-two. Needs a logged-in `claude`; the scenarios' control calls are unit-tested by `scripts/test_drive_cli.py`.
 - `cd scripts && python3 -m unittest` tests the recording scripts (the redactor's safety net, `copy_transcript.py`, `drive_cli.py`'s control calls) without Gradle or a real `claude`.
 
 ## Tools and skills to use
