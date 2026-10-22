@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -40,9 +41,8 @@ import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.TandemProjectScope
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
-import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.SessionId
-import dev.daarkolabs.tandem.session.SessionManager
+import dev.daarkolabs.tandem.ui.rows.LocalReducedMotion
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -85,11 +85,14 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val manager = sessions.manager
     val actions = remember(project) { SessionActions(project, manager, TandemProjectScope.get(project).scope) }
     val workspace = remember(project) { TandemWorkspaceState.getInstance(project) }
-    val newSession = remember(workspace, manager) { NewSessionChoices(workspace) { manager.knownModels().ifEmpty { workspace.knownModels() } } }
+    val newSession = remember(workspace, manager) {
+        NewSessionChoices(workspace) { manager.models.value.ifEmpty { workspace.knownModels() } }
+    }
     val open by manager.sessions.collectAsState()
     val selectedId by manager.selected.collectAsState()
     val selected = open.firstOrNull { it.id == selectedId }
     val presenters = rememberChatPresenters(manager, open, sessions.rowOptions)
+    val reduceMotion by sessions.reduceMotion.collectAsState()
     var collapsed by remember { mutableStateOf(workspace.state.sidebarCollapsed) }
     // The sidebar over the chat, in a window too narrow to dock it.
     var drawerOpen by remember { mutableStateOf(false) }
@@ -255,22 +258,24 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                 }
                             }
                             Box(Modifier.onFocusChanged { chatFocused = it.hasFocus }.then(chatFocus)) {
-                                ChatPane(
-                                    project,
-                                    selected,
-                                    manager,
-                                    workspace,
-                                    presenter,
-                                    ui,
-                                    actions,
-                                    sender,
-                                    focusPrompt = promptFocusFor == selected.id,
-                                    onPromptFocused = { promptFocusFor = null },
-                                    onFocusComposer = { promptFocusFor = selected.id },
-                                    cardTakesFocus = chatHoldsFocus,
-                                    onOpenMcp = { ui.mcpPanelOpen.value = true },
-                                    onStop = { manager.stopShell(selected.id) },
-                                )
+                                CompositionLocalProvider(LocalReducedMotion provides reduceMotion) {
+                                    ChatPane(
+                                        project,
+                                        selected,
+                                        manager,
+                                        workspace,
+                                        presenter,
+                                        ui,
+                                        actions,
+                                        sender,
+                                        focusPrompt = promptFocusFor == selected.id,
+                                        onPromptFocused = { promptFocusFor = null },
+                                        onFocusComposer = { promptFocusFor = selected.id },
+                                        cardTakesFocus = chatHoldsFocus,
+                                        onOpenMcp = { ui.mcpPanelOpen.value = true },
+                                        onStop = { manager.stopShell(selected.id) },
+                                    )
+                                }
                             }
                         }
                     }
@@ -328,15 +333,4 @@ internal fun focusInChat(inPanel: Boolean, rootFocused: Boolean, chatFocused: Bo
 private fun awtFocusIn(panel: Component): Boolean {
     val owner = SwingUtilities.getWindowAncestor(panel)?.mostRecentFocusOwner ?: return false
     return SwingUtilities.isDescendingFrom(owner, panel)
-}
-
-/**
- * The models the CLI offers, as the selected session's process listed them in its `initialize` response, else another open
- * session's: every session runs the same `claude`. None until a process has answered; the popup then offers the list a session
- * reported last, in this IDE run or an earlier one ([TandemWorkspaceState.knownModels]).
- */
-private fun SessionManager.knownModels(): List<ModelOption> {
-    val open = sessions.value
-    val first = open.firstOrNull { it.id == selected.value }
-    return (listOfNotNull(first) + open).firstNotNullOfOrNull { handle -> handle.state.value.models.ifEmpty { null } }.orEmpty()
 }

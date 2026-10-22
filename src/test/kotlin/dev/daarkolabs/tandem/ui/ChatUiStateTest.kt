@@ -35,7 +35,7 @@ class ChatUiStateTest {
     fun expansionIsKeptPerSessionKey() {
         val scope = CoroutineScope(SupervisorJob())
         try {
-            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)))
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()))
             val first = presenters.ui("a").expanded("tool:1")
             first.value = true
 
@@ -54,7 +54,7 @@ class ChatUiStateTest {
     fun draftIsKeptPerSessionKey() {
         val scope = CoroutineScope(SupervisorJob())
         try {
-            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)))
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()))
             val first = presenters.ui("a").draft
             first.edit { append("hello") }
 
@@ -140,7 +140,7 @@ class ChatUiStateTest {
     fun `the panel state is kept per session key`() {
         val scope = CoroutineScope(SupervisorJob())
         try {
-            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)))
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()))
             presenters.ui("a").mcpPanelOpen.value = true
 
             assertFalse(presenters.ui("b").mcpPanelOpen.value)
@@ -155,7 +155,7 @@ class ChatUiStateTest {
     fun `palette state is kept per session key`() {
         val scope = CoroutineScope(SupervisorJob())
         try {
-            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)))
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()))
             presenters.ui("a").paletteSelection.value = "/m" to 2
             presenters.ui("a").paletteDismissedFor.value = "/m"
             presenters.ui("a").menuRequest.value = FooterMenu.MODEL

@@ -166,6 +166,8 @@ class SessionActionsTest {
             actions.fork(SEEDED)
             while (manager.sessions.value.size < 2) delay(20)
             val fork = manager.sessions.value.single { it.forkOf == SEEDED }
+            // The fork is listed a moment before it is selected: two flows, one lock.
+            while (manager.selected.value != fork.id) delay(20)
             assertEquals(fork.id, manager.selected.value)
 
             // A session with no prompt yet has no transcript: nothing to fork, and its chat says so.

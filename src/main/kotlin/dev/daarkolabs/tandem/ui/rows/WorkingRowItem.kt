@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
@@ -16,7 +18,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import com.intellij.ide.ui.UISettings
 import dev.daarkolabs.tandem.chat.WorkingIndicator
 import dev.daarkolabs.tandem.chat.WorkingIndicator.Mode
 import dev.daarkolabs.tandem.chat.WorkingRow
@@ -56,7 +57,7 @@ internal fun WorkingRowItem(row: WorkingRow, lastFrameAt: StateFlow<Long>, agent
             lastFrame = lastFrameAt.value
         }
     }
-    val view = WorkingIndicator.view(shownWorkingRow(row, agentExpanded), now, lastFrame, reducedMotion())
+    val view = workingView(row, now, lastFrame, agentExpanded)
     val colors = JewelTheme.globalColors.text
     val color = when (view.mode) {
         Mode.RUNNING -> colors.info
@@ -76,8 +77,23 @@ internal fun WorkingRowItem(row: WorkingRow, lastFrameAt: StateFlow<Long>, agent
 }
 
 /**
- * Whether the IDE asks for less motion: its window animations are off (open item 5: whether that is the right flag is open, so it is
- * read here only). Then the spark stands still.
+ * What [WorkingRowItem] shows for [row] at [now], the process having last written a line at [lastFrame] ([WorkingIndicator.view]):
+ * the spark stands still under Tandem's `Reduce motion` setting ([reducedMotion]).
  */
 @Composable
-internal fun reducedMotion(): Boolean = !UISettings.getInstance().animateWindows
+internal fun workingView(row: WorkingRow, now: Long, lastFrame: Long, agentExpanded: Boolean): WorkingIndicator.View =
+    WorkingIndicator.view(shownWorkingRow(row, agentExpanded), now, lastFrame, reducedMotion())
+
+/**
+ * Tandem's `Reduce motion` setting (`TandemSessions.reduceMotion`), which the tool window provides around the chat; off unless
+ * provided, so the spark moves.
+ */
+internal val LocalReducedMotion: ProvidableCompositionLocal<Boolean> = compositionLocalOf { false }
+
+/**
+ * Whether the user asked for less motion: Tandem's `Reduce motion` setting ([LocalReducedMotion]). Then the spark stands still. Not
+ * the IDE's `UISettings.animateWindows`: that is the slide of unpinned tool windows (registry `ide.animate.toolwindows`), off by
+ * default, which stilled the spark for everyone.
+ */
+@Composable
+internal fun reducedMotion(): Boolean = LocalReducedMotion.current

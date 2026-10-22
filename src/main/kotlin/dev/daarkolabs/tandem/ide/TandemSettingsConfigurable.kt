@@ -104,6 +104,10 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
                     .bindSelected({ settings.state.respondToShellOutput }, { settings.state.respondToShellOutput = it })
                     .comment("Off: the output is added to the conversation without a reply (the CLI's respondToBashCommands: false).")
             }
+            row {
+                checkBox("Reduce motion")
+                    .bindSelected({ settings.state.reduceMotion }, { settings.state.reduceMotion = it })
+            }.rowComment("The spark beside Claude's working line stands still.")
         }
         check()
         return page

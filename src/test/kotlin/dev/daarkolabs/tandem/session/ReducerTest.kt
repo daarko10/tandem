@@ -223,6 +223,7 @@ class ReducerTest {
         assertTrue(modelMatches("opus", "claude-opus-5-5"))
         assertTrue(modelMatches("claude-opus-5-5[1m]", "claude-opus-5-5"))
         assertTrue(modelMatches("default", "claude-sonnet-5-5"))
+        assertTrue(modelMatches("fable", "claude-fable-5-1"))
         assertFalse(modelMatches("opus", "claude-sonnet-5-5"))
     }
 

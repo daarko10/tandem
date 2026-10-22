@@ -6,6 +6,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionId
@@ -19,12 +20,12 @@ import kotlinx.coroutines.plus
 
 /**
  * The presenters, senders and UI states of the [open] sessions, which go when their session closes or the tool window's content goes
- * away. Prompts go to [manager].
+ * away. Prompts go to [manager], and a session whose process has not listed its models offers [SessionManager.models].
  */
 @Composable
 internal fun rememberChatPresenters(manager: SessionManager, open: List<SessionHandle>, options: StateFlow<RowOptions>): ChatPresenters {
     val scope = rememberCoroutineScope()
-    val presenters = remember(scope, manager, options) { ChatPresenters(scope, options, manager::send) }
+    val presenters = remember(scope, manager, options) { ChatPresenters(scope, options, manager.models, manager::send) }
     LaunchedEffect(presenters, open) { presenters.retain(open) }
     return presenters
 }
@@ -38,6 +39,8 @@ internal fun rememberChatPresenters(manager: SessionManager, open: List<SessionH
 internal class ChatPresenters(
     private val scope: CoroutineScope,
     private val options: StateFlow<RowOptions>,
+    /** The models another process listed, for a session whose own process has not ([ChatPresenter]): [SessionManager.models]. */
+    private val models: StateFlow<List<ModelOption>>,
     private val send: (SessionId, String, List<ImageBlock>) -> Unit = { _, _, _ -> },
 ) {
     private inner class Entry(val handle: SessionHandle, val job: Job, val presenter: ChatPresenter) {
@@ -64,7 +67,7 @@ internal class ChatPresenters(
         entries[handle.id]?.takeIf { it.handle === handle }?.let { return it }
         entries.remove(handle.id)?.job?.cancel()
         val job = SupervisorJob(scope.coroutineContext.job)
-        val presenter = ChatPresenter(scope + job, handle.state, options)
+        val presenter = ChatPresenter(scope + job, handle.state, options, models = models)
         val entry = Entry(handle, job, presenter)
         entries[handle.id] = entry
         ui(handle.id).onExpand = presenter::expandBody

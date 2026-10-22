@@ -36,6 +36,12 @@ class TandemSettings : SimplePersistentStateComponent<TandemSettings.State>(Tand
          * output is only added to the conversation. Read when each command ends.
          */
         var respondToShellOutput: Boolean by property(true)
+
+        /**
+         * Whether the chat's working spark stands still (spec 4.9); open chats take it on [TandemSessions.settingsChanged]. Tandem's
+         * own: the IDE has no reduce-motion setting (`UISettings.animateWindows` is the tool windows' slide, off by default).
+         */
+        var reduceMotion: Boolean by property(false)
     }
 
     /**

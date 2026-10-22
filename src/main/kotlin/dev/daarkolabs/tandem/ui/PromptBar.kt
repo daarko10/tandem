@@ -255,7 +255,7 @@ internal fun PromptBar(
             palette = { palette.value },
             interceptable = { intercepts(ui.draft.text.toString(), composer.models) },
             onPalettePick = { item -> pickFrom(paletteOf(true), item, false) },
-            onAdd = { scope.launch { attachFiles(ComposerImages.chooseImages(project)) } },
+            onAdd = { ComposerImages.chooseImagesLater(project, onChosen = attachFiles) },
             onDrop = attachFiles,
             onAction = { action ->
                 when (action) {

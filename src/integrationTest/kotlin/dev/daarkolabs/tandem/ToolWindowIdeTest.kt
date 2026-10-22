@@ -23,6 +23,7 @@ import com.intellij.ide.starter.models.TestCase
 import com.intellij.ide.starter.plugins.PluginConfigurator
 import com.intellij.ide.starter.project.LocalProjectInfo
 import com.intellij.ide.starter.runner.Starter
+import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -35,6 +36,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.ExtendWith
 import java.awt.GraphicsEnvironment
 import java.awt.Image
 import java.awt.Point
@@ -71,8 +73,9 @@ import kotlin.time.Duration.Companion.seconds
  * the UI sends and logs every frame it receives, so each test checks both the rendered UI and the protocol traffic.
  *
  * Unlike the platform tests, the plugin is loaded by its own plugin classloader here, as it is for users.
- * Run with `xvfb-run ./gradlew integrationTest` when there is no display.
+ * Run with `xvfb-run ./gradlew integrationTest` when there is no display. CI splits the tests across jobs ([IdeTestShard]).
  */
+@ExtendWith(IdeTestShard::class)
 class ToolWindowIdeTest {
     private val pluginZip = Path.of(System.getProperty("tandem.pluginZip"))
     private val fakeClaude = System.getProperty("tandem.fakeClaude")
@@ -946,7 +949,9 @@ class ToolWindowIdeTest {
     /**
      * What the footer's model control reads for [fixture] (`fixtures/<fixture>.ndjson`, next to the fake CLI) with no model picked
      * (spec 2.3, `<Model>`): the display name of the entry other than `default`, in its first control_response that lists models,
-     * whose `resolvedModel` is the model its first `system/init` reports; else that model's wire id.
+     * whose `resolvedModel` is the model its first `system/init` reports; without such a list, in an IDE where no process has listed
+     * any, the name of the CLI's alias for that model's family ([CLI_MODEL_ALIASES]: `Sonnet` for `claude-sonnet-5-5`); else that
+     * model's wire id.
      */
     private fun defaultModelName(fixture: String): String {
         val lines = Path.of(fakeClaude).resolveSibling("fixtures/$fixture.ndjson").readLines().filter { it.isNotBlank() }
@@ -958,7 +963,9 @@ class ToolWindowIdeTest {
         val entry = models.firstOrNull {
             it["value"]?.jsonPrimitive?.content != "default" && it["resolvedModel"]?.jsonPrimitive?.content == running
         }
-        return entry?.get("displayName")?.jsonPrimitive?.content ?: running
+        return entry?.get("displayName")?.jsonPrimitive?.content
+            ?: CLI_MODEL_ALIASES.firstOrNull { it.value != "default" && it.value in running.split('-') }?.displayName
+            ?: running
     }
 
     /**

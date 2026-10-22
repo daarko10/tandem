@@ -13,8 +13,13 @@ import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.reduce
 import org.junit.jupiter.api.Assumptions.assumeFalse
 import org.junit.jupiter.api.Test
+import java.awt.Component
 import java.awt.GraphicsEnvironment
+import java.awt.KeyboardFocusManager
 import java.awt.event.KeyEvent
+import java.beans.PropertyChangeEvent
+import javax.accessibility.Accessible
+import javax.accessibility.AccessibleContext
 import javax.swing.JDialog
 import javax.swing.JFrame
 import javax.swing.JPanel
@@ -116,14 +121,14 @@ class FooterControlsTest {
 
     @Test
     fun `a session started with a model pick reads that model before its first init, Model with none`() {
-        // NewSessionOptions.model: no system/init and no initialize answer yet, so no list and no active model (spec 2.3, <Model> 3
-        // and 4).
-        assertEquals("opus", modelLabel(composer(models = emptyList(), requestedModel = "opus")).model)
+        // NewSessionOptions.model: no system/init and no initialize answer yet, and no process has ever listed the models, so the
+        // list is the CLI's aliases and there is no active model (spec 2.3, <Model> 3 and 4).
+        assertEquals("Opus", modelLabel(composer(models = emptyList(), requestedModel = "opus")).model)
         val defaultPick = modelLabel(composer(models = emptyList(), requestedModel = "default")).model
         assertEquals("Model", defaultPick, "the CLI's own default is no pick")
         assertEquals("Model", modelLabel(composer(models = emptyList())).model)
         val running = modelLabel(composer(models = emptyList(), activeModel = sonnet, requestedModel = "opus")).model
-        assertEquals(sonnet, running, "then what the CLI runs")
+        assertEquals("Sonnet", running, "then what the CLI runs, by its alias's name")
         assertEquals("Opus 5.5", modelLabel(composer(requestedModel = "opus")).model, "with the list, the requested entry's name")
     }
 
@@ -225,8 +230,55 @@ class FooterControlsTest {
         assertEquals("Mode", modeLabel(composer))
         assertTrue(modeMenu(composer).none { it.checked })
         assertEquals(ModelLabel("Model", null), modelLabel(composer))
-        assertEquals(emptyList(), modelMenu(composer))
+        // No process has listed its models yet: the CLI's own aliases, none badged, their Default checked since nothing is picked.
+        assertEquals(listOf("Default", "Opus", "Fable", "Sonnet", "Haiku"), modelMenu(composer).map { it.label })
+        assertTrue(modelMenu(composer).none { it.isDefault })
+        assertEquals(listOf("Default"), modelMenu(composer).filter { it.checked }.map { it.label })
         assertNull(effortMenu(composer))
+    }
+
+    @Test
+    fun `a session without a list of its own labels and lists its model from the list another process gave`() {
+        // Resumed without a process: the transcript's model and effort, no initialize response of its own.
+        val resumed = ChatState(activeModel = "claude-opus-5-5", effort = "medium")
+        val known = composerModel(resumed, known = models)
+        assertEquals(ModelLabel("Opus 5.5", "Medium"), modelLabel(known))
+        assertEquals(12, modelMenu(known).size)
+        assertTrue(modelMenu(known).item("Opus 5.5").checked)
+        assertEquals("Fable 5.1", modelMenu(known).single { it.isDefault }.label)
+
+        // Before any process has answered: the aliases, and the raw id by its alias's name, never "claude-opus-5-5".
+        val first = composerModel(resumed)
+        assertEquals(ModelLabel("Opus", "Medium"), modelLabel(first))
+        assertEquals(listOf("Default", "Opus", "Fable", "Sonnet", "Haiku"), modelMenu(first).map { it.label })
+        assertEquals(listOf("low", "medium", "high", "max"), effortMenu(first)?.items?.map { it.level })
+    }
+
+    @Test
+    fun `an alias-only menu lists the CLI's default, which sends no model and goes back to it`() {
+        // A stopped session that picked Sonnet from the aliases: Sonnet checked, Default pickable, and picking it sends null.
+        val sonnetPicked = composerModel(ChatState(requestedModel = "sonnet", modelSwitchPending = true))
+        val menu = modelMenu(sonnetPicked)
+        assertEquals(ModelItem(value = null, label = "Default", isDefault = false, checked = false, digit = 1), menu.item("Default"))
+        assertTrue(menu.item("Sonnet").checked)
+        assertEquals(listOf("Default"), menu.filter { it.value == null }.map { it.label })
+        // Back on the default, the popup's own `default` pick included: Default checked, the aliases picked by their values.
+        for (requested in listOf(null, "default")) {
+            val back = modelMenu(composerModel(ChatState(requestedModel = requested)))
+            assertTrue(back.item("Default").checked, "requested $requested")
+            assertEquals(listOf("opus", "fable", "sonnet", "haiku"), back.filter { !it.checked }.map { it.value }, "requested $requested")
+        }
+        // A list that resolves its `default` entry badges that entry instead: no Default item of its own.
+        assertTrue(modelMenu(composer()).all { it.isDefault || it.value != null })
+    }
+
+    @Test
+    fun `an alias picked before any process listed its models keeps the effort`() {
+        // A stopped session's alias-only menu: picking Sonnet shows the alias, whose effort levels are unknown, not absent.
+        val composer = composerModel(ChatState(activeModel = "claude-opus-5-5", effort = "medium", requestedModel = "sonnet", modelSwitchPending = true))
+        assertEquals(ModelLabel("Sonnet", "Medium"), modelLabel(composer))
+        assertEquals(listOf("low", "medium", "high", "max"), effortMenu(composer)?.items?.map { it.level })
+        assertEquals("Medium", effortMenu(composer)?.trailing)
     }
 
     @Test
@@ -299,9 +351,37 @@ class FooterControlsTest {
         assertTrue(takesKey(panel, panel))
         assertFalse(takesKey(editor, panel), "a key typed in another component is left alone")
         assertFalse(takesKey(null, panel))
-        assertFalse(focusLeft(field, panel))
-        assertFalse(focusLeft(null, panel), "no focus owner: the window lost the focus, the menu stays")
-        assertTrue(focusLeft(editor, panel))
+        assertFalse(focusLeft(field, field, panel))
+        assertFalse(focusLeft(null, null, panel), "no focus owner: the window lost the focus, the menu stays")
+        assertTrue(focusLeft(editor, editor, panel))
+    }
+
+    @Test
+    fun `a footer menu stays open on skiko's accessibility focus event on macOS`() {
+        val panel = JPanel()
+        val field = JTextField().also(panel::add)
+        val editor = JTextField().also(JPanel()::add)
+        // What skiko's NativeAccessibleFocusHelper.requestMacOSFocusOnAccessible names as the new owner when a Compose node takes the
+        // focus (a menu item, on hover or an arrow key): a ComposeAccessible, a Component with no parent, while AWT's focus owner stays.
+        val accessible = object : Component(), Accessible {
+            override fun getAccessibleContext(): AccessibleContext? = null
+        }
+        assertFalse(focusLeft(accessible, field, panel), "the real focus owner is still in the panel")
+        assertFalse(focusLeft(accessible, null, panel))
+        assertFalse(focusLeft(accessible, editor, panel), "the event names a component that does not hold the focus")
+        assertTrue(focusLeft(editor, editor, panel), "a real move out of the panel")
+        assertFalse(focusLeft(field, field, panel), "a real move within the panel")
+
+        // The listener both footer menus register, sent the event exactly as skiko builds it, then a real move.
+        val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+        var owner: Component? = field
+        var closed = 0
+        val listener = focusLeftListener(panel, { owner }) { closed++ }
+        listener.propertyChange(PropertyChangeEvent(focusManager, "focusOwner", null, accessible))
+        assertEquals(0, closed, "the menu stays open")
+        owner = editor
+        listener.propertyChange(PropertyChangeEvent(focusManager, "focusOwner", field, editor))
+        assertEquals(1, closed, "the menu closes once the focus has left the panel")
     }
 
     @Test
@@ -314,7 +394,7 @@ class FooterControlsTest {
             try {
                 val field = JTextField().also { dialog.contentPane.add(it) }
                 assertFalse(takesKey(field, panel))
-                assertTrue(focusLeft(field, panel))
+                assertTrue(focusLeft(field, field, panel))
             } finally {
                 dialog.dispose()
             }

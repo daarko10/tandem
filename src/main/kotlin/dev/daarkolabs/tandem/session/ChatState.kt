@@ -186,6 +186,18 @@ data class ModelOption(
 )
 
 /**
+ * The CLI's own model aliases, as `--model` and `set_model` take them: what a session offers while no process has ever listed its
+ * models ([SessionManager.models]). Without a [ModelOption.resolvedModel]: which model an alias stands for is the CLI's to say.
+ */
+val CLI_MODEL_ALIASES: List<ModelOption> = listOf(
+    ModelOption("default", "Default", null),
+    ModelOption("opus", "Opus", null),
+    ModelOption("fable", "Fable", null),
+    ModelOption("sonnet", "Sonnet", null),
+    ModelOption("haiku", "Haiku", null),
+)
+
+/**
  * One image the user sent with a prompt: [id] is `<entry uuid>#<index>`, the same live and on reload; [base64] is its bytes as the
  * wire carries them. Kept on the entry only: rows never copy the data.
  */

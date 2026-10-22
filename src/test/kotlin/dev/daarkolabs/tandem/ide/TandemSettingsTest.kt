@@ -429,6 +429,41 @@ class TandemSettingsTest {
         }
     }
 
+
+    @Test
+    fun `reduce motion is off by default, persists and is set from the page`() = timeoutRunBlocking {
+        assertFalse(TandemSettings.State().reduceMotion, "the working row animates by default")
+        val settings = TandemSettings.getInstance()
+        settings.loadState(TandemSettings.State().apply { reduceMotion = true })
+        assertTrue(settings.state.reduceMotion)
+        // Saved and read back under its name, as tandem.xml holds it.
+        val saved = XmlSerializer.serialize(TandemSettings.State().apply { reduceMotion = true })
+        assertTrue("reduceMotion" in JDOMUtil.write(saved), JDOMUtil.write(saved))
+        assertTrue(XmlSerializer.deserialize(saved, TandemSettings.State::class.java).reduceMotion)
+
+        // The page's checkbox writes it.
+        settings.loadState(TandemSettings.State())
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val (shown, changed, applied) = withContext(Dispatchers.EDT) {
+                val page = configurable.createComponent()
+                configurable.reset()
+                val box = UIUtil.findComponentsOfType(page, JCheckBox::class.java).single { it.text == "Reduce motion" }
+                val shown = box.isSelected
+                box.doClick()
+                val changed = configurable.isModified
+                configurable.apply()
+                Triple(shown, changed, configurable.isModified)
+            }
+            assertFalse(shown, "the checkbox shows the stored value")
+            assertTrue(changed)
+            assertFalse(applied, "nothing left to apply once applied")
+            assertTrue(settings.state.reduceMotion)
+        } finally {
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+    }
+
     @Test
     fun `the page shows the executable it detects`() = timeoutRunBlocking {
         val fake = System.getProperty("tandem.claudePath")

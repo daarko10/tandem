@@ -35,8 +35,9 @@ The existing options were studied in October 2026:
         ▼
  TandemSessions (ide/)  project service: owns the SessionManager in its coroutine scope, restores the open sessions
         │               from TandemWorkspaceState, reads TandemSettings (claude path, max live sessions, show thinking rows,
-        │               whether Claude replies to `!` command output; Settings | Tools | Tandem), runs SessionNotifier (IDE
-        │               notifications), opens an MCP server's sign-in link in the system browser (BrowserOpener)
+        │               reduce motion, whether Claude replies to `!` command output; Settings | Tools | Tandem), runs
+        │               SessionNotifier (IDE notifications), opens an MCP server's sign-in link in the system browser
+        │               (BrowserOpener)
         ▼
  SessionManager (session/)  the project's sessions: StateFlow<List<SessionHandle>> and the selection, the live cap,
         │                   create / open / fork / rename / delete / close, the resume-id mismatch rule. It raises the

@@ -64,6 +64,7 @@ import dev.daarkolabs.tandem.chat.ComposerModel
 import dev.daarkolabs.tandem.chat.ContextFormat
 import dev.daarkolabs.tandem.chat.DEFAULT_MODEL_ENTRY
 import dev.daarkolabs.tandem.chat.Modes
+import dev.daarkolabs.tandem.chat.modelDisplayName
 import dev.daarkolabs.tandem.chat.shownModel
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.ContextUsage
@@ -96,14 +97,16 @@ internal data class ModelLabel(val model: String, val effort: String?)
 /**
  * What the model control reads (spec 2.3, `<Model>` and `<Effort>`): the shown model's display name ([shownModel]), else the model the
  * CLI reports, else the model picked (a session started with a pick, before its first `system/init` and the CLI's model list; the
- * CLI's own `default` entry is no pick), else "Model"; and the effort, unless there is none or the effort page would not list it
- * ([effortMenu]: a shown model without effort levels).
+ * CLI's own `default` entry is no pick), each by its name in the list ([modelDisplayName]: an alias's for a model of its family,
+ * the id itself for one the list does not name), else "Model"; and the effort, unless there is none or the effort page would not
+ * list it ([effortMenu]: a shown model without effort levels; an alias's levels are unknown, so it keeps the effort).
  */
 internal fun modelLabel(composer: ComposerModel): ModelLabel {
     val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
     val effort = composer.effort?.takeIf { effortMenu(composer) != null }?.let(Modes::effortLabel)
     val picked = composer.requestedModel?.takeIf { it != DEFAULT_MODEL_ENTRY }
-    return ModelLabel(shown?.displayName ?: composer.activeModel ?: picked ?: NO_MODEL_LABEL, effort)
+    val model = shown?.displayName ?: (composer.activeModel ?: picked)?.let { modelDisplayName(it, composer.models) } ?: NO_MODEL_LABEL
+    return ModelLabel(model, effort)
 }
 
 /** What the mode control reads: the session's mode by its footer label, or "Mode" while there is none. */
@@ -118,21 +121,31 @@ internal data class ModelItem(val value: String?, val label: String, val isDefau
 /**
  * The model menu (spec 2.3): every model of the CLI's list but its `default` entry, in its order. The entry that resolves to the default
  * model carries the chip; picking it sends no model while that model runs or nothing runs yet, and its value while another model
- * runs, so that the pick is never ignored. The shown model is checked in place of its digit; the first nine items have digits. A
- * requested model that no entry stands for is listed last, by its value. Empty while the CLI has not listed its models.
+ * runs, so that the pick is never ignored. A `default` entry that resolves to no model (the CLI's aliases,
+ * [dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES]) has no entry to badge, so it is listed in its place, by its name: picking it
+ * sends no model, and it is checked while no model is picked. The shown model is checked in place of its digit; the first nine items
+ * have digits. A requested model that no entry stands for is listed last, by its value. Empty only for a composer without models,
+ * which [dev.daarkolabs.tandem.chat.composerModel] never gives: it falls back to the models another process listed, then to the
+ * CLI's aliases.
  */
 internal fun modelMenu(composer: ComposerModel): List<ModelItem> {
     if (composer.models.isEmpty()) return emptyList()
     val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
     val default = composer.defaultModel
     val defaultRuns = composer.activeModel == null || composer.activeModel == default
-    val entries = composer.models.filter { it.value != DEFAULT_MODEL_ENTRY }
-    val items = entries.map { option ->
-        val isDefault = default != null && option.resolvedModel == default
-        Triple(if (isDefault && defaultRuns) null else option.value, option.displayName, isDefault) to (option == shown)
-    }
     // The new-session popup can pick the CLI's own `default` entry: that one is the Default-badged item, not an item of its own.
     val requested = composer.requestedModel?.takeIf { it != DEFAULT_MODEL_ENTRY }
+    val entries = composer.models.filter { it.value != DEFAULT_MODEL_ENTRY }
+    val items = composer.models.mapNotNull { option ->
+        when {
+            option.value != DEFAULT_MODEL_ENTRY -> {
+                val isDefault = default != null && option.resolvedModel == default
+                Triple(if (isDefault && defaultRuns) null else option.value, option.displayName, isDefault) to (option == shown)
+            }
+            option.resolvedModel == null -> Triple(null, option.displayName, false) to (requested == null)
+            else -> null
+        }
+    }
     val extra = if (requested != null && entries.none { it.value == requested }) listOf(Triple(requested, requested, false) to false) else emptyList()
     return (items + extra).mapIndexed { index, (item, checked) ->
         val (value, label, isDefault) = item
@@ -157,16 +170,17 @@ internal data class EffortMenu(val trailing: String, val items: List<EffortItem>
 
 /**
  * The effort page (spec 2.3), or null when the model menu has none: the shown model's levels, the current one checked. While no
- * entry stands for the model (the CLI has not listed its models, or the model it runs is none of theirs), a known effort lists low,
- * medium, high and max (edge 1): only a shown model without effort levels hides the page (edge 15). A current level the shown model
- * does not list comes last, checked and disabled: the CLI decides at the next turn.
+ * entry stands for the model (the list is the CLI's aliases, which name no model, or the model it runs is none of the list's), or the
+ * shown entry is an alias (no `resolvedModel`: its levels are unknown, not absent), a known effort lists low, medium, high and max
+ * (edge 1): only a shown model without effort levels hides the page (edge 15). A current level the shown model does not list comes
+ * last, checked and disabled: the CLI decides at the next turn.
  */
 internal fun effortMenu(composer: ComposerModel): EffortMenu? {
     val effort = composer.effort
     val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
     val levels = when {
         composer.effortLevels.isNotEmpty() -> composer.effortLevels
-        shown == null && effort != null -> EFFORT_LEVELS
+        (shown == null || shown.resolvedModel == null) && effort != null -> EFFORT_LEVELS
         else -> return null
     }
     val items = levels.map { EffortItem(it, Modes.effortLabel(it), checked = it == effort, enabled = true) }
@@ -217,11 +231,26 @@ internal fun digitOf(event: AwtKeyEvent): Int? {
 internal fun takesKey(component: Component?, panel: JComponent): Boolean = component != null && SwingUtilities.isDescendingFrom(component, panel)
 
 /**
- * Whether the AWT focus has left [panel] for [owner], the new focus owner, which closes an open footer menu: the menu gets no click
- * from Swing components outside the panel, so it would stay open under the editor otherwise. No owner (the IDE window lost the
- * focus) is not a move: the menu stays, and no key reaches it meanwhile.
+ * Whether the AWT focus has left [panel] for [owner], the new focus owner a `focusOwner` change names, which closes an open footer
+ * menu: the menu gets no click from Swing components outside the panel, so it would stay open under the editor otherwise. No owner
+ * (the IDE window lost the focus) is not a move: the menu stays, and no key reaches it meanwhile.
+ *
+ * Only a real move counts: [owner] must be [actualOwner], the focus owner the `KeyboardFocusManager` reports, which it sets before it
+ * fires the change. On macOS, Compose also sends every `focusOwner` listener a change of its own whenever a Compose node takes the
+ * focus (for VoiceOver: skiko's `NativeAccessibleFocusHelper.requestMacOSFocusOnAccessible` in IDE 2026.1, Compose's own
+ * `androidx.compose.ui.platform.a11y.AccessibleFocusHelper` in 2026.2), naming a parentless `ComposeAccessible` while the focus stays
+ * where it was. A menu item takes the focus on hover and on the arrow keys, so that event alone closed the menus at the first item the
+ * pointer crossed.
  */
-internal fun focusLeft(owner: Component?, panel: JComponent): Boolean = owner != null && !takesKey(owner, panel)
+internal fun focusLeft(owner: Component?, actualOwner: Component?, panel: JComponent): Boolean =
+    owner != null && owner === actualOwner && !takesKey(owner, panel)
+
+/**
+ * The `focusOwner` listener an open footer menu registers: calls [close] when the focus has left [panel] ([focusLeft]), with
+ * [focusOwner] the focus owner as the `KeyboardFocusManager` reports it when the change arrives.
+ */
+internal fun focusLeftListener(panel: JComponent, focusOwner: () -> Component?, close: () -> Unit): PropertyChangeListener =
+    PropertyChangeListener { change -> if (focusLeft(change.newValue as? Component, focusOwner(), panel)) close() }
 
 /**
  * A footer control's pill (spec 2.3): [pillSurface], then 7 dp by 3 dp inside. The context ring takes the same surface as a 23 dp
@@ -260,7 +289,7 @@ internal fun ContextRing(context: StateFlow<ContextUsage?>) {
 /**
  * The ring and its popover: a 23 dp pill, filled while hovered or open and outlined while focused, around a 14 dp ring with a 2 dp
  * stroke, the arc clockwise from the top over [fraction] of the turn. As a footer control's menu, the popover closes when the AWT
- * focus leaves the tool window's panel ([focusLeft]), which it gets no click from.
+ * focus really leaves the tool window's panel ([focusLeftListener]), which it gets no click from.
  */
 @Composable
 private fun RingControl(fraction: Float, value: String) {
@@ -272,8 +301,9 @@ private fun RingControl(fraction: Float, value: String) {
     val panel = LocalComponent.current
     if (open) {
         DisposableEffect(panel) {
-            val focusListener = PropertyChangeListener { change -> if (focusLeft(change.newValue as? Component, panel)) open = false }
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            // focusLeftListener, never a check of the new value alone: macOS sends a focus change on hover that moves nothing (focusLeft).
+            val focusListener = focusLeftListener(panel, focusManager::getFocusOwner) { open = false }
             focusManager.addPropertyChangeListener("focusOwner", focusListener)
             onDispose { focusManager.removePropertyChangeListener("focusOwner", focusListener) }
         }
@@ -551,9 +581,10 @@ internal fun pageTurn(event: AwtKeyEvent, page: Int): Int? {
  * The digits and the arrows are taken from AWT's key dispatch while the menu is open, not from a Compose key handler (open item 13):
  * in the IDE the menu is a focusable popup layer of the tool window's own Compose scene (the IDE leaves Jewel's `JBPopupRenderer`
  * off), which takes the keys with no Compose node focused in it, so neither a handler on the menu nor one on the control gets them.
- * Only keys in the tool window's own panel are taken ([takesKey]), and the menu closes when the AWT focus leaves that panel
- * ([focusLeft]): the layer gets no click from Swing components outside it, so a menu left open under the editor would otherwise
- * take the digits and arrows typed there.
+ * Only keys in the tool window's own panel are taken ([takesKey]), and the menu closes when the AWT focus really leaves that panel
+ * ([focusLeftListener]): the layer gets no click from Swing components outside it, so a menu left open under the editor would
+ * otherwise take the digits and arrows typed there. The focus change Compose sends on macOS when a menu item takes the Compose focus
+ * (on hover, or an arrow key) moves nothing, and leaves the menu open ([focusLeft]).
  *
  * The menu is placed in the control's outer box, which has no padding of its own, so that [AboveAnchor] measures from the pill's
  * edges: placed inside the pill's padding, it sat 5 dp above the pill and 7 dp inside its right edge.
@@ -616,8 +647,9 @@ private fun FooterControl(
                 page = next
                 true
             }
-            val focusListener = PropertyChangeListener { change -> if (focusLeft(change.newValue as? Component, panel)) open = false }
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            // focusLeftListener, never a check of the new value alone: macOS sends a focus change on hover that moves nothing (focusLeft).
+            val focusListener = focusLeftListener(panel, focusManager::getFocusOwner) { open = false }
             focusManager.addKeyEventDispatcher(dispatcher)
             focusManager.addPropertyChangeListener("focusOwner", focusListener)
             onDispose {

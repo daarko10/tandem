@@ -13,12 +13,14 @@ import dev.daarkolabs.tandem.chat.ThinkingRow
 import dev.daarkolabs.tandem.chat.ToolKind
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
+import dev.daarkolabs.tandem.chat.WorkingIndicator
 import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.McpResult
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.PermissionAnswers
@@ -232,6 +234,32 @@ class TandemSessionsTest {
     }
 
     @Test
+    fun `the working row animates unless Reduce motion is on`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("motion").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            val row = WorkingRow(turnUuid = "turn", startedAtMillis = 0, step = "Pondering", outputTokens = 0, waiting = false)
+            fun animated(): Boolean = WorkingIndicator.view(row, 1_000, 1_000, sessions.reduceMotion.value).animated
+            assertFalse(sessions.reduceMotion.value)
+            assertTrue(animated(), "the spark moves on a default IDE")
+            val options = sessions.rowOptions.value
+            try {
+                TandemSettings.getInstance().state.reduceMotion = true
+                sessions.settingsChanged()
+                assertTrue(sessions.reduceMotion.value)
+                assertFalse(animated(), "the spark stands still")
+                // The rows' options, which every open chat rebuilds its rows on, do not change.
+                assertEquals(options, sessions.rowOptions.value)
+            } finally {
+                // The settings are the application's: no other test may see reduceMotion = true.
+                TandemSettings.getInstance().loadState(TandemSettings.State())
+                sessions.settingsChanged()
+            }
+            assertTrue(animated())
+        }
+    }
+
+    @Test
     fun `the models a session's CLI lists are remembered for the next IDE run`() = timeoutRunBlocking(30.seconds) {
         val dir = tempDir.get().resolve("models").createDirectories()
         openProjectAsync(dir).useProjectAsync { project ->
@@ -298,6 +326,19 @@ class TandemSessionsTest {
         val output = users[1]["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
         assertEquals("<bash-stdout>${shell.output}</bash-stdout><bash-stderr></bash-stderr>", output)
         assertFalse("shouldQuery" in users[1])
+    }
+
+    @Test
+    fun `the models remembered from the last IDE run are every session's until a process lists them`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("remembered-models").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val remembered = listOf(ModelOption("opus", "Opus", null, "claude-opus-5-5"))
+            TandemWorkspaceState.getInstance(project).rememberModels(remembered)
+            val sessions = TandemSessions.get(project)
+            sessions.ensureStarted()
+            // A session restored without a process has no initialize response of its own: it offers these (ChatPresenter).
+            assertEquals(remembered, sessions.manager.models.first { it.isNotEmpty() })
+        }
     }
 
     @Test

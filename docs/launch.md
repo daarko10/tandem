@@ -44,9 +44,9 @@ star swaps or vote rings, ever): GitHub removes them, and the project's credibil
    time a decision is proven in code or a benchmark, and the README version never lists a row that `main`
    does not yet deliver.
 7. **The contract run is the immune system.** Protocol work is not done until `cli-contract.yml` covers it.
-   A red run is the first thing to fix in any session, and the fix is a pull request carrying the re-recorded
-   fixture and the decoder change, with a description written for a reader: those pull requests are the
-   material of the drift-loop article.
+   A red run is the first thing to fix in any session, and the fix is a pull request carrying the run's recording
+   promoted to a fixture and the decoder change, with a description written for a reader: those pull requests are
+   the material of the drift-loop article.
 8. **Hand-test findings become tests.** Every item from the owner's `runIde` or real-project pass ends as a
    fixture, a platform test or an IDE Starter test, so the next polish round starts from a higher floor.
 9. **README.md and plugin.xml say only what `main` does today.** A roadmap item is labelled as one. Hard rule
@@ -63,9 +63,10 @@ star swaps or vote rings, ever): GitHub removes them, and the project's credibil
   context reach the CLI. Unlocks: Marketplace submission the day it works, and the launch GIF.
 - **Launch-ready**: every launch gate below is green, in any order after Milestone 2.
 - **Launch**: Show HN, once. Unlocks: Milestone 3 (parity), with real users filing the backlog.
-- **Drift loop closed.** Done when a red `cli-contract.yml` run re-records the fixture, patches the decoder,
-  runs the tests and opens a pull request without a human, and that has happened once on a real CLI change.
-  Unlocks: the drift-loop article.
+- **Drift loop closed.** Done when a red `cli-contract.yml` run promotes its recording to a fixture, patches the
+  decoder, runs the tests and opens a pull request without a human, and that has happened once on a real CLI change,
+  the owner merged it and the next nightly was green (the owner appends the PR number, the CLI version and the fixture
+  name here). Unlocks: the drift-loop article.
 
 ## Launch gates (all required; none is waived by speed)
 - **Marketplace listing** approved and installable. Review is outside our control; a ZIP-only launch is not a

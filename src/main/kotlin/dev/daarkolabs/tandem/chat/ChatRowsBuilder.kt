@@ -19,7 +19,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.util.IdentityHashMap
 
-/** What the rows show beyond the state: [showThinking] is the `Show thinking` setting. */
+/** What the rows show beyond the state: [showThinking] is the `Show thinking rows` setting. */
 data class RowOptions(val showThinking: Boolean)
 
 /**
