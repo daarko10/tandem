@@ -19,18 +19,22 @@ Time matters here: do not spend time that can be avoided, and the earlier a corr
 - Model tiers: Tasks D1, D2, D3 and D5 run on Opus with an Opus per-task reviewer; Task D4 (docs) runs on Sonnet; the final whole-branch review runs on Fable. A task that fails review twice moves to Fable.
 - Hard rules of `CLAUDE.md` 6 and 8: every protocol change gets a fixture test; unknown message types parse to `Unknown(raw)`, never throw; the product is "Tandem", which works with Claude Code. Nothing in this plan changes Kotlin: `./gradlew check` stays as it is.
 - `docs/launch.md` is not edited (its milestone bullet "Drift loop closed" is appended by the owner after the first real merged fix); `docs/protocol.md` is not edited (the fixer edits it per drift); nothing under `.github/` is ever edited by the fixer.
-- Exact values from the spec: workflow name `Drift fix`; job `fix`; `concurrency.group: drift-fix`, `cancel-in-progress: false`; job `timeout-minutes: 90`, action step `timeout-minutes: 75`; permissions `id-token: write`, `contents: write`, `pull-requests: write`, `issues: write`, `actions: read`; artifact `contract-recording`; recording dir `build/drift/recording`; classification `build/drift/classification.json`; re-recording dir (unused today) `build/drift/recorded`; labels `contract-drift` and `rehearsal`; standing issue title `CLI contract: the CLI did not answer`; branch `drift/<YYYY-MM-DD>-<run id>`; fixture names `drift-<YYYY-MM-DD>` and `rehearsal-<YYYY-MM-DD>` (UTC date of the red run); kinds `cli-did-not-answer`, `decoder`, `reader`, `unknown`; detail cut at 400 characters; `--model claude-opus-5-5`, `--max-turns 60`; the allowlist `Read,Grep,Glob,Edit,Write,Bash(./gradlew:*),Bash(python3:*),Bash(git:*),Bash(gh auth setup-git),Bash(gh pr:*),Bash(gh issue:*),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)`; edit allowlist `src/main/kotlin/dev/daarkolabs/tandem/protocol/`, `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`, `src/test/`, `docs/protocol.md`; the four Anthropic identifiers exactly as `cli-contract.yml` carries them in `env:` (`fdrl_019BGJmAMDiAL6DmAQENbhfk`, `8336fe5f-a7f7-4255-9fe0-7f594d5a8ec8`, `svac_01F45vdtRBnPSRZHXY8ek1fn`, `wrkspc_012JJzfEG8tDKeta7pe3CCa5`).
-- One deliberate addition to the spec's prompt: the workflow passes `date=<YYYY-MM-DD>` (the red run's UTC date) as a fifth argument, so the skill never needs `actions: read` through the App token to look the run up. Run by hand, `date=` defaults to today in UTC.
-- `scripts/*.py` run under `python3 -I` and import only the standard library (PyYAML only in `test_workflows.py`, which skips itself when PyYAML is missing). Tests run with `cd scripts && python3 -m unittest -v`, as `build.yml`'s "Script tests" step does.
+- Exact values from the spec: workflow name `Drift fix`; job `fix`; `concurrency.group: drift-fix`, `cancel-in-progress: false`; job `timeout-minutes: 90`, action step `timeout-minutes: 75`; permissions `id-token: write`, `contents: write`, `pull-requests: write`, `issues: write`, `actions: read`; artifact `contract-recording`; recording dir `build/drift/recording`; classification `build/drift/classification.json`; re-recording dir (unused today) `build/drift/recorded`; labels `contract-drift` and `rehearsal`; standing issue title `CLI contract: the CLI did not answer`; branch `drift/<YYYY-MM-DD>-<run id>`; fixture names `drift-<YYYY-MM-DD>` and `rehearsal-<YYYY-MM-DD>` (UTC date of the red run); kinds `cli-did-not-answer`, `decoder`, `reader`, `unknown`; detail cut at 400 characters; `--model claude-opus-5-5`, `--max-turns 60`; the tool allowlist `Read,Grep,Glob,Edit,Write,Bash(./gradlew:*),Bash(python3:*),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin drift/:*),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)` (24 entries, verbs not programs); edit allowlist `src/main/kotlin/dev/daarkolabs/tandem/protocol/`, `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`, `src/test/`, `docs/protocol.md`; the four Anthropic identifiers exactly as `cli-contract.yml` carries them in `env:` (`fdrl_019BGJmAMDiAL6DmAQENbhfk`, `8336fe5f-a7f7-4255-9fe0-7f594d5a8ec8`, `svac_01F45vdtRBnPSRZHXY8ek1fn`, `wrkspc_012JJzfEG8tDKeta7pe3CCa5`).
+- The workflow passes `date=<YYYY-MM-DD>` (the red run's UTC date) as the prompt's fifth argument, so the skill never needs `actions: read` through the App token to look the run up. Run by hand, `date=` defaults to today in UTC. The prompt's `rehearsal=` comes from the marker file `rehearsal` in the recording (written by `make_drift.py`), not from a dispatch input: the real rehearsal arrives through `workflow_run` like any red.
+- The fixer's tool allowlist names verbs, not programs (spec, runtime step 8): with the App token no merge, close, force push, branch deletion or push outside `drift/` is possible. The skill prescribes no command outside the list and no compound command whose parts are not all on it (in headless mode a denied call is a dead end, not a prompt): the script tests run as `python3 -m unittest discover -s scripts -t scripts` from the repository root, the leak stop removes copies with `git clean -f --`, the labels are created by the workflow and never by the skill, the push is `git push -u origin drift/…`, and no `gh auth setup-git` or identity fallback exists (the action sets the `origin` URL and `user.name`/`user.email` before the CLI starts).
+- `scripts/*.py` run under `python3 -I` and import only the standard library (PyYAML only in `test_workflows.py`, which skips itself when PyYAML is missing). Tests run with `python3 -m unittest discover -s scripts -t scripts -v` from the worktree root (the skill's spelling), the same set `build.yml`'s "Script tests" step runs as `cd scripts && python3 -m unittest`.
 - The federation rule admits only `refs/heads/main`: the rehearsal (D5) can run only after `ci/drift-loop` is merged. Everything else is verified on the branch before that, so the merge is not a wait: D1 proves both rehearsal modes against the real decoder locally, D2 and D3 prove the YAML, and the rehearsal follows the merge immediately.
 
 ## Review Focus
 
 1. A recording whose stream has a reply but no `result` line (the CLI was killed mid-run): the nightly's check passes, the decode test fails with "no result", and the classification must be `decoder` with that message, not kind 1 → pinned in D1 (`test_a_reply_without_a_result_is_decoder_drift_when_the_decode_test_failed`).
 2. A failure message with XML-escaped characters (Kotlin's `[assistant, user]` lists and quoted file names) must come out as the test wrote it, not as `&quot;` → pinned in D1 (`test_failure_messages_are_unescaped`).
-3. The results directory holds XML of every test class when the whole `test` task ran; a failure in another class must not be read as drift → pinned in D1 (`test_failures_of_other_test_classes_are_ignored`).
+3. The results directory holds XML of every test class when the whole `test` task ran; a failure in another class must not be read as drift, even under a contract test's name → pinned in D1 (`test_failures_of_other_test_classes_are_ignored` fails `DECODE_TEST` under `CardsTest`, so it is red when `failures()` ignores `classname`).
 4. `make_drift.py` given `src/test/resources/fixtures/../fixtures/x`, or a symlink into the fixtures directory, must refuse as it refuses the plain path → pinned in D1 (`test_writing_under_the_fixtures_directory_is_refused` covers both spellings).
 5. A reader failure that says "no transcripts in" (the stream is fine, the transcript copy never happened) has nothing for the skill to promote; it must be `unknown`, not `reader`, so the agent is not started → pinned in D1 (`test_a_reader_failure_for_missing_transcripts_is_unknown`).
+6. A stream whose `result` holds the reply text but has no `assistant` line is a renamed core type, the drift the loop exists for, not "the CLI did not answer" → pinned in D1 (`test_a_result_with_text_but_no_assistant_line_is_decoder_drift`) and in D3 (the nightly's check step reds it with its own message).
+7. `make_drift.py <mode> <dir> --from <dir>` mutates a recording in place: every source file is read before any output is written, and the result is byte-identical to the fixture-sourced run → pinned in D1 (`test_from_mutates_a_recording_in_place`).
+8. A kind-1 red with no artifact must reach the report step: `build/drift` is created by the fetch step before anything is written there, and Gradle never runs for kind 1 → pinned in D2 (`test_the_fetch_the_precheck_and_the_allowlist_step_fail_loudly`).
 
 ---
 
@@ -56,21 +60,22 @@ Time matters here: do not spend time that can be avoided, and the earlier a corr
   def classify(recording: str, results_dir: str) -> dict   # {"kind", "cli_version", "detail", "files"}
   def main(argv: list[str]) -> int                    # prints json.dumps(classify(...)) and returns 0; returns 2 on a usage error (usage on stderr)
 
-  # scripts/make_drift.py                Usage: make_drift.py <mode> <out-dir>
+  # scripts/make_drift.py                Usage: make_drift.py <mode> <out-dir> [--from <recording-dir>]
   FIXTURES = <repo>/src/test/resources/fixtures      # from __file__, normpath
   SOURCE = "history-reply"
   MODES = ("init-model-key", "transcript-content-key")
+  MARKER = "rehearsal"
   def rename_key(obj: dict, old: str, new: str) -> dict           # same key order
   def mutate_stream(lines: list[str], mode: str) -> list[str]
   def mutate_transcript(lines: list[str], mode: str) -> list[str]
-  def main(mode: str, out_dir: str) -> None          # sys.exit(...) on an unknown mode or an out_dir under FIXTURES
+  def main(mode: str, out_dir: str, source: str | None = None) -> None   # sys.exit(...) on an unknown mode, an out_dir under FIXTURES, or a source missing one of its three files
   ```
-  Output layout of `make_drift.py`: `<out>/contract-hello.ndjson`, `<out>/transcripts/contract-hello.jsonl`, `<out>/transcripts/session-id.jsonl` (the transcript twin again).
+  Output layout of `make_drift.py`: `<out>/contract-hello.ndjson`, `<out>/transcripts/contract-hello.jsonl`, `<out>/transcripts/session-id.jsonl` and the marker `<out>/rehearsal` (one line: the mode), which the fixer reads as `rehearsal=true`. Without `--from` the sources are the `history-reply` fixture pair (the twin written as both transcripts); with `--from <dir>` they are that recording's three files, each mutated from its own lines, and `<dir>` may be `<out>` itself: all three are read before any file is written (the nightly's rehearsal step runs `make_drift.py "$DRIFT" build/contract --from build/contract`).
   The skill is invoked as `/fix-contract-drift run=<url> recording=<dir> classification=<file> rehearsal=<true|false> date=<YYYY-MM-DD>`.
 
 - [ ] **Step 1: Write the failing tests for `classify_drift.py`**
 
-`scripts/test_classify_drift.py`, in the style of `test_copy_transcript.py` (a `TemporaryDirectory` per test, helpers). Helpers: `recording(self, stream: list | None, transcripts: tuple[str, ...] = ("contract-hello.jsonl", "session-id.jsonl")) -> str` creates `<dir>` (`self.root/recording`), writes `<dir>/contract-hello.ndjson` unless `stream is None` (one `json.dumps` per element; a `str` element is written verbatim) and an empty file per name under `<dir>/transcripts/`; `results(self, failing: dict[str, str], classname="dev.daarkolabs.tandem.protocol.ContractTest") -> str` writes `TEST-<classname>.xml` into the one directory `self.root/test-results` (created on first use, so two calls share it) with `xml.etree.ElementTree` (a `<testsuite>` with a `<testcase name=… classname=…>` for both contract tests, each failing one holding `<failure message=… type="java.lang.AssertionError">`), and returns that directory. `INIT = {"type": "system", "subtype": "init", "model": "claude-sonnet-5-5", "apiKeySource": "none", "claude_code_version": "2.1.302"}`, `REPLY = {"type": "assistant", "message": {"content": [{"type": "text", "text": "pong"}]}}`, `OK = {"type": "result", "subtype": "success", "is_error": False, "result": "pong"}`.
+`scripts/test_classify_drift.py`, in the style of `test_copy_transcript.py` (a `TemporaryDirectory` per test, helpers). Helpers: `recording(self, stream: list | None, transcripts: tuple[str, ...] = ("contract-hello.jsonl", "session-id.jsonl")) -> str` creates `<dir>` (`self.root/recording`), writes `<dir>/contract-hello.ndjson` unless `stream is None` (one `json.dumps` per element; a `str` element is written verbatim) and an empty file per name under `<dir>/transcripts/`; `results(self, failing: dict[str, str], classname="dev.daarkolabs.tandem.protocol.ContractTest") -> str` writes `TEST-<classname>.xml` into the one directory `self.root/test-results` (created on first use, so two calls share it) with `xml.etree.ElementTree` (a `<testsuite>` with a `<testcase name=… classname=…>` for both contract tests and for every other key of `failing`, each failing one holding `<failure message=… type="java.lang.AssertionError">`), and returns that directory. `INIT = {"type": "system", "subtype": "init", "model": "claude-sonnet-5-5", "apiKeySource": "none", "claude_code_version": "2.1.302"}`, `REPLY = {"type": "assistant", "message": {"content": [{"type": "text", "text": "pong"}]}}`, `OK = {"type": "result", "subtype": "success", "is_error": False, "result": "pong"}`.
 
 ```python
 def test_no_recording_is_the_cli_not_answering(self):
@@ -97,6 +102,10 @@ def test_no_assistant_line_uses_the_errors_field(self):
     out = classify_drift.classify(self.recording([INIT, {"type": "result", "errors": ["boom"]}]), self.results({}))
     self.assertEqual("cli-did-not-answer", out["kind"])
     self.assertEqual("The CLI did not answer (apiKeySource='none'): [\"boom\"]", out["detail"])
+
+def test_a_result_with_text_but_no_assistant_line_is_decoder_drift(self):
+    out = classify_drift.classify(self.recording([INIT, OK]), self.results({}))        # the reply came under a type the decoder does not know
+    self.assertEqual(("decoder", "2.1.302", "contract-hello.ndjson: no assistant line, result text present"), (out["kind"], out["cli_version"], out["detail"]))
 
 def test_a_decode_failure_is_decoder_drift(self):
     message = "contract-hello.ndjson: [assistant]"
@@ -138,9 +147,9 @@ def test_failure_messages_are_unescaped(self):
 
 def test_failures_of_other_test_classes_are_ignored(self):
     results = self.results({})
-    self.results({"something else": "boom"}, classname="dev.daarkolabs.tandem.chat.CardsTest")   # same dir
+    self.results({classify_drift.DECODE_TEST: "boom"}, classname="dev.daarkolabs.tandem.chat.CardsTest")   # same dir; a contract test's name under another class
     out = classify_drift.classify(self.recording([INIT, REPLY, OK]), results)
-    self.assertEqual("unknown", out["kind"])
+    self.assertEqual(("unknown", "neither contract test failed"), (out["kind"], out["detail"]))                   # red when failures() ignores classname
 
 def test_a_reader_failure_for_missing_transcripts_is_unknown(self):
     out = classify_drift.classify(self.recording([INIT, REPLY, OK], transcripts=()),
@@ -172,7 +181,7 @@ Module docstring in the style of `copy_transcript.py` (usage, the four kinds, th
 
 1. `recording` is not a directory or has no `contract-hello.ndjson` → `cli-did-not-answer`, `"the run left no recording"`.
 2. no line with `type == "system"` and `subtype == "init"` → `cli-did-not-answer`, `"no system/init in contract-hello.ndjson"`.
-3. `result.get("is_error")` truthy or no `assistant` line → `cli-did-not-answer`, detail `f"The CLI did not answer (apiKeySource={init.get('apiKeySource')!r}): {text[:DETAIL_LIMIT]}"` where `text = result["result"] if isinstance(result.get("result"), str) else json.dumps(result.get("errors", result))` (the nightly's own expression; `result` is `{}` without a result line).
+3. `result.get("is_error")` truthy → `cli-did-not-answer`, detail `f"The CLI did not answer (apiKeySource={init.get('apiKeySource')!r}): {text[:DETAIL_LIMIT]}"` where `text = result["result"] if isinstance(result.get("result"), str) else json.dumps(result.get("errors", result))` (the nightly's own expression; `result` is `{}` without a result line). Otherwise, when no `assistant` line exists: `decoder` with the detail `"contract-hello.ndjson: no assistant line, result text present"` when `result.get("result")` is a non-empty string (the reply came under a type the decoder does not know; the nightly's check step reds the run the same way, D3), else `cli-did-not-answer` with the detail above (an empty or missing result). A stream with an `assistant` line and no `result` line goes on to rule 4 (Review Focus 1).
 4. `results_dir` is not a directory → `unknown`, `f"no test results in {results_dir}"`.
 5. the decode test failed → `decoder`; detail is its message, or `decode + "\n" + reader` when the reader test failed too.
 6. the reader test failed → `unknown` when its message starts with `"no transcripts in"`, else `reader` with the message.
@@ -183,11 +192,11 @@ Module docstring in the style of `copy_transcript.py` (usage, the four kinds, th
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree/scripts && python3 -m unittest test_classify_drift -v`
-Expected: `Ran 17 tests` … `OK`
+Expected: `Ran 18 tests` … `OK`
 
 - [ ] **Step 5: Write the failing tests for `make_drift.py`**
 
-`scripts/test_make_drift.py`. `setUp` creates a `TemporaryDirectory`; `self.out = os.path.join(self.root, "recording")`. Helpers `fixture(name) -> list[str]` (the committed file's lines via `readlines()`, newlines kept) and `written(rel) -> list[str]` (the output file's lines). `UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")`.
+`scripts/test_make_drift.py`. `setUp` creates a `TemporaryDirectory`; `self.out = os.path.join(self.root, "recording")`. Helpers `fixture(name) -> list[str]` (the committed file's lines via `readlines()`, newlines kept), `written(rel) -> list[str]` (the output file's lines) and `recording_from_fixture(dir) -> str` (copies `history-reply.ndjson` to `<dir>/contract-hello.ndjson` and the twin to `<dir>/transcripts/contract-hello.jsonl` and `<dir>/transcripts/session-id.jsonl` with `shutil.copy`, returns `dir`). `UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")`.
 
 ```python
 def test_init_model_key_renames_only_the_init_line_s_model_key(self):
@@ -221,10 +230,28 @@ def test_transcript_content_key_renames_content_on_every_user_line_of_both_trans
                 self.assertEqual(a, b)
         self.assertEqual(1, renamed)
 
-def test_the_output_layout(self):
+def test_the_output_layout_and_the_marker(self):
     make_drift.main("init-model-key", self.out)
     files = sorted(os.path.relpath(os.path.join(d, f), self.out) for d, _, fs in os.walk(self.out) for f in fs)
-    self.assertEqual(["contract-hello.ndjson", "transcripts/contract-hello.jsonl", "transcripts/session-id.jsonl"], files)
+    self.assertEqual(["contract-hello.ndjson", "rehearsal", "transcripts/contract-hello.jsonl", "transcripts/session-id.jsonl"], files)
+    self.assertEqual(["init-model-key\n"], self.written("rehearsal"))
+
+def test_from_mutates_a_recording_in_place(self):
+    for mode in make_drift.MODES:
+        recording = self.recording_from_fixture(os.path.join(self.root, mode))
+        make_drift.main(mode, recording, source=recording)                      # in place: everything read, then written
+        make_drift.main(mode, os.path.join(self.out, mode))
+        for rel in ("contract-hello.ndjson", "transcripts/contract-hello.jsonl", "transcripts/session-id.jsonl", "rehearsal"):
+            with open(os.path.join(recording, rel), "rb") as a, open(os.path.join(self.out, mode, rel), "rb") as b:
+                self.assertEqual(a.read(), b.read(), rel)
+
+def test_from_refuses_an_incomplete_recording_before_writing(self):
+    recording = os.path.join(self.root, "partial"); os.makedirs(recording)
+    shutil.copy(os.path.join(make_drift.FIXTURES, "history-reply.ndjson"), os.path.join(recording, "contract-hello.ndjson"))
+    with self.assertRaises(SystemExit) as raised:
+        make_drift.main("init-model-key", self.out, source=recording)
+    self.assertIn("transcripts/contract-hello.jsonl", str(raised.exception))
+    self.assertFalse(os.path.exists(self.out))
 
 def test_the_placeholders_survive(self):
     for mode in make_drift.MODES:
@@ -257,12 +284,12 @@ Expected: `ModuleNotFoundError: No module named 'make_drift'`
 
 - [ ] **Step 7: Implement `scripts/make_drift.py`**
 
-Docstring: usage, the two modes and what each breaks (`init-model-key`: `system/init.model` → `model_id`, so `Ndjson` decodes the line to `Unknown` and the decode test fails with "no system/init"; `transcript-content-key`: every transcript `user` line's `message.content` → `message.blocks`, so the reader yields no user entry), and that it never writes under `src/test/resources/fixtures`. A mutated line is re-serialized with `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` plus `"\n"` (the redactor's format); every other line is copied byte for byte. `main` checks `mode in MODES` (else `sys.exit(f"make_drift: unknown mode {mode!r}; one of {', '.join(MODES)}")`), then refuses when `os.path.realpath(out_dir)` equals or starts with `os.path.realpath(FIXTURES) + os.sep` (`sys.exit(f"make_drift: refusing to write under the fixtures directory: {out_dir}")`), then reads the two source files, writes the three outputs (`os.makedirs(..., exist_ok=True)`) and prints `wrote <path>` per file to stderr. `if __name__ == "__main__": main(*sys.argv[1:])` after a `len(sys.argv) != 3` usage exit.
+Docstring: usage (`make_drift.py <mode> <out-dir> [--from <recording-dir>]`), the two modes and what each breaks (`init-model-key`: `system/init.model` → `model_id`, so `Ndjson` decodes the line to `Unknown` and the decode test fails with "no system/init"; `transcript-content-key`: every transcript `user` line's `message.content` → `message.blocks`, so the reader yields no user entry), the `--from` form (the nightly's rehearsal mutates its own `build/contract` in place), the marker `rehearsal` (the fixer reads it as `rehearsal=true`), and that it never writes under `src/test/resources/fixtures`. A mutated line is re-serialized with `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` plus `"\n"` (the redactor's format); every other line is copied byte for byte. `main` checks `mode in MODES` (else `sys.exit(f"make_drift: unknown mode {mode!r}; one of {', '.join(MODES)}")`), then refuses when `os.path.realpath(out_dir)` equals or starts with `os.path.realpath(FIXTURES) + os.sep` (`sys.exit(f"make_drift: refusing to write under the fixtures directory: {out_dir}")`), then reads every source into memory before writing anything: without `source`, the two fixture files (the twin serves as both transcripts); with `source`, `<source>/contract-hello.ndjson`, `<source>/transcripts/contract-hello.jsonl` and `<source>/transcripts/session-id.jsonl`, each mutated from its own lines (`sys.exit(f"make_drift: no {rel} in {source}")` when one is missing, before any write, so an in-place run never half-mutates). Then it writes the three outputs and `<out>/rehearsal` holding `mode + "\n"` (`os.makedirs(..., exist_ok=True)`) and prints `wrote <path>` per file to stderr. Argument parsing under `if __name__ == "__main__":`: `sys.argv[1:]` is `[mode, out]` or `[mode, out, "--from", dir]`; anything else prints `__doc__` to stderr and exits 2.
 
-- [ ] **Step 8: Run the tests to verify they pass**
+- [ ] **Step 8: Run the tests to verify they pass, with the skill's own command**
 
-Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree/scripts && python3 -m unittest -v`
-Expected: every test of `test_classify_drift`, `test_make_drift`, `test_copy_transcript`, `test_drive_cli` and `test_redact_fixture` reports `ok`; the summary ends `OK`.
+Run, from the worktree root, the spelling the skill prescribes (no `cd`: it is not on the fixer's tool allowlist): `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree && python3 -m unittest discover -s scripts -t scripts -v`
+Expected: every test of `test_classify_drift` (18), `test_make_drift` (8), `test_copy_transcript`, `test_drive_cli` and `test_redact_fixture` reports `ok`; the summary ends `OK`. This proves the command the skill's section 7 and the PR body's "Verified" bullet name; it is the same set `cd scripts && python3 -m unittest` runs.
 
 - [ ] **Step 9: Prove both rehearsal modes against the real decoder and reader**
 
@@ -276,17 +303,17 @@ python3 -I scripts/make_drift.py transcript-content-key build/drift/recording
 ./gradlew test --tests '*ContractTest*' -Dtandem.contractDir="$PWD/build/drift/recording" --rerun; echo "gradle exit $?"
 python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test
 ```
-Expected: the first Gradle run fails only `live transcripts decode with every core type recognised` and the classification prints `{"kind": "decoder", "cli_version": "2.1.301", "detail": "contract-hello.ndjson: no system/init", "files": [...three files...]}`; the second fails only `live transcripts load with the reader` and prints `"kind": "reader"` with a detail ending in `: no user entry`. If a mode does not go red this way, the mutation, not the decoder, is wrong: fix `make_drift.py` and repeat. `./gradlew test` with no property still skips `ContractTest` (`assumeTrue`).
+Expected: the first Gradle run fails only `live transcripts decode with every core type recognised` and the classification prints `{"kind": "decoder", "cli_version": "2.1.301", "detail": "contract-hello.ndjson: no system/init", "files": ["contract-hello.ndjson", "rehearsal", "transcripts/contract-hello.jsonl", "transcripts/session-id.jsonl"]}`; the second fails only `live transcripts load with the reader` and prints `"kind": "reader"` with a detail ending in `: no user entry` (naming `contract-hello.jsonl` or `session-id.jsonl`: `ContractTest` stops at the first failing transcript in directory order, which is why the skill copies both). If a mode does not go red this way, the mutation, not the decoder, is wrong: fix `make_drift.py` and repeat. `./gradlew test` with no property still skips `ContractTest` (`assumeTrue`).
 
 - [ ] **Step 10: Write the skill `.claude/skills/fix-contract-drift/SKILL.md`**
 
-Frontmatter and body below; the body is the spec's procedure and the commands are exact. Write it for an agent that has not seen the spec.
+Frontmatter and body below; the body is the spec's procedure and the commands are exact. Write it for an agent that has not seen the spec. Every command in it is on the `allowed-tools` list (the action's `--allowedTools`, D2): in the workflow a denied call is a dead end, not a prompt.
 
 ````markdown
 ---
 name: fix-contract-drift
 description: "Turn a red nightly CLI contract run into a pull request carrying the recording as a fixture and the minimal decoder or reader change. Arguments: run=<url> recording=<dir> classification=<file> rehearsal=<true|false> date=<YYYY-MM-DD>."
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(./gradlew:*), Bash(python3:*), Bash(git:*), Bash(gh auth setup-git), Bash(gh pr:*), Bash(gh issue:*), Bash(cp:*), Bash(ls:*), Bash(cat:*), Bash(grep:*), Bash(date:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(./gradlew:*), Bash(python3:*), Bash(gh pr create:*), Bash(gh issue list:*), Bash(gh issue create:*), Bash(gh issue comment:*), Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git switch:*), Bash(git clean:*), Bash(git push -u origin drift/:*), Bash(cp:*), Bash(ls:*), Bash(cat:*), Bash(grep:*), Bash(date:*)
 ---
 
 # Fix contract drift
@@ -300,26 +327,32 @@ obtained, the better.
 
 You never fix authentication, never guess, never merge, never edit `.github/`, `build.gradle.kts` or `CLAUDE.md`,
 never lower the coverage bound, and never re-record: the recording is the fixture. A re-recorded scenario, when the
-workflow records one, appears under `build/drift/recorded`; today it records none.
+workflow records one, appears under `build/drift/recorded`; today it records none. Only the commands named here are
+allowed (the tool list above). In the workflow a denied command is a dead end, not a prompt: try no other, and run no
+compound command (`cd … && …`) whose parts are not all on the list.
 
 ## 1. Read the classification
 `python3 -I scripts/classify_drift.py <recording> build/test-results/test` (run `./gradlew test --tests '*ContractTest*'
 -Dtandem.contractDir=<recording> --rerun` first if `build/test-results/test` is missing). `cli-did-not-answer` or
 `unknown`: stop, open no branch; by hand, say what `detail` is. `decoder` or `reader`: go on; `detail` holds the
-assertion message(s), both when both tests failed (decoder first).
+assertion message(s), both when both tests failed (decoder first). A `decoder` whose detail is `no assistant line,
+result text present` comes with a green decode test: the reply arrived under a type `Ndjson` does not know (see 5).
 
 ## 2. Name the fixture and copy the recording
 Name `drift-<date>`, or `rehearsal-<date>` when `rehearsal=true`. Copy `<recording>/contract-hello.ndjson` to
 `src/test/resources/fixtures/<name>.ndjson` and `<recording>/transcripts/contract-hello.jsonl` to
-`src/test/resources/fixtures/transcripts/<name>.jsonl`; for reader drift whose detail names `session-id.jsonl`, copy
-`<recording>/transcripts/session-id.jsonl` to `transcripts/<name>-session-id.jsonl` too. Never overwrite an existing
-fixture: the committed ones pin recorded facts (`plain-reply` pins 2.1.300 and one "pong").
+`src/test/resources/fixtures/transcripts/<name>.jsonl`. For reader drift, always copy
+`<recording>/transcripts/session-id.jsonl` to `src/test/resources/fixtures/transcripts/<name>-session-id.jsonl` too,
+whichever file the detail names: the test stops at the first failing transcript in directory order, and both carry
+the new shape. Never overwrite an existing fixture: the committed ones pin recorded facts (`plain-reply` pins 2.1.300
+and one "pong").
 
 ## 3. Run the redactor's safety net
 `python3 -I scripts/redact_fixture.py <copy> <copy>` for each copied file (onto itself; redacted input changes
-nothing). Any `unredacted id` or `<leaked-N>` on stderr is a stop: delete the copies, open no PR, and comment on the
-open issue titled "CLI contract: the CLI did not answer" (`gh issue list --label contract-drift --state open`; create
-it with that title and label when none is open) naming the key path the redactor printed, never the value. Then
+nothing). Any `unredacted id` or `<leaked-N>` on stderr is a stop: remove the copies with `git clean -f -- <copies>`,
+open no PR, and comment on the open issue titled "CLI contract: the CLI did not answer" (`gh issue list --label
+contract-drift --state open --json number,title`; `gh issue create` with that title and the label `contract-drift`
+when none is open) naming the key path the redactor printed, never the value. Then
 `grep -nE '@|[0-9a-f]{8}-[0-9a-f]{4}-|toolu_|msg_|fv-az|runner' <copies>`: an e-mail address, a UUID, an API id, a
 hostname or an account name is the same stop; a package name with `@` inside reply text is not.
 
@@ -334,7 +367,9 @@ for its malformed version (still `Unknown`, never a throw).
 ## 5. Patch minimally
 Decoder drift: `src/main/kotlin/dev/daarkolabs/tandem/protocol/Ndjson.kt` and `CliMessage.kt` only; a renamed field is
 read under both names, a new required field is read optionally, a new type or subtype gets a typed message only when
-Tandem needs it and `Unknown(raw)` otherwise. Reader drift: `TranscriptReader.kt` and `TranscriptChain.kt` under
+Tandem needs it and `Unknown(raw)` otherwise. For the detail `no assistant line, result text present`, write first a
+test that decodes the new fixture and asserts a `CliMessage.Assistant`; the fix reads the new type beside `assistant`.
+Reader drift: `TranscriptReader.kt` and `TranscriptChain.kt` under
 `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`. Validate every field, no IntelliJ imports in `protocol/`,
 no logging of prompt or file contents. Edits are allowed only under `src/main/kotlin/dev/daarkolabs/tandem/protocol/`,
 `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`, `src/test/` and `docs/protocol.md`; the workflow closes a
@@ -347,32 +382,36 @@ changed shape in the section that describes it, citing the fixture by name and t
 is still possible. No reference to any spec or plan.
 
 ## 7. Verify
-`./gradlew check` and `cd scripts && python3 -m unittest`. If `check` fails for a reason unrelated to the drift (a
-flaky platform test, disk space), run it once more; still red: go on and say so in the PR. The live contract check
-cannot run on the branch (the federation rule admits `main` only); the evidence is the red run's artifact plus `check`
-here, and the next nightly after the merge is the real proof.
+`./gradlew check` and, from the repository root, `python3 -m unittest discover -s scripts -t scripts` (the same tests
+as `cd scripts && python3 -m unittest`, which you cannot run: `cd` is not on the list). If `check` fails for a reason
+unrelated to the drift (a flaky platform test, disk space), run it once more; still red: go on and say so in the PR.
+The live contract check cannot run on the branch (the federation rule admits `main` only); the evidence is the red
+run's artifact plus `check` here, and the next nightly after the merge is the real proof.
 
 ## 8. Commit and open the pull request
-`gh auth setup-git` (git pushes with the token the workflow exported). Branch `drift/<date>-<run id>` from the current
-`HEAD` of `main` (`git switch -c drift/<date>-<run id>`). One commit, no trailers, subject
-`fix(protocol): follow CLI <version>: <what changed>` or `fix(transcript): …`; if `git config user.name` is empty,
-commit with `-c user.name='claude[bot]' -c user.email='claude[bot]@users.noreply.github.com'`. Push, then
-`gh label create contract-drift --force --color B60205 --description "Opened or reported by the drift loop"` and
-`gh pr create --base main --label contract-drift --title "<subject>" --body-file <file>` (add `--draft --label
-rehearsal` and the title prefix `[rehearsal] ` in a rehearsal, whose body starts with the line "This is a rehearsal
-of the drift loop: close it, do not merge it."). The body, for a reader:
+Branch `drift/<date>-<run id>` from the current `HEAD` of `main` (`git switch -c drift/<date>-<run id>`). One commit,
+no trailers, subject `fix(protocol): follow CLI <version>: <what changed>` or `fix(transcript): …`. The author and the
+push credential are set before you start (in the workflow, the Claude GitHub App: `claude[bot]`, and the App token in
+the `origin` URL): set no identity and run no `gh auth setup-git`. `git push -u origin drift/<date>-<run id>`. Write
+the body to `build/drift/pr-body.md` (`build/` is gitignored, so it cannot end up in the commit), then
+`gh pr create --base main --label contract-drift --title "<subject>" --body-file build/drift/pr-body.md` (add
+`--draft --label rehearsal` and the title prefix `[rehearsal] ` in a rehearsal, whose body starts with the line "This
+is a rehearsal of the drift loop: close it, do not merge it."). The labels exist: the workflow creates them before
+you start; by hand, the owner created `contract-drift` and `rehearsal` once. The body, for a reader:
 - **What the CLI changed**: one paragraph, the CLI version from the recording and the version the previous fixtures
   were recorded on (Sources list of docs/protocol.md).
 - **The fixture line that shows it**: fixture name, line number, the field or type, quoted.
 - **What the decoder (or reader) does now**, and what it still does for the old shape.
-- **Verified**: `./gradlew check` on the branch, `cd scripts && python3 -m unittest`, the redactor's safety net clean.
+- **Verified**: `./gradlew check` on the branch, `python3 -m unittest discover -s scripts -t scripts`, the redactor's
+  safety net clean.
 - **Not verified**: the live check on this branch (federation admits `main` only); the next nightly after merge is
   the proof. Anything you could not reproduce.
 - The run link (`run=`) and the artifact name `contract-recording`.
 
 ## 9. Stop
 No merge, no second PR, no comment anywhere else. If a step after the push fails, still open the PR, as a draft, and
-name the failing step in the body: a half-done branch is more useful than silence.
+name the failing step in the body: a half-done branch is more useful than silence. (If you are stopped before you can,
+the workflow opens an `[incomplete]` draft for the pushed branch and goes red.)
 ````
 
 - [ ] **Step 11: Check the skill is well-formed**
@@ -383,8 +422,7 @@ text = open(".claude/skills/fix-contract-drift/SKILL.md", encoding="utf-8").read
 front = yaml.safe_load(re.match(r"---\n(.*?)\n---\n", text, re.S).group(1))
 print(front["name"], "|", len(front["allowed-tools"].split(",")), "tools")
 PY`
-Expected: `fix-contract-drift | 16 tools`
-
+Expected: `fix-contract-drift | 24 tools`
 - [ ] **Step 12: Commit**
 
 ```bash
@@ -452,8 +490,8 @@ def test_the_skill_and_the_action_allow_the_same_tools(self):
 def test_the_steps_run_in_the_spec_s_order(self):
     names = [s.get("name") for s in steps(load(DRIFT), "fix")]
     expected = ["Free disk space", "Check out main", None, None, "Ensure the labels exist", "Name the red run", "Fetch the recording",
-                "Mutate a recording for the rehearsal", "Reproduce the red", "Classify", "Report a run the agent cannot fix",
-                "Skip when a fix is already waiting", "Fix the drift", "Enforce the edit allowlist"]
+                "Mutate a recording for the rehearsal", "Classify before Gradle", "Reproduce the red", "Classify",
+                "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Fix the drift", "Enforce the edit allowlist"]
     self.assertEqual(expected, names)
     wf = load(DRIFT)
     self.assertTrue(step(wf, "fix", "Reproduce the red")["continue-on-error"])
@@ -461,8 +499,32 @@ def test_the_steps_run_in_the_spec_s_order(self):
     for name in ("Name the red run", "Fetch the recording", "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Enforce the edit allowlist"):
         self.assertEqual("${{ github.token }}", step(wf, "fix", name)["env"]["GH_TOKEN"])
     self.assertIn("conclusion", step(wf, "fix", "Name the red run")["run"])      # a green or foreign run is refused before any spend
-    self.assertIn("scripts/make_drift.py", step(wf, "fix", "Mutate a recording for the rehearsal")["run"])
+    mutate = step(wf, "fix", "Mutate a recording for the rehearsal")
+    self.assertIn("scripts/make_drift.py", mutate["run"])
+    self.assertEqual("${{ inputs.mode }}", mutate["env"]["MODE"])                 # through env, never interpolated into the shell line
+    self.assertNotIn("${{", mutate["run"])
     self.assertIn("gh run download", step(wf, "fix", "Fetch the recording")["run"])
+
+def test_the_fetch_the_precheck_and_the_allowlist_step_fail_loudly(self):
+    wf = load(DRIFT)
+    fetch = step(wf, "fix", "Fetch the recording")["run"]
+    self.assertIn("mkdir -p build/drift", fetch)                                  # a kind-1 red with no artifact must reach the report step
+    self.assertIn("set -euo pipefail", fetch)
+    self.assertIn('index("contract-recording")', fetch)                           # presence first: null is kind 1
+    self.assertNotIn("|| echo", fetch)                                            # any other download failure fails the job
+    precheck = step(wf, "fix", "Classify before Gradle")
+    self.assertEqual("precheck", precheck["id"])
+    self.assertIn("build/drift/precheck.json", precheck["run"])
+    self.assertIn("build/drift/recording/rehearsal", precheck["run"])            # the marker makes the run a rehearsal
+    for name in ("Reproduce the red", "Classify"):
+        self.assertIn("steps.precheck.outputs.kind != 'cli-did-not-answer'", step(wf, "fix", name)["if"])
+    report = step(wf, "fix", "Report a run the agent cannot fix")
+    self.assertIn("steps.precheck.outputs.kind == 'cli-did-not-answer'", report["if"])
+    self.assertIn("precheck.json", report["run"])
+    enforce = step(wf, "fix", "Enforce the edit allowlist")["run"]
+    self.assertIn("git ls-remote --heads origin", enforce)                        # a pushed branch without a PR gets a draft and a red run
+    self.assertIn("[incomplete] drift fix for run", enforce)
+    self.assertIn("rehearsal=${{ steps.precheck.outputs.rehearsal }}", step(wf, "fix", "Fix the drift")["with"]["prompt"])
 ```
 
 (The two `None` names are the `actions/setup-java@v6` and `gradle/actions/setup-gradle@v6` steps, unnamed as in `build.yml`.)
@@ -479,8 +541,9 @@ Expected: `FileNotFoundError: … drift-fix.yml` in every test.
 # (scripts/classify_drift.py), and runs the repository skill fix-contract-drift with Workload Identity Federation (the same
 # four identifiers as cli-contract.yml; the federation rule admits runs on main only). A run the CLI did not answer is
 # reported on the issue "CLI contract: the CLI did not answer" instead, and an open PR labelled contract-drift skips the
-# agent. Nothing here merges or publishes. Rehearsal: workflow_dispatch with rehearse=true (docs/superpowers is not read
-# by the fixer; CLAUDE.md names the loop).
+# agent. Nothing here merges or publishes. Rehearsal: `gh workflow run cli-contract.yml -f drift=<mode>` makes the nightly
+# mutate its own recording, so this workflow fires as for a real red; workflow_dispatch with rehearse=true runs the fixer
+# alone on a mutated fixture. CLAUDE.md names the loop.
 name: Drift fix
 
 on:
@@ -490,7 +553,7 @@ on:
   workflow_dispatch:
     inputs:
       rehearse:
-        description: Run the loop against a recording mutated on purpose; the draft PR it opens is closed, not merged
+        description: Run the fixer alone against a recording mutated on purpose, with no download; the draft PR it opens is closed, not merged
         type: boolean
         default: false
       mode:
@@ -552,7 +615,7 @@ jobs:
         run: |
           gh label create contract-drift --force --color B60205 --description "Opened or reported by the drift loop (drift-fix.yml)"
           gh label create rehearsal --force --color FBCA04 --description "A drift-loop rehearsal: close, do not merge"
-      # Outputs: id, url and UTC date of the red run (this run itself in a rehearsal), and rehearsal=true|false.
+      # Outputs: id, url and UTC date of the red run (this run itself when rehearse=true), and rehearse=true|false.
       - name: Name the red run
         id: run
         env:
@@ -573,37 +636,63 @@ jobs:
               echo "::error title=Drift fix::Run $id is not a failed CLI contract run: $(jq -r '[.workflowName, .conclusion] | join(", ")' <<<"$view")."; exit 1
             fi
           fi
-          printf 'id=%s\nurl=%s\ndate=%s\nrehearsal=%s\n' "$id" "$url" "$date" "$([ "$REHEARSE" = "true" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          printf 'id=%s\nurl=%s\ndate=%s\nrehearse=%s\n' "$id" "$url" "$date" "$([ "$REHEARSE" = "true" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "fixing run $url ($date)"
-      # A missing artifact is a red of kind 1 (the record step wrote nothing), classified below; not an error here.
+      # No artifact at all is a red of kind 1 (the record step wrote nothing), classified below; not an error here. Any
+      # other failure of the download (a 403, an API outage, a renamed artifact, an expired retention) fails the job: it is
+      # not "the CLI did not answer". build/drift is created here because the steps below write into it.
       - name: Fetch the recording
-        if: steps.run.outputs.rehearsal != 'true'
+        if: steps.run.outputs.rehearse != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "${{ steps.run.outputs.id }}" -n contract-recording -D build/drift/recording || echo "the run left no recording"
+          RUN_ID: ${{ steps.run.outputs.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/drift
+          present="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" --jq '[.artifacts[].name] | index("contract-recording")')"
+          if [ "$present" = "null" ]; then echo "the run left no recording"; exit 0; fi
+          gh run download "$RUN_ID" -n contract-recording -D build/drift/recording
+      # The fixer-only rehearsal: the committed history-reply fixture, mutated, stands in for the download. The script leaves
+      # the marker build/drift/recording/rehearsal, as the nightly's own rehearsal step leaves one in its artifact.
       - name: Mutate a recording for the rehearsal
-        if: steps.run.outputs.rehearsal == 'true'
-        run: python3 -I scripts/make_drift.py "${{ inputs.mode }}" build/drift/recording
+        if: steps.run.outputs.rehearse == 'true'
+        env:
+          MODE: ${{ inputs.mode }}
+        run: python3 -I scripts/make_drift.py "$MODE" build/drift/recording
+      # Rules 1-3 of the classification need no test results: a run the CLI did not answer is known here, and the Gradle
+      # step (the platform download, a compile) never runs for it. The marker names a rehearsal, whichever path left it.
+      - name: Classify before Gradle
+        id: precheck
+        run: |
+          set -euo pipefail
+          mkdir -p build/drift
+          python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test | tee build/drift/precheck.json
+          echo "kind=$(jq -r .kind build/drift/precheck.json)" >> "$GITHUB_OUTPUT"
+          echo "rehearsal=$([ -f build/drift/recording/rehearsal ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       # Reproduces the red here and leaves the assertion messages in build/test-results/test for the classification.
       - name: Reproduce the red
+        if: steps.precheck.outputs.kind != 'cli-did-not-answer'
         continue-on-error: true
         run: ./gradlew test --tests '*ContractTest*' -Dtandem.contractDir="$PWD/build/drift/recording"
       - name: Classify
         id: classify
+        if: steps.precheck.outputs.kind != 'cli-did-not-answer'
         run: |
           set -euo pipefail
           python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test | tee build/drift/classification.json
           echo "kind=$(jq -r .kind build/drift/classification.json)" >> "$GITHUB_OUTPUT"
-      # Kind 1 and unknown: one standing issue, one comment per red run, no branch, no agent. The job ends green.
+      # Kind 1 and unknown: one standing issue, one comment per red run, no branch, no agent. The job ends green. Reads the
+      # classification when Gradle ran, else the precheck.
       - name: Report a run the agent cannot fix
-        if: steps.classify.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'unknown'
+        if: steps.precheck.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'unknown'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ steps.run.outputs.url }}
         run: |
           set -euo pipefail
+          file=build/drift/classification.json; [ -f "$file" ] || file=build/drift/precheck.json
           title="CLI contract: the CLI did not answer"
-          body="$(jq -r --arg url "$RUN_URL" '"The CLI contract run \($url) is red and the drift loop cannot fix it.\n\n- kind: \(.kind)\n- CLI version: \(.cli_version // "unknown")\n- detail: \(.detail)\n- files: \(if .files == [] then "none" else (.files | join(", ")) end)"' build/drift/classification.json)"
+          body="$(jq -r --arg url "$RUN_URL" '"The CLI contract run \($url) is red and the drift loop cannot fix it.\n\n- kind: \(.kind)\n- CLI version: \(.cli_version // "unknown")\n- detail: \(.detail)\n- files: \(if .files == [] then "none" else (.files | join(", ")) end)"' "$file")"
           issue="$(gh issue list --label contract-drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
           if [ -z "$issue" ]; then gh issue create --title "$title" --label contract-drift --body "$body"; else gh issue comment "$issue" --body "$body"; fi
       # One open fix at a time: a red that persists for a week opens one PR, not seven.
@@ -623,7 +712,9 @@ jobs:
           else
             echo "proceed=true" >> "$GITHUB_OUTPUT"
           fi
-      # No github_token input: the action authenticates as the Claude GitHub App, so the PR it opens starts the Build workflow.
+      # No github_token input: the action authenticates as the Claude GitHub App, sets the origin URL and the commit identity
+      # before the CLI starts, and the PR it opens starts the Build workflow. The tool allowlist names verbs: with the App
+      # token the agent can create one PR, list, create and comment on issues, and push to drift/; nothing else.
       - name: Fix the drift
         if: steps.gate.outputs.proceed == 'true'
         uses: anthropics/claude-code-action@v1
@@ -633,20 +724,29 @@ jobs:
           anthropic_organization_id: ${{ env.ANTHROPIC_ORGANIZATION_ID }}
           anthropic_service_account_id: ${{ env.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           anthropic_workspace_id: ${{ env.ANTHROPIC_WORKSPACE_ID }}
-          prompt: "/fix-contract-drift run=${{ steps.run.outputs.url }} recording=build/drift/recording classification=build/drift/classification.json rehearsal=${{ steps.run.outputs.rehearsal }} date=${{ steps.run.outputs.date }}"
+          prompt: "/fix-contract-drift run=${{ steps.run.outputs.url }} recording=build/drift/recording classification=build/drift/classification.json rehearsal=${{ steps.precheck.outputs.rehearsal }} date=${{ steps.run.outputs.date }}"
           claude_args: |
             --model claude-opus-5-5
             --max-turns 60
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew:*),Bash(python3:*),Bash(git:*),Bash(gh auth setup-git),Bash(gh pr:*),Bash(gh issue:*),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew:*),Bash(python3:*),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin drift/:*),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
       # The check that does not depend on the agent obeying the skill: a PR touching anything outside the allowlist is closed.
+      # A pushed drift branch without a PR (the agent was stopped by the timeout or the turn limit) gets a draft and a red
+      # run. The repository is public, so the remote read works without credentials (persist-credentials: false).
       - name: Enforce the edit allowlist
         if: always() && steps.gate.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
+          RUN_ID: ${{ steps.run.outputs.id }}
         run: |
           set -euo pipefail
           pr="$(gh pr list --label contract-drift --state open --json number,headRefName --jq '[.[] | select(.headRefName | startswith("drift/"))][0].number // empty')"
-          if [ -z "$pr" ]; then echo "no drift pull request is open"; exit 0; fi
+          if [ -z "$pr" ]; then
+            if [ -z "$(git ls-remote --heads origin "$BRANCH")" ]; then echo "no drift pull request is open and no branch was pushed"; exit 0; fi
+            gh pr create --draft --base main --head "$BRANCH" --label contract-drift --title "[incomplete] drift fix for run $RUN_ID" \
+              --body "The agent stopped before opening this PR (timeout or turn limit); review the branch. Opened by drift-fix.yml with the workflow token, so no Build run starts here."
+            echo "::error title=Drift fix::The agent pushed $BRANCH but opened no PR; a draft was opened for it."; exit 1
+          fi
           offending="$(gh pr view "$pr" --json files --jq '.files[].path' \
             | grep -vE '^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\.md$)' || true)"
           if [ -n "$offending" ]; then
@@ -659,8 +759,7 @@ jobs:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree/scripts && python3 -m unittest test_workflows -v`
-Expected: `Ran 6 tests` … `OK` (not `skipped`: PyYAML 6 is installed in this sandbox).
-
+Expected: `Ran 7 tests` … `OK` (not `skipped`: PyYAML 6 is installed in this sandbox).
 - [ ] **Step 5: Lint the YAML**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree && if command -v actionlint >/dev/null; then actionlint .github/workflows/drift-fix.yml .github/workflows/cli-contract.yml; else python3 -c 'import yaml,sys; [yaml.safe_load(open(p)) for p in sys.argv[1:]]; print("yaml ok")' .github/workflows/drift-fix.yml .github/workflows/cli-contract.yml; fi`
@@ -678,12 +777,12 @@ git commit -m "ci: drift-fix.yml turns a red CLI contract run into a pull reques
 ### Task D3: The nightly's side
 
 **Files:**
-- Modify: `.github/workflows/cli-contract.yml:65-98` (the `--session-id` step's copy, a new failure step after the Gradle step, the artifact step unchanged)
+- Modify: `.github/workflows/cli-contract.yml` (the `workflow_dispatch` input `drift`; the check step's renamed-type case; the `--session-id` step's copy; a mutate step between it and the Gradle step; a failure step after the Gradle step; the artifact step unchanged)
 - Test: `scripts/test_workflows.py` (extend)
 
 **Interfaces:**
-- Consumes: `scripts/copy_transcript.py <work-dir> <raw> <out-dir> <name>` and `scripts/redact_fixture.py <in> <out>` (unchanged); `load`, `step` from D2's test.
-- Produces: an artifact `contract-recording` whose `transcripts/session-id.jsonl` is redacted, and `::error title=CLI contract::` annotations naming each failed assertion. No second identity token: the design wires no re-recording step in the fixer (the spec says so under "The red run's recording is the new fixture"), so the nightly's two tokens stay as they are.
+- Consumes: `scripts/copy_transcript.py <work-dir> <raw> <out-dir> <name>` and `scripts/redact_fixture.py <in> <out>` (unchanged); `scripts/make_drift.py <mode> <out> --from <dir>` (D1); `load`, `steps`, `step` from D2's test.
+- Produces: an artifact `contract-recording` whose `transcripts/session-id.jsonl` is redacted; `::error title=CLI contract::` annotations naming each failed assertion; a check step that reds a stream with result text but no `assistant` line as a drift of its own, not as "the CLI did not answer"; a dispatch input `drift` whose run mutates its own live recording in place (marker `build/contract/rehearsal` in the artifact), reds the Gradle step and so fires `drift-fix.yml` through `workflow_run` as a real red does. No second identity token: the design wires no re-recording step in the fixer (the spec says so under "The red run's recording is the new fixture"), so the nightly's two tokens stay as they are.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -706,22 +805,72 @@ def test_the_nightly_prints_failed_assertions_as_annotations(self):
     self.assertEqual("failure()", report["if"])
     self.assertIn("::error title=CLI contract::", report["run"])
     self.assertIn("build/test-results/test", report["run"])
+
+def test_the_nightly_s_check_step_tells_a_renamed_type_from_no_answer(self):
+    run = step(load(os.path.join(ROOT, ".github/workflows/cli-contract.yml")), "contract", "Check that the CLI authenticated and answered")["run"]
+    self.assertIn("The CLI did not answer", run)
+    self.assertIn("No assistant line although the result holds text", run)
+
+def test_the_nightly_rehearsal_mutates_its_own_recording(self):
+    wf = load(os.path.join(ROOT, ".github/workflows/cli-contract.yml"))
+    drift = wf[True]["workflow_dispatch"]["inputs"]["drift"]
+    self.assertEqual(("string", ""), (drift["type"], drift["default"]))
+    names = [s.get("name") for s in steps(wf, "contract")]
+    self.assertEqual(names.index("Check --session-id with an inherited CLAUDE_CODE_SESSION_ID") + 1, names.index("Mutate the recording for a rehearsal"))
+    self.assertEqual(names.index("Mutate the recording for a rehearsal") + 1, names.index("Decode with Tandem's protocol layer and load the transcripts with its reader"))
+    mutate = step(wf, "contract", "Mutate the recording for a rehearsal")
+    self.assertEqual("inputs.drift != ''", mutate["if"])
+    self.assertEqual("${{ inputs.drift }}", mutate["env"]["DRIFT"])                # through env, never interpolated into the shell line
+    self.assertIn('scripts/make_drift.py "$DRIFT" build/contract --from build/contract', mutate["run"])
+    self.assertNotIn("${{", mutate["run"])
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree/scripts && python3 -m unittest test_workflows -v`
-Expected: the two new tests fail (`AssertionError` on the `copy_transcript.py` line; `ValueError: 'Name the failed assertions' is not in list`).
+Expected: the four new tests fail (`AssertionError` on the `copy_transcript.py` line; `ValueError: 'Name the failed assertions' is not in list`; `AssertionError` on `No assistant line although the result holds text`; `TypeError: 'NoneType' object is not subscriptable` on the `drift` input, since `workflow_dispatch:` has no value today).
 
 - [ ] **Step 3: Change `cli-contract.yml`**
 
+Under `on:`, give `workflow_dispatch:` its input:
+```yaml
+  workflow_dispatch:
+    inputs:
+      drift:
+        description: "Rehearse the drift loop: mutate this run's own recording (init-model-key or transcript-content-key) so Drift fix fires as for a real red; empty for a real run"
+        type: string
+        default: ""
+```
+In the step "Check that the CLI authenticated and answered", replace the `if` block of the Python with (the reply text is the result's `result` string; no reply line while it holds text is a renamed core type, which `ContractTest` alone would pass):
+```python
+          has_reply = any(m.get("type") == "assistant" for m in lines)
+          text = result.get("result") if isinstance(result.get("result"), str) else ""
+          if result.get("is_error") or not (has_reply or text):
+              detail = text or json.dumps(result.get("errors", result))
+              print(f"::error title=CLI contract::The CLI did not answer: {str(detail)[:400]}")
+              sys.exit(1)
+          if not has_reply:
+              print("::error title=CLI contract::No assistant line although the result holds text: a core type may have been renamed; see the recording.")
+              sys.exit(1)
+```
 In the `--session-id` step replace the last line with:
 ```bash
           python3 -I scripts/copy_transcript.py "$work" "$work/raw.ndjson" "$work/transcripts" session-id
           mkdir -p build/contract/transcripts
           python3 -I scripts/redact_fixture.py "$work/transcripts/session-id.jsonl" build/contract/transcripts/session-id.jsonl
 ```
-and a comment above the step's `run:` that the copy is redacted before upload because the artifact of a public repository is kept for fourteen days and the fixer promotes it as it is. After the Gradle step, before "Keep the recording":
+and a comment above the step's `run:` that the copy is redacted before upload because the artifact of a public repository is kept for fourteen days and the fixer promotes it as it is. After that step, before the Gradle step:
+```yaml
+      # The rehearsal of the drift loop: the live recording is mutated in place (all three files are read before any is
+      # written) and a marker file names the mode, so the Gradle step goes red, the real artifact is uploaded and
+      # drift-fix.yml fires through workflow_run exactly as for a real red. A scheduled run has no input and records as is.
+      - name: Mutate the recording for a rehearsal
+        if: inputs.drift != ''
+        env:
+          DRIFT: ${{ inputs.drift }}
+        run: python3 -I scripts/make_drift.py "$DRIFT" build/contract --from build/contract
+```
+After the Gradle step, before "Keep the recording":
 ```yaml
       # The Gradle console names the failing test but not the assertion message (the file and the unrecognised types);
       # the message is in the JUnit XML. Printed as annotations, so a red run can be read without downloading anything.
@@ -740,8 +889,8 @@ and a comment above the step's `run:` that the copy is redacted before upload be
 
 - [ ] **Step 4: Run the tests to verify they pass, and lint**
 
-Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree/scripts && python3 -m unittest -v && cd .. && python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/cli-contract.yml")); print("yaml ok")'`
-Expected: every test `ok`, summary `OK`, then `yaml ok` (`actionlint` instead when installed).
+Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree && python3 -m unittest discover -s scripts -t scripts -v && python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/cli-contract.yml")); print("yaml ok")'`
+Expected: every test `ok`, summary `OK`, then `yaml ok` (`actionlint` instead when installed; it is what flags a `${{ inputs.* }}` interpolated into a `run:` line, which both workflows avoid by `env:`).
 
 - [ ] **Step 5: Prove the annotation script on a real failure**
 
@@ -771,7 +920,7 @@ git commit -m "ci: the nightly redacts session-id.jsonl before upload and names 
 Under "Commands", after the `scripts/record-scenario.sh` bullet, add exactly:
 
 ```markdown
-- `.github/workflows/drift-fix.yml` runs after every red nightly `CLI contract` run: it classifies the red (`scripts/classify_drift.py`) and, for decoder or reader drift, runs the repository skill `.claude/skills/fix-contract-drift/SKILL.md`, which promotes the run's `contract-recording` artifact to a fixture, patches the decoder or reader and opens a pull request labelled `contract-drift`; a run the CLI did not answer is reported on the issue "CLI contract: the CLI did not answer" instead. By hand: `gh run download <run id> -n contract-recording -D build/drift/recording`, then `/fix-contract-drift run=<run url> recording=build/drift/recording classification=build/drift/classification.json rehearsal=false date=<YYYY-MM-DD>`. Rehearsal (needs `main`: the federation rule admits nothing else): `gh workflow run drift-fix.yml --ref main -f rehearse=true -f mode=init-model-key` or `-f mode=transcript-content-key` (`scripts/make_drift.py` mutates the `history-reply` fixture); its draft PR is closed, not merged. Repeat a rehearsal after any change to the skill, `classify_drift.py`, `make_drift.py` or `drift-fix.yml`.
+- `.github/workflows/drift-fix.yml` runs after every red nightly `CLI contract` run: it classifies the red (`scripts/classify_drift.py`) and, for decoder or reader drift, runs the repository skill `.claude/skills/fix-contract-drift/SKILL.md`, which promotes the run's `contract-recording` artifact to a fixture, patches the decoder or reader and opens a pull request labelled `contract-drift`; a run the CLI did not answer is reported on the issue "CLI contract: the CLI did not answer" instead. By hand: `gh run download <run id> -n contract-recording -D build/drift/recording`, then `/fix-contract-drift run=<run url> recording=build/drift/recording classification=build/drift/classification.json rehearsal=false date=<YYYY-MM-DD>`. Rehearsal (needs `main`: the federation rule admits nothing else): `gh workflow run cli-contract.yml --ref main -f drift=init-model-key` (or `transcript-content-key`) makes the nightly mutate its own recording (`scripts/make_drift.py --from`) so the fixer fires through `workflow_run` as for a real red; `gh workflow run drift-fix.yml --ref main -f rehearse=true -f mode=<mode>` runs the fixer alone on the mutated `history-reply` fixture. Either draft PR is closed, not merged. Repeat a rehearsal after any change to the skill, `classify_drift.py`, `make_drift.py`, `cli-contract.yml` or `drift-fix.yml`.
 ```
 
 Under "Working in this repo", after the "Work on a feature branch" bullet, add exactly:
@@ -800,29 +949,29 @@ git commit -m "docs: CLAUDE.md names the drift loop and its rehearsal"
 - None in the repository (the rehearsal's own pull requests are opened by the loop and closed by the owner).
 
 **Interfaces:**
-- Consumes: D1–D4 merged to `main`; the owner's one-time preparation (the Claude GitHub App installed on `daarko10/tandem`, branch protection on `main` requiring a pull request).
+- Consumes: D1–D4 merged to `main`; the owner's one-time preparation (the Claude GitHub App installed on `daarko10/tandem`; branch protection on `main` requiring a pull request and one approving review, so that the App, which cannot approve its own PR, can never merge one even if the tool allowlist regresses; the owner, an administrator, still merges their own PRs unless "Do not allow bypassing the above settings" is on).
 
 - [ ] **Step 1: Open the pull request for `ci/drift-loop` and hand the merge to the owner**
 
 Run: `cd /tmp/claude-0/-home-user-tandem/ee35bc45-05bb-55f2-a063-cf2c94eb6664/scratchpad/drift-worktree && git push -u origin ci/drift-loop && gh pr create --base main --title "ci: the drift loop" --body-file <body>`
-Body: context (a red nightly becomes a PR; what each file does), approach (the recording is the fixture; kind 1 is reported, not fixed; one open fix at a time; the allowlist step), testing notes (`cd scripts && python3 -m unittest` green, both rehearsal modes reproduced against the real decoder locally in D1 step 9, YAML parsed; not verified: the `workflow_run` firing and the rehearsal itself, which need `main`), and the two owner steps before the first rehearsal. No attribution lines.
-Expected: a PR URL; `Build` green. The owner merges (squash). Nothing waits on this beyond the merge itself: the rehearsals start the moment `main` has the workflow.
+Body: context (a red nightly becomes a PR; what each file does), approach (the recording is the fixture; kind 1 is reported, not fixed; one open fix at a time; the tool allowlist of verbs; the edit-allowlist step and its `[incomplete]` draft), testing notes (`python3 -m unittest discover -s scripts -t scripts` green, both rehearsal modes reproduced against the real decoder locally in D1 step 9, YAML parsed; not verified: the `workflow_run` firing and the rehearsal itself, which need `main`), and the two owner steps before the first rehearsal. No attribution lines.
+Expected: a PR URL; `Build` green. The owner merges (squash). Nothing waits on this beyond the merge itself: the rehearsals start the moment `main` has the workflows.
 
-- [ ] **Step 2: Rehearse the decoder drift**
+- [ ] **Step 2: Rehearse the decoder drift through the real trigger**
 
-Run: `gh workflow run drift-fix.yml --ref main -f rehearse=true -f mode=init-model-key && sleep 20 && gh run list --workflow drift-fix.yml --limit 1 --json databaseId --jq '.[0].databaseId' | xargs -I{} gh run watch {} --exit-status`
-Expected, in the run's log (`gh run view <id> --log`): "Name the red run" prints `fixing run … (<today>)`; "Classify" prints `"kind": "decoder"` with detail `contract-hello.ndjson: no system/init`; "Fix the drift" shows a line `Fetched a GitHub identity token` or the action's own federation line with subject `repo:daarko10/tandem:ref:refs/heads/main` (open item 2 of the spec, now answered); "Enforce the edit allowlist" prints `PR #<n> stays within the allowlist`; the run is green. Then `gh pr list --label contract-drift --json number,title,isDraft,labels,headRefName`: one draft PR, title starting `[rehearsal] fix(protocol): follow CLI 2.1.301:`, labels `contract-drift` and `rehearsal`, head `drift/<today>-<run id>`, with `src/test/resources/fixtures/rehearsal-<today>.ndjson`, its transcript twin, tests, `Ndjson.kt` reading `model_id` as well as `model`, and a `docs/protocol.md` change; `gh pr checks <n>` shows the `Build` workflow running (the App token worked; if it waits for approval, the App is not installed: spec open item 1). If the action's commit failed on an identity, the log says so and the skill's `-c user.name` fallback is the fix (spec open item 4).
+Run: `gh workflow run cli-contract.yml --ref main -f drift=init-model-key && sleep 20 && gh run list --workflow cli-contract.yml --limit 1 --json databaseId --jq '.[0].databaseId' | xargs -I{} gh run watch {}; sleep 30; gh run list --workflow drift-fix.yml --limit 1 --json databaseId --jq '.[0].databaseId' | xargs -I{} gh run watch {} --exit-status`
+Expected: the `CLI contract` run is red at "Decode with Tandem's protocol layer…": its "Mutate the recording for a rehearsal" step printed `wrote build/contract/…` four times, "Name the failed assertions" printed `live transcripts decode with every core type recognised: contract-hello.ndjson: no system/init`, and `contract-recording` was uploaded. A `Drift fix` run fired by `workflow_run` follows (`gh run view <id> --json event` says `workflow_run`); in its log (`gh run view <id> --log`): "Name the red run" prints `fixing run <the nightly's url> (<today>)`; "Fetch the recording" downloads the artifact (no "the run left no recording"); "Classify before Gradle" prints `"kind": "unknown"` (no test results yet: only kind 1 is told here) and sets `rehearsal=true` from the marker; "Classify" prints `"kind": "decoder"` with detail `contract-hello.ndjson: no system/init`; "Fix the drift" shows the action's federation line with the OIDC subject of a `workflow_run` job (expected `repo:daarko10/tandem:ref:refs/heads/main`; record it in open item 2 of the spec); "Enforce the edit allowlist" prints `PR #<n> stays within the allowlist`; the run is green. Then `gh pr list --label contract-drift --json number,title,isDraft,labels,headRefName`: one draft PR, title starting `[rehearsal] fix(protocol): follow CLI <the run's claude --version>:`, labels `contract-drift` and `rehearsal`, head `drift/<today>-<the nightly's run id>`, with `src/test/resources/fixtures/rehearsal-<today>.ndjson` (recorded by the newest CLI, not `history-reply`), its transcript twin, tests, `Ndjson.kt` reading `model_id` as well as `model`, and a `docs/protocol.md` change; its commit authored by `claude[bot]` (set by the action). `gh pr checks <n>` shows the `Build` workflow running (the App token worked). If no `Build` run appears on the PR at all, the App is not installed and the action fell back to `GITHUB_TOKEN` (spec open item 1); there is no approval button to look for.
 
 - [ ] **Step 3: The owner closes the rehearsal PR, then rehearse the reader drift**
 
-The owner closes PR `<n>` (`gh pr close <n> --comment "rehearsal"`), which re-arms the loop. Run: `gh workflow run drift-fix.yml --ref main -f rehearse=true -f mode=transcript-content-key` and watch as in step 2.
-Expected: "Classify" prints `"kind": "reader"` with a detail ending `: no user entry`; a draft PR `[rehearsal] fix(transcript): …` whose diff touches `TranscriptReader.kt` and adds `rehearsal-<today>-session-id.jsonl` as well; the allowlist step green. The owner closes it.
+The owner closes PR `<n>` (`gh pr close <n> --comment "rehearsal"`), which re-arms the loop. Run: `gh workflow run cli-contract.yml --ref main -f drift=transcript-content-key` and watch both runs as in step 2.
+Expected: "Classify" prints `"kind": "reader"` with a detail ending `: no user entry` (naming `contract-hello.jsonl` or `session-id.jsonl`: `ContractTest` stops at the first failing transcript in directory order); a draft PR `[rehearsal] fix(transcript): …` whose diff touches `TranscriptReader.kt` and adds both `rehearsal-<today>.jsonl` and `rehearsal-<today>-session-id.jsonl` (the skill copies both transcripts for every reader drift, whichever the detail names); the allowlist step green. The owner closes it.
 
-- [ ] **Step 4: Prove the guards once**
+- [ ] **Step 4: Prove the open-PR skip and the fixer-only rehearsal once**
 
-With the second rehearsal PR still open, run the first rehearsal again: `gh workflow run drift-fix.yml --ref main -f rehearse=true -f mode=init-model-key`.
-Expected: the run is green without an agent step: "Skip when a fix is already waiting" comments `The nightly of <today> is still red: …` on the open PR and "Fix the drift" is skipped. Then the owner closes that PR.
+With the second rehearsal PR still open, run the fixer alone: `gh workflow run drift-fix.yml --ref main -f rehearse=true -f mode=init-model-key` and watch it.
+Expected: "Mutate a recording for the rehearsal" writes the four files; "Classify before Gradle" sets `rehearsal=true`; "Classify" prints `"kind": "decoder"`; the run is green without an agent step: "Skip when a fix is already waiting" comments `The nightly of <today> is still red: …` on the open PR and "Fix the drift" is skipped. Then the owner closes that PR.
 
-- [ ] **Step 5: Record what the rehearsal answered**
+- [ ] **Step 5: Record what the rehearsal answered, and the scheduled run's actor**
 
-Anything the rehearsal showed that differs from the skill or the workflow (the commit identity, the token subject line, a `gh` command that needed a different flag) goes into a follow-up PR on a branch `ci/drift-loop-fixes` with the same tests, and a rehearsal of the mode it touched is repeated after it. The milestone bullet in `docs/launch.md` stays as it is: it closes only when a non-rehearsal `contract-drift` PR has been merged and the next nightly was green, and the owner appends the PR number, CLI version and fixture name then.
+Anything the rehearsal showed that differs from the skill or the workflow (the token subject line, a `gh` command that needed a different flag) goes into a follow-up PR on a branch `ci/drift-loop-fixes` with the same tests, and a rehearsal of the mode it touched is repeated after it. After the first scheduled nightly (03:17 UTC) the owner records `gh api 'repos/daarko10/tandem/actions/runs?event=schedule' --jq '.workflow_runs[0].actor.login'` in open item 4 of the spec (the same follow-up); if it is not a User with write access, that PR gives the fixer the action's `allowed_bots` input or a `workflow_dispatch` relay before the first real firing is trusted. The milestone bullet in `docs/launch.md` stays as it is: it closes only when a non-rehearsal `contract-drift` PR has been merged and the next nightly was green, and the owner appends the PR number, CLI version and fixture name then.
