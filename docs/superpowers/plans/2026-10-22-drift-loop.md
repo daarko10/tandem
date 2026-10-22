@@ -1,5 +1,7 @@
 # Drift Loop Implementation Plan
 
+> **Record of the executed plan.** The files it names changed after it ran; the files in the repository are the source of truth, not the copies embedded below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A red nightly `CLI contract` run becomes a pull request the same night, without a human: the fixer workflow downloads the red run's recording, classifies the red, and a repository skill promotes the recording to a fixture, patches the decoder or the reader, runs the tests and opens the PR; a run the CLI did not answer is reported on a standing issue instead.

@@ -3,12 +3,12 @@
 # four identifiers as cli-contract.yml; the federation rule admits runs on main only). A run the CLI did not answer is
 # reported on the issue "CLI contract: the CLI did not answer" instead, and an open PR labelled contract-drift skips the
 # agent. Only a scheduled or dispatched run of this repository's own nightly is fixed, never a fork's or a pull request's.
-# The agent never starts unless the repository is public (a private one of a personal account enforces a ruleset only
-# with GitHub Pro), a ruleset on main requires a pull request with an approving review from a code owner and approval of
-# the most recent push, and main's CODEOWNERS owns every file: that protection, not the tool allowlist, keeps the App
-# token off main. A second job, enforce, checks the pull request's file list on a fresh runner once the agent's
-# job has ended; a third, remind, comments on the pull request the gate found waiting. Nothing here merges or
-# publishes. Rehearsal: `gh workflow run
+# The agent never starts unless a ruleset on main requires a pull request with an approving review from a code owner and
+# approval of the most recent push, and main's CODEOWNERS owns every file: that protection, not the tool allowlist, keeps
+# the App token off main. The ruleset binds only while GitHub enforces it (a public repository, or a private one on
+# GitHub Pro, Team or Enterprise), which this workflow cannot tell: keeping it enforced is the owner's part. A second
+# job, enforce, checks the pull request's file list on a fresh runner once the agent's job has ended; a third, remind,
+# comments on the pull request the gate found waiting. Nothing here merges or publishes. Rehearsal: `gh workflow run
 # cli-contract.yml -f drift=<mode>` makes the nightly mutate its own recording, so this workflow fires as for a real red;
 # workflow_dispatch with rehearse=true runs the fixer alone on a mutated fixture. CLAUDE.md names the loop.
 name: Drift fix
@@ -178,27 +178,6 @@ jobs:
           python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test | tee build/drift/precheck.json
           echo "kind=$(jq -r .kind build/drift/precheck.json)" >> "$GITHUB_OUTPUT"
           echo "rehearsal=$([ -f build/drift/recording/rehearsal ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      # Before any Gradle spend: a ruleset on a private repository owned by a personal account is enforced only with
-      # GitHub Pro, and no read open to the workflow token tells Pro from Free or an enforced ruleset from a listed one, so
-      # the loop goes no further unless the repository answers private: false (a failed read refuses too); the repository
-      # goes public before the ruleset. A run the CLI did not answer needs neither Gradle nor the agent, so it skips this
-      # step and is still reported while the repository is private. A refusal fails the job: no later step runs, and
-      # enforce, which needs `Require a protected main` to have succeeded, is skipped.
-      - name: Require a public repository
-        id: public
-        if: steps.precheck.outputs.kind != 'cli-did-not-answer'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if ! private="$(gh api "repos/$GITHUB_REPOSITORY" --jq .private 2>/dev/null)"; then
-            status="$(jq -r '.status // empty' <<<"$private" 2>/dev/null || true)"
-            echo "::error title=Drift fix::Reading the repository failed (HTTP status '${status:-none}'), so whether it is public is not known; the agent is not started."; exit 1
-          fi
-          if [ "$private" != "false" ]; then
-            echo "::error title=Drift fix::The repository is private (answer '$private'): a ruleset on a private repository of a personal account is enforced only with GitHub Pro and this workflow cannot tell, so make the repository public first. The agent is not started."; exit 1
-          fi
-          echo "the repository is public"
       # Reproduces the red here and leaves the assertion messages in build/test-results/test for the classification.
       # --rerun: the build cache (org.gradle.caching, restored by setup-gradle) keys the task on the code and the path, not
       # the recording's contents, so without it a ContractTest that passed once on this commit could replay from the cache.
@@ -275,10 +254,10 @@ jobs:
       # below) and an Integration (an App) on its bypass list refuses, whatever its bypass mode; a role (the owner's
       # admin role, how the only code owner merges) is allowed. GitHub returns bypass_actors only to a caller who can
       # edit the ruleset, which the workflow token never can (it has no administration permission), so on a real run
-      # the list is withheld, the step says so in its log, and keeping the App off it stays the owner's part. A ruleset on a
-      # private repository owned by a personal account is enforced only with GitHub Pro, and what this endpoint lists for
-      # an unenforced ruleset is not known, so reading the rule does not prove enforcement: `Require a public repository`
-      # refused a private repository before Gradle. The same step refuses a drift branch that already
+      # the list is withheld, the step says so in its log, and keeping the App off it stays the owner's part. So does
+      # keeping the ruleset enforced: on a private repository of a personal account GitHub enforces a ruleset only with
+      # GitHub Pro or above, and no read open to this token tells an enforced ruleset from an unenforced one, so reading
+      # the rule does not prove enforcement. The same step refuses a drift branch that already
       # exists (a closed PR whose branch was kept, and the same run dispatched again): the agent's `git push -u origin
       # HEAD` would be rejected as non-fast-forward after the spend, and the enforce job would misread the old branch as
       # a stopped agent. Only a 404 means "no branch": gh prints the error body on stdout and exits 1 on any HTTP error,

@@ -179,15 +179,6 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    compiles for several minutes, never runs for the commonest red (authentication, an outage). The step also outputs
    `rehearsal=true` when the marker `build/drift/recording/rehearsal` exists (written by `make_drift.py`, in the
    nightly or in the fixer), else `false`; that is what the prompt passes to the skill.
-   Then **Require a public repository** (`id: public`, with `GITHUB_TOKEN`), `if` the precheck's kind is not
-   `cli-did-not-answer`: the repository must answer `private: false` (`gh api "repos/$GITHUB_REPOSITORY" --jq
-   .private`, decided by `gh`'s exit status; a failed read, or any answer but `false`, is `::error` and `exit 1`). A
-   ruleset on a private repository owned by a personal account is enforced only with GitHub Pro, and no read open to
-   the workflow token tells Pro from Free or an enforced ruleset from a listed one, so the loop refuses a private
-   repository whatever the plan ("What the owner does": the repository goes public before the ruleset). The check
-   needs nothing from the classification or the gate, so it runs before the Gradle step: a private repository costs
-   no Gradle setup, and a run the CLI did not answer, which needs neither Gradle nor the agent, is still reported while
-   the repository is private. A refusal fails the job, so no later step runs and step 9 is skipped.
 4. **Run the contract test against the recording**, `if` the precheck's kind is not `cli-did-not-answer`:
    `./gradlew test --tests '*ContractTest*' --rerun -Dtandem.contractDir="$PWD/build/drift/recording"`, `continue-on-error: true`,
    `timeout-minutes: 30`
@@ -229,7 +220,7 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    `pull-requests: write` even through the issues endpoint (`issues: write` alone is a 403), and the `fix` job's token
    must hold no such write. A red that persists for a week opens one PR, not seven. Once the gate proceeds, the step `Require
    a protected main` (`id: protect`, with `GITHUB_TOKEN`) checks the precondition of "Safeguards" before the agent's
-   spend (the repository's visibility was read before Gradle, step 3). The
+   spend. The
    `pull_request` rules in `gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"` (the active
    rulesets' rules, readable with metadata access) whose `required_approving_review_count` is at least 1,
    `require_code_owner_review` is `true` and `require_last_push_approval` is `true` must name at least one ruleset (the
@@ -252,10 +243,11 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    push. Classic branch protection does not count: the workflow token cannot read its review count (administration
    access), and `branches/main`'s `protected: true` holds for a classic rule with no option ticked, which still
    accepts a direct push. Anything else, a failed read or an answer that is not a number included: `::error` and
-   `exit 1`, the agent does not start and step 9 is skipped. A ruleset on a private repository
-   owned by a personal account is enforced only with GitHub Pro, and what the endpoint lists for an unenforced ruleset
-   is not known, so reading the rule does not prove enforcement: that is why `Require a public repository` (step 3)
-   refuses a private repository, and the owner's part ("What the owner does") comes before any rehearsal.
+   `exit 1`, the agent does not start and step 9 is skipped. A ruleset binds only while GitHub enforces it (a public
+   repository, or a private one on GitHub Pro, Team or Enterprise), and the workflow cannot tell an enforced ruleset
+   from an unenforced one (what the endpoint lists for an unenforced ruleset is not known), so reading the rule does
+   not prove enforcement: keeping it enforced is the owner's part ("What the owner does"), which comes before any
+   rehearsal.
    The same step then refuses a drift branch `drift/<date>-<run id>` that already exists (`gh api
    "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name` exits 0: a closed pull request whose branch was kept, and
    the same run dispatched again), with `::error … delete it to retry` and `exit 1`: the agent's `git push -u origin
@@ -618,10 +610,9 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
   General | Pull Requests; `delete_branch_on_merge` is false today), so a merged fix's branch never trips the refusal
   of a `drift/` branch without an open pull request (runtime step 7); a closed fix's branch is deleted by hand
   (`gh pr close <n> --delete-branch`).
-  A ruleset on a private repository owned by a personal account is enforced only with GitHub Pro: the repository
-  goes public before the ruleset and the rehearsals, and the rehearsal (D5) waits for that. `Require a public
-  repository` checks it before the Gradle step: it reads the repository's `private` and refuses while it is not
-  `false`, whatever the plan, since it cannot tell Pro from Free. Before the
+  The ruleset must be enforced: on a public repository, or on a private one on GitHub Pro, Team or Enterprise (a
+  private repository of a personal account on GitHub Free lists a ruleset without enforcing it). The workflow cannot
+  tell an enforced ruleset from an unenforced one, so this is the owner's responsibility, like the bypass list. Before the
   first rehearsal the owner runs `gh api repos/daarko10/tandem/rules/branches/main` and sees the `pull_request` rule
   with `required_approving_review_count` of at least 1, `require_code_owner_review` true and
   `require_last_push_approval` true (what the endpoint lists for an unenforced ruleset is not known, so the check
@@ -799,8 +790,7 @@ line exists, the milestone is open, whatever the rehearsals showed.
   (`proceed=false` and no `waiting`, the PR list unread) and with a failed or malformed list; the reminder's
   comment and its refusal of a missing number; "Name the red run" with the nightly's own run (the four outputs), a
   fork's, a green one, another branch's, another event's, another workflow's (exit 1, nothing in `GITHUB_OUTPUT`),
-  an id that is not a number (exit 1 before any call) and a rehearsal (no call); "Require a public repository" with
-  `private: false` (green) and with a private repository, a `null` answer or a failed read (exit 1); the protect step
+  an id that is not a number (exit 1 before any call) and a rehearsal (no call); the protect step
   with the ruleset, the owner line and a 404 (green, the ruleset read first), and without each of them, with a ruleset whose bypass list
   names an App (exit 1, the actor's type and id named), names only a role (green), is withheld (green, said in the
   log) or fails to read (exit 1 without a verdict), with two rulesets of which the second names an App, with a kept
@@ -829,7 +819,7 @@ line exists, the milestone is open, whatever the rehearsals showed.
   downloaded, so the fetch step reds the job by design: that is the fetch-failure path, not kind 1). Expected: "Name
   the red run" prints that run's url and date; "Fetch the recording" prints `the run left no recording` (or downloads
   a stream whose `result` has `is_error: true`); "Classify before Gradle" prints `"kind": "cli-did-not-answer"`;
-  "Require a public repository", "Reproduce the red", "Classify", the gate, "Fix the drift" and the allowlist step
+  "Reproduce the red", "Classify", the gate, "Fix the drift" and the allowlist step
   are skipped; "Report a run the
   agent cannot fix" creates the issue "CLI contract: the CLI did not answer" with the label `contract-drift` (or
   comments on it); the job is green with no Gradle and no agent spend; `gh issue view` shows the bold first line
