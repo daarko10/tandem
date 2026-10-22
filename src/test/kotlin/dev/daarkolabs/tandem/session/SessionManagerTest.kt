@@ -1920,6 +1920,7 @@ class SessionManagerTest {
         assertEquals(ShellEnd.Exited(0), shell.end)
         assertEquals("hi\n", shell.output)
         assertTrue(shell.sent)
+        assertEquals(2, userFrames().size)
         val (input, output) = userFrames()
         assertEquals("<bash-input>echo hi</bash-input>", input.content())
         assertEquals(true, input["client_composed"]!!.jsonPrimitive.boolean)
@@ -2110,9 +2111,32 @@ class SessionManagerTest {
         scope.coroutineContext.job.cancelAndJoin()
         // The handle's mirror went with the scope: the process's own state has the end.
         assertEquals(ShellEnd.Stopped, handle.liveSession()!!.state.value.shell().end)
+        // ShellSent is reduced as the escape is handed to the process, whether or not its bytes reach the CLI: the guard held.
+        assertFalse(handle.liveSession()!!.state.value.shell().sent)
         delay(300)
         assertEquals(emptyList(), userFrames())
         assertGone(sleeps)
+    }
+
+    @Test
+    fun `stopping the session says a held shell escape's output was not sent`() = test {
+        unix()
+        // The prompt's reply streams for seconds, so the escape is held behind its turn when the session stops.
+        val manager = manager(environment = mapOf("TANDEM_FAKE_LINE_DELAY_MS" to "1000"))
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Reply with the single word: pong")
+        handle.state.first { it.busy }
+        manager.runShell(handle.id, "echo hi")
+        withTimeout(5_000) {
+            while (handle.shellJob == null) delay(20)
+            handle.shellJob!!.join() // its frames were handed to the process, which holds them behind the turn
+        }
+        assertTrue(handle.state.value.busy, "the prompt's turn is still in progress")
+        manager.stop(handle.id)
+        val state = handle.state.value
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", (state.entries.last() as ChatEntry.Notice).text)
+        assertFalse(state.shell().sent)
+        assertEquals(1, userFrames().size, "only the prompt")
     }
 
     @Test

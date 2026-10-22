@@ -531,10 +531,14 @@ class SessionHandle internal constructor(
         synchronized(lock) { releaseLocked(ended, settle) }
     }
 
-    /** Lets [ended] go if it is still the attached process: its last state becomes the chat's, [settle]d if asked. */
+    /**
+     * Lets [ended] go if it is still the attached process: its last state becomes the chat's, [settle]d if asked. A shell escape it
+     * still held is dropped first, with a notice that its output was not sent (a [stop] during the turn it waited for).
+     */
     private fun releaseLocked(ended: ClaudeSession, settle: Boolean = false) {
         if (attachment?.session !== ended) return
         detachLocked()
+        ended.letGoShellFrames()
         val last = ended.state.value
         publishLocked(if (settle) last.settled() else last, attached = false)
     }

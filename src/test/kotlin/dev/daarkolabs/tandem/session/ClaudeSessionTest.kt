@@ -1119,23 +1119,43 @@ class ClaudeSessionTest {
 
     @Test
     fun `Ended drops a pending output frame`() = runBlocking {
-        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 500)
+        // A wait far longer than the test: only the drop on Ended can clear the pending frame, never the fallback.
+        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 60_000)
         run.session.start()
         run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
         run.written("\"type\":\"user\"")
         run.process.destroyForcibly()
         val ended = withTimeout(10_000) { run.session.state.first { it.ended } }
-        delay(700) // past the wait: a frame still pending would go out now
         // A guard only: the destroyed process wrote the file, so a frame sent now could not land in it whatever happened.
         assertEquals(1, run.userFrames().size)
         val end = ended.entries.filterIsInstance<ChatEntry.TurnEnded>().single()
         assertEquals(TurnEnd.FAILED, end.end)
-        // The check that the frame was dropped: an output frame still pending would make interrupt() drop it, with a "Stopped." notice.
+        // The check that the frame was dropped: an output frame still pending would make interrupt() drop it, with a "Stopped." notice
+        // dispatched before interrupt() returns.
         val stopped = { run.session.state.value.entries.count { it is ChatEntry.Notice && it.text == "Stopped." } }
         val before = stopped()
         run.session.interrupt()
-        delay(100)
         assertEquals(before, stopped(), "nothing was pending")
+        run.close()
+    }
+
+    @Test
+    fun `Ended drops a held shell escape and says its output was not sent`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendUserMessage("x")
+        run.session.sendShellEscape("shell-1", "echo hi\necho more", "hi\nmore\n", respond = true)
+        run.written("\"type\":\"user\"")
+        run.process.destroyForcibly()
+        val text = "The output of ! echo hi was not sent: the CLI ended first."
+        val state = withTimeout(10_000) { run.session.state.first { s -> s.entries.any { it is ChatEntry.Notice && it.text == text } } }
+        assertEquals(1, run.userFrames().size, "only the prompt")
+        // After the prompt's failed turn and the exit's own notice, at the end of the chat.
+        val notice = state.entries.last() as ChatEntry.Notice
+        assertEquals(text, notice.text)
+        assertEquals(NoticeLevel.WARNING, notice.level)
+        assertEquals(TurnEnd.FAILED, state.entries.filterIsInstance<ChatEntry.TurnEnded>().single().end)
+        assertTrue(state.entries.indexOfFirst { it is ChatEntry.TurnEnded } < state.entries.lastIndex - 1)
         run.close()
     }
 

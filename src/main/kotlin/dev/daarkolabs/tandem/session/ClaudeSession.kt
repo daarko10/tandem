@@ -179,8 +179,9 @@ class ClaudeSession(
     private var killed = false
 
     /**
-     * Guards [heldEscapes] and [pendingOutput]: a shell escape's frames go out in the recorded order (spec 12.4), never two sends back
-     * to back, since the CLI batches the sends queued before it starts processing and merges them into one (`bash-mode:3-6`).
+     * Guards [heldEscapes] and [pendingOutput]: a shell escape's frames go out in the recorded order (spec 12.4), the output frame never
+     * right behind its command frame and an escape never right behind a prompt, since the CLI batches the sends queued before it starts
+     * processing and merges them into one (`bash-mode:3-6`). A prompt is not held (spec 12.9 item 7).
      */
     private val shellLock = Any()
 
@@ -253,8 +254,9 @@ class ClaudeSession(
             val reason = e.message ?: e.javaClass.simpleName
             val text = "Could not start `${config.binary}`: $reason. Is the claude CLI (Claude Code) installed?"
             ended = true // ahead of the chat saying so: a request made once it shows answers Ended at once
-            dropShellFrames()
+            val unsent = dropShellFrames()
             dispatch(SessionEvent.Ended(text, isError = true, atMillis = clock()))
+            noticeUnsent(unsent)
             return
         }
         process = p
@@ -273,8 +275,9 @@ class ClaudeSession(
             writer.cancel()
             LOG.info("claude exited with code $code")
             ended = true // ahead of the chat saying so: a request made once it shows answers Ended at once
-            dropShellFrames()
+            val unsent = dropShellFrames()
             dispatch(exitEvent(code))
+            noticeUnsent(unsent)
             this.coroutineContext.job.children.forEach { it.cancel() }
         }
     }
@@ -367,14 +370,29 @@ class ClaudeSession(
         }
     }
 
-    /** The process is over: no shell escape frame goes out any more (the turn a responding escape opened ends with the process). */
-    private fun dropShellFrames() {
+    /**
+     * The process is over: no shell escape frame goes out any more (the turn a responding escape opened ends with the process).
+     * Returns the escapes still held behind a turn, none of whose frames went out, for [noticeUnsent].
+     */
+    private fun dropShellFrames(): List<HeldEscape> =
         synchronized(shellLock) {
             pendingOutput?.fallback?.cancel()
             pendingOutput = null
-            heldEscapes.clear()
+            heldEscapes.toList().also { heldEscapes.clear() }
+        }
+
+    /** Says in the chat, one notice each, that the output of the [unsent] escapes never reached the CLI (hard rule 5). */
+    private fun noticeUnsent(unsent: List<HeldEscape>) {
+        unsent.forEach {
+            notice(NoticeLevel.WARNING, "The output of ! ${it.command.lineSequence().first()} was not sent: the CLI ended first.")
         }
     }
+
+    /**
+     * The handle lets this process go before it ends ([SessionHandle.stop]): no shell escape frame goes out any more, and an escape
+     * still held behind the turn in progress says that its output was not sent, ahead of the chat being taken from [state].
+     */
+    internal fun letGoShellFrames(): Unit = noticeUnsent(dropShellFrames())
 
     /**
      * Asks for another model. The switch only counts once `system/init` reports it (see [ChatState.modelWarning]); an error answer
