@@ -34,7 +34,7 @@ private const val CAP_EXCEEDED_TEXT: String = "Max live sessions exceeded"
 
 /** What [SessionSpawner.start] came to. */
 internal sealed interface SpawnOutcome {
-    /** A process runs for the session: one did already, or it started now. */
+    /** A process runs for the session: one did already, or one started now, which may have ended since (its chat says why). */
     data object Running : SpawnOutcome
 
     /** Nothing was to start: the session is closed, or a start for prompts found none queued. */
@@ -144,7 +144,8 @@ internal class SessionSpawner(
                     onFirstInit = { session, reported -> firstInit(handle, session, reported) },
                 )
             }
-            if (handle.liveSession() != null) SpawnOutcome.Running else SpawnOutcome.Skipped // closed meanwhile
+            // A process that attached and ended at once (one that could not launch) is still this start's: its chat says why.
+            if (handle.isClosed) SpawnOutcome.Skipped else SpawnOutcome.Running
         }
 
     /**
