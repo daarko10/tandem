@@ -18,7 +18,9 @@ Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
   A line that is not a JSON object is dropped with a warning.
 - Cuts transcript `attachment` lines down to their type: the payload (the CLI's system prompt, tool, skill and agent
   listings, an environment snapshot) and its `rendered` copy describe the recording machine, not the protocol.
-  Every other field of the line stays.
+  Every other field of the line stays. A `queued_command` attachment (a message the host sent mid-turn, folded into
+  the running turn) keeps its payload, the host's own prompt and ids, which the other rules redact; only its
+  `rendered` copy goes.
 - Leaves values that already are placeholders (<name-N>) alone, so a second run over a redacted file changes nothing.
 - Safety net: a UUID or API id that no rule above caught becomes <leaked-N>, with a warning naming its key path.
 """
@@ -31,12 +33,15 @@ ID_KEYS = {
     "task_id", "agent_id",
     "api_message_id", "summarizes_uuid", "user_message_uuid", "refused_user_message_uuid", "new_conversation_id",
     "command_uuid",
+    "source_uuid", "delivery_id",  # queued_command attachment
     # Transcript lines
     "parentUuid", "sessionId", "promptId", "leafUuid", "requestId", "toolUseID", "agentId", "sourceToolUseID",
-    "sourceToolAssistantUUID", "serverClassifierRequest",
+    "sourceToolAssistantUUID", "serverClassifierRequest", "commandUuid", "deliveryId",
     "organizationUuid",  # credential_org attachment: the signed-in account's organization
 }
-ID_LIST_KEYS = {"user_message_uuids", "retracted_message_uuids", "supersedes"}
+ID_LIST_KEYS = {"user_message_uuids", "retracted_message_uuids", "supersedes",
+                "still_queued", "cancelled"}  # the interrupt receipt
+KEPT_ATTACHMENTS = {"queued_command"}  # protocol, not a description of the recording machine
 INIT_LISTS = {"mcp_servers", "plugins", "skills", "agents", "slash_commands", "terminal_slash_commands", "commands"}
 PATH_RE = re.compile(r"(?:/(?:root|home|Users|tmp|private|var|opt)|[A-Za-z]:\\\\)[^\s\"']*")
 API_ID_RE = re.compile(r"^(?:toolu|srvtoolu|msg|req)_[A-Za-z0-9]+$")
@@ -107,7 +112,8 @@ def empty_lists(node: dict) -> None:
 def strip_attachment(msg: dict) -> None:
     if "attachment" in msg:
         kind = msg["attachment"].get("type") if isinstance(msg["attachment"], dict) else None
-        msg["attachment"] = {"type": kind if isinstance(kind, str) else "unknown"}
+        if kind not in KEPT_ATTACHMENTS:
+            msg["attachment"] = {"type": kind if isinstance(kind, str) else "unknown"}
     if "rendered" in msg:
         msg["rendered"] = ""
 
