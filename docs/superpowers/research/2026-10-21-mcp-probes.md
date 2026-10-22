@@ -242,7 +242,7 @@ On disk the local commands are an `isMeta` `<local-command-caveat>` user line (`
 - Send `/<name> <args>` as the user text. A local command answers with the synthetic assistant line (render it as assistant text, flagged local, no "Worked for 0s" working state: `num_turns:0`); `local_command_outcome.kind == "unavailable_headless"` is a note, not an error; a project or skill command is a normal model turn.
 - `/mcp` (and anything Tandem has a native surface for: `/model`, `/rename`, `/compact`'s boundary) can be intercepted locally; everything else goes to the CLI.
 
-### 3.6 Fixture tooling follow-ups (not done; tracked files untouched)
+### 3.6 Fixture tooling follow-ups (status per item)
 
 - `scripts/redact_fixture.py`: a per-fixture keep-list for `INIT_LISTS` (these three fixtures keep `mcp_servers`, and `mcp-slash` also keeps `slash_commands`, `terminal_slash_commands` and `commands`; re-running the committed redactor over them would empty those lists and break the tests that will read them); add `submitUuid` to `ID_KEYS` (`transcripts/mcp-slash.jsonl:13` shows `<leaked-1>`). (done: M5r)
 - `scripts/record-fixture.sh` / `drive_cli.py`: an MCP scenario needs the argv without `--safe-mode`, `--mcp-config` + `--strict-mcp-config`, `--setting-sources project,local`, the two python servers (`scratchpad/mcp-probes/echo_server.py`, `authy_server.py`) and the host frames of 1; the OAuth nonces (`code_challenge`, `state`) need a redaction rule. (done: M5r; not in this plan: spec 11 item 10)
