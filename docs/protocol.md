@@ -710,9 +710,12 @@ overload fallback: A to C come from `sdk.d.ts` 0.3.300; `model_not_found` is rec
 Note `modelUsage` legitimately contains helper models (fixture: `claude-haiku-5-5` for internal calls), so only `init.model`/`assistant.message.model` mismatches count as a fallback.
 Also `assistant.error = "model_not_found"` means the CLI rejected the model.
 
-**D. Explicit switches** (`set_model`, `/model`, automatic changes) have no stdout message of their own. The only typed
-signal is the `PreModelSwitch`/`PostModelSwitch` hook input (`from_model`, `to_model`, `requested_model`,
-`source: "command"|"picker"|"sdk"|"auto"|"resume"`), which a host only sees if it registers hooks in `initialize`.
+**D. Explicit switches** (`set_model`, `/model`, automatic changes) have no typed stdout message: `set_model` leaves only
+the replayed user line `<local-command-stdout>Set model to …</local-command-stdout>` (`model-switch.ndjson:20`,
+2.1.300) and a bare `/model` only the local-command line of 6.1 (`mcp-slash.ndjson:11`, 2.1.306); neither is a reliable
+switch signal. The only typed signal is the `PreModelSwitch`/`PostModelSwitch` hook input (`from_model`, `to_model`,
+`requested_model`, `source: "command"|"picker"|"sdk"|"auto"|"resume"`), which a host only sees if it registers hooks in
+`initialize`.
 Tandem relies on comparing `init.model` and `assistant.message.model` against the requested model instead.
 
 ---

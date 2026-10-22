@@ -106,8 +106,9 @@ Key choices:
    back the model shown before the pick and says so in the chat, naming the model the CLI stays on, as a refused
    permission mode or effort does (`protocol.md` 8). **Status: implemented on feat/chat-redesign.**
 
-   **Phase 2c, MCP controls and bash mode** (spec docs/superpowers/specs/2026-10-21-mcp-controls-design.md; Phase 2b is
-   reserved for the task-list widget, chat redesign spec 4.6). The MCP servers panel, opened from the header's button
+   **Phase 2c, MCP controls and bash mode** (spec docs/superpowers/specs/2026-10-21-mcp-controls-design.md). Phase 2b,
+   the chat redesign spec's deferred list (its section 2, the task-list widget among it), is not yet a milestone of its
+   own; the polish round and this phase took some of its items. The MCP servers panel, opened from the header's button
    with its connected/total badge, lists the session's servers with their state and error and disables, enables,
    reconnects or signs in to each. The sign-in is the CLI's own OAuth flow (`mcp_authenticate`): Tandem only opens the
    link in the system browser and waits for the server to connect, and never sees a token (hard rule 3). A `/` in the
