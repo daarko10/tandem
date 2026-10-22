@@ -2,16 +2,20 @@ package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.TranscriptFiles
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -61,6 +65,11 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlin.test.fail
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * [SessionManager] against the fake CLI (`src/test/resources/fake-claude.py`): every session runs a real child process that
@@ -112,6 +121,8 @@ class SessionManagerTest {
         maxLive: Int = 4,
         /** More variables for every process, such as `TANDEM_FAKE_SESSION_ID`. */
         environment: Map<String, String> = emptyMap(),
+        mcpAuthEvery: Duration = 2.seconds,
+        mcpAuthTimeout: Duration = 3.minutes,
     ): SessionManager {
         val fake = buildMap {
             put("TANDEM_FAKE_LOG", log.toString())
@@ -132,6 +143,8 @@ class SessionManagerTest {
             readTranscript = read,
             appendTitle = appendTitle,
             deleteFiles = deleteFiles,
+            mcpAuthEvery = mcpAuthEvery,
+            mcpAuthTimeout = mcpAuthTimeout,
         )
     }
 
@@ -1545,5 +1558,317 @@ class SessionManagerTest {
         val updated = response["updatedPermissions"]!!.jsonArray.map { it.jsonObject }
         assertEquals(listOf("addRules"), updated.map { it.string("type") })
         assertEquals("session", updated.single().string("destination"))
+    }
+
+    // MCP controls (docs/superpowers/specs/2026-10-21-mcp-controls-design.md 4.2, 9.2). The fake answers every mcp_* request
+    // inline; on `mcp-status` its first mcp_status gets the pending payload of `:2` (its rule (c)), which mcpSession() uses up.
+
+    /** The sign-in link of `mcp-status:40`. */
+    private val authUrl: String =
+        Json.parseToJsonElement(Fixtures.lines("mcp-status")[39]).jsonObject["response"]!!.jsonObject["response"]!!.jsonObject
+            .string("authUrl")!!
+
+    /** A new session of this manager, once its process is attached. */
+    private suspend fun SessionManager.started(): SessionHandle {
+        val handle = create(NewSessionOptions())
+        handle.status.first { it == SessionStatus.IDLE }
+        return handle
+    }
+
+    /**
+     * A manager on the `mcp-status` fixture and a session of it that has listed its servers once, which uses up the fake's
+     * pending answer (rule (c)).
+     */
+    private suspend fun mcpSession(
+        environment: Map<String, String> = emptyMap(),
+        every: Duration = 2.seconds,
+        timeout: Duration = 3.minutes,
+    ): Pair<SessionManager, SessionHandle> {
+        val manager = manager(fixtures = "mcp-status", environment = environment, mcpAuthEvery = every, mcpAuthTimeout = timeout)
+        val handle = manager.started()
+        manager.refreshMcp(handle.id).ok()
+        return manager to handle
+    }
+
+    private fun <T> McpResult<T>.ok(): T = when (this) {
+        is McpResult.Ok -> value
+        is McpResult.Failed -> fail("expected an answer, got $this")
+    }
+
+    /** The control requests of [subtype] the host wrote, in order. */
+    private fun requests(subtype: String): List<JsonObject> = frames().filter { it.type() == "control_request" && it.subtype() == subtype }
+
+    /** The frames the host wrote after its first control request of [subtype]. */
+    private fun framesAfter(subtype: String): List<JsonObject> = frames().dropWhile { it.subtype() != subtype }.drop(1)
+
+    private fun ChatState.notices(level: NoticeLevel): List<String> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == level }.map { it.text }
+
+    private suspend fun SessionHandle.awaitOutcome(server: String): McpAuthOutcome =
+        mcpAuth.first { it[server]?.outcome != null }[server]!!.outcome!!
+
+    @Test
+    fun `opening the servers sends mcp_status and the handle publishes the rows`() = test {
+        val manager = manager(fixtures = "mcp-status")
+        val handle = manager.started()
+
+        val listed = manager.refreshMcp(handle.id).ok()
+
+        assertEquals(listOf("echo", "broken", "authy"), listed.map { it.name })
+        assertEquals(1, requests("mcp_status").size)
+        assertEquals(emptyList(), prompts(), "the request goes out before any prompt")
+        val published = handle.mcpServers.first { it.detailed }
+        assertEquals(listOf("echo", "broken", "authy"), published.servers.map { it.name })
+    }
+
+    @Test
+    fun `toggle sends mcp_toggle and a following refreshMcp shows disabled`() = test {
+        val (manager, handle) = mcpSession()
+
+        assertEquals(McpResult.Ok(Unit), manager.toggleMcp(handle.id, "echo", enabled = false))
+
+        val toggle = requests("mcp_toggle").single()["request"]!!.jsonObject
+        assertEquals("echo", toggle.string("serverName"))
+        assertEquals(false, toggle["enabled"]!!.jsonPrimitive.boolean)
+        assertEquals(McpStatus.DISABLED, manager.refreshMcp(handle.id).ok().single { it.name == "echo" }.status)
+        handle.mcpServers.first { mcp -> mcp.servers.any { it.name == "echo" && it.status == McpStatus.DISABLED } }
+    }
+
+    @Test
+    fun `toggle of an unknown server returns Server not found`() = test {
+        val (manager, handle) = mcpSession()
+        assertEquals(McpResult.Failed(McpError.Rejected("Server not found: nosuch")), manager.toggleMcp(handle.id, "nosuch", enabled = false))
+    }
+
+    @Test
+    fun `reconnect of a failed server returns the CLI's error`() = test {
+        val (manager, handle) = mcpSession()
+        assertEquals(McpResult.Failed(McpError.Rejected("Connection closed")), manager.reconnectMcp(handle.id, "broken"))
+        assertEquals("broken", requests("mcp_reconnect").single()["request"]!!.jsonObject.string("serverName"))
+    }
+
+    // spec: reconnect of a needs-auth server returns Server status: needs-auth
+    @Test
+    fun `reconnect of a needs-auth server returns Server status - needs-auth`() = test {
+        val (manager, handle) = mcpSession()
+        assertEquals(McpResult.Failed(McpError.Rejected("Server status: needs-auth")), manager.reconnectMcp(handle.id, "authy"))
+    }
+
+    @Test
+    fun `startMcpAuth opens the auth url and the poll sees the server connect`() = test {
+        val (manager, handle) = mcpSession(environment = mapOf("TANDEM_FAKE_AUTH_DONE_MS" to "500"), every = 50.milliseconds)
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+
+        val start = manager.startMcpAuth(handle.id, "authy") { opened.add(it) }.ok()
+
+        assertEquals(authUrl, start.authUrl)
+        assertEquals(listOf(authUrl), opened.toList())
+        assertNotNull(handle.mcpAuth.value["authy"], "the wait is published as soon as the browser is asked")
+        assertEquals(McpAuthOutcome.Connected, handle.awaitOutcome("authy"))
+        val chat = handle.state.first { it.notices(NoticeLevel.INFO).isNotEmpty() }
+        assertEquals(listOf("Signed in to authy."), chat.notices(NoticeLevel.INFO))
+        assertEquals(listOf(authUrl), opened.toList(), "the browser opens once")
+        assertEquals(emptySet(), handle.mcpLoginHinted.value)
+    }
+
+    @Test
+    fun `the sign-in poll times out while the server still needs auth`() = test {
+        val (manager, handle) = mcpSession(every = 50.milliseconds, timeout = 300.milliseconds)
+
+        manager.startMcpAuth(handle.id, "authy") {}.ok()
+
+        assertEquals(McpAuthOutcome.StillNeedsAuth, handle.awaitOutcome("authy"))
+        val chat = handle.state.first { it.notices(NoticeLevel.WARNING).isNotEmpty() }
+        assertEquals(listOf("Sign-in to authy did not complete within 3 minutes."), chat.notices(NoticeLevel.WARNING))
+        assertTrue(framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } >= 2, "the poll asked more than once")
+    }
+
+    @Test
+    fun `an mcp_status error answer is Rejected with the CLI's text`() = test {
+        val manager = manager(fixtures = "plain-reply")
+        val handle = manager.started()
+        assertEquals(McpResult.Failed(McpError.Rejected("Unknown subtype")), manager.refreshMcp(handle.id))
+    }
+
+    @Test
+    fun `startMcpAuth answered with Unknown subtype opens nothing and posts the error notice`() = test {
+        val manager = manager(fixtures = "plain-reply")
+        val handle = manager.started()
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+
+        val result = manager.startMcpAuth(handle.id, "authy") { opened.add(it) }
+
+        assertEquals(McpResult.Failed(McpError.Rejected("Unknown subtype")), result)
+        val chat = handle.state.first { it.notices(NoticeLevel.ERROR).isNotEmpty() }
+        assertEquals(listOf("Sign-in to authy failed: Unknown subtype"), chat.notices(NoticeLevel.ERROR))
+        assertEquals(setOf("authy"), handle.mcpLoginHinted.value)
+        assertEquals(emptyMap(), handle.mcpAuth.value)
+        assertEquals(emptyList(), opened.toList())
+    }
+
+    @Test
+    fun `toggle and reconnect answered with Unknown subtype are Rejected with the CLI's text`() = test {
+        val manager = manager(fixtures = "plain-reply")
+        val handle = manager.started()
+        val unknown = McpResult.Failed(McpError.Rejected("Unknown subtype"))
+        assertEquals(unknown, manager.toggleMcp(handle.id, "echo", enabled = false))
+        assertEquals(unknown, manager.reconnectMcp(handle.id, "echo"))
+    }
+
+    @Test
+    fun `startMcpAuth without an authUrl refreshes once`() = test {
+        val (manager, handle) = mcpSession(every = 50.milliseconds)
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+
+        val start = manager.startMcpAuth(handle.id, "echo") { opened.add(it) }.ok()
+
+        assertNull(start.authUrl)
+        assertEquals(McpAuthOutcome.Connected, handle.awaitOutcome("echo"))
+        val chat = handle.state.first { it.notices(NoticeLevel.INFO).isNotEmpty() }
+        assertEquals(listOf("Signed in to echo."), chat.notices(NoticeLevel.INFO))
+        delay(300) // a poll every 50 ms would have asked again by now
+        assertEquals(1, framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" })
+        assertEquals(emptyList(), opened.toList())
+    }
+
+    @Test
+    fun `the sign-in steps survive the caller's cancellation before and after the answer`() = test {
+        val environment = mapOf("TANDEM_FAKE_AUTH_DONE_MS" to "300", "TANDEM_FAKE_EXTRA_NEEDS_AUTH" to "authy2")
+        val (manager, handle) = mcpSession(environment = environment, every = 50.milliseconds)
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+
+        // Cancelled while mcp_authenticate is in flight.
+        val before = launch(start = CoroutineStart.UNDISPATCHED) { manager.startMcpAuth(handle.id, "authy") { opened.add(it) } }
+        before.cancel()
+        assertEquals(McpAuthOutcome.Connected, handle.awaitOutcome("authy"))
+        assertEquals(listOf(authUrl), opened.toList())
+
+        // Cancelled once the answer is in, while the browser is being asked.
+        val asked = CompletableDeferred<String>()
+        val browserDone = CompletableDeferred<Unit>()
+        val after = launch {
+            manager.startMcpAuth(handle.id, "authy2") { url ->
+                asked.complete(url)
+                browserDone.await()
+            }
+        }
+        assertEquals(authUrl, asked.await())
+        after.cancelAndJoin()
+        browserDone.complete(Unit)
+        assertEquals(McpAuthOutcome.Connected, handle.awaitOutcome("authy2"))
+        val chat = handle.state.first { it.notices(NoticeLevel.INFO).size == 2 }
+        assertEquals(listOf("Signed in to authy.", "Signed in to authy2."), chat.notices(NoticeLevel.INFO))
+    }
+
+    @Test
+    fun `two sign-in waits run side by side`() = test {
+        val environment = mapOf("TANDEM_FAKE_EXTRA_NEEDS_AUTH" to "authy2", "TANDEM_FAKE_AUTH_DONE_MS" to "500")
+        val (manager, handle) = mcpSession(environment = environment, every = 50.milliseconds)
+
+        manager.startMcpAuth(handle.id, "authy") {}.ok()
+        manager.startMcpAuth(handle.id, "authy2") {}.ok()
+
+        assertEquals(setOf("authy", "authy2"), handle.mcpAuth.value.keys)
+        val settled = handle.mcpAuth.first { waits -> waits.size == 2 && waits.values.all { it.outcome != null } }
+        assertEquals(mapOf("authy" to McpAuthOutcome.Connected, "authy2" to McpAuthOutcome.Connected), settled.mapValues { it.value.outcome })
+        val chat = handle.state.first { it.notices(NoticeLevel.INFO).size == 2 }
+        assertEquals(setOf("Signed in to authy.", "Signed in to authy2."), chat.notices(NoticeLevel.INFO).toSet())
+
+        // A second run: cancelling one wait leaves the other one running.
+        val second = manager.started()
+        manager.refreshMcp(second.id).ok()
+        manager.startMcpAuth(second.id, "authy") {}.ok()
+        manager.startMcpAuth(second.id, "authy2") {}.ok()
+        manager.cancelMcpAuth(second.id, "authy")
+        assertEquals(setOf("authy2"), second.mcpAuth.value.keys)
+        assertEquals(McpAuthOutcome.Connected, second.awaitOutcome("authy2"))
+        assertNull(second.mcpAuth.value["authy"])
+        val secondChat = second.state.first { it.notices(NoticeLevel.INFO).isNotEmpty() }
+        delay(200) // a cancelled wait would have ended by now too
+        assertEquals(listOf("Signed in to authy2."), second.state.value.notices(NoticeLevel.INFO), secondChat.toString())
+    }
+
+    @Test
+    fun `a stopped session answers NotRunning`() = test {
+        val manager = manager(fixtures = "mcp-status")
+        val handle = manager.started()
+        manager.stop(handle.id)
+        val errorsBefore = handle.state.value.notices(NoticeLevel.ERROR)
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+        val notRunning = McpResult.Failed(McpError.NotRunning)
+
+        assertEquals(notRunning, manager.refreshMcp(handle.id))
+        assertEquals(notRunning, manager.toggleMcp(handle.id, "echo", enabled = false))
+        assertEquals(notRunning, manager.reconnectMcp(handle.id, "broken"))
+        assertEquals(notRunning, manager.startMcpAuth(handle.id, "authy") { opened.add(it) })
+        assertEquals(notRunning, manager.refreshMcp("no-such-session"))
+        manager.cancelMcpAuth(handle.id, "authy")
+        manager.cancelMcpAuth("no-such-session", "authy")
+
+        assertEquals(emptyList(), frames().filter { it.subtype()?.startsWith("mcp_") == true })
+        assertEquals(emptyList(), opened.toList())
+        assertEquals(emptyMap(), handle.mcpAuth.value)
+        assertEquals(emptySet(), handle.mcpLoginHinted.value)
+        assertEquals(errorsBefore, handle.state.value.notices(NoticeLevel.ERROR), "no notice for a session that is not running")
+    }
+
+    @Test
+    fun `two actions run one after the other`() = test {
+        // A process whose input the test reads, and whose answers the test writes.
+        val written = dir.resolve("host-frames.log")
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > '$written'").start())
+        val (manager, handle) = scripted(process)
+        fun mcpRequests(): List<JsonObject> =
+            if (!written.exists()) emptyList()
+            else written.readText().split('\n').dropLast(1).filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+                .filter { it.type() == "control_request" && it.subtype()?.startsWith("mcp_") == true }
+        fun JsonObject.requestId(): String = string("request_id")!!
+        try {
+            val toggle = async { manager.toggleMcp(handle.id, "echo", enabled = false) }
+            val reconnect = async { manager.reconnectMcp(handle.id, "broken") }
+            awaitLog { mcpRequests().isNotEmpty() }
+            delay(300)
+            val first = mcpRequests().single()
+            assertEquals("mcp_toggle", first.subtype(), "the second request waits for the first one's answer")
+
+            process.script.println("""{"type":"control_response","response":{"subtype":"success","request_id":"${first.requestId()}"}}""")
+            awaitLog { mcpRequests().size == 2 }
+            val second = mcpRequests()[1]
+            assertEquals("mcp_reconnect", second.subtype())
+            process.script.println(
+                """{"type":"control_response","response":{"subtype":"error","request_id":"${second.requestId()}","error":"Connection closed"}}""",
+            )
+
+            assertEquals(McpResult.Ok(Unit), toggle.await())
+            assertEquals(McpResult.Failed(McpError.Rejected("Connection closed")), reconnect.await())
+        } finally {
+            manager.close(handle.id)
+        }
+    }
+
+    @Test
+    fun `a toggle followed by its refresh completes while a poll runs`() = test {
+        val (manager, handle) = mcpSession(every = 50.milliseconds) // authy stays needs-auth: the poll goes on
+        manager.startMcpAuth(handle.id, "authy") {}.ok()
+        awaitLog { framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } >= 2 }
+
+        assertEquals(McpResult.Ok(Unit), manager.toggleMcp(handle.id, "echo", enabled = false))
+        assertEquals(McpStatus.DISABLED, manager.refreshMcp(handle.id).ok().single { it.name == "echo" }.status)
+
+        assertNull(handle.mcpAuth.value.getValue("authy").outcome, "the poll still runs")
+        manager.cancelMcpAuth(handle.id, "authy")
+        assertEquals(emptyMap(), handle.mcpAuth.value)
+    }
+
+    @Test
+    fun `three refreshes at once share one follow-up run`() = test {
+        val (manager, handle) = mcpSession()
+        val before = requests("mcp_status").size
+
+        val results = List(3) { async(start = CoroutineStart.UNDISPATCHED) { manager.refreshMcp(handle.id) } }.awaitAll()
+
+        results.forEach { assertEquals(listOf("echo", "broken", "authy"), it.ok().map { server -> server.name }) }
+        val sent = requests("mcp_status").size - before
+        assertTrue(sent in 1..2, "$sent mcp_status requests for three refreshes at once")
     }
 }

@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -163,6 +164,28 @@ class SessionHandle internal constructor(
      * value once the process is let go, until the next one is attached.
      */
     val lastFrameAtMillis: StateFlow<Long> = mutableLastFrameAt.asStateFlow()
+
+    /** The session's MCP servers as the chat knows them ([ChatState.mcp]): every `system/init`'s list, then every `mcp_status` answer. */
+    val mcpServers: StateFlow<McpState> =
+        mutableState.map { it.mcp }.distinctUntilChanged().stateIn(scope, SharingStarted.Eagerly, initialState.mcp)
+
+    private val mutableMcpAuth = MutableStateFlow<Map<String, McpAuthWait>>(emptyMap())
+    private val mutableMcpLoginHinted = MutableStateFlow<Set<String>>(emptySet())
+
+    /** The running or just-ended sign-in waits ([SessionManager.startMcpAuth]), by server name: at most one per server. */
+    val mcpAuth: StateFlow<Map<String, McpAuthWait>> = mutableMcpAuth.asStateFlow()
+
+    /**
+     * The servers whose `mcp_authenticate` failed or timed out in this session, so that the panel keeps offering the terminal's
+     * sign-in hint, also when it is opened again.
+     */
+    val mcpLoginHinted: StateFlow<Set<String>> = mutableMcpLoginHinted.asStateFlow()
+
+    /**
+     * Held for exactly one MCP control request (status, toggle, reconnect or authenticate) at a time, never across a follow-up
+     * refresh: a kotlinx [Mutex] is not reentrant.
+     */
+    val mcpActions: Mutex = Mutex()
 
     init {
         // The index's listing comes from the manager's scope; its title counts from the next step on.
@@ -387,6 +410,36 @@ class SessionHandle internal constructor(
         }
         stop()
         scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    /** Publishes [wait] as its server's sign-in wait, in place of any earlier one. */
+    internal fun putMcpAuth(wait: McpAuthWait) {
+        mutableMcpAuth.update { it + (wait.server to wait) }
+    }
+
+    /** Replaces [old] with [new] if [old] is still its server's wait; false when it was cancelled or replaced meanwhile. */
+    internal fun replaceMcpAuth(old: McpAuthWait, new: McpAuthWait): Boolean {
+        var replaced = false
+        mutableMcpAuth.update { waits ->
+            replaced = waits[old.server] === old
+            if (replaced) waits + (old.server to new) else waits
+        }
+        return replaced
+    }
+
+    /** Drops [server]'s sign-in wait, whichever it is. */
+    internal fun removeMcpAuth(server: String) {
+        mutableMcpAuth.update { it - server }
+    }
+
+    /** Drops [wait] if it is still its server's sign-in wait. */
+    internal fun removeMcpAuth(wait: McpAuthWait) {
+        mutableMcpAuth.update { waits -> if (waits[wait.server] === wait) waits - wait.server else waits }
+    }
+
+    /** Remembers that [server]'s `mcp_authenticate` failed or timed out ([mcpLoginHinted]). */
+    internal fun hintMcpLogin(server: String) {
+        mutableMcpLoginHinted.update { it + server }
     }
 
     internal fun raiseAttention() {

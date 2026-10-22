@@ -2,12 +2,17 @@ package dev.daarkolabs.tandem.session
 
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.protocol.McpAuthStart
+import dev.daarkolabs.tandem.protocol.McpServerInfo
+import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.TranscriptFiles
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -16,7 +21,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -32,10 +40,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.nio.file.Path
 import java.time.Instant
 import java.util.UUID
+import java.util.WeakHashMap
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 private val LOG = logger<SessionManager>()
 
@@ -47,6 +60,9 @@ private const val NOT_READ_TEXT: String = "The session's history could not be re
 
 /** The chat's warning, before the reason, when reading a session's transcript failed part way, after the history it shows. */
 private const val PARTLY_READ_TEXT: String = "The session's history was read only partly: "
+
+/** How long an ended sign-in wait stays in [SessionHandle.mcpAuth], so that the panel shows its outcome. */
+private const val MCP_AUTH_OUTCOME_MILLIS: Long = 5_000
 
 /** What a new session starts with; null leaves it to the CLI. */
 data class NewSessionOptions(val model: String? = null, val effort: String? = null, val permissionMode: PermissionMode? = null)
@@ -93,7 +109,11 @@ class SessionManager internal constructor(
     private val appendTitle: (transcript: Path, id: SessionId, title: String, time: Instant) -> Unit = TranscriptFiles::appendCustomTitle,
     /** Removes a transcript and its directory; tests pass one that waits, to delete while something else happens. */
     private val deleteFiles: (transcript: Path) -> Unit = TranscriptFiles::delete,
-) {
+    /** How often a sign-in wait asks for the servers ([startMcpAuth]). */
+    private val mcpAuthEvery: Duration = 2.seconds,
+    /** How long a sign-in wait lasts at most. */
+    private val mcpAuthTimeout: Duration = 3.minutes,
+) : McpControls {
     /** Reads histories with [TranscriptReader]. */
     constructor(
         scope: CoroutineScope,
@@ -124,6 +144,15 @@ class SessionManager internal constructor(
      * delete, one that came and went meanwhile, reads it again. Guarded by [lock].
      */
     private val closings = HashMap<SessionId, Long>()
+
+    /**
+     * Per session: the `mcp_status` run in flight ([McpRefresh.running]) and the follow-up run that callers arriving meanwhile share
+     * ([McpRefresh.next]). Weak keys, so a closed session's entry goes with its handle. Guarded by [lock].
+     */
+    private val mcpRefreshes = WeakHashMap<SessionHandle, McpRefresh>()
+
+    /** Per session: the sign-in wait of each server, by name ([startMcpAuth]). Guarded by [lock]. */
+    private val mcpAuthJobs = WeakHashMap<SessionHandle, MutableMap<String, Job>>()
 
     /** Starts the sessions' processes. */
     private val spawner = SessionSpawner(
@@ -367,6 +396,46 @@ class SessionManager internal constructor(
         refreshLock.withLock { listing.value = withContext(Dispatchers.IO) { index.list() } }
     }
 
+    override suspend fun refreshMcp(id: SessionId): McpResult<List<McpServerInfo>> {
+        val handle = handle(id) ?: return McpResult.Failed(McpError.NotRunning)
+        handle.liveSession() ?: return McpResult.Failed(McpError.NotRunning)
+        val answer = synchronized(lock) {
+            val refresh = mcpRefreshes.getOrPut(handle, ::McpRefresh)
+            if (refresh.running != null) {
+                refresh.next ?: CompletableDeferred<McpResult<List<McpServerInfo>>>().also { refresh.next = it }
+            } else {
+                CompletableDeferred<McpResult<List<McpServerInfo>>>().also { first -> startRefreshes(handle, refresh, first) }
+            }
+        }
+        return answer.await()
+    }
+
+    override suspend fun toggleMcp(id: SessionId, server: String, enabled: Boolean): McpResult<Unit> =
+        mcpAction(id) { it.mcpToggle(server, enabled) }
+
+    override suspend fun reconnectMcp(id: SessionId, server: String): McpResult<Unit> =
+        mcpAction(id) { it.mcpReconnect(server) }
+
+    override suspend fun startMcpAuth(id: SessionId, server: String, open: suspend (url: String) -> Unit): McpResult<McpAuthStart> {
+        val handle = handle(id) ?: return McpResult.Failed(McpError.NotRunning)
+        val session = handle.liveSession() ?: return McpResult.Failed(McpError.NotRunning)
+        // In the session's scope: the caller (a panel that closes) only waits for the result, and cannot cut the sign-in off.
+        val signIn = handle.scope.async(CoroutineName("SessionManager.mcpSignIn")) { signIn(id, handle, session, server, open) }
+        return try {
+            signIn.await()
+        } catch (e: CancellationException) {
+            currentCoroutineContext().ensureActive() // the caller's own cancellation goes on
+            McpResult.Failed(McpError.Ended) // the session's scope ended first
+        }
+    }
+
+    override fun cancelMcpAuth(id: SessionId, server: String) {
+        val handle = handle(id) ?: return
+        synchronized(lock) { mcpAuthJobs[handle]?.remove(server) }?.cancel()
+        handle.removeMcpAuth(server)
+        LOG.info("session $id: sign-in wait for MCP server $server cancelled")
+    }
+
     /**
      * Kills every process this manager started that has not ended yet, and what it started, at once ([ClaudeSession.killNow]): those
      * of open sessions, and those still being ended, such as a closed or stopped session's. The last resort of a JVM shutdown hook,
@@ -377,6 +446,156 @@ class SessionManager internal constructor(
     }
 
     private fun handle(id: SessionId): SessionHandle? = mutableSessions.value.firstOrNull { it.id == id }
+
+    /** One MCP action of session [id]'s live process, under its [SessionHandle.mcpActions]. */
+    private suspend fun <T> mcpAction(id: SessionId, request: suspend (ClaudeSession) -> McpResult<T>): McpResult<T> {
+        val handle = handle(id) ?: return McpResult.Failed(McpError.NotRunning)
+        val session = handle.liveSession() ?: return McpResult.Failed(McpError.NotRunning)
+        return handle.mcpActions.withLock { request(session) }
+    }
+
+    /**
+     * Starts [handle]'s `mcp_status` runs, under [lock]: the first answers [first]; then, while callers arrived meanwhile
+     * ([McpRefresh.next]), one more run answers all of them. A run cut off by the session's end answers [McpError.Ended].
+     */
+    private fun startRefreshes(handle: SessionHandle, refresh: McpRefresh, first: CompletableDeferred<McpResult<List<McpServerInfo>>>) {
+        val job = handle.scope.launch(CoroutineName("SessionManager.mcpStatus")) {
+            var target: CompletableDeferred<McpResult<List<McpServerInfo>>>? = first
+            try {
+                while (target != null) {
+                    val listed = handle.mcpActions.withLock {
+                        handle.liveSession()?.mcpStatus() ?: McpResult.Failed(McpError.NotRunning)
+                    }
+                    target.complete(listed)
+                    target = synchronized(lock) {
+                        refresh.next?.also { refresh.next = null } ?: run {
+                            refresh.running = null
+                            null
+                        }
+                    }
+                }
+            } finally {
+                target?.complete(McpResult.Failed(McpError.Ended))
+            }
+        }
+        refresh.running = job
+        // A job cancelled before it ran never reaches its finally: whoever waits for it is answered here.
+        job.invokeOnCompletion {
+            val waiting = synchronized(lock) {
+                if (refresh.running !== job) {
+                    null
+                } else {
+                    refresh.running = null
+                    refresh.next.also { refresh.next = null }
+                }
+            }
+            first.complete(McpResult.Failed(McpError.Ended))
+            waiting?.complete(McpResult.Failed(McpError.Ended))
+        }
+    }
+
+    /**
+     * [startMcpAuth] in [handle]'s scope: `mcp_authenticate`, then the browser and the wait for [server] to connect, or without a link
+     * one look at the servers.
+     */
+    private suspend fun signIn(
+        id: SessionId,
+        handle: SessionHandle,
+        session: ClaudeSession,
+        server: String,
+        open: suspend (url: String) -> Unit,
+    ): McpResult<McpAuthStart> {
+        val started = handle.mcpActions.withLock { session.mcpAuthenticate(server) }
+        val start = when (started) {
+            is McpResult.Failed -> {
+                signInFailed(handle, server, started.error)
+                return started
+            }
+            is McpResult.Ok -> started.value
+        }
+        val url = start.authUrl
+        if (url == null || start.requiresUserAction == false) {
+            // Nothing to open (unrecorded): what the servers say now is the outcome.
+            val outcome = when (val listed = refreshMcp(id)) {
+                is McpResult.Ok -> signInOutcome(listed.value, server) ?: McpAuthOutcome.NoLink
+                is McpResult.Failed -> McpAuthOutcome.Failed(listed.error.endedIfGone())
+            }
+            launchSignIn(handle, McpAuthWait(server, clock(), outcome)) { outcome }
+            return started
+        }
+        try {
+            open(url)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            LOG.warn("session $id: the browser did not open for MCP server $server (${e.javaClass.simpleName})")
+            val failed = McpResult.Failed(McpError.Rejected(e.message ?: e.javaClass.simpleName))
+            signInFailed(handle, server, failed.error)
+            return failed
+        }
+        launchSignIn(handle, McpAuthWait(server, clock())) { pollSignIn(id, server) }
+        return started
+    }
+
+    /** `mcp_authenticate` failed with [error]: the chat says so and the panel offers the terminal's sign-in, unless the session ended. */
+    private fun signInFailed(handle: SessionHandle, server: String, error: McpError) {
+        val text = error.text() ?: return
+        handle.hintMcpLogin(server)
+        handle.notice(NoticeLevel.ERROR, "Sign-in to $server failed: $text")
+        LOG.info("session ${handle.id}: mcp_authenticate for MCP server $server failed (${error.javaClass.simpleName})")
+    }
+
+    /**
+     * Publishes [wait] as [handle]'s wait for its server, in place of an earlier one, and runs [outcome] for it in the session's scope,
+     * then [settleSignIn].
+     */
+    private fun launchSignIn(handle: SessionHandle, wait: McpAuthWait, outcome: suspend () -> McpAuthOutcome) {
+        synchronized(lock) {
+            val jobs = mcpAuthJobs.getOrPut(handle, ::HashMap)
+            jobs.remove(wait.server)?.cancel()
+            handle.putMcpAuth(wait)
+            val job = handle.scope.launch(CoroutineName("SessionManager.mcpSignInWait")) { settleSignIn(handle, wait, outcome()) }
+            jobs[wait.server] = job
+            job.invokeOnCompletion { synchronized(lock) { if (jobs[wait.server] === job) jobs.remove(wait.server) } }
+        }
+    }
+
+    /** Waits for [server] to connect: its status every [mcpAuthEvery], for up to [mcpAuthTimeout]. */
+    private suspend fun pollSignIn(id: SessionId, server: String): McpAuthOutcome {
+        var lastError: McpError? = null
+        val settled = withTimeoutOrNull(mcpAuthTimeout) { pollUntilSettled(id, server) { lastError = it } }
+        return settled ?: lastError?.let { McpAuthOutcome.Failed(it) } ?: McpAuthOutcome.StillNeedsAuth
+    }
+
+    /** Asks for the servers every [mcpAuthEvery] until [server] leaves `needs-auth`; [failed] gets each check's error, null after an answer. */
+    private suspend fun pollUntilSettled(id: SessionId, server: String, failed: (McpError?) -> Unit): McpAuthOutcome {
+        while (true) {
+            delay(mcpAuthEvery)
+            when (val listed = refreshMcp(id)) {
+                is McpResult.Ok -> {
+                    failed(null)
+                    signInOutcome(listed.value, server)?.let { return it }
+                }
+                is McpResult.Failed -> when (val error = listed.error) {
+                    is McpError.Rejected, is McpError.TimedOut -> failed(error) // no change: the next check tries again
+                    McpError.NotRunning, McpError.Ended -> return McpAuthOutcome.Failed(McpError.Ended)
+                }
+            }
+        }
+    }
+
+    /** Shows [outcome] on [wait] and in the chat, unless the wait was cancelled or replaced meanwhile, and drops it 5 s later. */
+    private suspend fun settleSignIn(handle: SessionHandle, wait: McpAuthWait, outcome: McpAuthOutcome) {
+        val settled = if (wait.outcome == outcome) wait else wait.copy(outcome = outcome)
+        if (!handle.replaceMcpAuth(wait, settled)) return
+        LOG.info("session ${handle.id}: sign-in to MCP server ${wait.server} ended (${outcome.javaClass.simpleName})")
+        signInNotice(wait.server, outcome)?.let { (level, text) -> handle.notice(level, text) }
+        try {
+            delay(MCP_AUTH_OUTCOME_MILLIS)
+        } finally {
+            handle.removeMcpAuth(settled)
+        }
+    }
 
     /**
      * Takes session [id] out of [sessions] (selecting a neighbour if it was selected), stops it and runs [then], all while it is
@@ -558,6 +777,42 @@ class SessionManager internal constructor(
             "The transcript of the session this fork was made from was not found (it was deleted, or could not be looked up), " +
                 "so the fork cannot start. Close it and fork again from another session."
     }
+}
+
+/** A session's `mcp_status` run in flight and the follow-up run shared by the callers that came meanwhile; see [SessionManager.refreshMcp]. */
+private class McpRefresh {
+    var running: Job? = null
+    var next: CompletableDeferred<McpResult<List<McpServerInfo>>>? = null
+}
+
+/** What [servers] say about a sign-in to [server]: null while it still needs auth. */
+private fun signInOutcome(servers: List<McpServerInfo>, server: String): McpAuthOutcome? {
+    val entry = servers.firstOrNull { it.name == server } ?: return McpAuthOutcome.Removed
+    return when (entry.status) {
+        McpStatus.CONNECTED -> McpAuthOutcome.Connected
+        McpStatus.NEEDS_AUTH -> null
+        else -> McpAuthOutcome.Changed(entry.status, entry.error)
+    }
+}
+
+/** A process that is gone, whether it ended or was never there, ends a sign-in as [McpError.Ended]. */
+private fun McpError.endedIfGone(): McpError = if (this == McpError.NotRunning) McpError.Ended else this
+
+/** The chat's text for an error the user should see; null when the session ended, which the chat shows already. */
+private fun McpError.text(): String? = when (this) {
+    is McpError.Rejected -> message
+    is McpError.TimedOut -> "The CLI did not answer within $seconds s."
+    McpError.NotRunning, McpError.Ended -> null
+}
+
+/** The chat's notice for a sign-in that ended with [outcome]; null for one that needs none. */
+private fun signInNotice(server: String, outcome: McpAuthOutcome): Pair<NoticeLevel, String>? = when (outcome) {
+    McpAuthOutcome.Connected -> NoticeLevel.INFO to "Signed in to $server."
+    McpAuthOutcome.StillNeedsAuth -> NoticeLevel.WARNING to "Sign-in to $server did not complete within 3 minutes."
+    McpAuthOutcome.NoLink -> NoticeLevel.ERROR to "Sign-in to $server failed: the CLI sent no sign-in link"
+    is McpAuthOutcome.Failed -> outcome.error.text()?.let { NoticeLevel.ERROR to "Sign-in to $server failed: $it" }
+    is McpAuthOutcome.Changed -> outcome.error?.let { NoticeLevel.ERROR to "Sign-in to $server failed: $it" }
+    McpAuthOutcome.Removed -> null
 }
 
 /** Each session with its title, again whenever a title changes. */
