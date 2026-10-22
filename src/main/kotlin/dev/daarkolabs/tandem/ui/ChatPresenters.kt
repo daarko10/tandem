@@ -14,7 +14,6 @@ import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.job
 import kotlinx.coroutines.plus
@@ -26,7 +25,7 @@ import kotlinx.coroutines.plus
 @Composable
 internal fun rememberChatPresenters(manager: SessionManager, open: List<SessionHandle>, options: StateFlow<RowOptions>): ChatPresenters {
     val scope = rememberCoroutineScope()
-    val presenters = remember(scope, manager, options) { ChatPresenters(scope, options, manager::send, manager.models) }
+    val presenters = remember(scope, manager, options) { ChatPresenters(scope, options, manager.models, manager::send) }
     LaunchedEffect(presenters, open) { presenters.retain(open) }
     return presenters
 }
@@ -40,9 +39,9 @@ internal fun rememberChatPresenters(manager: SessionManager, open: List<SessionH
 internal class ChatPresenters(
     private val scope: CoroutineScope,
     private val options: StateFlow<RowOptions>,
+    /** The models another process listed, for a session whose own process has not ([ChatPresenter]): [SessionManager.models]. */
+    private val models: StateFlow<List<ModelOption>>,
     private val send: (SessionId, String, List<ImageBlock>) -> Unit = { _, _, _ -> },
-    /** The models another process listed, for a session whose own process has not ([ChatPresenter]). */
-    private val models: StateFlow<List<ModelOption>> = MutableStateFlow(emptyList()),
 ) {
     private inner class Entry(val handle: SessionHandle, val job: Job, val presenter: ChatPresenter) {
         /** Made on the first prompt: a session never typed in has none. */

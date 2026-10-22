@@ -31,7 +31,7 @@ class ChatUiStateTest {
     fun expansionIsKeptPerSessionKey() {
         val scope = CoroutineScope(SupervisorJob())
         try {
-            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)))
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()))
             val first = presenters.ui("a").expanded("tool:1")
             first.value = true
 
@@ -50,7 +50,7 @@ class ChatUiStateTest {
     fun draftIsKeptPerSessionKey() {
         val scope = CoroutineScope(SupervisorJob())
         try {
-            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)))
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()))
             val first = presenters.ui("a").draft
             first.edit { append("hello") }
 
