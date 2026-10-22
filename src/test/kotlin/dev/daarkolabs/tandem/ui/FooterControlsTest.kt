@@ -254,6 +254,15 @@ class FooterControlsTest {
     }
 
     @Test
+    fun `an alias picked before any process listed its models keeps the effort`() {
+        // A stopped session's alias-only menu: picking Sonnet shows the alias, whose effort levels are unknown, not absent.
+        val composer = composerModel(ChatState(activeModel = "claude-opus-5-5", effort = "medium", requestedModel = "sonnet", modelSwitchPending = true))
+        assertEquals(ModelLabel("Sonnet", "Medium"), modelLabel(composer))
+        assertEquals(listOf("low", "medium", "high", "max"), effortMenu(composer)?.items?.map { it.level })
+        assertEquals("Medium", effortMenu(composer)?.trailing)
+    }
+
+    @Test
     fun `a digit of a hidden mode picks nothing`() {
         // Auto is hidden for Haiku 4.5, which has no supportsAutoMode: 1 is Auto's digit, never the first item's.
         assertNull(byDigit(modeMenu(composer(permissionMode = PermissionMode.DEFAULT, activeModel = haiku45)), 1, ModeItem::digit))

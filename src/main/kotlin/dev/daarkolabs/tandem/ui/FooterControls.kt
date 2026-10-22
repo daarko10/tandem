@@ -95,7 +95,7 @@ internal data class ModelLabel(val model: String, val effort: String?)
  * CLI reports, else the model picked (a session started with a pick, before its first `system/init` and the CLI's model list; the
  * CLI's own `default` entry is no pick), each by its name in the list ([modelDisplayName]: an alias's for a model of its family,
  * the id itself for one the list does not name), else "Model"; and the effort, unless there is none or the effort page would not
- * list it ([effortMenu]: a shown model without effort levels).
+ * list it ([effortMenu]: a shown model without effort levels; an alias's levels are unknown, so it keeps the effort).
  */
 internal fun modelLabel(composer: ComposerModel): ModelLabel {
     val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
@@ -157,16 +157,17 @@ internal data class EffortMenu(val trailing: String, val items: List<EffortItem>
 
 /**
  * The effort page (spec 2.3), or null when the model menu has none: the shown model's levels, the current one checked. While no
- * entry stands for the model (the list is the CLI's aliases, which name no model, or the model it runs is none of the list's), a
- * known effort lists low, medium, high and max (edge 1): only a shown model without effort levels hides the page (edge 15). A
- * current level the shown model does not list comes last, checked and disabled: the CLI decides at the next turn.
+ * entry stands for the model (the list is the CLI's aliases, which name no model, or the model it runs is none of the list's), or the
+ * shown entry is an alias (no `resolvedModel`: its levels are unknown, not absent), a known effort lists low, medium, high and max
+ * (edge 1): only a shown model without effort levels hides the page (edge 15). A current level the shown model does not list comes
+ * last, checked and disabled: the CLI decides at the next turn.
  */
 internal fun effortMenu(composer: ComposerModel): EffortMenu? {
     val effort = composer.effort
     val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
     val levels = when {
         composer.effortLevels.isNotEmpty() -> composer.effortLevels
-        shown == null && effort != null -> EFFORT_LEVELS
+        (shown == null || shown.resolvedModel == null) && effort != null -> EFFORT_LEVELS
         else -> return null
     }
     val items = levels.map { EffortItem(it, Modes.effortLabel(it), checked = it == effort, enabled = true) }
