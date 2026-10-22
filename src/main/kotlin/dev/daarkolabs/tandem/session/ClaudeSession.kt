@@ -22,6 +22,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
@@ -33,6 +34,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.future.await
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -42,6 +44,7 @@ import kotlinx.serialization.json.JsonObject
 import java.io.IOException
 import java.nio.file.Path
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -55,6 +58,18 @@ private const val MCP_STATUS_SECONDS = 15
 
 /** How long `mcp_reconnect` and `mcp_authenticate` wait for their answer (a guess: a reconnect that succeeds is unrecorded). */
 private const val MCP_SLOW_SECONDS = 30
+
+/**
+ * How long the end waits, once the process has exited, for the rest of its stderr. A normal exit's last lines are there at once; a
+ * process the CLI started that outlives it (a tool's subprocess, an MCP server) can keep the stderr open for as long as it runs.
+ */
+private const val STDERR_GRACE_MILLIS = 2_000L
+
+/**
+ * How long a read of the process's output that failed waits for the process to be over before the failure counts as one:
+ * [Process.destroyForcibly] closes its pipes at once, but [Process.isAlive] turns false only once the JDK has seen it exit.
+ */
+private const val CUT_OFF_GRACE_MILLIS = 2_000L
 
 /** How a [ClaudeSession.request] came out: the CLI's [Answered] answer, no answer in time, or the process [Ended] first. */
 internal sealed interface Reply {
@@ -266,17 +281,22 @@ class ClaudeSession(
                 try { awaitCancellation() } finally { withContext(NonCancellable) { terminate(p) } }
             }
             val writer = launch { writeLoop(p) }
-            val stderr = launch { readOutput(p) { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } } }
+            val stderr = launch { readOutput(p) { readStderr(p) } }
             readLoop(p)
             // Past the CLI's stdout end it can neither answer a request nor read a frame: from here a request answers Ended and a
             // shell escape says its output was not sent, rather than writing to a process that no longer reads (hard rule 5).
             ended = true
             val code = runInterruptible { p.waitFor() }
-            stderr.join()
-            writer.cancel()
+            writer.cancel() // which closes the process's input, without the end waiting for that (writeLoop)
+            // A normal exit's last stderr lines go in the exit notice. A process the CLI started that keeps the stderr open holds the
+            // end back no longer than the grace: the chat shows the end whatever the reader does, and the reader is let go below.
+            if (withTimeoutOrNull(STDERR_GRACE_MILLIS) { stderr.join() } == null) {
+                LOG.info("claude's stderr is still open $STDERR_GRACE_MILLIS ms after it exited: a process it started holds it")
+            }
             LOG.info("claude exited with code $code")
             ended = true // ahead of the chat saying so: a request made once it shows answers Ended at once
             endWith(exitEvent(code))
+            endRequests() // and so does one that waits, once the chat shows the end
             this.coroutineContext.job.children.forEach { it.cancel() }
         }
     }
@@ -583,7 +603,7 @@ class ClaudeSession(
     private suspend fun readLoop(p: Process) {
         val reader = p.inputStream.bufferedReader(Charsets.UTF_8)
         while (true) {
-            val line = readOutput(p) { reader.readLine() } ?: return
+            val line = readOutput(p) { runInterruptible { reader.readLine() } } ?: return
             val at = clock()
             _lastFrameAtMillis.value = at
             if (line.isBlank()) continue
@@ -609,34 +629,51 @@ class ClaudeSession(
     }
 
     /**
-     * [read], a blocking read of [p]'s stdout or stderr; null if the output failed because the process is over. The JDK can close
-     * the pipe of a process that exits under a waiting read: when Tandem ended the process, or it ended by itself, its output is
-     * over and the exit code tells the rest. A failure while it runs on, and Tandem did not end it, is one, and is thrown.
+     * [read], a read of [p]'s stdout or stderr; null if the output failed because the process is over. The JDK can close the pipe of
+     * a process that exits under a waiting read, and [Process.destroyForcibly] closes them before the process is seen to exit: when
+     * Tandem ended the process, or it is over within [CUT_OFF_GRACE_MILLIS], its output is over and the exit code tells the rest. A
+     * failure while it runs on, and Tandem did not end it, is one, and is thrown.
      *
-     * Cancelling this interrupts the reading thread ([runInterruptible]): a stream that can be interrupted then throws
+     * Cancelling a read in [runInterruptible] interrupts the reading thread: a stream that can be interrupted then throws
      * `InterruptedIOException`, an [IOException], and runInterruptible interrupts only once the cancellation has begun. While this is
      * being cancelled, that, or any I/O failure, is the cancellation, never a failure to show.
      */
-    private suspend fun <T> readOutput(p: Process, read: () -> T): T? =
+    private suspend fun <T> readOutput(p: Process, read: suspend () -> T): T? =
         try {
-            runInterruptible(block = read)
+            read()
         } catch (e: IOException) {
             currentCoroutineContext().ensureActive() // being cancelled: this is the cancellation, thrown as such
-            if (stopping || !p.isAlive) null else throw e
+            if (stopping || runInterruptible { p.waitFor(CUT_OFF_GRACE_MILLIS, TimeUnit.MILLISECONDS) }) null else throw e
         }
 
+    /**
+     * Reads [p]'s stderr to its end into [stderrTail], on a thread of [Dispatchers.IO] that this waits for only until it is cancelled.
+     * A process the CLI started can keep the stderr open after the CLI is gone, and a read of a pipe can be neither interrupted nor
+     * closed under it: that thread then ends when the last process that holds the pipe does, and nothing waits for it.
+     */
+    private suspend fun readStderr(p: Process) {
+        val read = { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } }
+        CompletableFuture.runAsync(read, Dispatchers.IO.asExecutor()).await()
+    }
+
+    /** Writes [outbox] to [p]'s input, and closes the input once it ends: cancelled, or the input failed. */
     private suspend fun writeLoop(p: Process) {
         val writer = p.outputStream.bufferedWriter(Charsets.UTF_8)
-        for (message in outbox) {
-            try {
-                runInterruptible {
-                    writer.write(Ndjson.encode(message))
-                    writer.flush()
+        try {
+            for (message in outbox) {
+                try {
+                    runInterruptible {
+                        writer.write(Ndjson.encode(message))
+                        writer.flush()
+                    }
+                } catch (e: IOException) {
+                    LOG.info("stdin closed: ${e.message}")
+                    return
                 }
-            } catch (e: IOException) {
-                LOG.info("stdin closed: ${e.message}")
-                return
             }
+        } finally {
+            // Here, not on the end's path: a write that waits on a full pipe holds the stream until it returns.
+            closeInput(p)
         }
     }
 
@@ -657,15 +694,21 @@ class ClaudeSession(
     private fun terminate(p: Process) {
         stopping = true
         val children = p.descendants().toList()
-        if (p.isAlive) {
-            runCatching { p.outputStream.close() } // end of input: the CLI shuts down on its own
-            if (!p.waitFor(2, TimeUnit.SECONDS)) {
-                p.destroy()
-                if (!p.waitFor(2, TimeUnit.SECONDS)) p.destroyForcibly().waitFor(2, TimeUnit.SECONDS)
-            }
+        closeInput(p) // the CLI shuts down on its own
+        if (p.isAlive && !p.waitFor(2, TimeUnit.SECONDS)) {
+            p.destroy()
+            if (!p.waitFor(2, TimeUnit.SECONDS)) p.destroyForcibly().waitFor(2, TimeUnit.SECONDS)
         }
         children.filter { it.isAlive }.forEach { it.destroyForcibly() }
         LOG.info("claude stopped")
+    }
+
+    /**
+     * Ends [p]'s input, also once [p] has exited: a process it started that reads the same pipe sees the end too. The JDK closes it
+     * at the exit only after a read of the stderr that waits has returned, and such a process can be what keeps that read waiting.
+     */
+    private fun closeInput(p: Process) {
+        runCatching { p.outputStream.close() }
     }
 
     private fun dispatch(event: SessionEvent) = _state.update { reduce(it, event) }

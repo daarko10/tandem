@@ -529,7 +529,7 @@ class ClaudeSessionTest {
     }
 
     /** A scope whose uncaught exceptions are kept in [uncaught], and a session in it whose process is [process]. */
-    private class CutOffSession(process: CutOffProcess, tmp: Path, sessionId: String) {
+    private class CutOffSession(process: Process, tmp: Path, sessionId: String) {
         val uncaught: MutableList<Throwable> = Collections.synchronizedList(ArrayList())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> uncaught.add(e) })
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = sessionId), ProcessLauncher { _, _ -> process })
@@ -636,11 +636,18 @@ class ClaudeSessionTest {
 
     /**
      * A session on a [ScriptedProcess]: the test writes the CLI's lines with [write], and every frame the host writes lands in
-     * [stdin]. Answers go through the session's own request path (spec 9.2).
+     * [stdin]. Answers go through the session's own request path (spec 9.2). With [child], the real process first starts that shell
+     * command in the background and then becomes the `cat` itself: a process the CLI started, which outlives it.
      */
-    private class ScriptedSession(tmp: Path, sessionId: String, mcpMillisPerSecond: Long = 1_000L, quietWaitMillis: Long = 5_000L) {
+    private class ScriptedSession(
+        tmp: Path,
+        sessionId: String,
+        mcpMillisPerSecond: Long = 1_000L,
+        quietWaitMillis: Long = 5_000L,
+        child: String? = null,
+    ) {
         val stdin: File = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > '${stdin.path}'").start())
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", (child?.let { "$it & exec " } ?: "") + "cat > '${stdin.path}'").start())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(
             scope,
@@ -651,6 +658,15 @@ class ClaudeSessionTest {
         )
 
         fun write(line: String) = process.script.println(line)
+
+        /**
+         * The CLI dies by itself, as in a crash or when something outside Tandem kills it. Unlike [Process.destroyForcibly], which
+         * also closes Tandem's ends of its pipes, nothing else changes: the pipes stay as they are, and its scripted output ends.
+         */
+        fun die() {
+            process.toHandle().destroyForcibly()
+            process.script.close()
+        }
 
         /** A success answer to [requestId]; [payload] is its `response` object, none for a bare success (`mcp-status:19`). */
         fun success(requestId: String, payload: String? = null) {
@@ -920,6 +936,84 @@ class ClaudeSessionTest {
         assertEquals(Reply.Ended, reply)
         assertTrue(session.state.value.ended)
         scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    /** The processes [ScriptedSession.process] started, once there is one: a test that kills its process kills these in the end. */
+    private suspend fun ScriptedSession.children(): List<ProcessHandle> = withTimeout(5_000) {
+        while (process.descendants().count() == 0L) delay(20)
+        process.descendants().toList()
+    }
+
+    /**
+     * Returns once the session's stderr reader waits in the pipe's read itself. A read that does not wait yet when the process exits
+     * finds the pipe drained and closed by the JDK; one that waits holds it until the last process that can write to it is gone.
+     */
+    private suspend fun ScriptedSession.stderrReadWaits() = withTimeout(5_000) {
+        val inRead = { frame: StackTraceElement? -> frame?.className == "java.io.FileInputStream" && frame.methodName == "readBytes" }
+        while (!inRead(process.stderrReader?.stackTrace?.firstOrNull())) delay(20)
+    }
+
+    @Test
+    fun `a child that keeps the CLI's stderr open holds back neither the end nor close`() = runBlocking {
+        // A tool's subprocess or an MCP server the CLI started can outlive it with its stderr: a read of that pipe never ends.
+        val run = ScriptedSession(tmp, newSessionId, child = "sleep 600 >&2")
+        val children = run.children()
+        try {
+            run.session.start()
+            val sent = CompletableDeferred<Unit>()
+            val waiting = async { run.session.request(60_000) { sent.complete(Unit); HostMessages.mcpStatus(it) } }
+            withTimeout(10_000) { sent.await() }
+            run.stderrReadWaits()
+
+            run.die()
+            val ended = withTimeout(5_000) { run.session.state.first { it.ended } }
+            assertEquals("The claude CLI exited with code 137.", (ended.entries.last() as ChatEntry.Notice).text)
+            assertEquals(Reply.Ended, withTimeout(1_000) { waiting.await() })
+            assertEquals(Reply.Ended, withTimeout(1_000) { run.session.request(60_000) { HostMessages.mcpStatus(it) } })
+            assertTrue(children.all { it.isAlive }, "the child still holds the stderr")
+            withTimeout(5_000) { run.close() }
+        } finally {
+            children.forEach { it.destroyForcibly() }
+        }
+    }
+
+    @Test
+    fun `the CLI's stdin is closed once it has exited, ahead of the end`() = runBlocking {
+        // The JDK closes it only once the waiting stderr read has returned, which this child holds back until its stdin ends. What the
+        // child writes to stderr then is in the exit notice.
+        val run = ScriptedSession(tmp, newSessionId, child = "exec 3<&0; { cat <&3 > /dev/null; echo 'stdin closed' >&2; }")
+        val children = run.children()
+        try {
+            run.session.start()
+            run.stderrReadWaits()
+            run.die()
+            val ended = withTimeout(5_000) { run.session.state.first { it.ended } }
+            assertEquals("The claude CLI exited with code 137.\nstdin closed", (ended.entries.last() as ChatEntry.Notice).text)
+            run.close()
+        } finally {
+            children.forEach { it.destroyForcibly() }
+        }
+    }
+
+    @Test
+    fun `an output that fails as the process is destroyed ends the session, not fails it`() = runBlocking {
+        // destroyForcibly closes the pipes at once, while isAlive turns false only once the JDK has seen the exit: a read that fails
+        // in between is the end of the output. Here the stderr fails a moment ahead of the kill, while the process still runs.
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "exec cat > /dev/null").start())
+        val run = CutOffSession(process, tmp, newSessionId)
+        try {
+            process.errorStream.close()
+            run.session.start()
+            withTimeout(5_000) { while (process.stderrFailure == null) delay(5) }
+            delay(100) // the session has taken the failure in by now, well within the grace it gives the process to end
+            process.destroyForcibly()
+            val ended = withTimeout(5_000) { run.session.state.first { it.ended } }
+            assertEquals(emptyList(), run.uncaught.map { it.stackTraceToString().take(1500) }, "the output ended with the process")
+            assertEquals("The claude CLI exited with code 137.", (ended.entries.last() as ChatEntry.Notice).text)
+        } finally {
+            process.destroyForcibly()
+            run.scope.coroutineContext.job.cancelAndJoin()
+        }
     }
 
     @Test
