@@ -52,7 +52,7 @@ A second workflow, `.github/workflows/drift-fix.yml`, named `Drift fix`, runs on
 - `workflow_dispatch` with three inputs: `rehearse` (boolean, default `false`) and `mode` (string, default
   `init-model-key`) for the fixer-only rehearsal (see "The rehearsal"), and `run_id` (string, optional: the id of a red
   `CLI contract` run to fix now, for a run that happened before this workflow reached `main` or whose automatic firing
-  was skipped). Dispatch from `main`: the job's `if` skips a dispatch from any other branch, which would otherwise fail
+  was skipped; with an old run the CLI did not answer it is also the kind-1 rehearsal, see "The rehearsal"). Dispatch from `main`: the job's `if` skips a dispatch from any other branch, which would otherwise fail
   at the federation exchange after the disk and Gradle setup. The rehearsal that proves the trigger is not a dispatch of
   this workflow but of the nightly (`cli-contract.yml` with `drift=<mode>`, see "The rehearsal").
 
@@ -186,7 +186,7 @@ One job, `fix`, on `ubuntu-latest`:
 
    ```
    --model claude-opus-5-5
-   --max-turns 60
+   --max-turns 120
    --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
    ```
 
@@ -194,8 +194,13 @@ One job, `fix`, on `ubuntu-latest`:
    `.claude/settings.json` is loaded as well) with `permissions.deny`: `Edit(.github/**)`, `Write(.github/**)`,
    `Edit(build.gradle.kts)`, `Write(build.gradle.kts)`, `Edit(settings.gradle.kts)`, `Write(settings.gradle.kts)`,
    `Edit(scripts/**)`, `Write(scripts/**)`, `Edit(.claude/**)`, `Write(.claude/**)`, `Edit(CLAUDE.md)`,
-   `Write(CLAUDE.md)` and `Bash(claude:*)`. The step has `id: agent`, so step 9 can read
-   `steps.agent.outputs.conclusion`.
+   `Write(CLAUDE.md)` and `Bash(claude:*)`, and `env`: `BASH_DEFAULT_TIMEOUT_MS` `900000` and `BASH_MAX_TIMEOUT_MS`
+   `1800000`. The CLI's Bash tool times a command out after two minutes by default (the model can raise it to ten),
+   and `./gradlew check` takes about three minutes on a warm runner (`Build` run 39706160759: 2m44s), so without those
+   values the first `check` is killed and its retry costs turns. The turn budget is 120: a real fixture from the newest
+   CLI also reds tests the skill names in its step 4 beyond the contract test, each needing reads and edits, and one
+   retry of `check` must fit; the step's 75 minutes and the workspace limit still bound spend. The step has
+   `id: agent`, so step 9 can read `steps.agent.outputs.conclusion`.
 
    Opus is the tier for an implementation task. `Edit` and `Write` here are the CLI's own tools on the runner's
    checkout, not Tandem's. The allowlist names the invocations the skill prescribes, not programs, because the GitHub
@@ -215,9 +220,16 @@ One job, `fix`, on `ubuntu-latest`:
    bounds the loop whatever the agent decides is branch protection on `main` and the App token's scope
    ("Safeguards"), not this list. The step has `timeout-minutes: 75` inside the job's 90.
 9. **Enforce the edit allowlist.** After the action, `if: always()` once the gate proceeded, a `run:` step lists the
-   files the drift branch changed against `main` and fails the job, comments on the PR naming the offending files and
-   closes it, when any path is outside `src/main/kotlin/dev/daarkolabs/tandem/protocol/`,
-   `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`, `src/test/` and `docs/protocol.md`. The skill says the
+   files the drift branch changed against `main` and, when any path is outside
+   `src/main/kotlin/dev/daarkolabs/tandem/protocol/`, `src/main/kotlin/dev/daarkolabs/tandem/session/transcript/`,
+   `src/test/` and `docs/protocol.md`, comments on the PR naming the offending paths, leaves it open and fails the job
+   (`exit 1`). The PR is not closed: the gate of step 7 keys on an open `contract-drift` PR, so a closed one would
+   re-arm the loop, and the next nightly (same red, same CLI) would start a fresh agent run that produces the same
+   out-of-allowlist fix, one Opus run plus a `Build` run per night until the owner intervened, against the cost
+   safeguard below; and to the gate a close by this step is indistinguishable from the owner closing a wrong fix.
+   Left open, the PR holds the gate (step 7 comments on it once per further red), branch protection still blocks its
+   merge, and the owner decides: close it to re-arm the loop, or merge after review, cherry-picking the agent's work
+   where the paths named in the comment are worth keeping. The skill says the
    same rule and the deny rules of step 8 enforce most of it before the push; this step is the check that does not
    depend on the agent obeying either. When no `contract-drift` PR is open, the step is red (`exit 1`) in both
    remaining cases, so a loop that proceeded past the gate and produced no PR is never green and silent (hard rule 5):
@@ -274,7 +286,9 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
    `transcript fixtures decode line by line without throwing`, and a `TranscriptReaderTest` case that loads it and
    asserts one `ChatEntry.User` and one `ChatEntry.Assistant`. Add one test that states the fact that drifted: the
    field or type the decoder now recognises, read from the new fixture, and a `RobustnessTest` case for the malformed
-   version of that shape (it must still decode to `Unknown`, never throw).
+   version of that shape (it must still decode to `Unknown`, never throw). Any other test that iterates
+   `Fixtures.names()` (`FixtureDecodeTest`'s unknown-types set, `ReducerTest`) may go red with the new fixture: update
+   its expectation, never remove the fixture.
 5. **Patch minimally.** Decoder drift: `src/main/kotlin/dev/daarkolabs/tandem/protocol/Ndjson.kt` and `CliMessage.kt`
    only; a renamed field is read under both names, a new required field is read optionally, a new type or subtype gets
    a typed message only when Tandem needs it and `Unknown(raw)` otherwise. Reader drift: `TranscriptReader.kt` and
@@ -346,15 +360,16 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 - **One open fix at a time**: an open PR labelled `contract-drift` (rehearsal or real) skips the agent entirely (step 7
   of the runtime). Closing or merging it re-arms the loop.
 - **Edit allowlist**: `protocol/`, `session/transcript/`, `src/test/`, `docs/protocol.md`; enforced before the push by
-  the deny rules of step 8 and after the action by the workflow (step 9), which closes an offending PR. The allowlist
-  keeps the fixer out of `.github/`, so no bot
+  the deny rules of step 8 and after the action by the workflow (step 9), which comments on an offending PR naming the
+  paths, leaves it open so the gate holds, and reds the run; never closes it. The allowlist keeps the fixer out of
+  `.github/`, so no bot
   ever becomes the last editor of the cron line, which is what GitHub's documented rule attributes a schedule run to
   (see "Errors and edge cases" on the actor check).
 - **A stopped agent**: a pushed `drift/` branch without a pull request is reported on the standing issue and the run
   is red; no branch and no pull request after the gate proceeded is red as well (runtime step 9): never a green loop
   and silence.
 - **No retrigger**: the nightly has no `push`/`pull_request` trigger; the fixer listens to `CLI contract` only.
-- **Cost**: `--max-turns 60`, `timeout-minutes` on the step and the job, one concurrency slot, kind-1 and unknown
+- **Cost**: `--max-turns 120`, `timeout-minutes` on the step and the job, one concurrency slot, kind-1 and unknown
   reds never start the agent, the open-PR skip, and the workspace spend limit the owner sets in the Claude Console
   for `wrkspc_012JJzfEG8tDKeta7pe3CCa5` as the ceiling nothing in the repository can raise.
 - **Missing artifact**: the fixer refuses (kind 1 path) rather than recording.
@@ -368,7 +383,8 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
   theirs to decide); checks that the Claude GitHub App is installed on `daarko10/tandem` (open item 1); runs the
   rehearsal (below). Nothing waits on a scheduled nightly: its actor is already recorded (open item 4, closed).
 - Reads the PR. Merges it (squash), or closes it with a comment saying why (the wrong fix, a change Tandem should
-  handle differently, a fixture to re-record by hand). Either re-arms the loop. A merge is followed by the next
+  handle differently, a fixture to re-record by hand, files outside the edit allowlist, which the allowlist step's
+  comment names). Either re-arms the loop. A merge is followed by the next
   nightly, which is the real verification; if it is red again the loop opens the next PR.
 - On a comment on the standing issue "CLI contract: the CLI did not answer": fixes the cause (the federation rule,
   the service account, the spend limit, a pinned CLI version while a broken publish lasts) and closes the issue; the
@@ -391,10 +407,13 @@ marker and passes `rehearsal=true` to the skill. Two modes, each a drift the cur
 way a real rename would:
 
 - `init-model-key` (decoder drift): the `system/init` line's `model` key becomes `model_id`. `Ndjson` requires `model`
-  on `init`, so the line decodes to `Unknown` and the decode test fails with "no system/init".
-- `transcript-content-key` (reader drift): every `user` line of both transcripts has `message.content` renamed to
-  `message.blocks`, so the reader yields no user entry. Which transcript the test names is up to directory order; the
-  skill copies both for every reader drift (skill step 2).
+  on `init`, so the line decodes to `Unknown` and the decode test fails with "no system/init". The line is found by
+  content (`type` `system`, `subtype` `init`), never by number: a live recording has `active_goal` and
+  `autocompact_state` lines before it, their count varying by CLI version (`history-reply` has `init` on line 2,
+  `plain-reply` on line 4, `permission` on line 8).
+- `transcript-content-key` (reader drift): every `user` line of both transcripts (found by `type`, with a
+  `message.content`) has `message.content` renamed to `message.blocks`, so the reader yields no user entry. Which
+  transcript the test names is up to directory order; the skill copies both for every reader drift (skill step 2).
 
 Without `--from`, `make_drift.py <mode> <out>` mutates the committed fixture `history-reply` (CLI 2.1.301, the one-shot
 reply that has a transcript twin) into the artifact's layout, the twin standing in for both transcripts, marker
@@ -404,8 +423,12 @@ recording, and runs the classification, the skill, the protocol.md edit and the 
 exercises no trigger; it serves a by-hand run of the loop and the proof of the open-PR skip. Either way the marker
 makes the fixture `rehearsal-<date>`, the PR a draft titled `[rehearsal] …` with the `rehearsal` label, and the owner
 closes it; a rehearsal branch merged by mistake is recognisable by the fixture name. Two rehearsals through the
-nightly, one per mode, are run before the branch holding this design is considered done; a rehearsal is repeated
-after any change to the skill, `classify_drift.py`, `make_drift.py`, `cli-contract.yml` or `drift-fix.yml`.
+nightly, one per mode, are run before the branch holding this design is considered done, and so is the kind-1 path,
+the commonest red, which neither of them touches: a `workflow_dispatch` with `run_id` set to one of the six red
+scheduled `CLI contract` runs (2026-10-17 to 2026-10-21) exercises the fetch with no artifact (or an `is_error`
+stream), the precheck short-circuit that skips Gradle, and the report step, which is the most hand-written shell in
+the workflow and otherwise first runs on a real night (see "Testing"). A rehearsal is repeated after any change to the
+skill, `classify_drift.py`, `make_drift.py`, `cli-contract.yml` or `drift-fix.yml`.
 
 ### The "closed" criterion and how it is recorded
 
@@ -459,6 +482,9 @@ line exists, the milestone is open, whatever the rehearsals showed.
 - `./gradlew check` fails for a reason unrelated to the drift (a flaky platform test, disk space): the skill retries
   `check` once, then opens the PR as a draft and says which test failed and that it is unrelated, so the owner decides.
 - Two nightlies red before the owner acts: the second fixer comments on the open PR and stops.
+- The fix edits a file outside the edit allowlist: the allowlist step comments on the PR naming the paths, leaves it
+  open and exits 1 (runtime step 9). The open PR holds the gate, so the same red costs no second agent run; closing
+  it is the owner's decision and re-arms the loop; branch protection blocks its merge.
 - The fixer workflow is itself broken (a YAML error, a missing script): GitHub shows it in Actions; the standing issue
   is not touched. `actionlint` on the branch catches the YAML part before merge.
 - The action's human-actor check (`github.actor` of the fixer's `workflow_run` job is the actor of the nightly, and the
@@ -479,7 +505,9 @@ line exists, the milestone is open, whatever the rehearsals showed.
   drift (pinned by a contract test name under another class).
 - `scripts/test_make_drift.py`: each mode changes exactly the lines it names and nothing else (line count and every
   other line byte-identical); the output layout with the marker; `--from` on a recording mutated in place gives the
-  same bytes as the fixture-sourced run; the refusal to write under the fixtures directory; the `<session_id-N>`
+  same bytes as the fixture-sourced run; `--from` finds the `init` line by content (a `plain-reply` stream, `init` on
+  line 4 behind `active_goal`, `autocompact_state` and `ui_invalidate`, mutated in place: line 4 gains `model_id`,
+  every other line is byte-identical); the refusal to write under the fixtures directory; the `<session_id-N>`
   placeholders survive.
 - `scripts/test_workflows.py`: the fixer's trigger, permissions, step order and guards (the fetch's `mkdir`, the
   presence check and the absence of `|| echo`; the Gradle and classification guards on the precheck; the allowlist
@@ -494,6 +522,16 @@ line exists, the milestone is open, whatever the rehearsals showed.
   download, the classification, the skill end to end, the App token (the PR's `Build` run starts), the allowlist step
   and the labels. The fixer-only dispatch (`rehearse=true`) proves the open-PR skip. Its draft PRs are closed by the
   owner.
+- The kind-1 path, with the existing `run_id` input and no spend: `gh workflow run drift-fix.yml --ref main -f
+  run_id=<id>` of one of the six red scheduled `CLI contract` runs (2026-10-17 to 2026-10-21), one that left no
+  artifact or whose artifact is still within its 14-day retention (an expired artifact is listed but cannot be
+  downloaded, so the fetch step reds the job by design: that is the fetch-failure path, not kind 1). Expected: "Name
+  the red run" prints that run's url and date; "Fetch the recording" prints `the run left no recording` (or downloads
+  a stream whose `result` has `is_error: true`); "Classify before Gradle" prints `"kind": "cli-did-not-answer"`;
+  "Reproduce the red", "Classify", the gate, "Fix the drift" and the allowlist step are skipped; "Report a run the
+  agent cannot fix" creates the issue "CLI contract: the CLI did not answer" with the label `contract-drift` (or
+  comments on it); the job is green with no Gradle and no agent spend; `gh issue view` shows the run link, `kind`, the
+  CLI version, `detail` and `files`. The issue may stay open or be closed; either is fine for the next rehearsal.
 - `./gradlew check` unchanged: the new scripts and workflows do not touch Kotlin.
 - Not testable before merge: the `workflow_run` firing itself (the workflow must be on `main`), the federation
   exchange of a `workflow_run` job (inferred from GitHub's subject rules; the first fixer run's federation log line
