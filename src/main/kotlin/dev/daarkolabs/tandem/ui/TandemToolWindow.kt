@@ -101,6 +101,8 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     // The header's MCP servers button, the header's last focusable, and the MCP panel's first button (MCP spec 3.1, 3.2).
     val mcpFocus = remember { FocusRequester() }
     val mcpSheetFocus = remember { FocusRequester() }
+    // The panel's Close: where Tab lands when the first action button's row has scrolled out of the panel's list.
+    val mcpCloseFocus = remember { FocusRequester() }
     // The session whose title is being edited in the header; it ends as soon as another session is selected.
     var renaming by remember { mutableStateOf<SessionId?>(null) }
     // The session whose prompt box takes the focus when it shows: the one last picked or created. One still being opened when
@@ -203,7 +205,8 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     toggleFocus = toggleFocus,
                     newSessionFocus = newSessionFocus,
                     mcp = selected?.mcpServers,
-                    onToggleMcp = { mcpPanelOpen?.let { it.value = !it.value } },
+                    // Closing the panel from its button also gives the composer the focus back (MCP spec 3.2).
+                    onToggleMcp = { if (sheetOpen) closeMcpPanel() else mcpPanelOpen?.value = true },
                     mcpFocus = mcpFocus,
                 )
                 Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -216,7 +219,18 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                             val previous = requestedFocusDirection == FocusDirection.Previous
                             when {
                                 drawerShown -> (if (previous) headerEnd else drawerEntryFocus).requestFocus()
-                                sheetOpen -> (if (previous) headerEnd else mcpSheetFocus).requestFocus()
+                                previous && sheetOpen -> headerEnd.requestFocus()
+                                // The first action button's row may have scrolled out of the panel's list: then its Close.
+                                sheetOpen -> if (!mcpSheetFocus.requestFocus(FocusDirection.Enter)) mcpCloseFocus.requestFocus()
+                            }
+                        }
+                    }.focusGroup()
+                    // Under the sidebar over the chat, the MCP panel takes no focus either: Tab and Shift+Tab pass it by as they pass
+                    // the chat, so that Esc there never closes the panel before the sidebar (MCP spec 3.2's precedence).
+                    val sheetFocus = Modifier.focusProperties {
+                        onEnter = {
+                            if (drawerShown) {
+                                (if (requestedFocusDirection == FocusDirection.Previous) headerEnd else drawerEntryFocus).requestFocus()
                             }
                         }
                     }.focusGroup()
@@ -266,7 +280,9 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                 opener = sessions.browserOpener,
                                 onClose = closeMcpPanel,
                                 firstFocus = mcpSheetFocus,
-                                modifier = Modifier.matchParentSize(),
+                                modifier = Modifier.matchParentSize().then(sheetFocus),
+                                closeFocus = mcpCloseFocus,
+                                drawerOver = drawerShown,
                             )
                         }
                     }

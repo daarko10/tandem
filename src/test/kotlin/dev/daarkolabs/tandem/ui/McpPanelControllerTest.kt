@@ -73,6 +73,10 @@ class McpPanelControllerTest {
 
     private fun McpPanelModel.row(name: String): McpRowModel = groups.flatMap { it.rows }.single { it.name == name }
 
+    /** What the sheet draws at row [name]'s right, from the controller's flows as the sheet reads them. */
+    private fun McpPanelController.buttonsOf(name: String): McpRowButtons =
+        mcpRowButtons(rows.value.row(name), busy.value, auth.value[name], rows.value.stopped)
+
     @Test
     fun `refresh on open, on initCount, after pending and never when closed`() = test {
         controls.refreshAnswer = { McpResult.Ok(listOf(echo, authy)) }
@@ -231,6 +235,8 @@ class McpPanelControllerTest {
         val caption = authCaption(controller.auth.value.getValue("authy"), nowMillis = 4_000)!!
         assertEquals("Waiting for the browser… · ${formatDuration(3_000)}", caption.text)
         assertTrue(caption.showCancel)
+        // What the sheet draws at the row's right: the wait's Cancel, enabled.
+        assertEquals(McpRowButtons.Cancel(enabled = true), controller.buttonsOf("authy"))
     }
 
     @Test
@@ -259,12 +265,36 @@ class McpPanelControllerTest {
 
     @Test
     fun `two rows wait at once`() = test {
+        // The two connectors of tandem-04: each needs auth, each starts its own wait.
+        servers.value = servers.value.copy(servers = listOf(echo, authy, server("other", McpStatus.NEEDS_AUTH, source = "claudeai")))
         auth.value = mapOf("authy" to McpAuthWait("authy", 0), "other" to McpAuthWait("other", 500))
 
         val controller = controller()
 
         assertEquals(setOf("authy", "other"), controller.auth.value.keys)
         assertTrue(controller.auth.value.values.all { authCaption(it, 1_000)!!.showCancel })
+        // Each waiting row has its own enabled Cancel, and the other row keeps its buttons (spec 3.2, 9.4).
+        assertEquals(McpRowButtons.Cancel(enabled = true), controller.buttonsOf("authy"))
+        assertEquals(McpRowButtons.Cancel(enabled = true), controller.buttonsOf("other"))
+        assertEquals(McpRowButtons.Actions(listOf(McpAction.DISABLE), enabled = true), controller.buttonsOf("echo"))
+    }
+
+    @Test
+    fun `a request on another row disables every button, a wait's Cancel included`() = test {
+        auth.value = mapOf("authy" to McpAuthWait("authy", 0))
+        val controller = controller()
+        val busy = McpBusy("echo", McpAction.DISABLE, McpAction.DISABLE.caption, since = 0)
+        val rows = controller.rows.value
+
+        assertEquals(McpRowButtons.Busy(McpAction.DISABLE.caption), mcpRowButtons(rows.row("echo"), busy, null, stopped = false))
+        assertEquals(McpRowButtons.Cancel(enabled = false), mcpRowButtons(rows.row("authy"), busy, auth.value["authy"], stopped = false))
+        assertEquals(
+            McpRowButtons.Actions(listOf(McpAction.AUTHENTICATE, McpAction.DISABLE), enabled = false),
+            mcpRowButtons(rows.row("authy"), busy, null, stopped = false),
+        )
+        assertEquals(McpRowButtons.None, mcpRowButtons(rows.row("authy"), null, auth.value["authy"], stopped = true))
+        assertTrue(!McpRowButtons.Cancel(enabled = false).hasEnabledButton())
+        assertTrue(!McpRowButtons.Actions(emptyList(), enabled = true).hasEnabledButton())
     }
 
     @Test

@@ -2,6 +2,7 @@ package dev.daarkolabs.tandem.ui
 
 import dev.daarkolabs.tandem.chat.McpAction
 import dev.daarkolabs.tandem.chat.McpPanelModel
+import dev.daarkolabs.tandem.chat.McpRowModel
 import dev.daarkolabs.tandem.chat.formatDuration
 import dev.daarkolabs.tandem.chat.mcpPanel
 import dev.daarkolabs.tandem.ide.BrowserOpener
@@ -72,6 +73,40 @@ internal fun authCaption(wait: McpAuthWait, nowMillis: Long): AuthCaption? = whe
         showCancel = false,
     )
     is McpAuthOutcome.Changed, McpAuthOutcome.Removed -> null
+}
+
+/** What a row shows at its right (spec 3.2), from [mcpRowButtons]. */
+internal sealed interface McpRowButtons {
+    /** The session is stopped: no buttons. */
+    data object None : McpRowButtons
+
+    /** One of the four requests runs on this row: its [caption] in place of the buttons. */
+    data class Busy(val caption: String) : McpRowButtons
+
+    /** The row's sign-in wait runs: its one button, `Cancel`, disabled while a request runs on another row. */
+    data class Cancel(val enabled: Boolean) : McpRowButtons
+
+    /** The row's [actions] (none for a pending row or Tandem's own server), disabled while a request runs on another row. */
+    data class Actions(val actions: List<McpAction>, val enabled: Boolean) : McpRowButtons
+}
+
+/**
+ * The buttons of [row] (spec 3.2): none while the session is [stopped]; the caption of the request that runs on it ([busy]); its
+ * sign-in [wait]'s `Cancel` while the wait runs, beside the other rows' own waits and buttons; else its actions. While a request
+ * runs on another row, every button here is disabled.
+ */
+internal fun mcpRowButtons(row: McpRowModel, busy: McpBusy?, wait: McpAuthWait?, stopped: Boolean): McpRowButtons = when {
+    stopped -> McpRowButtons.None
+    busy?.name == row.name -> McpRowButtons.Busy(busy.caption)
+    wait != null && wait.outcome == null -> McpRowButtons.Cancel(enabled = busy == null)
+    else -> McpRowButtons.Actions(row.actions, enabled = busy == null)
+}
+
+/** Whether these buttons hold an enabled one: the first such row's first button takes the focus when the panel opens. */
+internal fun McpRowButtons.hasEnabledButton(): Boolean = when (this) {
+    McpRowButtons.None, is McpRowButtons.Busy -> false
+    is McpRowButtons.Cancel -> enabled
+    is McpRowButtons.Actions -> enabled && actions.isNotEmpty()
 }
 
 /**
@@ -200,6 +235,8 @@ internal class McpPanelController(
         }
         when (result) {
             is McpResult.Ok -> {
+                // The plan's rule: every Ok clears the title area, a re-poll's included, so an action error moved there by
+                // act lasts until the next listing (it was shown, hard rule 5).
                 mutableMessage.value = null
                 afterList(result.value)
             }

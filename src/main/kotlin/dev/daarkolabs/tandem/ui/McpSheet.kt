@@ -30,6 +30,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -67,7 +68,9 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
  * The MCP panel of [handle]'s session over its chat, while it is open: the drawer's scrim over the whole chat box (a click on it
  * closes the panel) and the sheet anchored at its top, the chat column's width and at most 60 % of its height. One
  * [McpPanelController] per open panel, closed with it: its requests go to [controls], a sign-in's link to [opener]. [onClose]
- * closes the panel (Esc in it, Close, a click on the scrim); [firstFocus] is its first enabled action button, else Close.
+ * closes the panel (Esc in it, Close, a click on the scrim); [firstFocus] is its first enabled action button, else Close, and
+ * [closeFocus] always its Close. While [drawerOver] (the sidebar over the chat covers the panel) Esc in it is left to the tool
+ * window, which closes the sidebar first (spec 3.2's precedence).
  */
 @Composable
 internal fun McpPanelHost(
@@ -77,6 +80,8 @@ internal fun McpPanelHost(
     onClose: () -> Unit,
     firstFocus: FocusRequester,
     modifier: Modifier = Modifier,
+    closeFocus: FocusRequester = remember { FocusRequester() },
+    drawerOver: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
     val controller = remember(handle) {
@@ -92,6 +97,8 @@ internal fun McpPanelHost(
             onClose,
             firstFocus,
             Modifier.align(Alignment.TopCenter).chatColumn().heightIn(max = maxHeight * 0.6f),
+            closeFocus = closeFocus,
+            drawerOver = drawerOver,
         )
     }
 }
@@ -99,10 +106,18 @@ internal fun McpPanelHost(
 /**
  * The sheet itself: the title with Refresh servers and Close, the title area's error with Retry, then the servers by group, each
  * row with its status, detail, error and actions (spec 3.2). Opening it puts the focus on [firstFocus]: the first enabled action
- * button, else Close. Esc anywhere in it calls [onClose].
+ * button, else Close ([closeFocus], also the fallback when that button's row has scrolled out of the list). Esc anywhere in it calls
+ * [onClose], unless [drawerOver]. The sheet takes every click on it, so that one between its buttons never reaches the scrim.
  */
 @Composable
-internal fun McpSheet(controller: McpPanelController, onClose: () -> Unit, firstFocus: FocusRequester, modifier: Modifier = Modifier) {
+internal fun McpSheet(
+    controller: McpPanelController,
+    onClose: () -> Unit,
+    firstFocus: FocusRequester,
+    modifier: Modifier = Modifier,
+    closeFocus: FocusRequester = remember { FocusRequester() },
+    drawerOver: Boolean = false,
+) {
     val model by controller.rows.collectAsState()
     val busy by controller.busy.collectAsState()
     val message by controller.message.collectAsState()
@@ -112,16 +127,20 @@ internal fun McpSheet(controller: McpPanelController, onClose: () -> Unit, first
     val rowErrors by controller.rowErrors.collectAsState()
     val retries by controller.retryActions.collectAsState()
     val currentOnClose by rememberUpdatedState(onClose)
+    val escapeCloses by rememberUpdatedState(!drawerOver)
     val firstKey = firstActionRow(model, busy, waits)
     val shape = RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp)
     Column(
         modifier
             .background(JewelTheme.globalColors.panelBackground, shape)
             .border(1.dp, JewelTheme.globalColors.borders.normal, shape)
+            // Takes the pointer where the sheet has nothing to click (its title, captions, padding), so that the scrim under it gets
+            // none: only a click on the scrim closes the panel (spec 3.2), as under the drawer.
+            .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }
             .testTag("mcp-panel")
             .semantics { contentDescription = "MCP servers panel" }
             .onPreviewKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown || event.key != Key.Escape) return@onPreviewKeyEvent false
+                if (!escapeCloses || event.type != KeyEventType.KeyDown || event.key != Key.Escape) return@onPreviewKeyEvent false
                 currentOnClose()
                 true
             }
@@ -140,7 +159,10 @@ internal fun McpSheet(controller: McpPanelController, onClose: () -> Unit, first
                 IconButton(onClick = controller::refresh) { Icon(AllIconsKeys.Actions.Refresh, contentDescription = "Refresh servers") }
             }
             WithTooltip("Close") {
-                IconButton(onClick = onClose, modifier = if (firstKey == null) Modifier.focusRequester(firstFocus) else Modifier) {
+                IconButton(
+                    onClick = onClose,
+                    modifier = (if (firstKey == null) Modifier.focusRequester(firstFocus) else Modifier).focusRequester(closeFocus),
+                ) {
                     Icon(AllIconsKeys.General.Close, contentDescription = "Close")
                 }
             }
@@ -154,7 +176,7 @@ internal fun McpSheet(controller: McpPanelController, onClose: () -> Unit, first
         val info = JewelTheme.globalColors.text.info
         if (model.stopped) {
             Text("The session is not running. Send a prompt to start it, then manage its servers.", color = info)
-        } else if (model.total == 0 && !refreshing) {
+        } else if (model.total == 0) {
             Text("No MCP servers are configured for this session.", color = info)
         }
         if (model.groups.isNotEmpty()) {
@@ -191,21 +213,15 @@ internal fun McpSheet(controller: McpPanelController, onClose: () -> Unit, first
     LaunchedEffect(Unit) {
         // After the first frame, once the list has laid its first rows out.
         withFrameNanos { }
-        runCatching { firstFocus.requestFocus() }
+        if (!firstFocus.requestFocus(FocusDirection.Enter)) closeFocus.requestFocus()
     }
 }
 
-/** The key of the row whose first action button takes the focus when the sheet opens; null when none has an enabled one. */
-private fun firstActionRow(model: McpPanelModel, busy: McpBusy?, waits: Map<String, McpAuthWait>): String? {
-    if (model.stopped || busy != null) return null
-    return model.groups.asSequence().flatMap { it.rows }
-        .firstOrNull { row ->
-            val wait = waits[row.name]
-            // A waiting row's one button is its Cancel.
-            if (wait != null && wait.outcome == null) true else row.actions.isNotEmpty()
-        }
+/** The key of the row whose first button takes the focus when the sheet opens ([mcpRowButtons]); null when none has an enabled one. */
+private fun firstActionRow(model: McpPanelModel, busy: McpBusy?, waits: Map<String, McpAuthWait>): String? =
+    model.groups.asSequence().flatMap { it.rows }
+        .firstOrNull { row -> mcpRowButtons(row, busy, waits[row.name], model.stopped).hasEnabledButton() }
         ?.key
-}
 
 /**
  * One server (spec 3.2): its name, status, tools and version; its url or command, or `Tandem's own server`; its error; its actions,
@@ -225,7 +241,6 @@ private fun McpServerRow(
 ) {
     val info = JewelTheme.globalColors.text.info
     val errorColor = JewelTheme.globalColors.text.error
-    val waiting = wait != null && wait.outcome == null
     Column(
         Modifier.fillMaxWidth().heightIn(min = 40.dp).padding(vertical = 4.dp)
             .then(if (stopped) Modifier.alpha(0.5f) else Modifier)
@@ -251,21 +266,21 @@ private fun McpServerRow(
                     WithTooltip(text) { Text(text, color = errorColor, maxLines = 3, overflow = TextOverflow.Ellipsis) }
                 }
             }
-            if (!stopped) {
-                when {
-                    busy?.name == row.name -> Text(busy.caption, color = info)
-                    waiting -> OutlinedButton(
-                        onClick = { controller.cancelAuth(row.name) },
-                        modifier = described("Cancel ${row.name}", focus),
-                    ) { Text("Cancel") }
-                    else -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        row.actions.forEachIndexed { i, action ->
-                            OutlinedButton(
-                                onClick = { controller.run(action, row.name) },
-                                modifier = described("${action.label} ${row.name}", focus.takeIf { i == 0 }),
-                                enabled = busy == null,
-                            ) { Text(action.label) }
-                        }
+            when (val buttons = mcpRowButtons(row, busy, wait, stopped)) {
+                McpRowButtons.None -> Unit
+                is McpRowButtons.Busy -> Text(buttons.caption, color = info)
+                is McpRowButtons.Cancel -> OutlinedButton(
+                    onClick = { controller.cancelAuth(row.name) },
+                    modifier = described("Cancel ${row.name}", focus),
+                    enabled = buttons.enabled,
+                ) { Text("Cancel") }
+                is McpRowButtons.Actions -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    buttons.actions.forEachIndexed { i, action ->
+                        OutlinedButton(
+                            onClick = { controller.run(action, row.name) },
+                            modifier = described("${action.label} ${row.name}", focus.takeIf { i == 0 }),
+                            enabled = buttons.enabled,
+                        ) { Text(action.label) }
                     }
                 }
             }
