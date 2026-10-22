@@ -189,7 +189,11 @@ class FixtureDecodeTest {
 
     @Test
     fun `transcript fixtures decode line by line without throwing`() {
-        for (name in listOf("history-reply", "history-permission", "history-interrupt", "fork", "fork-origin")) {
+        val names = listOf(
+            "history-reply", "history-permission", "history-interrupt", "fork", "fork-origin",
+            "fork-at", "fork-at-origin", "queue-fold", "queue-later", "queue-cancel",
+        )
+        for (name in names) {
             val lines = Fixtures.transcript(name).readLines().filter { it.isNotBlank() }
             assertTrue(lines.isNotEmpty(), "$name: empty transcript")
             lines.forEach(Ndjson::decode)
