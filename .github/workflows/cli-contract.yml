@@ -1,8 +1,8 @@
 # Nightly: parse the stream-json output of the newest `claude` CLI with Tandem's protocol decoder, and load the
 # transcripts it writes to disk with Tandem's transcript reader. Catches protocol drift before users do.
-# Authenticates with Workload Identity Federation (.github/actions/anthropic-token): the run's GitHub OIDC token is
-# exchanged for a ten-minute Anthropic access token bound to the tandem-ci service account, so no API key is stored
-# in the repository. The federation rule in the Claude Console admits only runs on main of daarko10/tandem.
+# Authenticates with Workload Identity Federation: .github/actions/anthropic-token fetches the run's GitHub OIDC token,
+# and the CLI exchanges it for a ten-minute Anthropic access token bound to the tandem-ci service account, so no API
+# key is stored in the repository. The federation rule in the Claude Console admits only runs on main of daarko10/tandem.
 name: CLI contract
 
 on:
@@ -36,17 +36,33 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
       - name: Install latest Claude Code
         run: npm install -g @anthropic-ai/claude-code && claude --version
-      - name: Mint an Anthropic access token
+      - name: Fetch an identity token for the CLI
         uses: ./.github/actions/anthropic-token
       - name: Record live transcripts
         run: |
           mkdir -p build/contract
           ./scripts/record-fixture.sh contract-hello "Reply with the single word: pong" build/contract
+      # The recording cannot be judged by the decoder alone: a run whose API call failed still has an init and a result.
+      - name: Check that the CLI authenticated and answered
+        run: |
+          python3 -I - build/contract/contract-hello.ndjson <<'PY'
+          import json, sys
+          lines = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+          init = next((m for m in lines if m.get("type") == "system" and m.get("subtype") == "init"), {})
+          result = next((m for m in lines if m.get("type") == "result"), {})
+          print(f"init: model={init.get('model')!r} apiKeySource={init.get('apiKeySource')!r}; "
+                f"result: subtype={result.get('subtype')!r} is_error={result.get('is_error')!r}; "
+                f"assistant lines: {sum(1 for m in lines if m.get('type') == 'assistant')}")
+          if result.get("is_error") or not any(m.get("type") == "assistant" for m in lines):
+              text = result.get("result") if isinstance(result.get("result"), str) else json.dumps(result.get("errors", result))
+              print(f"::error title=CLI contract::The CLI did not answer: {str(text)[:400]}")
+              sys.exit(1)
+          PY
       # Tandem names every new session with --session-id and drops inherited session variables (docs/protocol.md 1.2).
       # This checks that the id passed with --session-id names the session and its transcript while one is inherited.
       # Measured with 2.1.301: CLAUDE_CODE_SESSION_ID on its own is ignored; the CLI used an inherited id only inside a
       # hosted session, whose other variables a runner does not have.
-      - name: Mint a fresh Anthropic access token
+      - name: Fetch a fresh identity token for the CLI
         uses: ./.github/actions/anthropic-token
       - name: Check --session-id with an inherited CLAUDE_CODE_SESSION_ID
         env:
@@ -70,3 +86,12 @@ jobs:
           python3 -I scripts/copy_transcript.py "$work" "$work/raw.ndjson" build/contract/transcripts session-id
       - name: Decode with Tandem's protocol layer and load the transcripts with its reader
         run: ./gradlew test --tests '*ContractTest*' -Dtandem.contractDir=build/contract
+      # The redacted recording, for a red run's diagnosis and for the fix that re-records the fixture.
+      - name: Keep the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-recording
+          path: build/contract
+          if-no-files-found: ignore
+          retention-days: 14
