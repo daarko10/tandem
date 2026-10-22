@@ -17,8 +17,10 @@ rehearsal, the owner has merged it and the following nightly was green (see the 
 
 ## Non-goals (deferred)
 
-- Widening what the nightly records (the bidirectional control protocol, scenarios, version comparison). Listed under
+- Widening what the nightly records further (the remaining `drive_cli.py` scenarios, version comparison). Listed under
   "Follow-up" at the end; this design only makes the nightly's artifact fully redacted and its failure message readable.
+  Since the MCP controls and bash-mode branch, the nightly also records six scenarios, each after a fresh identity
+  token; their red never reaches the fixer (see "Follow-up").
 - Fixing a run that is red because the CLI could not be reached or would not answer. That is authentication, billing or
   an outage, not code; the loop reports it and stops.
 - Merging. Nothing in this design pushes to `main`, merges, publishes or posts outside the repository (`docs/launch.md`,
@@ -835,13 +837,26 @@ line exists, the milestone is open, whatever the rehearsals showed.
 
 ## Follow-up: widening the nightly
 
-Today the nightly covers one one-shot `-p` reply and one `--session-id` run: no `initialize` response, no
-`can_use_tool`, no interrupt receipt, `set_model`, `set_permission_mode` (and its rejection), `rename_session`, fork or
-effort change; no tool calls; no comparison of `claude --version` with the versions the fixtures were recorded on
-(2.1.300 to 2.1.302), so a green run on a new version is silent; and `ContractTest` tolerates any `Unknown` whose
-type is not core, so a new top-level type or `system` subtype passes. After the loop has fired once:
+The nightly records one one-shot `-p` reply and one `--session-id` run, the two the fixer promotes, and then six
+scenarios with `scripts/record-scenario.sh` into `build/contract`: `mcp-slash`, `mcp-status`, `mcp-tool-call`,
+`bash-mode`, `bash-mode-respond` and `bash-mode-context`, each a step of its own after a fresh identity token. The
+`-p` reply and the `--session-id` run come first, so the files the fixer promotes exist even when a scenario fails.
+`ContractTest`'s two `live transcripts` tests read only the promoted files; its `scenario ...` tests decode and read
+the scenario recordings and check what Tandem reads in them (the slash catalogue and local commands, the `mcp_*`
+answers and `init`'s `mcp_servers`, an MCP tool's permission request, each quiet shell-escape frame's zero-turn result).
+`classify_drift.py` reports a red in those tests as `unknown`, naming each failing case, so the fixer is never handed
+drift it does not copy. Neither the scenario steps nor a rehearsal against this version has run: both need `main`
+(the federation rule). After the merge, `gh workflow run cli-contract.yml --ref main` must show each scenario step
+authenticating on its own token and `ContractTest` green; then both rehearsals (`-f drift=init-model-key` and
+`-f drift=transcript-content-key`) must be classified `decoder` and `reader` and each open a draft pull request,
+which is then closed.
 
-1. Record each `drive_cli.py` scenario (`permission`, `interrupt`, `model-switch`, `permission-mode`,
+Still missing: no `can_use_tool`, no interrupt receipt, `set_model`, `set_permission_mode` (and its rejection),
+`rename_session`, fork or effort change; no comparison of `claude --version` with the versions the fixtures were
+recorded on (2.1.300 to 2.1.302), so a green run on a new version is silent; and `ContractTest` tolerates any
+`Unknown` whose type is not core, so a new top-level type or `system` subtype passes. After the loop has fired once:
+
+1. Record each remaining `drive_cli.py` scenario (`permission`, `interrupt`, `model-switch`, `permission-mode`,
    `permission-mode-rejected`, `fork`) with `scripts/record-scenario.sh` into `build/contract`, a fresh identity token
    before each, and extend `ContractTest` with the per-scenario facts `FixtureDecodeTest` pins. Whether one token file
    serves the fork scenario's two sequential processes is not known; the first run shows it, and a second token file
