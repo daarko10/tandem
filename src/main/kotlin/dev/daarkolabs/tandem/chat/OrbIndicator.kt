@@ -18,9 +18,10 @@ data class Orb(val x: Float, val y: Float, val radius: Float, val alpha: Float)
  * an orb that flips through the depth behind the shapes all but vanishes and fades, as the desktop app's do. The orbs take four
  * shapes in turn and merge into one between them, as the desktop app's do. The shapes, their timings and the merges were measured
  * from the desktop app's recording; the cycle of [PERIOD_MS] that strings them together is composed:
- * - a ring of three, edge on, that spins about the vertical once in 3 s, tipping its near side low and then high ([Phase.RING]);
- * - a square of four whose diagonal pairs swap places in turn, each half turn bulging towards the other pair, every 0.6 s
- *   ([Phase.SQUARE]);
+ * - a ring of three, edge on, that spins about the vertical once in 3 s, tipping its near side low and then high ([Phase.RING]),
+ *   and tips towards the viewer into a small triangle as it shrinks into one ([Phase.RING_MERGE]);
+ * - a square of four whose diagonal pairs swap places in turn, each half turn swinging out until it touches the other pair, every
+ *   0.6 s ([Phase.SQUARE]);
  * - three orbs on the corners of a hexagon, each flipping through the back to the opposite corner one after another, 1/3 s apart,
  *   every orb back home in 2 s ([Phase.TRIAD]);
  * - one orb between them, which backs away a little, never out of sight, and comes back ([Phase.SOLO_AFTER_RING] and the like)
@@ -67,8 +68,12 @@ object OrbIndicator {
     private const val SQUARE_HALF = 0.255f
     private const val SQUARE_RADIUS = SQUARE_HALF * 1.4142135f
 
-    /** How far a swapping orb's half turn bulges sideways, as a share of [SQUARE_RADIUS], and how far it leaves the screen's plane. */
-    private const val SWAP_BULGE = 0.55f
+    /**
+     * How far a swapping orb's half turn swings sideways, as a share of [SQUARE_RADIUS], and how far it leaves the screen's plane. At
+     * mid-turn it passes 0.6 of [SQUARE_RADIUS] from the other pair's corner, about two orbs' radii: it touches that orb, as the desktop
+     * app's do, and does not cover it.
+     */
+    private const val SWAP_BULGE = 0.4f
     private const val SWAP_DEPTH = 0.08f
     private const val SQUARE_CYCLE_MS = 1_200L
     private const val SWAP_MS = 500L
@@ -175,7 +180,7 @@ object OrbIndicator {
         return when (phase) {
             Phase.RING_SPLIT -> ringAt(elapsed - phase.durationMs, radius = RING_RADIUS * easeOut(u))
             Phase.RING -> ringAt(elapsed)
-            Phase.RING_MERGE -> ringAt(Phase.RING.durationMs + elapsed).map { it.lerp(CENTRE, easeIn(u)) }
+            Phase.RING_MERGE -> ringAt(Phase.RING.durationMs + elapsed, tilt = RING_TILT * easeInOut(u)).map { it.lerp(CENTRE, easeIn(u)) }
             Phase.SQUARE_SPLIT -> (0 until 4).map { CENTRE.lerp(square(it, 0), easeOut(u)) }
             Phase.SQUARE -> (0 until 4).map { square(it, elapsed) }
             Phase.SQUARE_MERGE -> (0 until 4).map { square(it, Phase.SQUARE.durationMs + elapsed).lerp(CENTRE, easeIn(u)) }
@@ -187,15 +192,22 @@ object OrbIndicator {
     }
 
     /**
-     * The ring of three [tau] into [Phase.RING] (negative before it): one turn per [RING_SPIN_MS], its near side tipped low a quarter of
-     * the way through and high three quarters of the way, each tip a fourth power of a sine, so that it lasts about 0.5 s.
+     * The ring of three [tau] into [Phase.RING] (negative before it): one turn per [RING_SPIN_MS], tipped [tilt] radians, by default
+     * [ringTilt].
      */
-    private fun ringAt(tau: Long, radius: Float = RING_RADIUS): List<Point> {
+    private fun ringAt(tau: Long, radius: Float = RING_RADIUS, tilt: Float = ringTilt(tau)): List<Point> {
         val spin = 2f * PI.toFloat() * tau / RING_SPIN_MS
+        return (0 until 3).map { ring(it, spin, tilt, radius) }
+    }
+
+    /**
+     * How far the ring is tipped [tau] into [Phase.RING]: its near side low a quarter of the way through and high three quarters of the
+     * way, each tip a fourth power of a sine, so that it lasts about 0.5 s; edge on before and after.
+     */
+    private fun ringTilt(tau: Long): Float {
         val along = (tau.toFloat() / Phase.RING.durationMs).coerceIn(0f, 1f)
         val wave = sin(2f * PI.toFloat() * along)
-        val tilt = RING_TILT * wave * wave * wave * abs(wave)
-        return (0 until 3).map { ring(it, spin, tilt, radius) }
+        return RING_TILT * wave * wave * wave * abs(wave)
     }
 
     /**
@@ -211,7 +223,7 @@ object OrbIndicator {
     /**
      * Orb [i] of the square [tau] into [Phase.SQUARE]. Each [SQUARE_CYCLE_MS] the top-left and bottom-right pair, then the top-right
      * and bottom-left pair, swap places: a half turn about the centre, anticlockwise for the first pair and clockwise for the second,
-     * that bulges towards the other pair, the upper orb passing in front and the lower one behind.
+     * that swings out until it touches the other pair ([SWAP_BULGE]), the upper orb passing in front and the lower one behind.
      */
     private fun square(i: Int, tau: Long): Point {
         val local = tau.mod(SQUARE_CYCLE_MS)
