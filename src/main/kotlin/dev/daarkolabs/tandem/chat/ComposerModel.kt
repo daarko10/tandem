@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
@@ -35,21 +36,26 @@ data class ComposerModel(
     val modelSwitchPending: Boolean = false,
 )
 
-/** The composer's model of [state]. */
-fun composerModel(state: ChatState): ComposerModel {
-    val shown = shownModel(state.models, state.requestedModel, state.activeModel, state.modelSwitchPending)
+/**
+ * The composer's model of [state]. Its models are the session's own ([ChatState.models]), else, while its process has not listed
+ * any (it has none, as a restored session before its first prompt), the [known] ones another process listed
+ * ([dev.daarkolabs.tandem.session.SessionManager.models]), else, before any process has, the CLI's own aliases ([CLI_MODEL_ALIASES]).
+ */
+fun composerModel(state: ChatState, known: List<ModelOption> = emptyList()): ComposerModel {
+    val models = state.models.ifEmpty { known }.ifEmpty { CLI_MODEL_ALIASES }
+    val shown = shownModel(models, state.requestedModel, state.activeModel, state.modelSwitchPending)
     return ComposerModel(
         busy = state.busy,
         ended = state.ended,
         cardOpen = state.pendingPermissions.isNotEmpty(),
-        models = state.models.toImmutableList(),
+        models = models.toImmutableList(),
         requestedModel = state.requestedModel,
         activeModel = state.activeModel,
         modelWarning = state.modelWarning,
         permissionMode = state.permissionMode,
         effort = state.effort,
         claudeCodeVersion = state.claudeCodeVersion,
-        defaultModel = state.models.firstOrNull { it.value == DEFAULT_MODEL_ENTRY }?.resolvedModel,
+        defaultModel = models.firstOrNull { it.value == DEFAULT_MODEL_ENTRY }?.resolvedModel,
         effortLevels = shown?.effortLevels.orEmpty().toImmutableList(),
         autoSupported = shown?.supportsAutoMode == true,
         modelSwitchPending = state.modelSwitchPending,
@@ -86,6 +92,18 @@ internal fun shownModel(models: List<ModelOption>, requested: String?, active: S
 
 /** The model id this entry stands for. */
 private fun ModelOption.resolvesTo(): String = resolvedModel ?: value
+
+/**
+ * What the footer calls model [id], a wire id such as `claude-opus-5-5` or a value such as `opus`, when no entry is shown for it:
+ * the display name of the entry of [models] other than `default` that stands for it (its `resolvedModel`) or is it (its value); else of an
+ * entry that names no model, an alias such as [CLI_MODEL_ALIASES]' `opus`, that is one of the id's words (its family); else [id].
+ */
+fun modelDisplayName(id: String, models: List<ModelOption>): String {
+    val choices = models.filter { it.value != DEFAULT_MODEL_ENTRY }
+    choices.firstOrNull { it.resolvesTo() == id || it.value == id }?.let { return it.displayName }
+    val words = id.split('-')
+    return choices.firstOrNull { it.resolvedModel == null && it.value in words }?.displayName ?: id
+}
 
 /**
  * The context ring's text and arc (polish spec 2.3): `<used> / <window> (<pct>%)`, as the tooltip and the popover show it, and the

@@ -113,6 +113,9 @@ class SessionManager internal constructor(
     /** The index's last listing. */
     private val listing = MutableStateFlow<List<SessionSummary>>(emptyList())
 
+    /** The models a process listed last, or those [seedModels] gave until one has. */
+    private val mutableModels = MutableStateFlow<List<ModelOption>>(emptyList())
+
     /** One listing at a time, so that an older one never replaces a newer one. */
     private val refreshLock = Mutex()
 
@@ -157,6 +160,14 @@ class SessionManager internal constructor(
     val summaries: StateFlow<List<SessionSummary>> =
         combine(listing, mutableSessions.flatMapLatest(::titles)) { listed, open -> merge(listed, open) }
             .stateIn(scope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * The models the CLI offers, as the process that answered `initialize` last listed them; until one has, those [seedModels] gave
+     * (remembered from an earlier IDE run); empty while there are neither. Every session runs the same `claude`, so a session whose
+     * own process has not listed them ([ChatState.models]: it has none yet, a restored session for one) offers these. Nothing starts
+     * a process to read them.
+     */
+    val models: StateFlow<List<ModelOption>> = mutableModels.asStateFlow()
 
     init {
         // The first signal comes once the folders are watched, so it also gives the first listing.
@@ -231,6 +242,11 @@ class SessionManager internal constructor(
         spawner.startInBackground(fork, forPrompts = false)
         LOG.info("session $id forked as $forkId")
         return fork
+    }
+
+    /** Offers [models], the list remembered from an earlier IDE run, as [SessionManager.models] until a process lists them. */
+    fun seedModels(models: List<ModelOption>) {
+        mutableModels.compareAndSet(emptyList(), models)
     }
 
     /** Selects session [id], or none; the selected session's [SessionHandle.attention] clears. An [id] that is not open is ignored. */
@@ -486,7 +502,8 @@ class SessionManager internal constructor(
      * Follows the session's status: every change counts as use, and a session that is not selected asks for attention when it
      * starts waiting for a permission, or when a turn ends ([ChatState.turnsEnded] grows: a count, which no conflation of the status
      * hides, and which a permission answered outside a turn or a Stop leaves alone), from [SessionHandle.turnsEndedAtStart] on: a
-     * turn that ended before this, as while a resumed-as-new session is taken over, still asks.
+     * turn that ended before this, as while a resumed-as-new session is taken over, still asks. The models its process lists become
+     * [models].
      */
     private fun watch(handle: SessionHandle) {
         // Undispatched, so that it sees the status from the start: the session's process may start right away.
@@ -504,6 +521,11 @@ class SessionManager internal constructor(
             handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
                 if (count > ended) raiseAttentionUnlessSelected(handle)
                 ended = count
+            }
+        }
+        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            handle.state.map { it.models }.distinctUntilChanged().collect { listed ->
+                if (listed.isNotEmpty()) mutableModels.value = listed
             }
         }
     }

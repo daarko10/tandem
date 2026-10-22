@@ -4,10 +4,13 @@ import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
+import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.PendingPermission
+import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.reduce
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.DisplayName
@@ -20,6 +23,57 @@ import kotlin.test.assertTrue
 
 /** What the composer shows, derived from the state (spec 5.4). */
 class ComposerModelTest {
+    /** The models of model-switch's `initialize` response: `opus` is "Opus" and resolves to claude-opus-5-5, `default` to Sonnet. */
+    private val listed: List<ModelOption> = reduce(ChatState(), SessionEvent.Cli(fixtureLine("model-switch", 4))).models
+
+    @Test
+    fun `a resumed session with no turns and no live process offers the models and shows a display name`() {
+        // Opened without a process (restored with the project, or over the cap): no initialize response of its own, only the model
+        // and the effort its transcript recorded.
+        val resumed = ChatState(activeModel = "claude-opus-5-5", effort = "medium")
+        assertEquals(emptyList(), resumed.models)
+
+        val composer = composerModel(resumed, known = listed)
+        assertEquals(listed, composer.models, "the list the last process to answer gave")
+        val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
+        assertEquals("Opus", shown?.displayName)
+        assertEquals("claude-sonnet-5-5", composer.defaultModel)
+        assertEquals(listOf("low", "medium", "high", "xhigh", "max"), composer.effortLevels)
+        assertEquals(true, composer.autoSupported)
+
+        // A new session that was never sent a prompt has no transcript at all: the default model's entry stands for it.
+        val fresh = composerModel(ChatState(), known = listed)
+        assertEquals("Sonnet", shownModel(fresh.models, fresh.requestedModel, fresh.activeModel, fresh.modelSwitchPending)?.displayName)
+
+        // Once its own process answers, its own list wins.
+        val own = listOf(ModelOption("opus", "Opus 6", null, "claude-opus-5-5"))
+        assertEquals(own, composerModel(resumed.copy(models = own), known = listed).models)
+    }
+
+    @Test
+    fun `before any process has listed its models the CLI's own aliases are offered`() {
+        val composer = composerModel(ChatState(activeModel = "claude-opus-5-5"))
+        assertEquals(CLI_MODEL_ALIASES, composer.models)
+        assertEquals(listOf("default", "opus", "sonnet", "haiku"), composer.models.map { it.value })
+        assertEquals("Opus", modelDisplayName("claude-opus-5-5", composer.models))
+    }
+
+    @Test
+    fun `a raw model id maps to the list's display name`() {
+        assertEquals("Opus", modelDisplayName("claude-opus-5-5", listed))
+        assertEquals("Haiku", modelDisplayName("claude-haiku-5-5", listed))
+        assertEquals("Opus", modelDisplayName("opus", listed), "an entry's own value")
+        // Never the `default` entry's "Default (recommended)", though it resolves to Sonnet too.
+        assertEquals("Sonnet", modelDisplayName("claude-sonnet-5-5", listed))
+        // An entry that names its model stands for that model only: another Opus keeps its wire id.
+        assertEquals("claude-opus-4-1-20250805", modelDisplayName("claude-opus-4-1-20250805", listed))
+        // An alias, which names no model, stands for the models of its family.
+        assertEquals("Opus", modelDisplayName("claude-opus-4-1-20250805", CLI_MODEL_ALIASES))
+        assertEquals("Sonnet", modelDisplayName("claude-3-5-sonnet-20241022", CLI_MODEL_ALIASES))
+        assertEquals("claude-unknown-9", modelDisplayName("claude-unknown-9", CLI_MODEL_ALIASES))
+        assertEquals("claude-unknown-9", modelDisplayName("claude-unknown-9", emptyList()))
+    }
+
     @Test
     fun `composer model changes only on its own fields`() {
         for (fixture in listOf("plain-reply", "agent-sync")) {

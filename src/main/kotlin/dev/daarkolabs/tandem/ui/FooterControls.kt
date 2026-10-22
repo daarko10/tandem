@@ -60,6 +60,7 @@ import dev.daarkolabs.tandem.chat.ComposerModel
 import dev.daarkolabs.tandem.chat.ContextFormat
 import dev.daarkolabs.tandem.chat.DEFAULT_MODEL_ENTRY
 import dev.daarkolabs.tandem.chat.Modes
+import dev.daarkolabs.tandem.chat.modelDisplayName
 import dev.daarkolabs.tandem.chat.shownModel
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.ContextUsage
@@ -92,14 +93,16 @@ internal data class ModelLabel(val model: String, val effort: String?)
 /**
  * What the model control reads (spec 2.3, `<Model>` and `<Effort>`): the shown model's display name ([shownModel]), else the model the
  * CLI reports, else the model picked (a session started with a pick, before its first `system/init` and the CLI's model list; the
- * CLI's own `default` entry is no pick), else "Model"; and the effort, unless there is none or the effort page would not list it
- * ([effortMenu]: a shown model without effort levels).
+ * CLI's own `default` entry is no pick), each by its name in the list ([modelDisplayName]: an alias's for a model of its family,
+ * the id itself for one the list does not name), else "Model"; and the effort, unless there is none or the effort page would not
+ * list it ([effortMenu]: a shown model without effort levels).
  */
 internal fun modelLabel(composer: ComposerModel): ModelLabel {
     val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
     val effort = composer.effort?.takeIf { effortMenu(composer) != null }?.let(Modes::effortLabel)
     val picked = composer.requestedModel?.takeIf { it != DEFAULT_MODEL_ENTRY }
-    return ModelLabel(shown?.displayName ?: composer.activeModel ?: picked ?: NO_MODEL_LABEL, effort)
+    val model = shown?.displayName ?: (composer.activeModel ?: picked)?.let { modelDisplayName(it, composer.models) } ?: NO_MODEL_LABEL
+    return ModelLabel(model, effort)
 }
 
 /** What the mode control reads: the session's mode by its footer label, or "Mode" while there is none. */
@@ -115,7 +118,8 @@ internal data class ModelItem(val value: String?, val label: String, val isDefau
  * The model menu (spec 2.3): every model of the CLI's list but its `default` entry, in its order. The entry that resolves to the default
  * model carries the chip; picking it sends no model while that model runs or nothing runs yet, and its value while another model
  * runs, so that the pick is never ignored. The shown model is checked in place of its digit; the first nine items have digits. A
- * requested model that no entry stands for is listed last, by its value. Empty while the CLI has not listed its models.
+ * requested model that no entry stands for is listed last, by its value. Empty only for a composer without models, which
+ * [dev.daarkolabs.tandem.chat.composerModel] never gives: it falls back to the models another process listed, then to the CLI's aliases.
  */
 internal fun modelMenu(composer: ComposerModel): List<ModelItem> {
     if (composer.models.isEmpty()) return emptyList()
@@ -153,9 +157,9 @@ internal data class EffortMenu(val trailing: String, val items: List<EffortItem>
 
 /**
  * The effort page (spec 2.3), or null when the model menu has none: the shown model's levels, the current one checked. While no
- * entry stands for the model (the CLI has not listed its models, or the model it runs is none of theirs), a known effort lists low,
- * medium, high and max (edge 1): only a shown model without effort levels hides the page (edge 15). A current level the shown model
- * does not list comes last, checked and disabled: the CLI decides at the next turn.
+ * entry stands for the model (the list is the CLI's aliases, which name no model, or the model it runs is none of the list's), a
+ * known effort lists low, medium, high and max (edge 1): only a shown model without effort levels hides the page (edge 15). A
+ * current level the shown model does not list comes last, checked and disabled: the CLI decides at the next turn.
  */
 internal fun effortMenu(composer: ComposerModel): EffortMenu? {
     val effort = composer.effort

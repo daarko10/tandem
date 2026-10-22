@@ -229,6 +229,32 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `a session without a process offers the models the last process listed, else the remembered ones`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "agent-sync")
+        val remembered = listOf(ModelOption("opus", "Opus", null, "claude-opus-5-5"))
+        manager.seedModels(remembered)
+        assertEquals(remembered, manager.models.value, "until a process lists them, the list an earlier IDE run remembered")
+
+        // Restored with the project: no process, so no initialize response of its own.
+        val resumed = manager.open(seeded, spawn = false)
+        assertEquals(SessionStatus.STOPPED, resumed.status.value)
+        assertEquals(emptyList(), resumed.state.value.models)
+        assertEquals(remembered, manager.models.value)
+
+        // Another session's process answers initialize (agent-sync's line 2) without a prompt: its list is every session's now.
+        val live = manager.create(NewSessionOptions())
+        val listed = live.state.first { it.models.isNotEmpty() }.models
+        assertEquals(listed, manager.models.first { it == listed })
+        assertEquals("Opus 5.5", listed.first { it.resolvedModel == "claude-opus-5-5" && it.value != "default" }.displayName)
+        assertEquals(emptyList(), resumed.state.value.models, "the resumed session's own list stays its process's")
+        assertEquals(1, spawns().size, "no process was started to read the list")
+
+        manager.seedModels(remembered)
+        assertEquals(listed, manager.models.value, "a remembered list never replaces one a process gave")
+    }
+
+    @Test
     fun `a transcript that cannot be read opens with a warning in place of the history`() = test {
         seed(seeded)
         // Run as root, a test cannot make a file unreadable, so the reader fails in its place.
@@ -1271,6 +1297,8 @@ class SessionManagerTest {
             // A request while no turn runs: it asks for attention as a request, and the user looks at it.
             process.script.println(Fixtures.lines("permission").first { "\"can_use_tool\"" in it })
             handle.status.first { it == SessionStatus.WAITING }
+            // The manager follows the status in a coroutine of its own: looking before it has seen WAITING would race its attention.
+            handle.attention.first { it }
             manager.select(handle.id)
             manager.select(null)
             manager.allow(handle.id, handle.state.value.pendingPermissions.single().requestId, always = false)

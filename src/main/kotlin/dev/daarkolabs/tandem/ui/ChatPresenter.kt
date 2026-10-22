@@ -25,6 +25,7 @@ import dev.daarkolabs.tandem.chat.composerModel
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ContextUsage
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.UserImage
 import kotlinx.collections.immutable.ImmutableList
@@ -101,6 +102,8 @@ internal data class RenderedChat(
  * then the row renders without it, and the bubble draws a placeholder. An image that cannot be decoded (data redacted to `<base64>`)
  * stays without a thumbnail and is not decoded again. A cached thumbnail goes when its row does.
  *
+ * The composer's models are the session's own, else [models], the ones another process listed ([composerModel]).
+ *
  * [parse] replaces the Markdown parser: tests watch where and how often it runs. [buildRows] replaces the call to the builder and
  * [logFailure] the logging of a failed render: tests make a state fail. [decode] replaces [decodeUserImage]: tests count and gate it.
  */
@@ -112,6 +115,7 @@ internal class ChatPresenter(
     private val buildRows: (ChatRowsBuilder, ChatState) -> ChatRows = ChatRowsBuilder::build,
     private val logFailure: (Throwable) -> Unit = { LOG.error(it) },
     decode: ((UserImage) -> ImageBitmap?)? = null,
+    models: StateFlow<List<ModelOption>> = MutableStateFlow(emptyList()),
 ) {
     // One processor per presenter: bare URLs stay links, GFM tables and strikethrough parse (spec 4.0, 4.4).
     private val processor = tandemMarkdownProcessor()
@@ -130,8 +134,8 @@ internal class ChatPresenter(
     val chat: StateFlow<RenderedChat> = rendered.asStateFlow()
 
     /** What the composer shows; it changes only when one of its own fields does, not on every streamed delta. */
-    val composer: StateFlow<ComposerModel> = state.map(::composerModel).distinctUntilChanged().flowOn(Dispatchers.Default)
-        .stateIn(scope, SharingStarted.Eagerly, composerModel(state.value))
+    val composer: StateFlow<ComposerModel> = combine(state, models, ::composerModel).distinctUntilChanged().flowOn(Dispatchers.Default)
+        .stateIn(scope, SharingStarted.Eagerly, composerModel(state.value, models.value))
 
     /**
      * How full the context window is, for the footer's ring (polish spec 2.3): it changes on a main-thread `message_start` and a

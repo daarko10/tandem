@@ -23,6 +23,7 @@ import com.intellij.ide.starter.models.TestCase
 import com.intellij.ide.starter.plugins.PluginConfigurator
 import com.intellij.ide.starter.project.LocalProjectInfo
 import com.intellij.ide.starter.runner.Starter
+import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -779,7 +780,9 @@ class ToolWindowIdeTest {
     /**
      * What the footer's model control reads for [fixture] (`fixtures/<fixture>.ndjson`, next to the fake CLI) with no model picked
      * (spec 2.3, `<Model>`): the display name of the entry other than `default`, in its first control_response that lists models,
-     * whose `resolvedModel` is the model its first `system/init` reports; else that model's wire id.
+     * whose `resolvedModel` is the model its first `system/init` reports; without such a list, in an IDE where no process has listed
+     * any, the name of the CLI's alias for that model's family ([CLI_MODEL_ALIASES]: `Sonnet` for `claude-sonnet-5-5`); else that
+     * model's wire id.
      */
     private fun defaultModelName(fixture: String): String {
         val lines = Path.of(fakeClaude).resolveSibling("fixtures/$fixture.ndjson").readLines().filter { it.isNotBlank() }
@@ -791,7 +794,9 @@ class ToolWindowIdeTest {
         val entry = models.firstOrNull {
             it["value"]?.jsonPrimitive?.content != "default" && it["resolvedModel"]?.jsonPrimitive?.content == running
         }
-        return entry?.get("displayName")?.jsonPrimitive?.content ?: running
+        return entry?.get("displayName")?.jsonPrimitive?.content
+            ?: CLI_MODEL_ALIASES.firstOrNull { it.value != "default" && it.value in running.split('-') }?.displayName
+            ?: running
     }
 
     /**

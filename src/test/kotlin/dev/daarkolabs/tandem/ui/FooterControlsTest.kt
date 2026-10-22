@@ -121,14 +121,14 @@ class FooterControlsTest {
 
     @Test
     fun `a session started with a model pick reads that model before its first init, Model with none`() {
-        // NewSessionOptions.model: no system/init and no initialize answer yet, so no list and no active model (spec 2.3, <Model> 3
-        // and 4).
-        assertEquals("opus", modelLabel(composer(models = emptyList(), requestedModel = "opus")).model)
+        // NewSessionOptions.model: no system/init and no initialize answer yet, and no process has ever listed the models, so the
+        // list is the CLI's aliases and there is no active model (spec 2.3, <Model> 3 and 4).
+        assertEquals("Opus", modelLabel(composer(models = emptyList(), requestedModel = "opus")).model)
         val defaultPick = modelLabel(composer(models = emptyList(), requestedModel = "default")).model
         assertEquals("Model", defaultPick, "the CLI's own default is no pick")
         assertEquals("Model", modelLabel(composer(models = emptyList())).model)
         val running = modelLabel(composer(models = emptyList(), activeModel = sonnet, requestedModel = "opus")).model
-        assertEquals(sonnet, running, "then what the CLI runs")
+        assertEquals("Sonnet", running, "then what the CLI runs, by its alias's name")
         assertEquals("Opus 5.5", modelLabel(composer(requestedModel = "opus")).model, "with the list, the requested entry's name")
     }
 
@@ -230,8 +230,27 @@ class FooterControlsTest {
         assertEquals("Mode", modeLabel(composer))
         assertTrue(modeMenu(composer).none { it.checked })
         assertEquals(ModelLabel("Model", null), modelLabel(composer))
-        assertEquals(emptyList(), modelMenu(composer))
+        // No process has listed its models yet: the CLI's own aliases, none checked, none badged.
+        assertEquals(listOf("Opus", "Sonnet", "Haiku"), modelMenu(composer).map { it.label })
+        assertTrue(modelMenu(composer).none { it.checked || it.isDefault })
         assertNull(effortMenu(composer))
+    }
+
+    @Test
+    fun `a session without a list of its own labels and lists its model from the list another process gave`() {
+        // Resumed without a process: the transcript's model and effort, no initialize response of its own.
+        val resumed = ChatState(activeModel = "claude-opus-5-5", effort = "medium")
+        val known = composerModel(resumed, known = models)
+        assertEquals(ModelLabel("Opus 5.5", "Medium"), modelLabel(known))
+        assertEquals(12, modelMenu(known).size)
+        assertTrue(modelMenu(known).item("Opus 5.5").checked)
+        assertEquals("Fable 5.1", modelMenu(known).single { it.isDefault }.label)
+
+        // Before any process has answered: the aliases, and the raw id by its alias's name, never "claude-opus-5-5".
+        val first = composerModel(resumed)
+        assertEquals(ModelLabel("Opus", "Medium"), modelLabel(first))
+        assertEquals(listOf("Opus", "Sonnet", "Haiku"), modelMenu(first).map { it.label })
+        assertEquals(listOf("low", "medium", "high", "max"), effortMenu(first)?.items?.map { it.level })
     }
 
     @Test

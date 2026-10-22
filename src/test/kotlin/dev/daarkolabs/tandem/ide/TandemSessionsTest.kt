@@ -19,6 +19,7 @@ import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.PermissionAnswers
@@ -270,6 +271,19 @@ class TandemSessionsTest {
             while (workspace.knownModels() != models) delay(20)
         }
         awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `the models remembered from the last IDE run are every session's until a process lists them`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("remembered-models").createDirectories()
+        openProjectAsync(dir).useProjectAsync { project ->
+            val remembered = listOf(ModelOption("opus", "Opus", null, "claude-opus-5-5"))
+            TandemWorkspaceState.getInstance(project).rememberModels(remembered)
+            val sessions = TandemSessions.get(project)
+            sessions.ensureStarted()
+            // A session restored without a process has no initialize response of its own: it offers these (ChatPresenter).
+            assertEquals(remembered, sessions.manager.models.first { it.isNotEmpty() })
+        }
     }
 
     @Test
