@@ -6,7 +6,8 @@
     <description><![CDATA[
     A fast, native chat inside JetBrains IDEs that works with Claude Code.<br/>
     Uses your own installed <code>claude</code> CLI and its sign-in; Tandem never reads your credentials.
-    Edits go through the IDE, so undo, unsaved buffers and the native diff viewer all work.<br/><br/>
+    IDE-native edits (undo, unsaved buffers, the native diff viewer) are the next milestone; until then the CLI's
+    Edit and Write tools are disabled in Tandem.<br/><br/>
     Tandem is an independent project and is not affiliated with or endorsed by Anthropic.
     Claude and Claude Code are trademarks of Anthropic, PBC.
     ]]></description>

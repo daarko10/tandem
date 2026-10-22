@@ -3,6 +3,7 @@
 A fast, native JetBrains plugin for Claude Code. Free and open source.
 It drives the user's own installed `claude` CLI over stream-json and renders everything with Jewel (Compose).
 Read `docs/design.md` before any non-trivial change, and `docs/protocol.md` before touching `protocol/` or `session/`.
+Read `docs/launch.md` before any work described as ship, release, publish, launch, announce, post, demo or benchmark, before editing `docs/protocol.md` or the fixtures, and before changing a claim in `README.md` or `plugin.xml`.
 
 ## Hard rules (do not break these)
 1. **Never block the EDT.** No process I/O, file I/O, JSON parsing or waiting on the CLI from the UI thread. Use the platform coroutine scopes (`platform-coroutines-structured-concurrency` skill).
