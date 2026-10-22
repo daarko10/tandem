@@ -13,8 +13,13 @@ import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.reduce
 import org.junit.jupiter.api.Assumptions.assumeFalse
 import org.junit.jupiter.api.Test
+import java.awt.Component
 import java.awt.GraphicsEnvironment
+import java.awt.KeyboardFocusManager
 import java.awt.event.KeyEvent
+import java.beans.PropertyChangeEvent
+import javax.accessibility.Accessible
+import javax.accessibility.AccessibleContext
 import javax.swing.JDialog
 import javax.swing.JFrame
 import javax.swing.JPanel
@@ -299,9 +304,37 @@ class FooterControlsTest {
         assertTrue(takesKey(panel, panel))
         assertFalse(takesKey(editor, panel), "a key typed in another component is left alone")
         assertFalse(takesKey(null, panel))
-        assertFalse(focusLeft(field, panel))
-        assertFalse(focusLeft(null, panel), "no focus owner: the window lost the focus, the menu stays")
-        assertTrue(focusLeft(editor, panel))
+        assertFalse(focusLeft(field, field, panel))
+        assertFalse(focusLeft(null, null, panel), "no focus owner: the window lost the focus, the menu stays")
+        assertTrue(focusLeft(editor, editor, panel))
+    }
+
+    @Test
+    fun `a footer menu stays open on skiko's accessibility focus event on macOS`() {
+        val panel = JPanel()
+        val field = JTextField().also(panel::add)
+        val editor = JTextField().also(JPanel()::add)
+        // What skiko's NativeAccessibleFocusHelper.requestMacOSFocusOnAccessible names as the new owner when a Compose node takes the
+        // focus (a menu item, on hover or an arrow key): a ComposeAccessible, a Component with no parent, while AWT's focus owner stays.
+        val accessible = object : Component(), Accessible {
+            override fun getAccessibleContext(): AccessibleContext? = null
+        }
+        assertFalse(focusLeft(accessible, field, panel), "the real focus owner is still in the panel")
+        assertFalse(focusLeft(accessible, null, panel))
+        assertFalse(focusLeft(accessible, editor, panel), "the event names a component that does not hold the focus")
+        assertTrue(focusLeft(editor, editor, panel), "a real move out of the panel")
+        assertFalse(focusLeft(field, field, panel), "a real move within the panel")
+
+        // The listener both footer menus register, sent the event exactly as skiko builds it, then a real move.
+        val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+        var owner: Component? = field
+        var closed = 0
+        val listener = focusLeftListener(panel, { owner }) { closed++ }
+        listener.propertyChange(PropertyChangeEvent(focusManager, "focusOwner", null, accessible))
+        assertEquals(0, closed, "the menu stays open")
+        owner = editor
+        listener.propertyChange(PropertyChangeEvent(focusManager, "focusOwner", field, editor))
+        assertEquals(1, closed, "the menu closes once the focus has left the panel")
     }
 
     @Test
@@ -314,7 +347,7 @@ class FooterControlsTest {
             try {
                 val field = JTextField().also { dialog.contentPane.add(it) }
                 assertFalse(takesKey(field, panel))
-                assertTrue(focusLeft(field, panel))
+                assertTrue(focusLeft(field, field, panel))
             } finally {
                 dialog.dispose()
             }

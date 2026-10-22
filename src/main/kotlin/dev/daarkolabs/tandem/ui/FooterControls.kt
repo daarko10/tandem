@@ -213,11 +213,25 @@ internal fun digitOf(event: AwtKeyEvent): Int? {
 internal fun takesKey(component: Component?, panel: JComponent): Boolean = component != null && SwingUtilities.isDescendingFrom(component, panel)
 
 /**
- * Whether the AWT focus has left [panel] for [owner], the new focus owner, which closes an open footer menu: the menu gets no click
- * from Swing components outside the panel, so it would stay open under the editor otherwise. No owner (the IDE window lost the
- * focus) is not a move: the menu stays, and no key reaches it meanwhile.
+ * Whether the AWT focus has left [panel] for [owner], the new focus owner a `focusOwner` change names, which closes an open footer
+ * menu: the menu gets no click from Swing components outside the panel, so it would stay open under the editor otherwise. No owner
+ * (the IDE window lost the focus) is not a move: the menu stays, and no key reaches it meanwhile.
+ *
+ * Only a real move counts: [owner] must be [actualOwner], the focus owner the `KeyboardFocusManager` reports, which it sets before it
+ * fires the change. On macOS, skiko also sends every `focusOwner` listener a change of its own whenever a Compose node takes the focus
+ * (`NativeAccessibleFocusHelper.requestMacOSFocusOnAccessible`, for VoiceOver), naming a parentless `ComposeAccessible` while the
+ * focus stays where it was. A menu item takes the focus on hover and on the arrow keys, so that event alone closed the menus at the
+ * first item the pointer crossed.
  */
-internal fun focusLeft(owner: Component?, panel: JComponent): Boolean = owner != null && !takesKey(owner, panel)
+internal fun focusLeft(owner: Component?, actualOwner: Component?, panel: JComponent): Boolean =
+    owner != null && owner === actualOwner && !takesKey(owner, panel)
+
+/**
+ * The `focusOwner` listener an open footer menu registers: calls [close] when the focus has left [panel] ([focusLeft]), with
+ * [focusOwner] the focus owner as the `KeyboardFocusManager` reports it when the change arrives.
+ */
+internal fun focusLeftListener(panel: JComponent, focusOwner: () -> Component?, close: () -> Unit): PropertyChangeListener =
+    PropertyChangeListener { change -> if (focusLeft(change.newValue as? Component, focusOwner(), panel)) close() }
 
 /**
  * A footer control's pill (spec 2.3): [pillSurface], then 7 dp by 3 dp inside. The context ring takes the same surface as a 23 dp
@@ -256,7 +270,7 @@ internal fun ContextRing(context: StateFlow<ContextUsage?>) {
 /**
  * The ring and its popover: a 23 dp pill, filled while hovered or open and outlined while focused, around a 14 dp ring with a 2 dp
  * stroke, the arc clockwise from the top over [fraction] of the turn. As a footer control's menu, the popover closes when the AWT
- * focus leaves the tool window's panel ([focusLeft]), which it gets no click from.
+ * focus really leaves the tool window's panel ([focusLeftListener]), which it gets no click from.
  */
 @Composable
 private fun RingControl(fraction: Float, value: String) {
@@ -268,8 +282,8 @@ private fun RingControl(fraction: Float, value: String) {
     val panel = LocalComponent.current
     if (open) {
         DisposableEffect(panel) {
-            val focusListener = PropertyChangeListener { change -> if (focusLeft(change.newValue as? Component, panel)) open = false }
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            val focusListener = focusLeftListener(panel, focusManager::getFocusOwner) { open = false }
             focusManager.addPropertyChangeListener("focusOwner", focusListener)
             onDispose { focusManager.removePropertyChangeListener("focusOwner", focusListener) }
         }
@@ -531,9 +545,10 @@ internal fun pageTurn(event: AwtKeyEvent, page: Int): Int? {
  * The digits and the arrows are taken from AWT's key dispatch while the menu is open, not from a Compose key handler (open item 13):
  * in the IDE the menu is a focusable popup layer of the tool window's own Compose scene (the IDE leaves Jewel's `JBPopupRenderer`
  * off), which takes the keys with no Compose node focused in it, so neither a handler on the menu nor one on the control gets them.
- * Only keys in the tool window's own panel are taken ([takesKey]), and the menu closes when the AWT focus leaves that panel
- * ([focusLeft]): the layer gets no click from Swing components outside it, so a menu left open under the editor would otherwise
- * take the digits and arrows typed there.
+ * Only keys in the tool window's own panel are taken ([takesKey]), and the menu closes when the AWT focus really leaves that panel
+ * ([focusLeftListener]): the layer gets no click from Swing components outside it, so a menu left open under the editor would
+ * otherwise take the digits and arrows typed there. The focus change skiko sends on macOS when a menu item takes the Compose focus
+ * (on hover, or an arrow key) moves nothing, and leaves the menu open ([focusLeft]).
  *
  * The menu is placed in the control's outer box, which has no padding of its own, so that [AboveAnchor] measures from the pill's
  * edges: placed inside the pill's padding, it sat 5 dp above the pill and 7 dp inside its right edge.
@@ -583,8 +598,8 @@ private fun FooterControl(
                 page = next
                 true
             }
-            val focusListener = PropertyChangeListener { change -> if (focusLeft(change.newValue as? Component, panel)) open = false }
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            val focusListener = focusLeftListener(panel, focusManager::getFocusOwner) { open = false }
             focusManager.addKeyEventDispatcher(dispatcher)
             focusManager.addPropertyChangeListener("focusOwner", focusListener)
             onDispose {
