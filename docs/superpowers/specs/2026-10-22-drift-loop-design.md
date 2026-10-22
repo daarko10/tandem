@@ -697,7 +697,7 @@ line exists, the milestone is open, whatever the rehearsals showed.
   `rehearsal` marker; refuses to write into `src/test/resources/fixtures`.
 - `scripts/test_classify_drift.py`, `scripts/test_make_drift.py`: unit tests, run by `python3 -m unittest discover -s
   scripts -t scripts` from the repository root (the skill's spelling) and by `cd scripts && python3 -m unittest`
-  (`build.yml`'s script-tests step); the same tests either way.
+  (`build.yml`'s `Script tests` job); the same tests either way.
 - `.claude/skills/fix-contract-drift/SKILL.md`: the procedure.
 - `docs/protocol.md`: no change in this design, except one parenthetical that referred a stranger to a spec's
   numbering (section 4.4, the effort picker), dropped; the fixer edits it per drift.
@@ -774,7 +774,8 @@ line exists, the milestone is open, whatever the rehearsals showed.
   any `Bash(git push…:*)` or broad `Bash(python3:*)`/`Bash(./gradlew:*)` rule; the allowlist (the 24 entries,
   exactly) and the deny rules of the `settings` input (the 29 rules, exactly, with no `Write(path)` rule), its `env`
   timeouts and the step id `agent`; the timeouts of `Fetch the recording` (5) and `Reproduce the red` (30); the
-  visibility step before `Reproduce the red`; the protection step before the agent, which the agent and the allowlist
+  disk, Java and Gradle setup after `Classify before Gradle` and before `Reproduce the red`, each skipped when the precheck's kind is
+  `cli-did-not-answer`; the protection step before the agent, which the agent and the allowlist
   step depend on; the REST file list with renames' old paths and the exact edit allowlist; `--rerun`; a `run_id` on
   `main`; no `${{` in any `run:` block); the nightly's `drift` input, mutate step, check step and
   redaction; the skill's `allowed-tools` equal to the action's. Under `GITHUB_ACTIONS` a missing PyYAML is an error,
