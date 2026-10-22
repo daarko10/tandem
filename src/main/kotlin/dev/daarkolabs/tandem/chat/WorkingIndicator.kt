@@ -87,7 +87,7 @@ object WorkingIndicator {
     /** How the working row looks: [RUNNING] with the step, [WAITING] for the user's answer, [NOT_RESPONDING] after a silence. */
     enum class Mode { RUNNING, WAITING, NOT_RESPONDING }
 
-    /** The working row as drawn: its [mode], whether its glyph cycles, its one line of [text] and what a screen reader says. */
+    /** The working row as drawn: its [mode], whether its orbs move ([OrbIndicator]), its one line of [text] and what a screen reader says. */
     data class View(val mode: Mode, val animated: Boolean, val text: String, val accessibleLabel: String)
 
     /**

@@ -20,14 +20,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.intellij.ide.BrowserUtil
 import dev.daarkolabs.tandem.chat.DiffKind
 import dev.daarkolabs.tandem.chat.DiffLine
@@ -37,6 +35,7 @@ import dev.daarkolabs.tandem.ui.ChatUiState
 import dev.daarkolabs.tandem.ui.LocalUrlHandler
 import dev.daarkolabs.tandem.ui.bottomFade
 import dev.daarkolabs.tandem.ui.chatPalette
+import dev.daarkolabs.tandem.ui.lineHeight
 import dev.daarkolabs.tandem.ui.monoTextStyle
 import kotlinx.collections.immutable.ImmutableList
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -293,16 +292,7 @@ private fun Modifier.capHeight(max: Dp, onTall: (Boolean) -> Unit): Modifier = l
 
 /** About [FADE_LINES] lines of body text in the editor font. */
 @Composable
-private fun fadeHeight(): Dp {
-    val style = monoTextStyle()
-    val size = style.fontSize.takeIf { it.isSp } ?: 12.sp
-    val line = when {
-        style.lineHeight.isSp -> style.lineHeight
-        style.lineHeight.isEm -> size * style.lineHeight.value
-        else -> size * 1.4f
-    }
-    return with(LocalDensity.current) { line.toDp() } * FADE_LINES
-}
+private fun fadeHeight(): Dp = lineHeight(monoTextStyle()) * FADE_LINES
 
 /** A box in the command and code fill, with a hairline border (spec 4.2); padded 8 dp × [vertical] (the command box's is 4 dp). */
 @Composable

@@ -1,53 +1,85 @@
 package dev.daarkolabs.tandem.ui.rows
 
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
-import org.jetbrains.jewel.foundation.theme.JewelTheme
-import org.jetbrains.jewel.ui.component.Text
+import dev.daarkolabs.tandem.chat.Orb
+import dev.daarkolabs.tandem.chat.OrbIndicator
+import dev.daarkolabs.tandem.ui.lineHeight
+import dev.daarkolabs.tandem.ui.smallTextStyle
 
-/** The spark's glyphs, played forward then back so that it grows and shrinks (spec 4.9). */
-private val GLYPHS: List<String> = listOf("·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢")
+/** How far an orb's light centre sits up and to the left of its middle, and how far its shading spreads, in orb radii. */
+private const val LIGHT_OFFSET = 0.35f
+private const val SHADE_RADIUS = 1.4f
 
-/** The glyph shown when the spark stands still: `✻`. */
-private const val STILL: Int = 4
-
-/** One step of the cycle. */
-private const val STEP_MS: Long = 120
+/** How much lighter than the tint the light centre is, and how much darker the far edge, from 0 (the tint) to 1. */
+private const val LIGHTER = 0.4f
+private const val DARKER = 0.18f
 
 /**
- * The working row's glyph (spec 4.9, decision 7): cycles [GLYPHS] one step every 120 ms while [animated], else stands at `✻`. A leaf,
- * so that only it recomposes on each step; the loop ends when the row leaves the screen. Decoration only: assistive technology reads
- * the row's own description.
+ * The working row's indicator (spec 4.9): the desktop app's coral orbs turning in 3D ([OrbIndicator]), on a square as tall as a line
+ * of the row's text, each a sphere shaded from a lighter centre up and to the left through [tint] to a darker edge, drawn far to near.
+ * While [animated] a frame-clock loop moves a time that only the draw phase reads, so the row redraws each frame but never recomposes;
+ * the loop ends when the row leaves the composition. Otherwise it shows [OrbIndicator.STILL], in [tint]: the warning or error colour
+ * while the row waits or the CLI is silent. Decoration only: assistive technology reads the row's own description.
  */
 @Composable
 internal fun Spark(animated: Boolean, tint: Color) {
-    var index by remember { mutableIntStateOf(STILL) }
+    var elapsed by remember { mutableLongStateOf(0L) }
     LaunchedEffect(animated) {
         if (animated) {
-            while (true) {
-                delay(STEP_MS)
-                index = (index + 1) % GLYPHS.size
-            }
-        } else {
-            index = STILL
+            val start = withFrameMillis { it }
+            while (true) withFrameMillis { elapsed = it - start }
         }
     }
-    Text(
-        GLYPHS[index],
-        color = tint,
-        style = JewelTheme.editorTextStyle,
-        modifier = Modifier.width(16.dp).clearAndSetSemantics {},
-        textAlign = TextAlign.Center,
+    val shades = remember(tint) { Shades(tint) }
+    Spacer(
+        Modifier.size(lineHeight(smallTextStyle())).clearAndSetSemantics {}.drawBehind {
+            for (orb in OrbIndicator.frame(elapsed, animated)) drawOrb(orb, shades)
+        },
     )
+}
+
+/** The three colours of an orb's shading in [tint]: lighter, the tint itself, darker. */
+private class Shades(tint: Color) {
+    val light: Color = mix(tint, 1f, LIGHTER)
+    val middle: Color = tint
+    val dark: Color = mix(tint, 0f, DARKER)
+
+    /** [color] moved [amount] of the way towards the channel value [towards] (1 lighter, 0 darker), keeping its alpha. */
+    private fun mix(color: Color, towards: Float, amount: Float): Color = Color(
+        red = color.red + (towards - color.red) * amount,
+        green = color.green + (towards - color.green) * amount,
+        blue = color.blue + (towards - color.blue) * amount,
+        alpha = color.alpha,
+    )
+}
+
+/** [orb] on this square: a disc whose radial shading has its light centre up and to the left, at the orb's alpha. */
+private fun DrawScope.drawOrb(orb: Orb, shades: Shades) {
+    val side = size.minDimension
+    val radius = orb.radius * side
+    val center = Offset(orb.x * side, orb.y * side)
+    val light = center - Offset(radius * LIGHT_OFFSET, radius * LIGHT_OFFSET)
+    val brush = Brush.radialGradient(
+        0f to shades.light,
+        0.5f to shades.middle,
+        1f to shades.dark,
+        center = light,
+        radius = radius * SHADE_RADIUS,
+    )
+    drawCircle(brush, radius = radius, center = center, alpha = orb.alpha)
 }
