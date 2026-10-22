@@ -145,6 +145,10 @@ class SessionManager internal constructor(
     /** The source of shell escape ids, `shell-<n>`: distinct from a loaded entry's line uuid. */
     private val nextShell = AtomicLong()
 
+    /** Set by [killAllNow]: the IDE exits, so a shell escape that ends sends no frames and starts no process. */
+    @Volatile
+    private var shuttingDown = false
+
     /** Guards changes of [sessions] and [selected] together, and a session's attention against a change of the selection. */
     private val lock = Any()
     private val mutableSessions = MutableStateFlow<List<SessionHandle>>(emptyList())
@@ -301,8 +305,8 @@ class SessionManager internal constructor(
      * Runs [command], a shell escape (`! command`), in the login shell in the project directory, off the EDT, and shows it in the
      * chat as it runs (spec 12). Once it ends, its frames go to the CLI ([ClaudeSession.sendShellEscape]), started first if no process
      * runs, as a prompt starts one; Claude replies when [respondToShell] says so. A command that did not start, or whose output could
-     * not be read, says so in its row and sends nothing; one stopped ([stopShell]) or capped sends its output with a note. Ignored
-     * while a command runs in this session, and once it is closed.
+     * not be read, says so in its row and sends nothing, as one the IDE's exit kills ([killAllNow]); one stopped ([stopShell]) or
+     * capped sends its output with a note. Ignored while a command runs in this session, and once it is closed.
      */
     @OptIn(DelicateCoroutinesApi::class)
     fun runShell(id: SessionId, command: String) {
@@ -337,8 +341,8 @@ class SessionManager internal constructor(
             withContext(NonCancellable) {
                 handle.shellEvent(SessionEvent.ShellEnded(shellId, ShellEnd.Stopped, ms))
                 LOG.info("shell escape stopped after $ms ms")
-                // A closed session, or a project that closes (its scope cancelled without a close), sends nothing.
-                if (!handle.isClosed && handle.scope.isActive) {
+                // A closed session, a project that closes (its scope cancelled without a close) or the IDE's exit sends nothing.
+                if (!shuttingDown && !handle.isClosed && handle.scope.isActive) {
                     sendShellFrames(handle, shellId, command, withNote(soFar.toString(), "Stopped after ${elapsed(ms)}"))
                 }
             }
@@ -349,7 +353,8 @@ class SessionManager internal constructor(
             return
         }
         handle.shellEvent(SessionEvent.ShellEnded(shellId, result.end, result.durationMs))
-        if (result.end is ShellEnd.NotStarted) return
+        // Not started: nothing ran. Stopped here means killAllNow killed it (the IDE exits): no claude may start now.
+        if (result.end is ShellEnd.NotStarted || result.end is ShellEnd.Stopped || shuttingDown) return
         sendShellFrames(handle, shellId, command, if (result.end is ShellEnd.TimedOut) withNote(result.output, "Killed after 10 minutes") else result.output)
     }
 
@@ -522,9 +527,11 @@ class SessionManager internal constructor(
     /**
      * Kills every process this manager started that has not ended yet, and what it started, at once ([ClaudeSession.killNow]): those
      * of open sessions, and those still being ended, such as a closed or stopped session's. The last resort of a JVM shutdown hook,
-     * which cannot wait for coroutines to end them. Never waits; safe to call from any thread, and more than once.
+     * which cannot wait for coroutines to end them. A shell escape it kills ends [ShellEnd.Stopped] and sends nothing, so that no
+     * process starts after it. Never waits; safe to call from any thread, and more than once.
      */
     fun killAllNow() {
+        shuttingDown = true // ahead of the kills: a command they end must not queue its frames and start a process
         spawner.killAllNow()
         shell.killAllNow()
     }

@@ -2,7 +2,9 @@ package dev.daarkolabs.tandem.session
 
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -80,7 +82,7 @@ sealed interface ShellEnd {
     /** The shell exited with [code]. */
     data class Exited(val code: Int) : ShellEnd
 
-    /** Stop, Esc or the session's close ended it. */
+    /** Stop, Esc, the session's close or the IDE's exit ([ShellRunner.killAllNow]) ended it. */
     data object Stopped : ShellEnd
 
     /** The 10-minute cap ended it. */
@@ -120,8 +122,9 @@ class ShellRunner(
      * Runs [command] in [directory] on [Dispatchers.IO], handing its output to [onOutput] in batches as it comes, and returns once
      * the shell has exited and the pipe holds nothing more (a backgrounded child that keeps the pipe open does not hold it). Stdin is
      * closed at once. The read never blocks: it reads only what the pipe has, so cancelling this, the cap and [killAllNow] end it at
-     * once; each kills the shell and what it started. A shell that cannot start ends [ShellEnd.NotStarted] with nothing read; the
-     * caller's cancellation is rethrown, and so is a read that fails, once the shell is killed.
+     * once; each kills the shell and what it started. A shell that cannot start ends [ShellEnd.NotStarted] with nothing read; one
+     * [killAllNow] killed ends [ShellEnd.Stopped]. The caller's cancellation is rethrown once the output read so far has reached
+     * [onOutput], and a read that fails is rethrown; either, once the shell is killed.
      */
     suspend fun run(command: String, directory: Path, onOutput: suspend (String) -> Unit): ShellResult = withContext(Dispatchers.IO) {
         val env = environment()
@@ -137,11 +140,21 @@ class ShellRunner(
         val output = Output(onOutput, started)
         try {
             runCatching { p.outputStream.close() } // a command that reads stdin sees its end
-            val finished = withTimeoutOrNull(timeoutMillis) {
-                pump(p, output)
-                true
+            val finished = try {
+                withTimeoutOrNull(timeoutMillis) {
+                    pump(p, output)
+                    true
+                }
+            } catch (e: CancellationException) {
+                // Stop, Esc or a close: the last batch and the decoder's residue still reach the caller, whose frame says "so far".
+                withContext(NonCancellable) { output.finish() }
+                throw e
             }
-            val end = if (finished == null) ShellEnd.TimedOut else ShellEnd.Exited(exitCode(p))
+            val end = when {
+                finished == null -> ShellEnd.TimedOut
+                p in killed -> ShellEnd.Stopped // the IDE exits: its exit code is the kill's, not the command's
+                else -> ShellEnd.Exited(p.exitValue()) // the pump returns otherwise only once the shell has exited
+            }
             output.finish()
             val durationMs = clock() - started
             LOG.info("shell escape ended: ${end.javaClass.simpleName} in $durationMs ms, ${output.length} chars")
@@ -161,9 +174,6 @@ class ShellRunner(
             runCatching { kill(p) }
         }
     }
-
-    /** [p]'s exit code once it has exited; a shell killed at once ([killAllNow]) gets its moment to be reaped, -1 if it takes longer. */
-    private fun exitCode(p: Process): Int = if (p.isAlive && !p.waitFor(2, TimeUnit.SECONDS)) -1 else p.exitValue()
 
     /** The OS's reason a shell did not launch, from the JDK's exception (its cause holds the OS's words). */
     private fun launchFailure(e: Exception): String {
@@ -261,7 +271,8 @@ class ShellRunner(
 
         private fun drain() {
             chars.flip()
-            val room = Shells.MAX_OUTPUT_CHARS - kept.length
+            // Once anything is cut, nothing more is kept: the kept text stays a prefix of the output.
+            val room = if (cut > 0) 0 else Shells.MAX_OUTPUT_CHARS - kept.length
             var take = minOf(room.coerceAtLeast(0), chars.remaining())
             // Never keep half of a surrogate pair at the cap.
             if (take in 1 until chars.remaining() && chars[take - 1].isHighSurrogate()) take--
