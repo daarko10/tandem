@@ -49,9 +49,6 @@ object HostMessages {
         put("uuid", uuid)
     }
 
-    /** A plain-text prompt: [userMessage] without images. */
-    fun userText(text: String, uuid: String): JsonObject = userMessage(text, emptyList(), uuid)
-
     /** `forwardSubagentText` makes the CLI forward a subagent's text replies as assistant lines with an `agent_id`. */
     fun initialize(requestId: String): JsonObject = request(requestId, "initialize") {
         put("hooks", JsonNull)

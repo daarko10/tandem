@@ -24,7 +24,7 @@ class HostMessagesTest {
         assertEquals(
             """{"type":"user","session_id":"","message":{"role":"user","content":[{"type":"text","text":"ping"}]},""" +
                 """"parent_tool_use_id":null,"uuid":"u-1"}""",
-            wire(HostMessages.userText("ping", uuid = "u-1")),
+            wire(HostMessages.userMessage("ping", emptyList(), uuid = "u-1")),
         )
     }
 
