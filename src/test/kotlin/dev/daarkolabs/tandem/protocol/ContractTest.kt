@@ -18,7 +18,10 @@ import kotlin.test.assertTrue
  * Run by the nightly CLI contract workflow against freshly recorded output of the newest CLI (`-Dtandem.contractDir=...`): its
  * stream-json output (`.ndjson` files) and the transcripts it wrote to disk (`.jsonl` files in `transcripts`). Skipped in normal
  * test runs. Beside the checks every recording gets, the scenario recordings the workflow makes (`mcp-slash`, `mcp-status`,
- * `bash-mode`, `bash-mode-respond`) are checked for what Tandem reads in them; a check is skipped when its file is not there.
+ * `mcp-tool-call`, `bash-mode`, `bash-mode-respond`, `bash-mode-context`) are checked for what Tandem reads in them: the slash
+ * catalogue, `init`'s `terminal_slash_commands` and a local command; the `mcp_status`, `mcp_toggle` and `mcp_authenticate` answers
+ * and `init`'s `mcp_servers`; an MCP tool's permission request naming its server; and each quiet shell-escape frame's zero-turn
+ * result. A check is skipped when its file is not there.
  */
 class ContractTest {
     @Test
@@ -60,6 +63,8 @@ class ContractTest {
         val catalogue = messages.filterIsInstance<CliMessage.ControlResponse>().firstNotNullOfOrNull { ControlPayloads.initialize(it.payload) }
         assertTrue(assertNotNull(catalogue, "no initialize answer with commands").commands.isNotEmpty(), "the initialize commands are empty")
         assertTrue(messages.filterIsInstance<CliMessage.SystemInit>().any { it.slashCommands.isNotEmpty() }, "no init lists slash commands")
+        // The palette leaves these out (MCP spec 3.4).
+        assertTrue(messages.filterIsInstance<CliMessage.SystemInit>().any { it.terminalSlashCommands.isNotEmpty() }, "no init lists terminal_slash_commands")
         // The first prompt is /mcp: the CLI answers it itself, with a local-command line and a result that names it.
         val local = messages.indexOfFirst { it is CliMessage.Assistant && it.localCommand != null }
         assertTrue(local >= 0, "no assistant line carries local_command_*")
@@ -70,8 +75,9 @@ class ContractTest {
     }
 
     @Test
-    fun `mcp-status - mcp_status and mcp_toggle answers decode`() {
-        val responses = recording("mcp-status").filterIsInstance<CliMessage.ControlResponse>()
+    fun `mcp-status - mcp_status, mcp_toggle and mcp_authenticate answers and init's mcp_servers decode`() {
+        val messages = recording("mcp-status")
+        val responses = messages.filterIsInstance<CliMessage.ControlResponse>()
         val listings = responses.mapNotNull { ControlPayloads.mcpStatus(it.payload) }
         assertTrue(listings.isNotEmpty(), "no mcp_status answer with an mcpServers array")
         assertTrue(
@@ -80,6 +86,24 @@ class ContractTest {
         )
         // mcp_toggle's success is bare (docs/protocol.md 4.4); the scenario toggles echo off and on.
         assertTrue(responses.count { it.isSuccess && it.payload.isNullOrEmpty() } >= 2, "no bare success for the two mcp_toggle requests")
+        // The sign-in opens authUrl itself (MCP spec 3.3); authy always needs auth.
+        assertTrue(
+            responses.mapNotNull { ControlPayloads.mcpAuthenticate(it.payload) }
+                .any { ControlPayloads.browsableUrl(it.authUrl) != null && it.callbackPort != null },
+            "no mcp_authenticate answer with a browsable authUrl",
+        )
+        // The header badge and the panel's merge read init's thin list (MCP spec 3.1, 4.2).
+        assertTrue(
+            messages.filterIsInstance<CliMessage.SystemInit>().any { init -> init.mcpServers.any { it.name == "echo" && it.status == McpStatus.CONNECTED } },
+            "no init lists echo connected in mcp_servers",
+        )
+    }
+
+    @Test
+    fun `mcp-tool-call - the permission request names the MCP server`() {
+        val asks = recording("mcp-tool-call").filterIsInstance<CliMessage.ControlRequest>().map { it.request }
+            .filterIsInstance<InboundRequest.CanUseTool>()
+        assertTrue(asks.any { it.mcpServer?.name == "echo" }, "no can_use_tool names the echo server: ${asks.map { it.mcpServer }}")
     }
 
     @Test
@@ -92,11 +116,25 @@ class ContractTest {
     }
 
     @Test
-    fun `bash-mode - the two quiet frames get one zero-turn result naming both`() {
+    fun `bash-mode-context - the one context frame gets a zero-turn result naming its uuid`() {
+        val lines = recordingLines("bash-mode-context")
+        val quiet = commandUuids(lines).first()
+        val results = lines.map(Ndjson::decode).filterIsInstance<CliMessage.Result>()
+        val zero = results.indexOfFirst { it.numTurns == 0 && it.userMessageUuids == listOf(quiet) }
+        assertTrue(zero >= 0, "no zero-turn result names $quiet alone")
+        assertTrue(
+            results.drop(zero + 1).any { (it.numTurns ?: 0) > 0 && quiet !in it.userMessageUuids },
+            "the next prompt ran no turn of its own",
+        )
+    }
+
+    /** Whether the CLI merges the two back-to-back frames into one result or answers each is timing; Tandem handles both. */
+    @Test
+    fun `bash-mode - each of the two quiet frames is named by a zero-turn result`() {
         val lines = recordingLines("bash-mode")
         val quiet = commandUuids(lines).take(2)
         val results = lines.map(Ndjson::decode).filterIsInstance<CliMessage.Result>()
-        assertTrue(results.any { it.numTurns == 0 && it.userMessageUuids.toSet() == quiet.toSet() }, "no zero-turn result names $quiet")
+        assertTrue(quiet.all { q -> results.any { it.numTurns == 0 && q in it.userMessageUuids } }, "no zero-turn result names each of $quiet")
     }
 
     /** The lines of recording [name], or the test is skipped when it was not recorded. */
