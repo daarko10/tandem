@@ -53,7 +53,10 @@ env:
 jobs:
   fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # The agent step's own 75 minutes plus the setup before it (disk, checkout, Java, the Gradle cache, the gh calls and
+    # `Reproduce the red`, a compile plus the IntelliJ Platform: a nightly running the same Gradle step took 23 minutes
+    # end to end), so the step's timeout always fires first and the job ends normally, with the outputs enforce reads.
+    timeout-minutes: 120
     # Read by the enforce and remind jobs. All but agent were written before the agent started, and a step's
     # GITHUB_OUTPUT is read when that step ends, so no later step of this job can rewrite them through GITHUB_OUTPUT;
     # agent only appears in a message. Code the agent ran holds root on this runner, though, and could tamper with the
@@ -242,7 +245,11 @@ jobs:
       # a stopped agent. Only a 404 means "no branch": gh prints the error body on stdout and exits 1 on any HTTP error,
       # so the read is decided by its exit status and then by the body's status, and a 5xx or a rate limit refuses too.
       # The CODEOWNERS read is decided the same way: a 404 is a missing file, which owns nothing; anything else refuses
-      # without a verdict, never as "no owner line".
+      # without a verdict, never as "no owner line". Last, any drift/ branch of this repository without an open pull
+      # request from it refuses (an earlier night's agent that pushed and was stopped, or opened nothing after a push; a
+      # closed fix whose branch was kept): without that, every night of the same red would start another agent run until
+      # the owner acted, so a failed night costs one run until the owner deletes the branch. The repository setting
+      # "Automatically delete head branches" removes a merged fix's branch.
       - name: Require a protected main
         id: protect
         if: steps.gate.outputs.proceed == 'true'
@@ -292,20 +299,35 @@ jobs:
           if [ "$status" != "404" ]; then
             echo "::error title=Drift fix::Reading the branch $BRANCH failed (HTTP status '${status:-none}'), so whether it exists is not known; the agent is not started."; exit 1
           fi
-      # No github_token input: the action authenticates as the Claude GitHub App, sets the origin URL and the commit identity
-      # before the CLI starts, and the PR it opens starts the Build workflow. The allowlist names the invocations the skill
-      # prescribes; the push rule is exact (a :* rule matches the prefix followed by a space, so drift/:* would never match
-      # the push). The deny rules keep the CLI's Edit and Write tools out of some of the files that run code before the
-      # push (the build scripts, gradle.properties and the wrapper, scripts/, the hooks in .claude/ and .git/) and out of
-      # a second CLI; test code under src/test runs anyway, and `cp` is not bound by them, so the enforce job checks the
-      # result on a fresh runner. The action also loads the project's .claude/settings.json, whose allow rules are merged
-      # in; the deny rules below take back the Gradle tasks and ktlint it allows that the skill never prescribes, every
-      # flag after `./gradlew check` (its rule there is a prefix): `-x` and `--exclude-task` as prefix rules, and the
-      # wildcard rule `./gradlew check *-*` (a rule with a `*` not in a trailing `:*` is a pattern) for
-      # `--exclude-task=koverVerify`, `--init-script` and the rest, and `./gradlew test *check*`, the other spelling of a
-      # check that skips koverVerify. What runs the real `./gradlew check` is Build on the pull request, not the agent's
-      # report. Neither list is what protects main: the ruleset on main (a pull request plus a code owner's approving review
-      # of the last push, required by the step above) and the App token's scope are.
+          if ! branches="$(gh api --paginate "repos/$GITHUB_REPOSITORY/branches?per_page=100" --jq '.[].name')"; then
+            echo "::error title=Drift fix::Listing the branches failed, so whether an earlier drift fix left a branch without a pull request is not known; the agent is not started."; exit 1
+          fi
+          if ! heads="$(gh pr list --state open --limit 100 --json headRefName,isCrossRepository --jq '.[] | select(.isCrossRepository == false) | .headRefName')"; then
+            echo "::error title=Drift fix::Listing the open pull requests failed, so whether a drift branch has one is not known; the agent is not started."; exit 1
+          fi
+          stale="$( (grep -E '^drift/' <<<"$branches" || true) | (grep -vxF -f <(printf '%s\n' "$heads") || true) | paste -sd ' ' -)"
+          if [ -n "$stale" ]; then
+            echo "::error title=Drift fix::The drift branches $stale exist without an open pull request (an earlier fix that opened none, or a closed one's branch, kept); read them, then delete them to re-arm the loop. The agent is not started."; exit 1
+          fi
+      # No github_token input: the action authenticates as the Claude GitHub App, sets the origin URL and the commit
+      # identity before the CLI starts, and the PR it opens starts the Build workflow. The allowlist names the
+      # invocations the skill prescribes; the push rule is exact (a :* rule matches the prefix followed by a space, so
+      # drift/:* would never match the push), `cat`, `ls` and `date` are not on it (the skill prescribes none of them),
+      # and `cp` is admitted from the recording into the fixtures only, as a pattern (a `*` not in a trailing `:*`
+      # matches anything, spaces included), so the deny rules `cp *..*` and `cp * * *` take back a `..` and a third
+      # argument (a target directory, `-t`). The deny rules keep the CLI's Edit and Write tools out of some of the files
+      # that run code before the push (the build scripts, gradle.properties and the wrapper, scripts/, the hooks in
+      # .claude/ and .git/), the Read tool out of .git/ (the App token is in the origin URL of .git/config) and a second
+      # CLI out; test code under src/test runs anyway, so the enforce job checks the result on a fresh runner.
+      # `attribution` empty keeps the CLI's own co-author trailer and "Generated with" line out of the commit and the PR
+      # body. The action also loads the project's .claude/settings.json, whose allow rules are merged in; the deny rules
+      # below take back the Gradle tasks and ktlint it allows that the skill never prescribes, every flag after
+      # `./gradlew check` (its rule there is a prefix): `-x` and `--exclude-task` as prefix rules, and the wildcard rule
+      # `./gradlew check *-*` (a rule with a `*` not in a trailing `:*` is a pattern) for `--exclude-task=koverVerify`,
+      # `--init-script` and the rest, and `./gradlew test *check*`, the other spelling of a check that skips
+      # koverVerify. What runs the real `./gradlew check` is Build on the pull request, not the agent's report. Neither
+      # list is what protects main: the ruleset on main (a pull request plus a code owner's approving review of the last
+      # push, required by the step above) and the App token's scope are.
       - name: Fix the drift
         id: agent
         if: steps.gate.outputs.proceed == 'true' && steps.protect.outcome == 'success'
@@ -320,9 +342,9 @@ jobs:
           claude_args: |
             --model claude-opus-5-5
             --max-turns 120
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp build/drift/recording/* src/test/resources/fixtures/*),Bash(grep:*)"
           settings: |
-            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(gradle.properties)", "Write(gradle.properties)", "Edit(gradle/**)", "Write(gradle/**)", "Edit(.git/**)", "Write(.git/**)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}}
+            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(gradle.properties)", "Write(gradle.properties)", "Edit(gradle/**)", "Write(gradle/**)", "Read(.git/**)", "Edit(.git/**)", "Write(.git/**)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, "attribution": {"commit": "", "pr": ""}}
   # The reminder on the pull request the gate found waiting, once per further red. Commenting on a pull request needs
   # pull-requests: write even through the issues endpoint (issues: write alone gets a 403), and the fix job's token must
   # hold no such write (the agent's test code can read it), so the comment is posted here, in a job that runs no agent
@@ -347,7 +369,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$WAITING" =~ ^[0-9]+$ ]] || { echo "::error title=Drift fix::The gate skipped the agent but named no waiting pull request."; exit 1; }
-          gh pr comment "$WAITING" --body "The nightly of $DATE is still red: $RUN_URL. This pull request is still waiting; merge or close it to re-arm the loop."
+          gh pr comment "$WAITING" --body "The nightly of $DATE is still red: $RUN_URL. This pull request is still waiting; merge it, or close it and delete its branch, to re-arm the loop."
           echo "commented on PR #$WAITING"
   # The check that depends neither on the agent obeying the skill nor on the runner its code ran on: the fix job runs test
   # code the agent wrote (./gradlew test) with sudo, and that code can change what a later step of the same job sees (a
@@ -362,7 +384,7 @@ jobs:
   # each is checked, never only the first's; a PR from the branch that lacks the label gets it, so the gate holds while
   # it is open; and more than one is red, since the agent opens one. A PR touching anything outside the allowlist is
   # commented on, left open and the run is red. It is never closed: the gate keys on an open contract-drift PR, so a
-  # close would re-arm the loop and the next nightly would produce the same fix again, every night.
+  # close (with its branch deleted) would re-arm the loop and the next nightly would produce the same fix again.
   # Once the gate proceeded, no PR is a red run: a pushed branch without one (the agent was stopped by the timeout or the
   # turn limit) is reported on the standing issue; no branch at all is a denied command, a redactor stop, an action that
   # skipped the agent, or an agent that gave up. The branch is read through the API with the workflow token (contents:
@@ -401,7 +423,7 @@ jobs:
           if [ "${#prs[@]}" -eq 0 ]; then
             if branch="$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name 2>/dev/null)"; then
               title="CLI contract: the CLI did not answer"
-              body="The drift fix for $RUN_URL pushed the branch $BRANCH but opened no pull request: the agent was stopped (timeout or turn limit; its step ended '${AGENT:-skipped}'). Review the branch by hand."
+              body="The drift fix for $RUN_URL pushed the branch $BRANCH but opened no pull request: the agent was stopped (timeout or turn limit; its step ended '${AGENT:-skipped}'). Review the branch by hand, then delete it to re-arm the loop: the fixer does not start while a drift/ branch has no open pull request."
               issue="$(gh issue list --label contract-drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
               if [ -z "$issue" ]; then gh issue create --title "$title" --label contract-drift --body "$body"; else gh issue comment "$issue" --body "$body"; fi
               echo "::error title=Drift fix::The agent pushed $BRANCH but opened no PR; reported on the standing issue."; exit 1
@@ -422,7 +444,7 @@ jobs:
             files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$pr/files" --jq '.[] | .filename, (.previous_filename // empty)')"
             offending="$(grep -vE '^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\.md$)' <<<"$files" || true)"
             if [ -n "$offending" ]; then
-              gh pr comment "$pr" --body "$(printf 'drift-fix.yml: this fix edits files outside the allowlist (protocol/, session/transcript/, src/test/, docs/protocol.md); it is left open so the loop holds (the gate skips while it is open) and the owner decides. Close it to re-arm the loop, or merge after review.\n\n%s' "$offending")"
+              gh pr comment "$pr" --body "$(printf 'drift-fix.yml: this fix edits files outside the allowlist (protocol/, session/transcript/, src/test/, docs/protocol.md); it is left open so the loop holds (the gate skips while it is open) and the owner decides. Close it and delete its branch to re-arm the loop, or merge after review.\n\n%s' "$offending")"
               echo "::error title=Drift fix::PR #$pr edits files outside the allowlist; commented and left open."; red=1
             else
               echo "PR #$pr ($head) stays within the allowlist"

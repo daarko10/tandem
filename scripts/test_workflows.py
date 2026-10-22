@@ -44,8 +44,8 @@ DRIFT = os.path.join(ROOT, ".github/workflows/drift-fix.yml")
 SKILL = os.path.join(ROOT, ".claude/skills/fix-contract-drift/SKILL.md")
 DENY = {"Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)",
         "Write(settings.gradle.kts)", "Edit(gradle.properties)", "Write(gradle.properties)", "Edit(gradle/**)", "Write(gradle/**)",
-        "Edit(.git/**)", "Write(.git/**)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)",
-        "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)",
+        "Read(.git/**)", "Edit(.git/**)", "Write(.git/**)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)",
+        "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)",
         "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)",
         "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"}
 ALLOWLIST = "'^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\\.md$)'"
@@ -157,7 +157,7 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual([], [s.get("name") for s in steps(wf, "fix") if "gh pr comment" in s.get("run", "") or "/comments" in s.get("run", "")])   # nothing in the fix job needs pull-requests: write
         self.assertEqual({"group": "drift-fix", "cancel-in-progress": False}, wf["concurrency"])
         job = wf["jobs"]["fix"]
-        self.assertEqual(90, job["timeout-minutes"])
+        self.assertEqual(120, job["timeout-minutes"])                                 # the agent step's 75 plus a cold-cache setup (a nightly took 23 minutes): the step's timeout fires first, and the job ends with its outputs
         for clause in ("github.repository == 'daarko10/tandem'", "github.ref == 'refs/heads/main'", "workflow_run.conclusion == 'failure'", "workflow_run.head_branch == 'main'"):
             self.assertIn(clause, job["if"])
         self.assertEqual(False, step(wf, "fix", "Check out main")["with"]["persist-credentials"])
@@ -285,6 +285,11 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertIn("status=\"$(jq -r '.status // empty' <<<\"$existing\" 2>/dev/null || true)\"", protect["run"])   # only a 404 lets the agent start: a 5xx would be a push rejected after the spend
         self.assertIn('if [ "$status" != "404" ]; then', protect["run"])
         self.assertLess(protect["run"].index("rules/branches/main"), protect["run"].index("branches/$BRANCH"))   # the ruleset first: it is the loop's precondition
+        stale = protect["run"].split("delete it to retry", 1)[1]                       # last: a drift/ branch without an open PR (a stopped agent's push, a closed fix's branch) would start a fresh run every night
+        self.assertIn('if ! branches="$(gh api --paginate "repos/$GITHUB_REPOSITORY/branches?per_page=100" --jq \'.[].name\')"; then', stale)
+        self.assertIn('if ! heads="$(gh pr list --state open --limit 100 --json headRefName,isCrossRepository --jq', stale)
+        self.assertIn("delete them to re-arm the loop", stale)
+        self.assertIn("exit 1", stale.split("delete them to re-arm the loop", 1)[1])
 
     def test_the_allowlist_is_enforced_in_its_own_job(self):
         wf = load(DRIFT)
@@ -358,9 +363,11 @@ class DriftFixWorkflowTest(unittest.TestCase):
         allowed = tools(step(load(DRIFT), "fix", "Fix the drift")["with"]["claude_args"])
         self.assertIn("Bash(git push -u origin HEAD)", allowed)                        # a :* rule matches prefix + space; drift/:* never matched the push
         self.assertEqual([], [t for t in allowed if t.startswith("Bash(git push") and t.endswith(":*)")])
-        for broad in ("Bash(python3:*)", "Bash(./gradlew:*)", "Bash(gh pr:*)", "Bash(gh issue:*)", "Bash(git:*)"):
+        for broad in ("Bash(python3:*)", "Bash(./gradlew:*)", "Bash(gh pr:*)", "Bash(gh issue:*)", "Bash(git:*)",
+                      "Bash(cp:*)", "Bash(cat:*)", "Bash(ls:*)", "Bash(date:*)"):      # `cat <<EOF > .github/…` and `cp x scripts/…` wrote past the Edit/Write deny rules
             self.assertNotIn(broad, allowed)
-        for exact in ("Bash(./gradlew check)", "Bash(python3 -m unittest discover -s scripts -t scripts)"):
+        for exact in ("Bash(./gradlew check)", "Bash(python3 -m unittest discover -s scripts -t scripts)",
+                      "Bash(cp build/drift/recording/* src/test/resources/fixtures/*)"):   # a `*` not in a trailing `:*` is a pattern: the recording into the fixtures only
             self.assertIn(exact, allowed)
 
     def test_the_agent_cannot_edit_the_build_or_start_a_second_cli(self):
@@ -370,6 +377,7 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual(DENY, set(deny))                                             # the spec's list, exactly: nothing dropped, nothing unexplained
         self.assertEqual(len(DENY), len(deny))
         self.assertEqual({"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, json.loads(agent["with"]["settings"])["env"])   # ./gradlew check outlives the Bash tool's two-minute default
+        self.assertEqual({"commit": "", "pr": ""}, json.loads(agent["with"]["settings"])["attribution"])   # the CLI's own co-author trailer and "Generated with" line stay out of the commit and the PR body (2.1.308: an empty string hides attribution; includeCoAuthoredBy is deprecated)
 
 
 BRANCH = "drift/2026-10-22-7"
@@ -392,6 +400,12 @@ APP_BYPASS = json.dumps({"id": 17, "enforcement": "active", "bypass_actors": [{"
 ROLE_ONLY = json.dumps({"id": 17, "enforcement": "active", "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]})
 WITHHELD = json.dumps({"id": 17, "enforcement": "active"})                         # GitHub's answer to a token that cannot edit the ruleset
 CODEOWNERS = "api -H Accept: application/vnd.github.raw+json repos/daarko10/tandem/contents/.github/CODEOWNERS?ref=main"
+BRANCHES = "api --paginate repos/daarko10/tandem/branches?per_page=100 --jq .[].name"
+HEADS = "pr list --state open --limit 100 --json headRefName,isCrossRepository --jq"
+CONTRACT_XML = ('<?xml version="1.0" encoding="UTF-8"?><testsuite name="dev.daarkolabs.tandem.protocol.ContractTest">'
+                '<testcase name="live transcripts decode with every core type recognised" classname="dev.daarkolabs.tandem.protocol.ContractTest">'
+                '<failure message="java.lang.AssertionError: contract-hello.ndjson: no system/init" type="java.lang.AssertionError">trace</failure></testcase>'
+                '<testcase name="live transcripts load with the reader" classname="dev.daarkolabs.tandem.protocol.ContractTest"/></testsuite>')
 
 
 def pr(number: int, head: str = BRANCH, labelled: bool = False, fork: bool = False) -> dict:
@@ -492,7 +506,7 @@ class StepOutcomeTest(unittest.TestCase):
         env = {"GH_TOKEN": "stub", "GH_REPO": "daarko10/tandem", "WAITING": "12", "RUN_URL": RUN_URL, "DATE": "2026-10-22"}
         rc, out, _, calls = run_step(load(DRIFT), "remind", "Comment on the waiting pull request", env, [("pr comment 12 --body", "", 0)])
         self.assertEqual(0, rc, out)
-        self.assertEqual(f"pr comment 12 --body The nightly of 2026-10-22 is still red: {RUN_URL}. This pull request is still waiting; merge or close it to re-arm the loop.\n", calls)
+        self.assertEqual(f"pr comment 12 --body The nightly of 2026-10-22 is still red: {RUN_URL}. This pull request is still waiting; merge it, or close it and delete its branch, to re-arm the loop.\n", calls)
         rc, out, _, calls = run_step(load(DRIFT), "remind", "Comment on the waiting pull request", {**env, "WAITING": ""}, [])
         self.assertEqual(1, rc, out)
         self.assertEqual("", calls)
@@ -532,17 +546,39 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertRegex(output, r"^id=99\nurl=https://github\.com/daarko10/tandem/actions/runs/99\ndate=\d{4}-\d{2}-\d{2}\nrehearse=true\n$")
         self.assertEqual("", calls)
 
-    def protect(self, rules: str, owners: str | tuple[str, int], branch: tuple[str, int], ruleset: tuple[str, int] = (ROLE_ONLY, 0)) -> tuple[int, str, str, str]:
+    def protect(self, rules: str, owners: str | tuple[str, int], branch: tuple[str, int], ruleset: tuple[str, int] = (ROLE_ONLY, 0),
+                branches: tuple[str, int] = ("main\nci/drift-loop\n", 0), heads: tuple[str, int] = ("", 0)) -> tuple[int, str, str, str]:
         owners = owners if isinstance(owners, tuple) else (owners, 0)
         return run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
-                        [(RULES, rules, 0), (RULESET, ruleset[0], ruleset[1]), (CODEOWNERS, owners[0], owners[1]), (BRANCH_READ, branch[0], branch[1])])
+                        [(RULES, rules, 0), (RULESET, ruleset[0], ruleset[1]), (CODEOWNERS, owners[0], owners[1]), (BRANCH_READ, branch[0], branch[1]),
+                         (BRANCHES, branches[0], branches[1]), (HEADS, heads[0], heads[1])])
 
     def test_protect_passes_a_ruleset_an_owner_and_a_missing_branch(self):
         rc, out, _, calls = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1))
         self.assertEqual(0, rc, out)
         self.assertIn("main requires a pull request, an approving review from a code owner and approval of the last push (ruleset 17)", out)
         self.assertIn("ruleset 17: no App on its bypass list", out)                   # the owner's admin role is how the only code owner merges
-        self.assertEqual([RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0]], [c.split(" --jq", 1)[0] for c in calls.splitlines()])   # the ruleset first
+        self.assertEqual([RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0], BRANCHES.split(" --jq", 1)[0], HEADS.split(" --jq", 1)[0]],
+                         [c.split(" --jq", 1)[0] for c in calls.splitlines()])        # the ruleset first; the stale-branch listing last
+
+    def test_protect_refuses_a_drift_branch_without_an_open_pull_request(self):
+        rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), branches=("main\ndrift/2026-10-20-5\ndrift/2026-10-19-4\nfeature/drift\n", 0),
+                                     heads=("drift/2026-10-19-4\nfeature/x\n", 0))
+        self.assertEqual(1, rc, out)                                                  # a stopped agent's push or a closed fix's branch: without this, the same red starts a run every night
+        self.assertIn("The drift branches drift/2026-10-20-5 exist without an open pull request", out)   # the one whose PR is open is not named, nor a branch outside drift/
+        self.assertIn("delete them to re-arm the loop", out)
+
+    def test_protect_passes_a_drift_branch_whose_pull_request_is_open(self):
+        rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), branches=("main\ndrift/2026-10-19-4\n", 0), heads=("drift/2026-10-19-4\n", 0))
+        self.assertEqual(0, rc, out)                                                  # the gate, not this step, decides about an open fix
+
+    def test_protect_refuses_without_a_verdict_when_a_listing_fails(self):
+        for branches, heads, message in (((SERVER_ERROR, 1), ("", 0), "Listing the branches failed"),
+                                         (("main\n", 0), (SERVER_ERROR, 1), "Listing the open pull requests failed")):
+            rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), branches=branches, heads=heads)
+            self.assertEqual(1, rc, (message, out))
+            self.assertIn(message, out)
+            self.assertNotIn("exist without an open pull request", out)              # red without a verdict, never "stale"
 
     def test_protect_says_when_github_withholds_the_bypass_list(self):
         rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), (WITHHELD, 0))
@@ -593,6 +629,31 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertIn("issue comment 3 --body **The CLI answered; the red is unclassified.**\n\nThe CLI contract run", calls)   # the title names kind 1 only: the first line names the kind
         self.assertIn("- kind: unknown", calls)                                       # the classification when Gradle ran, else the precheck
         self.assertNotIn("issue create", calls)
+
+    def classify(self, name: str, files: dict) -> tuple[int, str, str]:
+        """The real classifier in the step's working directory: the step runs `python3 -I scripts/classify_drift.py`."""
+        with open(os.path.join(ROOT, "scripts/classify_drift.py"), encoding="utf-8") as f:
+            script = f.read()
+        rc, out, output, _ = run_step(load(DRIFT), "fix", name, {}, [], {"scripts/classify_drift.py": script, **files})
+        return rc, out, output
+
+    def test_the_precheck_names_the_kind_and_the_rehearsal_marker(self):
+        reply = stream(INIT, REPLY, {"type": "result", "is_error": False, "result": "pong"})
+        rc, out, output = self.classify("Classify before Gradle", {"build/drift/recording/contract-hello.ndjson": reply, "build/drift/recording/rehearsal": "init-model-key\n"})
+        self.assertEqual(0, rc, out)
+        self.assertEqual("kind=unknown\nrehearsal=true\n", output)                    # no test results before Gradle (rule 4); the marker is what the prompt passes as rehearsal=
+        self.assertIn('"kind": "unknown"', out)                                       # tee: the JSON stays in the log
+        rc, out, output = self.classify("Classify before Gradle", {})
+        self.assertEqual(0, rc, out)
+        self.assertEqual("kind=cli-did-not-answer\nrehearsal=false\n", output)        # no recording at all: kind 1 without Gradle
+
+    def test_classify_reads_the_failed_decode_test(self):
+        reply = stream(INIT, REPLY, {"type": "result", "is_error": False, "result": "pong"})
+        rc, out, output = self.classify("Classify", {"build/drift/recording/contract-hello.ndjson": reply,
+                                                     "build/test-results/test/TEST-dev.daarkolabs.tandem.protocol.ContractTest.xml": CONTRACT_XML})
+        self.assertEqual(0, rc, out)
+        self.assertEqual("kind=decoder\n", output)
+        self.assertIn('"detail": "contract-hello.ndjson: no system/init"', out)       # the assertion's own message, without the exception class
 
     def test_the_fetch_tells_no_recording_from_a_failed_listing(self):
         env = {"GH_TOKEN": "stub", "RUN_ID": "7"}

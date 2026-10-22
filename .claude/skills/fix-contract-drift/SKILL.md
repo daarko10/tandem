@@ -1,7 +1,7 @@
 ---
 name: fix-contract-drift
 description: "Turn a red nightly CLI contract run into a pull request carrying the recording as a fixture and the minimal decoder or reader change. Arguments: run=<url> recording=<dir> classification=<file> rehearsal=<true|false> date=<YYYY-MM-DD>."
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(./gradlew check), Bash(./gradlew test:*), Bash(python3 -I scripts/classify_drift.py:*), Bash(python3 -I scripts/redact_fixture.py:*), Bash(python3 -m unittest discover -s scripts -t scripts), Bash(gh pr create:*), Bash(gh issue list:*), Bash(gh issue create:*), Bash(gh issue comment:*), Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git switch:*), Bash(git clean:*), Bash(git push -u origin HEAD), Bash(cp:*), Bash(ls:*), Bash(cat:*), Bash(grep:*), Bash(date:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(./gradlew check), Bash(./gradlew test:*), Bash(python3 -I scripts/classify_drift.py:*), Bash(python3 -I scripts/redact_fixture.py:*), Bash(python3 -m unittest discover -s scripts -t scripts), Bash(gh pr create:*), Bash(gh issue list:*), Bash(gh issue create:*), Bash(gh issue comment:*), Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git switch:*), Bash(git clean:*), Bash(git push -u origin HEAD), Bash(cp build/drift/recording/* src/test/resources/fixtures/*), Bash(grep:*)
 ---
 
 # Fix contract drift
@@ -28,13 +28,15 @@ result text present` comes with a green decode test: the reply arrived under a t
 
 ## 2. Name the fixture and copy the recording
 Name `drift-<date>`, or `rehearsal-<date>` when `rehearsal=true`. If `src/test/resources/fixtures/<name>.ndjson` exists
-already, use `<name>-<run id>` for every file of this fix. Copy `<recording>/contract-hello.ndjson` to
-`src/test/resources/fixtures/<name>.ndjson` and `<recording>/transcripts/contract-hello.jsonl` to
-`src/test/resources/fixtures/transcripts/<name>.jsonl`. For reader drift, always copy
-`<recording>/transcripts/session-id.jsonl` to `src/test/resources/fixtures/transcripts/<name>-session-id.jsonl` too,
-whichever file the detail names: the test stops at the first failing transcript in directory order, and both carry
-the new shape. Never overwrite an existing fixture: the committed ones pin recorded facts (`plain-reply` pins 2.1.300
-and one "pong").
+already, use `<name>-<run id>` for every file of this fix. The recording is `build/drift/recording` (the `recording=`
+argument), and `cp` is allowed from there into the fixtures only, spelled with those two relative paths and nothing
+else (no `./`, no `..`, no flag, no third argument):
+`cp build/drift/recording/contract-hello.ndjson src/test/resources/fixtures/<name>.ndjson` and
+`cp build/drift/recording/transcripts/contract-hello.jsonl src/test/resources/fixtures/transcripts/<name>.jsonl`. For
+reader drift, always `cp build/drift/recording/transcripts/session-id.jsonl
+src/test/resources/fixtures/transcripts/<name>-session-id.jsonl` too, whichever file the detail names: the test stops
+at the first failing transcript in directory order, and both carry the new shape. Never overwrite an existing fixture:
+the committed ones pin recorded facts (`plain-reply` pins 2.1.300 and one "pong").
 
 ## 3. Run the redactor's safety net
 `python3 -I scripts/redact_fixture.py <copy> <copy>` for each copied file (onto itself; redacted input changes
@@ -42,15 +44,18 @@ nothing). Any `unredacted id` or `<leaked-N>` on stderr is a stop: remove the co
 open no PR, and comment on the open issue titled "CLI contract: the CLI did not answer" (`gh issue list --label
 contract-drift --state open --json number,title`; `gh issue create` with that title and the label `contract-drift`
 when none is open) naming the key path the redactor printed, never the value. Then
-`grep -nE '@|[0-9a-f]{8}-[0-9a-f]{4}-|toolu_|msg_|fv-az|runner|<leaked-' <copies>`: an e-mail address, a UUID, an API
-id, a hostname, an account name or a `<leaked-N>` placeholder (the nightly's redactor already caught a leak; your run
-leaves the placeholder alone and prints nothing) is the same stop; a package name with `@` inside reply text is not,
+`grep -nE '@|[0-9a-f]{8}-[0-9a-f]{4}-|toolu_|msg_|fv-az|runner|<leaked-' <copies>`, over the copies and nothing else
+(never `.git/`, whose `config` holds the push credential): an e-mail address, a UUID, an API id, a hostname, an
+account name or a `<leaked-N>` placeholder (the nightly's redactor already caught a leak; your run leaves the
+placeholder alone and prints nothing) is the same stop; a package name with `@` inside reply text is not,
 nor is a capability name such as `msg_lifecycle_v1` in `system/init` (an API id is `msg_` or `toolu_` followed by a
 random string, and the redactor has already replaced every one it knows with a `<key-N>` placeholder).
 
 ## 4. Add the fixture to the tests
-The stream joins `FixtureDecodeTest` and `RobustnessTest` by directory listing (`Fixtures.names()`), so the decode
-tests are red now: that is the failing test the fix turns green. Add `<name>` (and `<name>-session-id`) to the list in
+The stream joins `FixtureDecodeTest` and `RobustnessTest` by directory listing (`Fixtures.names()`); `every fixture
+line decodes and core types are never Unknown` is red only when a core type now decodes to `Unknown`. For a
+`system/init` or field drift (the rehearsal's `init-model-key` included) nothing is red yet: write the test stating the
+fact that drifted (below) first; it is the failing test the fix turns green. Add `<name>` (and `<name>-session-id`) to the list in
 `transcript fixtures decode line by line without throwing` (`FixtureDecodeTest`), and a `TranscriptReaderTest` case
 that loads `Fixtures.transcript("<name>")` and asserts one `ChatEntry.User` and one `ChatEntry.Assistant`. Add one test
 stating the fact that drifted (the field or type now recognised, read from the new fixture) and a `RobustnessTest` case
