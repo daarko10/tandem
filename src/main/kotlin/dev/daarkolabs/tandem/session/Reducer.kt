@@ -31,8 +31,11 @@ sealed interface SessionEvent {
     /** A prompt the user sent: its [text] and the [images] attached to it. */
     data class UserSent(val uuid: String, val text: String, val atMillis: Long = 0L, val images: List<UserImage> = emptyList()) : SessionEvent
 
-    /** The user picked a model (at spawn or via `set_model`); null means the CLI default. */
-    data class ModelRequested(val model: String?) : SessionEvent
+    /**
+     * The user picked a model; null means the CLI default. With [requestId], the `set_model` request sent for it, whose error answer
+     * puts back the model shown before it; without, for the next process to start with (`--model`).
+     */
+    data class ModelRequested(val model: String?, val requestId: String? = null) : SessionEvent
 
     /**
      * The user picked a permission mode: with [requestId], the `set_permission_mode` request sent for it, whose answer confirms
@@ -67,8 +70,15 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
         turnInterrupted = false,
         turn = TurnProgress(event.uuid, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
     )
-    // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch.
-    is SessionEvent.ModelRequested -> state.copy(requestedModel = event.model, modelWarning = null, modelSwitchPending = true)
+    // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch. A refusal takes it back.
+    is SessionEvent.ModelRequested -> state.copy(
+        requestedModel = event.model,
+        modelWarning = null,
+        modelSwitchPending = true,
+        modelChanges = event.requestId
+            ?.let { state.modelChanges + (it to ModelChange(event.model, state.requestedModel, state.modelSwitchPending, state.modelWarning)) }
+            ?: state.modelChanges,
+    )
     // Shown at once; what the CLI reports next (system/status, system/init) has the last word, and a rejection takes it back.
     is SessionEvent.PermissionModeRequested -> state.copy(
         permissionMode = event.mode,
@@ -124,6 +134,7 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
         pendingPermissions = emptyList(),
         permissionModeChanges = emptyMap(),
         effortChanges = emptyMap(),
+        modelChanges = emptyMap(),
         lastTurnEnd = end ?: state.lastTurnEnd,
         turnsEnded = if (end != null) state.turnsEnded + 1 else state.turnsEnded,
         turnInterrupted = false,
@@ -179,9 +190,13 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         val change = state.permissionModeChanges[message.requestId]
         val answered = if (change == null) state else state.copy(permissionModeChanges = state.permissionModeChanges - message.requestId)
         val effortChange = state.effortChanges[message.requestId]
+        val modelChange = state.modelChanges[message.requestId]
         when {
             effortChange != null && message.isSuccess -> state.copy(effortChanges = state.effortChanges - message.requestId)
             effortChange != null -> state.rejectEffortChange(message.requestId, effortChange, message.error)
+            // Accepted: the switch still waits for the next system/init to confirm it.
+            modelChange != null && message.isSuccess -> state.copy(modelChanges = state.modelChanges - message.requestId).withModels(message.payload)
+            modelChange != null -> state.rejectModelChange(message.requestId, modelChange, message.error)
             message.isSuccess -> answered.withModels(message.payload)
             change == null -> answered.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
             else -> state.rejectModeChange(message.requestId, change, message.error)
@@ -307,6 +322,32 @@ private fun ChatState.rejectEffortChange(requestId: String, change: EffortChange
     if (next != null) pending = pending + (next to pending.getValue(next).copy(previous = change.previous))
     val level = if (next == null && effort == change.requested) change.previous else effort
     return copy(effort = level, effortChanges = pending).notice(NoticeLevel.ERROR, "Effort not changed: ${error ?: "unknown error"}")
+}
+
+/**
+ * The CLI answered the `set_model` [change], request [requestId], with [error] and kept the model it had (hard rule 5: the chat says
+ * so). As [rejectModeChange] does for modes, the next change still waiting now starts from what was shown before [change]; if none
+ * waits, the footer goes back to it: the model picked before, whether that pick still waited for its `system/init`, and its warning,
+ * unless another pick replaced [change] meanwhile. The CLI answers a control request before it starts the next turn, so no
+ * `system/init` comes between a pick and its answer.
+ */
+private fun ChatState.rejectModelChange(requestId: String, change: ModelChange, error: String?): ChatState {
+    // In the order the requests were sent: the reducer adds each to the end of this map.
+    val ids = modelChanges.keys.toList()
+    val next = ids.getOrNull(ids.indexOf(requestId) + 1)
+    var pending = modelChanges - requestId
+    if (next != null) {
+        val waiting = pending.getValue(next)
+        pending = pending + (next to waiting.copy(previous = change.previous, previousPending = change.previousPending, previousWarning = change.previousWarning))
+    }
+    val restored = if (next == null && requestedModel == change.requested) {
+        copy(requestedModel = change.previous, modelSwitchPending = change.previousPending, modelWarning = change.previousWarning)
+    } else {
+        this
+    }
+    val reason = error?.let { " ($it)" }.orEmpty()
+    val target = change.requested?.let { "model $it" } ?: "the default model"
+    return restored.copy(modelChanges = pending).notice(NoticeLevel.ERROR, "The CLI rejected the switch to $target$reason.")
 }
 
 private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at: Long): ChatState {

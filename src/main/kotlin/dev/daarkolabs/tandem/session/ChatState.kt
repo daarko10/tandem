@@ -40,6 +40,11 @@ data class ChatState(
      * [requestedModel] rather than the [activeModel] the turn still running reports. A non-local refusal fallback clears it too.
      */
     val modelSwitchPending: Boolean = false,
+    /**
+     * The `set_model` requests the CLI has not answered yet, by request id, in the order they were sent: [requestedModel] shows the
+     * model each asked for at once, and goes back to what was shown before it if the CLI answers with an error. Empty once [settled].
+     */
+    val modelChanges: Map<String, ModelChange> = emptyMap(),
     val claudeCodeVersion: String? = null,
     val busy: Boolean = false,
     val pendingPermissions: List<PendingPermission> = emptyList(),
@@ -134,6 +139,12 @@ data class PermissionModeChange(val requested: PermissionMode, val previous: Per
 
 /** An `apply_flag_settings` effort request still to be answered: the level it asks for, and the effort shown before it. */
 data class EffortChange(val requested: String, val previous: String?)
+
+/**
+ * A `set_model` request still to be answered: the model it asks for (null: the CLI's default), and what was shown before it: the
+ * model picked then, whether that pick still waited for its `system/init` ([ChatState.modelSwitchPending]), and the model warning.
+ */
+data class ModelChange(val requested: String?, val previous: String?, val previousPending: Boolean, val previousWarning: String?)
 
 /**
  * A model the CLI offers: [value] is what `--model` and `set_model` take, [displayName] and [description] are for people.
@@ -279,6 +290,7 @@ internal fun ChatState.settled(): ChatState = copy(
     pendingPermissions = emptyList(),
     permissionModeChanges = emptyMap(),
     effortChanges = emptyMap(),
+    modelChanges = emptyMap(),
     ended = false,
     turnInterrupted = false,
     turn = null,

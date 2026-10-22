@@ -374,6 +374,9 @@ class ReducerTest {
     private fun rejection(requestId: String, error: String): SessionEvent =
         cli("""{"type":"control_response","response":{"subtype":"error","request_id":"$requestId","error":"$error"}}""")
 
+    private fun success(requestId: String): SessionEvent =
+        cli("""{"type":"control_response","response":{"subtype":"success","request_id":"$requestId"}}""")
+
     @Test
     fun `a rejected permission mode change goes back to the mode before it and says which change was rejected`() {
         var state = ChatState(permissionMode = PermissionMode.DEFAULT)
@@ -498,6 +501,60 @@ class ReducerTest {
         assertTrue(state.modelSwitchPending, "a local fallback answers one request only")
         state = reduce(state, fallback("session"))
         assertFalse(state.modelSwitchPending, "the session switched")
+    }
+
+    @Test
+    fun `a refused set_model puts back the model shown before, ends the pending switch and says so`() {
+        val before = ChatState(requestedModel = "sonnet", activeModel = "claude-haiku-5-5", modelWarning = "You picked sonnet, but the CLI is using claude-haiku-5-5.")
+        val requested = reduce(before, SessionEvent.ModelRequested("opus", "r1"))
+        assertTrue(requested.modelSwitchPending)
+        assertNull(requested.modelWarning)
+        assertEquals(mapOf("r1" to ModelChange("opus", "sonnet", previousPending = false, previousWarning = before.modelWarning)), requested.modelChanges)
+
+        val accepted = reduce(requested, success("r1"))
+        assertEquals("opus", accepted.requestedModel)
+        assertTrue(accepted.modelSwitchPending, "an accepted switch still waits for its init")
+        assertEquals(emptyMap(), accepted.modelChanges)
+        assertTrue(accepted.entries.none { it is ChatEntry.Notice })
+
+        val refused = reduce(requested, rejection("r1", "Model opus is not available"))
+        assertEquals("sonnet", refused.requestedModel)
+        assertFalse(refused.modelSwitchPending, "the footer leaves its pending state")
+        assertEquals(before.modelWarning, refused.modelWarning)
+        assertEquals(emptyMap(), refused.modelChanges)
+        val notice = ChatEntry.Notice("notice-0", NoticeLevel.ERROR, "The CLI rejected the switch to model opus (Model opus is not available).")
+        assertEquals(notice, refused.entries.last())
+
+        val defaultRefused = reduce(reduce(ChatState(), SessionEvent.ModelRequested(null, "r2")), rejection("r2", "no"))
+        assertEquals("The CLI rejected the switch to the default model (no).", (defaultRefused.entries.last() as ChatEntry.Notice).text)
+        assertFalse(defaultRefused.modelSwitchPending)
+    }
+
+    @Test
+    fun `a refused set_model hands what was shown before it to the next pick waiting`() {
+        // opus accepted and waiting for its init; then haiku (r2) and fable (r3), both sent before the CLI answers either.
+        val opus = reduce(reduce(ChatState(requestedModel = "sonnet"), SessionEvent.ModelRequested("opus", "r1")), success("r1"))
+        val sent = reduce(reduce(opus, SessionEvent.ModelRequested("haiku", "r2")), SessionEvent.ModelRequested("fable", "r3"))
+
+        val firstRefused = reduce(sent, rejection("r2", "no"))
+        assertEquals("fable", firstRefused.requestedModel, "the later pick still shows")
+        assertTrue(firstRefused.modelSwitchPending)
+        assertEquals(mapOf("r3" to ModelChange("fable", "opus", previousPending = true, previousWarning = null)), firstRefused.modelChanges)
+
+        val bothRefused = reduce(firstRefused, rejection("r3", "no"))
+        assertEquals("opus", bothRefused.requestedModel)
+        assertTrue(bothRefused.modelSwitchPending, "opus, accepted, still waits for its init")
+        assertEquals(emptyMap(), bothRefused.modelChanges)
+    }
+
+    @Test
+    fun `settled and an exit clear the model changes, and a pick for a stopped session records none`() {
+        val state = reduce(ChatState(), SessionEvent.ModelRequested("opus", "r1"))
+        assertEquals(emptyMap(), state.settled().modelChanges)
+        assertEquals(emptyMap(), reduce(state, SessionEvent.Ended("exited", isError = false)).modelChanges)
+        val stopped = reduce(ChatState(), SessionEvent.ModelRequested("opus"))
+        assertEquals("opus", stopped.requestedModel)
+        assertEquals(emptyMap(), stopped.modelChanges)
     }
 
     @Test

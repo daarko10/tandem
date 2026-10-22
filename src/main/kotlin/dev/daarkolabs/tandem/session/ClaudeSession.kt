@@ -220,10 +220,14 @@ class ClaudeSession(
 
     fun interrupt(): Unit = send(HostMessages.interrupt(newRequestId()))
 
-    /** Asks for another model. The switch only counts once `system/init` reports it (see [ChatState.modelWarning]). */
+    /**
+     * Asks for another model. The switch only counts once `system/init` reports it (see [ChatState.modelWarning]); an error answer
+     * puts back the model shown before, with a notice ([reduce]).
+     */
     fun setModel(model: String?) {
-        dispatch(SessionEvent.ModelRequested(model))
-        send(HostMessages.setModel(newRequestId(), model))
+        val requestId = newRequestId()
+        dispatch(SessionEvent.ModelRequested(model, requestId))
+        send(HostMessages.setModel(requestId, model))
     }
 
     /**
