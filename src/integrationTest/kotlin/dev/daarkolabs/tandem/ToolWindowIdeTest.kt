@@ -691,6 +691,56 @@ class ToolWindowIdeTest {
     }
 
     @Test
+    fun `a bang command runs locally and Claude replies`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("bang-command", fixtures = listOf("bash-mode-respond"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            // The same send path as a prompt: Send runs the command instead of sending it.
+            typePrompt("! echo hi")
+            // The row's header, by its description and its text: the session's title in the header is described the same way.
+            waitFor("the shell row", 1.minutes) { node("! echo hi") { "$it='! echo hi'" }.present() }
+            // The output's last line: the IDE runs the user's real login profile, which may print first.
+            waitFor("the command's output", 1.minutes) { ui.xx(shellOutputEndingWith("hi")).list().isNotEmpty() }
+            // Any node holding the reply's text: the reply's whole sentence is one text row (bash-mode-respond:41).
+            waitFor("Claude's reply", 2.minutes) {
+                ui.xx("//div[@class='ComposeNode' and contains(@visible_text, 'The probe ran')]").list().isNotEmpty()
+            }
+            waitFor("the turn footer", 1.minutes) { ui.xx(FOOTER).list().isNotEmpty() }
+            waitForTurnEnd()
+            takeScreenshot("bang-command")
+            // The quiet result of the command frame draws no footer: only the reply's turn has one.
+            assertEquals(1, ui.xx(FOOTER).list().size, "one footer")
+            assertFalse(described("Stop command").present(), "no Stop on the row once the command ended")
+        }
+        val users = sent.filter { it.type == "user" }
+        assertEquals(2, users.size, users.toString())
+        val (input, output) = users
+        assertEquals("<bash-input>echo hi</bash-input>", input.content())
+        assertEquals(false, input["shouldQuery"]?.jsonPrimitive?.booleanOrNull)
+        val stdout = output.content()
+        assertTrue(stdout.startsWith("<bash-stdout>"), stdout)
+        assertTrue(stdout.endsWith("hi\n</bash-stdout><bash-stderr></bash-stderr>"), stdout)
+        assertFalse("shouldQuery" in output, output.toString())
+    }
+
+    @Test
+    fun `a bang command stops from the row`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        runChat("bang-stop", fixtures = listOf("bash-mode-respond"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            typePrompt("! sleep 30")
+            waitFor("the row's Stop", 1.minutes) { described("Stop command").present() }
+            iconButton("Stop command").click(Point(10, 10))
+            waitFor("the stopped status", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'Stopped after')]").present()
+            }
+            assertFalse(described("Stop command").present(), "no Stop on the row once the command stopped")
+        }
+    }
+
+    @Test
     fun `a wide tool window docks the sidebar, which stays collapsed in the next IDE run`() {
         val configDir = Files.createTempDirectory("tandem-config")
         val project = newProject()
@@ -1177,6 +1227,19 @@ class ToolWindowIdeTest {
     private fun Driver.openSidebar() {
         iconButton("Show sessions").click(Point(10, 10))
     }
+
+    /**
+     * A shell row's output whose last line ends with [text]: the output node (`Shell output`) itself when its text is merged into it,
+     * else the text node inside it.
+     */
+    private fun shellOutputEndingWith(text: String): String {
+        fun endsWith(attr: String) = "substring($attr, string-length($attr) - ${text.length - 1}) = '$text'"
+        val output = "//div[@class='ComposeNode' and @contentdescription='Shell output']"
+        return "$output[${endsWith("@text")} or ${endsWith("@visible_text")}] | $output//div[@class='ComposeNode' and ${endsWith("@visible_text")}]"
+    }
+
+    /** A `user` frame's `message.content`, a string in the shell escape frames. */
+    private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
 
     private fun Driver.waitForText(text: String) {
         waitFor("'$text' rendered", 2.minutes) { ui.x("//div[@class='ComposeNode' and @visible_text='$text']").present() }

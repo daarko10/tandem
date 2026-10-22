@@ -55,11 +55,11 @@ object WorkingIndicator {
         return ToolLabels.middleTruncate(task.description!!, STEP_MAX)
     }
 
-    /** Whether a top-level row after the last user message holds the call [callId]. */
+    /** Whether a top-level row after the last user message (or shell escape) holds the call [callId]. */
     private fun inLastTurn(callId: String, rows: List<ChatRow>): Boolean {
         for (i in rows.indices.reversed()) {
             when (val row = rows[i]) {
-                is UserRow -> return false
+                is UserRow, is ShellRow -> return false
                 is ToolRow -> if (row.calls.any { it.id == callId }) return true
                 else -> Unit
             }
@@ -72,7 +72,7 @@ object WorkingIndicator {
         val entries = state.entries
         for (i in entries.indices.reversed()) {
             when (val entry = entries[i]) {
-                is ChatEntry.User -> return false
+                is ChatEntry.User, is ChatEntry.Shell -> return false
                 is ChatEntry.Assistant -> if (entry.parentToolUseId == null && entry.streaming &&
                     entry.blocks.any { it is AssistantBlock.Thinking && it.completedAtMillis == null }
                 ) {

@@ -16,6 +16,7 @@ import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -147,5 +148,28 @@ class ComposerModelTest {
         assertEquals(persistentListOf(SlashCommand("hello", "Hi (project)")), model.commands)
         assertEquals(persistentListOf("hello", "mcp"), model.slashCommandNames)
         assertEquals(persistentSetOf("doctor"), model.terminalCommands)
+    }
+
+    @Test
+    fun `a bang draft is a shell escape`() {
+        assertEquals("echo hi", shellCommand("! echo hi"))
+        assertEquals("ls", shellCommand("  !ls"))
+        // Shift+Enter writes a multi-line command: the newlines inside it are kept, the whitespace around it is not.
+        assertEquals("ls -la", shellCommand("!\n ls -la\n"))
+        assertEquals("a\nb", shellCommand("! a\nb"))
+        // A bare `!` goes to the CLI as text; `!` elsewhere, or a slash command, is no shell escape.
+        for (draft in listOf("!", "! ", "a!b", "/mcp", "")) assertNull(shellCommand(draft), "'$draft'")
+    }
+
+    @Test
+    fun `shellRunning follows the state`() {
+        assertTrue(composerModel(ChatState(runningShell = "shell-1")).shellRunning)
+        assertFalse(composerModel(ChatState(runningShell = null)).shellRunning)
+    }
+
+    @Test
+    fun `Stop stops the command while one runs, else the turn`() {
+        assertEquals(StopTarget.Shell, stopTarget(true))
+        assertEquals(StopTarget.Turn, stopTarget(false))
     }
 }

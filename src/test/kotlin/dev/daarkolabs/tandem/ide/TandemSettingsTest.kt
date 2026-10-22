@@ -393,6 +393,43 @@ class TandemSettingsTest {
     }
 
     @Test
+    fun `the reply setting round-trips and defaults to on`() = timeoutRunBlocking {
+        assertTrue(TandemSettings.State().respondToShellOutput, "Claude replies to a shell escape by default, as the CLI does")
+        val written = TandemSettings()
+        written.state.respondToShellOutput = false
+        val read = TandemSettings()
+        read.loadState(written.state)
+        assertFalse(read.state.respondToShellOutput)
+        // Saved and read back under its name, as tandem.xml holds it.
+        val saved = XmlSerializer.serialize(TandemSettings.State().apply { respondToShellOutput = false })
+        assertTrue("respondToShellOutput" in JDOMUtil.write(saved), JDOMUtil.write(saved))
+        assertFalse(XmlSerializer.deserialize(saved, TandemSettings.State::class.java).respondToShellOutput)
+
+        // The page's checkbox writes it.
+        val settings = TandemSettings.getInstance()
+        settings.loadState(TandemSettings.State())
+        val configurable = TandemSettingsConfigurable()
+        try {
+            val (shown, changed, applied) = withContext(Dispatchers.EDT) {
+                val page = configurable.createComponent()
+                configurable.reset()
+                val box = UIUtil.findComponentsOfType(page, JCheckBox::class.java).single { it.text == "Claude replies to ! command output" }
+                val shown = box.isSelected
+                box.doClick()
+                val changed = configurable.isModified
+                configurable.apply()
+                Triple(shown, changed, configurable.isModified)
+            }
+            assertTrue(shown, "the checkbox shows the stored value")
+            assertTrue(changed)
+            assertFalse(applied, "nothing left to apply once applied")
+            assertFalse(settings.state.respondToShellOutput)
+        } finally {
+            withContext(NonCancellable + Dispatchers.EDT) { configurable.disposeUIResources() }
+        }
+    }
+
+    @Test
     fun `the page shows the executable it detects`() = timeoutRunBlocking {
         val fake = System.getProperty("tandem.claudePath")
         val configurable = TandemSettingsConfigurable()

@@ -76,13 +76,17 @@ import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.Attachments
 import dev.daarkolabs.tandem.chat.PaletteItem
 import dev.daarkolabs.tandem.chat.PaletteOutcome
+import dev.daarkolabs.tandem.chat.ScrollEvent
 import dev.daarkolabs.tandem.chat.SlashIntercept
 import dev.daarkolabs.tandem.chat.SlashPalette
+import dev.daarkolabs.tandem.chat.StopTarget
 import dev.daarkolabs.tandem.chat.committedDraft
 import dev.daarkolabs.tandem.chat.moved
 import dev.daarkolabs.tandem.chat.paletteFor
 import dev.daarkolabs.tandem.chat.pick
+import dev.daarkolabs.tandem.chat.shellCommand
 import dev.daarkolabs.tandem.chat.slashIntercept
+import dev.daarkolabs.tandem.chat.stopTarget
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
@@ -125,6 +129,10 @@ import kotlin.math.roundToInt
  * send, palette or not, first runs the interception table (`slashIntercept`): `/mcp` opens the MCP panel, `/model` the model menu,
  * `/permissions` and `/mode` the mode menu ([ChatUiState.menuRequest]), `/model <name>` picks that model; each clears the draft,
  * sends nothing and leaves the attachments for the next prompt.
+ *
+ * Before that table, a draft that is a shell escape (`! command`, MCP spec 12.1) runs in the login shell through [manager] instead of
+ * being sent: the draft is cleared, the attachments are left for the next prompt and the list follows its bottom again. While the
+ * command runs the composer is busy, and Stop (the button or Esc) stops the command; otherwise it stops the turn ([stopTarget]).
  */
 @Composable
 internal fun PromptBar(
@@ -142,13 +150,14 @@ internal fun PromptBar(
     val composer by presenter.composer.collectAsState()
     val sending by sender.sending.collectAsState()
     val scope = rememberCoroutineScope()
-    val sendNow = {
-        if (sendDraft(ui, sender)) {
-            scope.launch {
-                val last = ui.listState.layoutInfo.totalItemsCount - 1
-                if (last >= 0) ui.listState.animateScrollToItem(last)
-            }
+    val scrollToEnd: () -> Unit = {
+        scope.launch {
+            val last = ui.listState.layoutInfo.totalItemsCount - 1
+            if (last >= 0) ui.listState.animateScrollToItem(last)
         }
+    }
+    val sendNow = {
+        if (sendDraft(ui, sender)) scrollToEnd()
     }
     // The interception table (MCP spec 3.4): Tandem's own commands act here and clear the draft, sending nothing and leaving the
     // attachment strip as it is; anything else is today's send, attachments included.
@@ -165,9 +174,22 @@ internal fun PromptBar(
         }
         if (intercept !is SlashIntercept.Send) ui.draft.clearText()
     }
-    // The send path, Enter or Send, palette or not (a pasted `/mcp` behaves the same): the table runs on the trimmed draft before the
-    // attachments are encoded.
-    val send = { runIntercept(slashIntercept(ui.draft.text.toString().trim(), composer.models)) }
+    // The send path, Enter or Send, palette or not (a pasted `/mcp` behaves the same): a shell escape runs first (MCP spec 12.1); else
+    // the table runs on the trimmed draft before the attachments are encoded.
+    val send: () -> Unit = {
+        val text = ui.draft.text.toString()
+        val command = shellCommand(text)
+        if (command != null) {
+            manager.runShell(handle.id, command)
+            ui.draft.clearText()
+            ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
+            scrollToEnd()
+        } else {
+            runIntercept(slashIntercept(text.trim(), composer.models))
+        }
+    }
+    // A shell escape that runs makes the composer busy, as a turn does (MCP spec 12.1).
+    val busy = composer.busy || composer.shellRunning
     // The palette (MCP spec 3.4, 4.4, 7): read where it is used, so a key handler always sees the current text's palette, never a
     // frame-old filter. It filters on the committed text only, and shows only while the text area has the focus.
     val inputFocused = remember { mutableStateOf(false) }
@@ -206,7 +228,7 @@ internal fun PromptBar(
     val pickFrom = { shown: SlashPalette?, item: PaletteItem?, insert: Boolean ->
         if (shown != null) {
             val index = item?.let(shown.items::indexOf)?.takeIf { it >= 0 } ?: shown.selected
-            execute(pick(shown.copy(selected = index), insert, busy = composer.busy || sending, composer.models))
+            execute(pick(shown.copy(selected = index), insert, busy = busy || sending, composer.models))
         }
     }
     val attachFiles: (List<Path>) -> Unit = { paths ->
@@ -223,7 +245,7 @@ internal fun PromptBar(
         }
         PromptBox(
             ui,
-            composer.busy,
+            busy,
             sending,
             composer.cardOpen,
             focus,
@@ -236,7 +258,10 @@ internal fun PromptBar(
             onAction = { action ->
                 when (action) {
                     ComposerAction.Send -> send()
-                    ComposerAction.Stop -> manager.interrupt(handle.id)
+                    ComposerAction.Stop -> when (stopTarget(composer.shellRunning)) {
+                        StopTarget.Shell -> manager.stopShell(handle.id)
+                        StopTarget.Turn -> manager.interrupt(handle.id)
+                    }
                     ComposerAction.CardEscape -> onCardEscape()
                     ComposerAction.PasteImage -> scope.launch { paste(ui) }
                     ComposerAction.RemoveLastImage -> ui.attachments.removeLastOrNull()

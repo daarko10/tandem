@@ -267,13 +267,13 @@ object Cards {
 
     /**
      * The main thread's blocks of the turn that ends before [end] that come before call [toolUseId], latest first: from the call (or,
-     * when its block is not in that turn, the turn's end) back to the turn's user message.
+     * when its block is not in that turn, the turn's end) back to the turn's user message (or shell escape).
      */
     private fun beforeCall(entries: List<ChatEntry>, end: Int, toolUseId: String?): List<AssistantBlock> {
         val turn = ArrayList<AssistantBlock>()
         for (i in end - 1 downTo 0) {
             val entry = entries[i]
-            if (entry is ChatEntry.User) break
+            if (entry is ChatEntry.User || entry is ChatEntry.Shell) break
             if (entry is ChatEntry.Assistant && entry.parentToolUseId == null) turn.addAll(entry.blocks.asReversed())
         }
         val call = turn.indexOfFirst { it is AssistantBlock.ToolUse && it.id == toolUseId }

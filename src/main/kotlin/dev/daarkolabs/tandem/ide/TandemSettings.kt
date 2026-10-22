@@ -30,6 +30,12 @@ class TandemSettings : SimplePersistentStateComponent<TandemSettings.State>(Tand
 
         /** Whether the chat shows a row for each thinking block (spec 4.5); open chats take it on [TandemSessions.settingsChanged]. */
         var showThinking: Boolean by property(true)
+
+        /**
+         * Whether Claude replies to a shell escape's output (MCP spec 12): on, as the CLI's `respondToBashCommands` defaults; off, the
+         * output is only added to the conversation. Read when each command ends.
+         */
+        var respondToShellOutput: Boolean by property(true)
     }
 
     /**

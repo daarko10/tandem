@@ -6,6 +6,7 @@ import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
+import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.TaskInfo
 import dev.daarkolabs.tandem.session.TurnEnd
 import kotlinx.collections.immutable.ImmutableList
@@ -29,21 +30,22 @@ data class RowOptions(val showThinking: Boolean)
 data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, val moreWaiting: Int, val latestReply: String? = null)
 
 /**
- * Builds the chat rows from a [ChatState] (spec 5.3, 5.4): one row per user message, text block, thinking block and notice, and one
- * per lone tool call or group of consecutive calls ([Grouping], spec 4.6.4), each with its key and its gap. A subagent's entries
+ * Builds the chat rows from a [ChatState] (spec 5.3, 5.4): one row per user message, shell escape (MCP spec 12.1), text block,
+ * thinking block and notice, and one per lone tool call or group of consecutive calls ([Grouping], spec 4.6.4), each with its key
+ * and its gap. A shell escape starts a turn as a user message does (MCP spec 12.4). A subagent's entries
  * (`parentToolUseId` naming an Agent call) become that call's children, one row per call. While a turn runs the last row is the
  * [WorkingRow] (spec 4.9); once the latest turn has ended its [TurnEndRow] stands where it ended (spec 4.10), and a failed turn's
  * `The turn failed` notice gives way to it when the footer states all the notice says (spec 4.10, 4.11). The oldest pending request
  * comes as the [ChatRows.card] ([Cards.pending]). Once a turn has ended, the last text block of its reply carries the hover row's
  * [MessageActions] (polish spec 2.6), and [ChatRows.latestReply] names the last ended turn's reply, from the entries on every build.
  *
- * Rows are cached per turn (a turn runs from one user message to the next): a closed turn is built once more when it closes and then
- * kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the last entry it holds
- * and scans only the entries after it, so a long session costs no more per event than a short one. A later entry that refers to a
- * cached turn (a late result, a background agent's lines) opens that turn again; a state whose entries shrank (a retraction) or whose
- * working directory changed drops the cache. The rows and the calls of the open turns that equal the previous build's keep their
- * previous instance, a result's body is built once and a live call's body once per input instance, so unchanged rows and calls
- * compare by identity (polish spec 6).
+ * Rows are cached per turn (a turn runs from one user message or shell escape to the next): a closed turn is built once more when it
+ * closes and then kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the
+ * last entry it holds and scans only the entries after it, so a long session costs no more per event than a short one. A later entry
+ * that refers to a cached turn (a late result, a background agent's lines) opens that turn again; a state whose entries shrank (a
+ * retraction) or whose working directory changed drops the cache. The rows and the calls of the open turns that equal the previous
+ * build's keep their previous instance, a result's body is built once and a live call's body once per input instance, so unchanged
+ * rows and calls compare by identity (polish spec 6).
  *
  * Not thread-safe: one builder per presenter coroutine. A new [RowOptions] value takes a new builder.
  */
@@ -105,7 +107,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
         val end = if (state.turn == null) turnEnd(entries) else null
         var previous = frozenRows.lastOrNull()
         val turnRows = region.turns.mapIndexed { t, turn ->
-            val turnOpen = state.turn != null && t == region.turns.lastIndex && entries[turn.first] is ChatEntry.User
+            // A responding shell escape's turn is open as a prompt's is: else its running calls would read as interrupted.
+            val turnOpen = state.turn != null && t == region.turns.lastIndex && entries[turn.first].startsTurn()
             // The footer of a failed turn says why (spec 4.10), so its "The turn failed" notice may say it twice (spec 4.11): it goes
             // when the footer holds all it says ([saidByFooter]). Not after the mid-response wording, which names no cause, and not in an
             // older turn, which has no footer: there the notice follows.
@@ -139,19 +142,20 @@ class ChatRowsBuilder(private val options: RowOptions) {
 
     /**
      * The entry id of the last ended turn's reply (polish spec 2.6), from [state]'s entries, never from the cached turns: a backward
-     * scan that skips the running turn, back to and including its user message, then takes the last main-thread message with text
-     * before the user message before it. Null when that turn has none (an interrupt before any text) or no turn has ended.
+     * scan that skips the running turn, back to and including its user message (or shell escape), then takes the last main-thread
+     * message with text before the user message before it. Null when that turn has none (an interrupt before any text) or no turn
+     * has ended.
      */
     private fun latestReply(state: ChatState): String? {
         val entries = state.entries
         var i = entries.lastIndex
         if (state.turn != null) {
-            while (i >= 0 && entries[i] !is ChatEntry.User) i--
+            while (i >= 0 && !entries[i].startsTurn()) i--
             i--
         }
         while (i >= 0) {
             val entry = entries[i]
-            if (entry is ChatEntry.User) return null
+            if (entry.startsTurn()) return null
             if (entries.isReply(i)) return entry.id
             i--
         }
@@ -172,7 +176,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
 
     /**
      * The footer of the latest turn, when it has ended (spec 4.10): at its [ChatEntry.TurnEnded], or, for a reloaded transcript that
-     * has none, at its interrupt marker. Only the latest turn has one; null when the last user message has neither after it.
+     * has none, at its interrupt marker. Only the latest turn has one; null when the last user message (or shell escape) has neither
+     * after it.
      */
     private fun turnEnd(entries: List<ChatEntry>): TurnEndAt? {
         var ended: ChatEntry.TurnEnded? = null
@@ -180,15 +185,13 @@ class ChatRowsBuilder(private val options: RowOptions) {
         var textStreamed = false
         for (i in entries.indices.reversed()) {
             when (val entry = entries[i]) {
-                is ChatEntry.User -> break
+                is ChatEntry.User, is ChatEntry.Shell -> break
                 is ChatEntry.TurnEnded -> if (ended == null) ended = entry
                 is ChatEntry.Notice -> if (marker == null && entry.kind == NoticeKind.INTERRUPTED) marker = entry
                 is ChatEntry.Assistant -> if (entry.parentToolUseId == null && entry.blocks.any { it is AssistantBlock.Text && it.text.isNotBlank() }) {
                     textStreamed = true
                 }
                 is ChatEntry.ToolResult -> Unit
-                // No row yet (M7b gives shell escapes theirs, and their turn boundaries).
-                is ChatEntry.Shell -> Unit
             }
         }
         if (ended != null) {
@@ -404,8 +407,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
                 else -> rows.add { noticeRow(entry, gap(Kind.NOTICE, it)) }
             }
             is ChatEntry.TurnEnded -> if (context.end?.entry === entry) rows.add { footer(entry, context, it) }
-            // No row yet (M7b gives shell escapes theirs).
-            is ChatEntry.Shell -> Unit
+            is ChatEntry.Shell -> rows.add { shellRow(entry, gap(Kind.SHELL, it)) }
         }
     }
 
@@ -565,19 +567,39 @@ class ChatRowsBuilder(private val options: RowOptions) {
         return ToolRow("tool:${result.toolUseId}", persistentListOf(call), label, state, null, gap)
     }
 
+    /**
+     * The row of shell escape [entry] (MCP spec 12.1, 12.2): its output with colour escapes stripped, cut as a tool body is
+     * ([ToolBodies.clamp]); the frames keep the raw text. Its status says how it ended, unless it exited 0, still runs or was
+     * reloaded (a transcript keeps no end).
+     */
+    private fun shellRow(entry: ChatEntry.Shell, gap: RowGap): ShellRow {
+        val (lines, total) = ToolBodies.clamp(ToolLabels.stripAnsi(entry.output))
+        val status = when (val end = entry.end) {
+            null -> null
+            is ShellEnd.Exited -> if (end.code == 0) null else "exit ${end.code}"
+            ShellEnd.Stopped -> "Stopped after ${formatDuration(entry.durationMs ?: 0)}"
+            ShellEnd.TimedOut -> "Killed after 10 minutes"
+            is ShellEnd.NotStarted -> "Could not start ${end.shell}: ${end.reason}"
+            is ShellEnd.Failed -> "Could not read the command's output: ${end.reason}"
+        }
+        return ShellRow("sh:${entry.id}", entry.command, lines, total, entry.running, status, statusError = status != null, gap)
+    }
+
     /** The latest turn's footer when it stands at [entry], else nothing (the entry still closes a group). */
     private fun footer(entry: ChatEntry, context: TurnContext, before: ChatRow?): TurnEndRow? {
         val end = context.end?.takeIf { it.entry === entry } ?: return null
         return TurnEndRow("e:${entry.id}", end.end, end.text, gap(Kind.END, before))
     }
 
-    private enum class Kind { USER, TEXT, THINKING, TOOL, NOTICE, END }
+    private enum class Kind { USER, SHELL, TEXT, THINKING, TOOL, NOTICE, END }
 
     /** The space above a row of [kind] after [previous] (spec 5.3, with the precedence of the plan's T4). */
     private fun gap(kind: Kind, previous: ChatRow?): RowGap = when {
         previous == null -> RowGap.NONE
-        kind == Kind.USER -> RowGap.TURN
+        kind == Kind.USER || kind == Kind.SHELL -> RowGap.TURN
         kind == Kind.NOTICE || kind == Kind.END -> RowGap.SECTION
+        // A shell row has no bubble: what follows it sits a section below.
+        previous is ShellRow -> RowGap.SECTION
         previous is UserRow -> RowGap.AFTER_BUBBLE
         previous is ToolRow || previous is ThinkingRow -> if (kind == Kind.TEXT) RowGap.BEFORE_TEXT else RowGap.ROW
         // After text, a notice, the working row or a footer.
@@ -607,7 +629,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
             var turnStart = start
             for (index in start until entries.size) {
                 val entry = entries[index]
-                if (entry is ChatEntry.User && index > turnStart) {
+                if (entry.startsTurn() && index > turnStart) {
                     turns += turnStart until index
                     turnStart = index
                 }
@@ -692,6 +714,12 @@ private inline fun IntRange.lastWhere(predicate: (Int) -> Boolean): Int {
 /** The message's non-blank text blocks joined by a blank line: what the hover row's Copy puts on the clipboard. */
 private fun ChatEntry.Assistant.markdown(): String = blocks.filter { it.isText() }.joinToString("\n\n") { (it as AssistantBlock.Text).text }
 
+/**
+ * Whether this entry starts a turn (MCP spec 12.4): a user message, or a shell escape, which stands in its place. Every check of a
+ * turn's bounds reads both.
+ */
+internal fun ChatEntry.startsTurn(): Boolean = this is ChatEntry.User || this is ChatEntry.Shell
+
 /** The call a subagent's entry belongs to, if any. */
 private fun parentOf(entry: ChatEntry): String? = when (entry) {
     is ChatEntry.Assistant -> entry.parentToolUseId
@@ -702,6 +730,7 @@ private fun parentOf(entry: ChatEntry): String? = when (entry) {
 /** This row under [key]. */
 private fun ChatRow.withKey(key: String): ChatRow = when (this) {
     is UserRow -> copy(key = key)
+    is ShellRow -> copy(key = key)
     is TextRow -> copy(key = key)
     is ThinkingRow -> copy(key = key)
     is ToolRow -> copy(key = key)

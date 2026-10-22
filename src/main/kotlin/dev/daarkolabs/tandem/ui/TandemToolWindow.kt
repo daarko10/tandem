@@ -269,6 +269,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                     onFocusComposer = { promptFocusFor = selected.id },
                                     cardTakesFocus = chatHoldsFocus,
                                     onOpenMcp = { ui.mcpPanelOpen.value = true },
+                                    onStop = { manager.stopShell(selected.id) },
                                 )
                             }
                         }

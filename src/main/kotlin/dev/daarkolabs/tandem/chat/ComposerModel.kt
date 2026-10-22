@@ -21,6 +21,7 @@ internal const val DEFAULT_MODEL_ENTRY: String = "default"
  * fields does, not on every streamed delta. [cardOpen]: a request waits for its answer. [defaultModel] is the model the CLI's `default`
  * entry resolves to; [effortLevels] and [autoSupported] are those of the shown model ([shownModel]); [modelSwitchPending] mirrors
  * [ChatState.modelSwitchPending]. [commands], [slashCommandNames] and [terminalCommands] feed the slash palette ([slashPalette]).
+ * [shellRunning]: a shell escape runs (MCP spec 12.1); the composer is busy meanwhile, and Stop stops the command ([stopTarget]).
  */
 data class ComposerModel(
     val busy: Boolean,
@@ -40,6 +41,7 @@ data class ComposerModel(
     val commands: ImmutableList<SlashCommand> = persistentListOf(),
     val slashCommandNames: ImmutableList<String> = persistentListOf(),
     val terminalCommands: ImmutableSet<String> = persistentSetOf(),
+    val shellRunning: Boolean = false,
 )
 
 /** The composer's model of [state]. */
@@ -63,8 +65,33 @@ fun composerModel(state: ChatState): ComposerModel {
         commands = state.commands.toImmutableList(),
         slashCommandNames = state.slashCommandNames.toImmutableList(),
         terminalCommands = state.terminalCommands.toImmutableSet(),
+        shellRunning = state.runningShell != null,
     )
 }
+
+/** A draft that is a shell escape: `!` as its first non-blank character, then a command that is not blank. */
+private val SHELL_ESCAPE = Regex("^\\s*!\\s*\\S")
+
+/**
+ * The command of [draft] when it is a shell escape (MCP spec 12.1, `^\s*!\s*\S`): the text after its `!` with the whitespace around
+ * it removed and the newlines inside it kept; else null. A bare `!` is no shell escape: it goes to the CLI as text.
+ */
+fun shellCommand(draft: String): String? {
+    if (!SHELL_ESCAPE.containsMatchIn(draft)) return null
+    return draft.substringAfter('!').trim().ifEmpty { null }
+}
+
+/** What the composer's Stop (its button or Esc) stops (MCP spec 12.3). */
+enum class StopTarget {
+    /** The shell escape that runs. */
+    Shell,
+
+    /** The turn that runs, as before shell escapes. */
+    Turn,
+}
+
+/** [StopTarget.Shell] while a shell escape runs ([shellRunning]), else [StopTarget.Turn]. */
+fun stopTarget(shellRunning: Boolean): StopTarget = if (shellRunning) StopTarget.Shell else StopTarget.Turn
 
 /**
  * The entry of [models] that the footer shows, checks and takes the effort levels and `auto` support from (spec 2.3, `<Model>`):

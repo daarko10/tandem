@@ -12,6 +12,7 @@ import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.ProcessLauncher
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
+import dev.daarkolabs.tandem.session.ShellRunner
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.TranscriptFiles
@@ -109,6 +110,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         readTranscript = { readTranscript(it) },
         appendTitle = { transcript, id, title, time -> appendTitle(transcript, id, title, time) },
         deleteFiles = { deleteTranscript(it) },
+        respondToShell = { TandemSettings.getInstance().state.respondToShellOutput },
+        // A shell escape runs with the login shell's environment, as the CLI does; read on IO, where waiting for the platform is fine.
+        shell = ShellRunner(environment = ShellEnvironment::get),
     )
 
     /** Opens an MCP server's sign-in page in the system browser (spec 3.3, 4.4); tests swap in a log line (`tandem.browserOpener`). */
