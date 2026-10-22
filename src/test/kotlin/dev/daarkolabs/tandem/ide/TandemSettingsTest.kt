@@ -429,7 +429,6 @@ class TandemSettingsTest {
         }
     }
 
-
     @Test
     fun `reduce motion is off by default, persists and is set from the page`() = timeoutRunBlocking {
         assertFalse(TandemSettings.State().reduceMotion, "the working row animates by default")
