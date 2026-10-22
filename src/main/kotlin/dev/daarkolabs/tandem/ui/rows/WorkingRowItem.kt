@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.compositionLocalOf
@@ -18,6 +19,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.chat.WorkingIndicator
 import dev.daarkolabs.tandem.chat.WorkingIndicator.Mode
 import dev.daarkolabs.tandem.chat.WorkingRow
@@ -57,7 +59,7 @@ internal fun WorkingRowItem(row: WorkingRow, lastFrameAt: StateFlow<Long>, agent
             lastFrame = lastFrameAt.value
         }
     }
-    val view = WorkingIndicator.view(shownWorkingRow(row, agentExpanded), now, lastFrame, reducedMotion())
+    val view = workingView(row, now, lastFrame, agentExpanded)
     val colors = JewelTheme.globalColors.text
     val color = when (view.mode) {
         Mode.RUNNING -> colors.info
@@ -77,7 +79,15 @@ internal fun WorkingRowItem(row: WorkingRow, lastFrameAt: StateFlow<Long>, agent
 }
 
 /**
- * Tandem's `Reduce motion` setting ([dev.daarkolabs.tandem.chat.RowOptions.reduceMotion]), which the tool window provides; off unless
+ * What [WorkingRowItem] shows for [row] at [now], the process having last written a line at [lastFrame] ([WorkingIndicator.view]):
+ * the spark stands still under Tandem's `Reduce motion` setting ([reducedMotion]).
+ */
+@Composable
+internal fun workingView(row: WorkingRow, now: Long, lastFrame: Long, agentExpanded: Boolean): WorkingIndicator.View =
+    WorkingIndicator.view(shownWorkingRow(row, agentExpanded), now, lastFrame, reducedMotion())
+
+/**
+ * Tandem's `Reduce motion` setting ([RowOptions.reduceMotion]), which the tool window provides ([ProvideRowMotion]); off unless
  * provided, so the spark moves.
  */
 internal val LocalReducedMotion: ProvidableCompositionLocal<Boolean> = compositionLocalOf { false }
@@ -89,3 +99,9 @@ internal val LocalReducedMotion: ProvidableCompositionLocal<Boolean> = compositi
  */
 @Composable
 internal fun reducedMotion(): Boolean = LocalReducedMotion.current
+
+/** Provides [options]' `Reduce motion` setting ([RowOptions.reduceMotion]) to the rows in [content], as [LocalReducedMotion]. */
+@Composable
+internal fun ProvideRowMotion(options: RowOptions, content: @Composable () -> Unit) {
+    CompositionLocalProvider(LocalReducedMotion provides options.reduceMotion, content = content)
+}

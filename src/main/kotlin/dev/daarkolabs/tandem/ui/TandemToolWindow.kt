@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -44,7 +43,7 @@ import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
-import dev.daarkolabs.tandem.ui.rows.LocalReducedMotion
+import dev.daarkolabs.tandem.ui.rows.ProvideRowMotion
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -214,7 +213,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                 }
                             }
                             Box(Modifier.onFocusChanged { chatFocused = it.hasFocus }.then(chatFocus)) {
-                                CompositionLocalProvider(LocalReducedMotion provides rowOptions.reduceMotion) {
+                                ProvideRowMotion(rowOptions) {
                                     ChatPane(
                                         project,
                                         selected,
