@@ -571,5 +571,122 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertNotIn("run download", calls)
 
 
+NIGHTLY = os.path.join(ROOT, ".github/workflows/cli-contract.yml")
+CHECK = "Check that the CLI authenticated and answered"
+NAME_FAILURES = "Name the failed assertions"
+
+
+@unittest.skipUnless(yaml, "PyYAML is not installed")
+class NightlyWorkflowTest(unittest.TestCase):
+    """The nightly's side of the drift loop: what cli-contract.yml leaves in its artifact and its log for the fixer."""
+
+    def test_the_nightly_redacts_the_session_id_transcript_and_keeps_the_artifact(self):
+        wf = load(os.path.join(ROOT, ".github/workflows/cli-contract.yml"))
+        run = step(wf, "contract", "Check --session-id with an inherited CLAUDE_CODE_SESSION_ID")["run"]
+        self.assertIn('scripts/copy_transcript.py "$work" "$work/raw.ndjson" "$work/transcripts" session-id', run)
+        self.assertIn('scripts/redact_fixture.py "$work/transcripts/session-id.jsonl" build/contract/transcripts/session-id.jsonl', run)
+        self.assertNotIn("build/contract/transcripts session-id", run)                # the raw copy never lands in the artifact
+        keep = step(wf, "contract", "Keep the recording")
+        self.assertEqual(("always()", "contract-recording", "build/contract"), (keep["if"], keep["with"]["name"], keep["with"]["path"]))
+
+    def test_the_nightly_prints_failed_assertions_as_annotations(self):
+        wf = load(os.path.join(ROOT, ".github/workflows/cli-contract.yml"))
+        names = [s.get("name") for s in steps(wf, "contract")]
+        self.assertEqual(names.index("Decode with Tandem's protocol layer and load the transcripts with its reader") + 1, names.index("Name the failed assertions"))
+        report = step(wf, "contract", "Name the failed assertions")
+        self.assertEqual("failure()", report["if"])
+        self.assertIn("::error title=CLI contract::", report["run"])
+        self.assertIn("build/test-results/test", report["run"])
+
+    def test_the_nightly_s_check_step_tells_a_renamed_type_from_no_answer(self):
+        run = step(load(os.path.join(ROOT, ".github/workflows/cli-contract.yml")), "contract", "Check that the CLI authenticated and answered")["run"]
+        self.assertIn("The CLI did not answer", run)
+        self.assertIn("No assistant line although the result holds text", run)
+
+    def test_the_nightly_rehearsal_mutates_its_own_recording(self):
+        wf = load(os.path.join(ROOT, ".github/workflows/cli-contract.yml"))
+        drift = wf[True]["workflow_dispatch"]["inputs"]["drift"]
+        self.assertEqual(("string", ""), (drift["type"], drift["default"]))
+        names = [s.get("name") for s in steps(wf, "contract")]
+        self.assertEqual(names.index("Check --session-id with an inherited CLAUDE_CODE_SESSION_ID") + 1, names.index("Mutate the recording for a rehearsal"))
+        self.assertEqual(names.index("Mutate the recording for a rehearsal") + 1, names.index("Decode with Tandem's protocol layer and load the transcripts with its reader"))
+        mutate = step(wf, "contract", "Mutate the recording for a rehearsal")
+        self.assertEqual("inputs.drift != ''", mutate["if"])
+        self.assertEqual("${{ inputs.drift }}", mutate["env"]["DRIFT"])                # through env, never interpolated into the shell line
+        self.assertIn('scripts/make_drift.py "$DRIFT" build/contract --from build/contract', mutate["run"])
+        self.assertNotIn("${{", mutate["run"])
+
+    def test_the_nightly_keeps_its_name_schedule_and_no_interpolated_run_line(self):
+        wf = load(NIGHTLY)
+        self.assertEqual("CLI contract", wf["name"])                                  # drift-fix.yml listens to this name
+        self.assertEqual([{"cron": "17 3 * * *"}], wf[True]["schedule"])
+        for s in steps(wf, "contract"):
+            self.assertNotIn("${{", s.get("run", ""), s.get("name"))
+
+
+def stream(*lines: dict) -> str:
+    return "".join(json.dumps(line) + "\n" for line in lines)
+
+
+INIT = {"type": "system", "subtype": "init", "model": "claude-opus-5-5", "apiKeySource": "none"}
+REPLY = {"type": "assistant", "message": {"content": [{"type": "text", "text": "pong"}]}}
+
+
+@unittest.skipUnless(yaml and BASH, "PyYAML, bash 4 and jq are needed to run the steps")
+class NightlyStepOutcomeTest(unittest.TestCase):
+    """The nightly's check and annotation steps run under bash on hand-built recordings and test results."""
+
+    def check(self, text: str) -> tuple[int, str]:
+        rc, out, _, _ = run_step(load(NIGHTLY), "contract", CHECK, {}, [], {"build/contract/contract-hello.ndjson": text})
+        return rc, out
+
+    def test_a_reply_passes(self):
+        rc, out = self.check(stream(INIT, REPLY, {"type": "result", "subtype": "success", "is_error": False, "result": "pong"}))
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("::error", out)
+
+    def test_an_error_result_is_no_answer_even_with_an_assistant_line(self):
+        rc, out = self.check(stream(INIT, REPLY, {"type": "result", "is_error": True, "result": "API Error: 401"}))
+        self.assertEqual(1, rc, out)
+        self.assertIn("::error title=CLI contract::The CLI did not answer: API Error: 401", out)
+
+    def test_no_assistant_line_and_no_result_text_is_no_answer(self):
+        rc, out = self.check(stream(INIT, {"type": "result", "is_error": False, "errors": ["overloaded"]}))
+        self.assertEqual(1, rc, out)
+        self.assertIn('::error title=CLI contract::The CLI did not answer: ["overloaded"]', out)
+
+    def test_result_text_without_an_assistant_line_is_a_renamed_type_not_no_answer(self):
+        rc, out = self.check(stream(INIT, {"type": "assistant_message", "message": {}}, {"type": "result", "is_error": False, "result": "pong"}))
+        self.assertEqual(1, rc, out)
+        self.assertIn("::error title=CLI contract::No assistant line although the result holds text", out)
+        self.assertNotIn("did not answer", out)
+
+    def test_a_multi_line_detail_stays_one_annotation(self):
+        rc, out = self.check(stream(INIT, {"type": "result", "is_error": True, "result": "line one\n::warning::two 100%"}))
+        self.assertEqual(1, rc, out)
+        self.assertIn("::error title=CLI contract::The CLI did not answer: line one%0A::warning::two 100%25\n", out)
+
+    def name_failures(self, files: dict) -> tuple[int, str]:
+        rc, out, _, _ = run_step(load(NIGHTLY), "contract", NAME_FAILURES, {}, [], files)
+        return rc, out
+
+    def test_each_failed_assertion_is_an_annotation_with_its_message_unescaped(self):
+        # Gradle's shape: the message is Throwable.toString(), the exception class before the assertion's own message.
+        xml = ('<?xml version="1.0" encoding="UTF-8"?><testsuite name="dev.daarkolabs.tandem.protocol.ContractTest">'
+               '<testcase name="live transcripts decode with every core type recognised" classname="dev.daarkolabs.tandem.protocol.ContractTest">'
+               '<failure message="java.lang.AssertionError: contract-hello.ndjson: [&quot;assistant&quot;, user]&#10;second line" type="java.lang.AssertionError">trace</failure></testcase>'
+               '<testcase name="live transcripts load with the reader" classname="dev.daarkolabs.tandem.protocol.ContractTest">'
+               '<failure message="boom" type="java.lang.IllegalStateException">trace</failure></testcase></testsuite>')
+        rc, out = self.name_failures({"build/test-results/test/TEST-dev.daarkolabs.tandem.protocol.ContractTest.xml": xml})
+        self.assertEqual(0, rc, out)
+        self.assertEqual(['::error title=CLI contract::live transcripts decode with every core type recognised: contract-hello.ndjson: ["assistant", user]%0Asecond line',
+                          "::error title=CLI contract::live transcripts load with the reader: boom"],
+                         out.splitlines())
+
+    def test_no_test_results_print_nothing(self):
+        rc, out = self.name_failures({})                                              # an earlier step failed before Gradle ran
+        self.assertEqual((0, ""), (rc, out))
+
+
 if __name__ == "__main__":
     unittest.main()
