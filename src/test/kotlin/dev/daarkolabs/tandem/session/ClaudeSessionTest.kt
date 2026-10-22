@@ -9,11 +9,13 @@ import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
@@ -37,6 +39,7 @@ import java.io.InputStream
 import java.nio.file.Path
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -633,11 +636,16 @@ class ClaudeSessionTest {
      * A session on a [ScriptedProcess]: the test writes the CLI's lines with [write], and every frame the host writes lands in
      * [stdin]. Answers go through the session's own request path (spec 9.2).
      */
-    private class ScriptedSession(tmp: Path, sessionId: String) {
+    private class ScriptedSession(tmp: Path, sessionId: String, mcpMillisPerSecond: Long = 1_000L) {
         val stdin: File = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > '${stdin.path}'").start())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = sessionId), ProcessLauncher { _, _ -> process })
+        val session = ClaudeSession(
+            scope,
+            SessionConfig("claude", tmp, sessionId = sessionId),
+            ProcessLauncher { _, _ -> process },
+            mcpMillisPerSecond = mcpMillisPerSecond,
+        )
 
         fun write(line: String) = process.script.println(line)
 
@@ -760,6 +768,94 @@ class ClaudeSessionTest {
             }
         }
         assertEquals(outcomes.count { it.second == Reply.TimedOut }, reduced.size, reduced.toString())
+        run.close()
+    }
+
+    /**
+     * Runs [test] with a caller thread that can be held: [hold] returns once that thread's one worker is busy, so a coroutine on it
+     * that waits stays suspended, its resumption queued, until [hold]'s release runs. The executor is not a scheduled one: a timeout
+     * on its dispatcher fires on another thread.
+     */
+    private fun <T> withHeldThread(test: suspend CoroutineScope.(thread: CoroutineDispatcher, hold: () -> (() -> Unit)) -> T): T {
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            return runBlocking {
+                test(executor.asCoroutineDispatcher()) {
+                    val held = CountDownLatch(1)
+                    val release = CountDownLatch(1)
+                    executor.execute { held.countDown(); release.await(10, TimeUnit.SECONDS) }
+                    assertTrue(held.await(10, TimeUnit.SECONDS), "the caller thread was never free")
+                    release::countDown
+                }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `an answer that comes after the timeout fired, before the caller resumed, is the caller's`() = withHeldThread { thread, hold ->
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val sent = CompletableDeferred<String>()
+        val reply = async(thread) { run.session.request(300) { sent.complete(it); HostMessages.mcpStatus(it) } }
+        val requestId = withTimeout(10_000) { sent.await() }
+        val release = hold() // the caller now waits for its answer and cannot resume
+        // The timeout cancels the request's withTimeoutOrNull block, a child of the caller, while the caller cannot run.
+        withTimeout(10_000) { while (reply.children.none { it.isCancelled }) delay(5) }
+        run.error(requestId, "late but first")
+        assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "the reader handed the answer to the waiter")
+        release()
+
+        val answered = assertIs<Reply.Answered>(withTimeout(10_000) { reply.await() })
+        assertEquals("late but first", answered.response.error)
+        assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "the caller's answer went to the reducer too")
+        run.close()
+    }
+
+    @Test
+    fun `an answer to a caller cancelled before it resumed still reaches the chat`() = withHeldThread { thread, hold ->
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val sent = CompletableDeferred<String>()
+        val caller = launch(thread) { run.session.request(10_000) { sent.complete(it); HostMessages.mcpReconnect(it, "broken") } }
+        val requestId = withTimeout(10_000) { sent.await() }
+        val release = hold() // the caller now waits for its answer and cannot resume
+        run.error(requestId, "Connection closed")
+        assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "the reader handed the answer to the waiter")
+        caller.cancel() // a panel closed just as the answer came: the queued resumption throws instead (prompt cancellation)
+        release()
+        withTimeout(10_000) { caller.join() }
+
+        assertTrue(caller.isCancelled)
+        assertEquals(listOf(rejected("Connection closed")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `the mcp requests wait 15 s or 30 s and say which`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, mcpMillisPerSecond = 10) // a second is 10 ms here; nothing answers
+        run.session.start()
+
+        /** [request]'s result and how long it took, in milliseconds. */
+        suspend fun timed(request: suspend () -> McpResult<*>): Pair<McpResult<*>, Long> {
+            val started = System.nanoTime()
+            val result = withTimeout(10_000) { request() }
+            return result to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+        }
+
+        val waits = listOf(
+            15 to timed { run.session.mcpStatus() },
+            15 to timed { run.session.mcpToggle("echo", enabled = false) },
+            30 to timed { run.session.mcpReconnect("broken") },
+            30 to timed { run.session.mcpAuthenticate("authy") },
+        )
+        for ((seconds, outcome) in waits) {
+            val (result, millis) = outcome
+            assertEquals(McpResult.Failed(McpError.TimedOut(seconds)), result)
+            assertTrue(millis >= seconds * 10L, "waited $millis ms, not $seconds of its seconds")
+        }
+        assertEquals(McpState(), run.settled().mcp)
         run.close()
     }
 
@@ -892,6 +988,11 @@ class ClaudeSessionTest {
         val reconnect = async { run.session.mcpReconnect("broken") }
         run.write(recorded(36, run.requestIdOf("mcp_reconnect")))
         assertEquals(McpResult.Failed(McpError.Rejected("Connection closed")), withTimeout(10_000) { reconnect.await() })
+
+        // Synthetic: an error answer without its error text.
+        val textless = async { run.session.mcpReconnect("broken") }
+        run.write("""{"type":"control_response","response":{"subtype":"error","request_id":"${run.requestIdOf("mcp_reconnect", nth = 2)}"}}""")
+        assertEquals(McpResult.Failed(McpError.Rejected("unknown error")), withTimeout(10_000) { textless.await() })
 
         val signIn = async { run.session.mcpAuthenticate("authy") }
         val link = recorded(40, run.requestIdOf("mcp_authenticate"))

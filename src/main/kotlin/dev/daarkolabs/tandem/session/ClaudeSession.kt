@@ -143,6 +143,8 @@ class ClaudeSession(
     private val launcher: ProcessLauncher = DefaultProcessLauncher(),
     initialState: ChatState = ChatState(),
     private val clock: () -> Long = System::currentTimeMillis,
+    /** How long one second of an MCP request's wait is; tests shrink it. The error still names the seconds ([McpError.TimedOut]). */
+    private val mcpMillisPerSecond: Long = 1_000L,
 ) {
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext.job) + CoroutineName("ClaudeSession"))
     private val _state = MutableStateFlow(
@@ -310,18 +312,24 @@ class ClaudeSession(
         val id = newRequestId()
         val waiter = CompletableDeferred<Reply>()
         replies[id] = waiter
+        var delivered = false // set just before the reply is handed back to the caller
         try {
-            if (ended || !job.isActive) return Reply.Ended
+            if (ended || !job.isActive) return Reply.Ended.also { delivered = true }
             send(build(id))
-            withTimeoutOrNull(timeoutMillis) { waiter.await() }?.let { return it }
+            withTimeoutOrNull(timeoutMillis) { waiter.await() }?.let { return it.also { delivered = true } }
             replies.remove(id)
-            if (!waiter.complete(Reply.TimedOut)) return waiter.getCompleted() // an answer that raced the timeout is the caller's
+            if (!waiter.complete(Reply.TimedOut)) return waiter.getCompleted().also { delivered = true } // raced the timeout: the caller's
             LOG.info("control request $id timed out after $timeoutMillis ms")
-            return Reply.TimedOut
+            return Reply.TimedOut.also { delivered = true }
         } finally {
             // On every exit, the caller's cancellation included: a later answer finds no waiter and goes to the reducer.
             replies.remove(id)
             waiter.cancel()
+            // Not cancelled: the reader completed the waiter first, and skipped the reducer. If the caller was cancelled before it
+            // resumed (await() is promptly cancellable), the answer never reached it, so it goes to the reducer now, once.
+            if (!delivered && !waiter.isCancelled) {
+                (waiter.getCompleted() as? Reply.Answered)?.let { dispatch(SessionEvent.Cli(it.response, clock())) }
+            }
         }
     }
 
@@ -362,7 +370,7 @@ class ClaudeSession(
      * [McpError.Rejected] with the CLI's text.
      */
     private suspend fun <T> mcpRequest(seconds: Int, build: (String) -> JsonObject, decode: (JsonObject?) -> McpResult<T>): McpResult<T> =
-        when (val reply = request(seconds * 1_000L, build)) {
+        when (val reply = request(seconds * mcpMillisPerSecond, build)) {
             is Reply.Answered -> {
                 val response = reply.response
                 if (response.isSuccess) {
