@@ -258,7 +258,8 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertIn('select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true)] | length', protect["run"])   # an App can approve a PR it did not author: a code owner's review of the last push is what it cannot give
         self.assertNotIn(".protected", protect["run"])                                # classic protected: true accepts a direct push when no option is ticked
         self.assertIn('if [[ "$rules" =~ ^[0-9]+$ ]] && [ "$rules" -ge 1 ]; then', protect["run"])   # fail closed: only a number >= 1 passes
-        self.assertIn('gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=main"', protect["run"])   # the code-owner review binds only owned files
+        self.assertIn('if ! owners="$(gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=main" 2>/dev/null)"; then', protect["run"])   # the code-owner review binds only owned files; by exit status: a 5xx is not "no owner line"
+        self.assertIn("status=\"$(jq -r '.status // empty' <<<\"$owners\" 2>/dev/null || true)\"", protect["run"])
         self.assertIn("grep -qE '^\\*[[:space:]]+@' <<<\"$owners\"", protect["run"])
         self.assertIn("exit 1", protect["run"].split("CODEOWNERS?ref=main", 1)[1].split("branches/$BRANCH", 1)[0])
         self.assertLess(protect["run"].index("rules/branches/main"), protect["run"].index("CODEOWNERS?ref=main"))
@@ -514,9 +515,10 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertRegex(output, r"^id=99\nurl=https://github\.com/daarko10/tandem/actions/runs/99\ndate=\d{4}-\d{2}-\d{2}\nrehearse=true\n$")
         self.assertEqual("", calls)
 
-    def protect(self, rules: str, owners: str, branch: tuple[str, int]) -> tuple[int, str, str, str]:
+    def protect(self, rules: str, owners: str | tuple[str, int], branch: tuple[str, int]) -> tuple[int, str, str, str]:
+        owners = owners if isinstance(owners, tuple) else (owners, 0)
         return run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
-                        [(RULES, rules, 0), (CODEOWNERS, owners, 0), (BRANCH_READ, branch[0], branch[1])])
+                        [(RULES, rules, 0), (CODEOWNERS, owners[0], owners[1]), (BRANCH_READ, branch[0], branch[1])])
 
     def test_protect_passes_a_ruleset_an_owner_and_a_missing_branch(self):
         rc, out, _, calls = self.protect("1\n", "* @daarko10\n", (NOT_FOUND, 1))
@@ -528,12 +530,16 @@ class StepOutcomeTest(unittest.TestCase):
         for rules, owners, branch, message in (("0\n", "* @daarko10\n", (NOT_FOUND, 1), "No ruleset on main requires a pull request"),
                                                ("x\n", "* @daarko10\n", (NOT_FOUND, 1), "No ruleset on main requires a pull request"),
                                                ("1\n", "docs/ @daarko10\n", (NOT_FOUND, 1), "CODEOWNERS has no line owning every file"),
+                                               ("1\n", ('{"message":"Not Found","status":"404"}', 1), (NOT_FOUND, 1), "CODEOWNERS has no line owning every file"),   # no file on main: a 404, which owns nothing
+                                               ("1\n", (SERVER_ERROR, 1), (NOT_FOUND, 1), "Reading main's .github/CODEOWNERS failed (HTTP status '502')"),   # not "no owner line": red without a verdict
                                                ("1\n", "* @daarko10\n", (BRANCH + "\n", 0), f"The branch {BRANCH} exists"),
                                                ("1\n", "* @daarko10\n", (SERVER_ERROR, 1), f"Reading the branch {BRANCH} failed (HTTP status '502')"),
                                                ("1\n", "* @daarko10\n", ("", 1), f"Reading the branch {BRANCH} failed (HTTP status 'none')")):
-            rc, out, _, _ = self.protect(rules, owners, branch)
+            rc, out, _, calls = self.protect(rules, owners, branch)
             self.assertEqual(1, rc, (message, out))
             self.assertIn(message, out)
+            if not message.startswith(("The branch", "Reading the branch")):
+                self.assertNotIn(BRANCH, calls)                                       # refused before the branch read
 
     def test_the_report_opens_or_comments_on_the_standing_issue(self):
         classification = json.dumps({"kind": "cli-did-not-answer", "cli_version": "2.1.301", "detail": "no system/init", "files": ["contract-hello.ndjson"]})

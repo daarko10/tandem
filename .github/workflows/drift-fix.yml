@@ -236,6 +236,8 @@ jobs:
       # HEAD` would be rejected as non-fast-forward after the spend, and the enforce job would misread the old branch as
       # a stopped agent. Only a 404 means "no branch": gh prints the error body on stdout and exits 1 on any HTTP error,
       # so the read is decided by its exit status and then by the body's status, and a 5xx or a rate limit refuses too.
+      # The CODEOWNERS read is decided the same way: a 404 is a missing file, which owns nothing; anything else refuses
+      # without a verdict, never as "no owner line".
       - name: Require a protected main
         id: protect
         if: steps.gate.outputs.proceed == 'true'
@@ -250,7 +252,13 @@ jobs:
           else
             echo "::error title=Drift fix::No ruleset on main requires a pull request with an approving review from a code owner and approval of the most recent push (a private repository of a personal account enforces one only with GitHub Pro); the agent is not started."; exit 1
           fi
-          owners="$(gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=main" 2>/dev/null || true)"
+          if ! owners="$(gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=main" 2>/dev/null)"; then
+            status="$(jq -r '.status // empty' <<<"$owners" 2>/dev/null || true)"
+            if [ "$status" != "404" ]; then
+              echo "::error title=Drift fix::Reading main's .github/CODEOWNERS failed (HTTP status '${status:-none}'), so whether it owns every file is not known; the agent is not started."; exit 1
+            fi
+            owners=""
+          fi
           if ! grep -qE '^\*[[:space:]]+@' <<<"$owners"; then
             echo "::error title=Drift fix::main's .github/CODEOWNERS has no line owning every file (* @owner), so the ruleset's code-owner review binds nothing; the agent is not started."; exit 1
           fi
