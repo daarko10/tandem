@@ -196,18 +196,6 @@ object Ndjson {
         nonExecutionKind = nonExecutionKind,
     )
 
-    /** The line's ISO-8601 `timestamp` in epoch milliseconds; null when absent or unreadable. */
-    private fun timestampMillis(o: JsonObject): Long? {
-        val text = o.string("timestamp") ?: return null
-        return try {
-            Instant.parse(text).toEpochMilli()
-        } catch (_: DateTimeException) {
-            null
-        } catch (_: ArithmeticException) { // an instant too far out for epoch milliseconds
-            null
-        }
-    }
-
     private fun decodeContent(content: JsonElement?): List<ContentBlock> = when (content) {
         is JsonPrimitive -> if (content.isString) listOf(ContentBlock.Text(content.content)) else emptyList()
         is JsonArray -> content.mapNotNull { (it as? JsonObject)?.let(::decodeBlock) }
@@ -358,5 +346,17 @@ object Ndjson {
             error = response.string("error"),
             raw = o,
         )
+    }
+}
+
+/** The line's ISO-8601 `timestamp` in epoch milliseconds; null when absent or unreadable. */
+internal fun timestampMillis(o: JsonObject): Long? {
+    val text = o.string("timestamp") ?: return null
+    return try {
+        Instant.parse(text).toEpochMilli()
+    } catch (_: DateTimeException) {
+        null
+    } catch (_: ArithmeticException) { // an instant too far out for epoch milliseconds
+        null
     }
 }

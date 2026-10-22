@@ -8,6 +8,7 @@ import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.obj
 import dev.daarkolabs.tandem.protocol.string
+import dev.daarkolabs.tandem.protocol.timestampMillis
 import dev.daarkolabs.tandem.protocol.unwrapLocalCommandOutput
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.SessionEvent
@@ -28,8 +29,6 @@ import java.nio.channels.FileChannel
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
-import java.time.DateTimeException
-import java.time.Instant
 import java.util.BitSet
 import kotlin.io.path.bufferedReader
 import kotlin.io.path.name
@@ -408,7 +407,7 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
         if (output != content || run != null || raw.obj("commandOutcome") != null) {
             state = reduce(state, SessionEvent.LocalCommandOutput(output, run?.string("command")))
         } else if (raw.string("submitUuid") != null) {
-            state = reduce(state, SessionEvent.UserSent(raw.string("uuid") ?: "line-$lineCount", content, timestampOf(raw)))
+            state = reduce(state, SessionEvent.UserSent(raw.string("uuid") ?: "line-$lineCount", content, timestampMillis(raw) ?: 0L))
         }
     }
 
@@ -424,18 +423,6 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
         // A line with images is a prompt even without typed text (images only), as it was when sent.
         if (shown.typed == null && shown.images.isEmpty()) return
         state = reduce(state, SessionEvent.UserSent(uuid, shown.typed?.text ?: "", atMillis, shown.images))
-    }
-}
-
-/** The line's ISO-8601 `timestamp` in epoch milliseconds; 0 (unknown) when it has none or it does not parse. */
-private fun timestampOf(raw: JsonObject): Long {
-    val text = raw.string("timestamp") ?: return 0L
-    return try {
-        Instant.parse(text).toEpochMilli()
-    } catch (_: DateTimeException) {
-        0L
-    } catch (_: ArithmeticException) { // an instant too far out for epoch milliseconds
-        0L
     }
 }
 
