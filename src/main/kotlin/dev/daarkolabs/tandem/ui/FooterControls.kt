@@ -30,6 +30,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -542,7 +544,9 @@ internal fun pageTurn(event: AwtKeyEvent, page: Int): Int? {
  * semantically a drop-down named [description]. A click, Enter or Space opens its menu above it (left- or right-aligned by
  * [alignEnd]) on its first page, unless it has nothing to list ([opens]); [menu] fills the page it is given and closes the menu, or
  * turns it to another of its [pages], with the [FooterMenuHandle] it is given. While the first page is open a digit picks through
- * [digitPick], which says whether it picked, and the menu closes when it did; → and ← turn the pages.
+ * [digitPick], which says whether it picked, and the menu closes when it did; → and ← turn the pages. A [request] equal to
+ * [requestedAs] (`/model`, `/permissions`, `/mode`) opens the menu as a click would and clears the request; with nothing to list
+ * ([opens] false) the control takes the focus instead, so the command visibly lands somewhere (MCP spec 11 item 6).
  *
  * The digits and the arrows are taken from AWT's key dispatch while the menu is open, not from a Compose key handler (open item 13):
  * in the IDE the menu is a focusable popup layer of the tool window's own Compose scene (the IDE leaves Jewel's `JBPopupRenderer`
@@ -582,11 +586,13 @@ private fun FooterControl(
     }
     val close = { open = false }
     // `/model`, `/permissions` or `/mode` asked for this control's menu (MCP spec 4.4): it opens as a click would, and the request
-    // is cleared, so the same command opens it again next time.
+    // is cleared, so the same command opens it again next time. A menu with nothing to list does not open; the control takes the
+    // focus instead (MCP spec 11 item 6), rather than the command vanishing without a trace.
+    val focusRequester = remember { FocusRequester() }
     val requested = request?.value
     LaunchedEffect(requested) {
         if (requested != null && requested == requestedAs) {
-            openMenu()
+            if (opens) openMenu() else focusRequester.requestFocus()
             request.value = null
         }
     }
@@ -627,6 +633,7 @@ private fun FooterControl(
                 role = Role.DropdownList
                 contentDescription = description
             }
+            .focusRequester(focusRequester)
             .onPreviewKeyEvent { event ->
                 when {
                     !open && event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.Spacebar) -> {
