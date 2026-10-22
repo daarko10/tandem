@@ -3,11 +3,19 @@
 They read .github/workflows/drift-fix.yml (and cli-contract.yml) with PyYAML, which reads the `on` key as the boolean
 True. Without PyYAML they skip, except under GITHUB_ACTIONS, where a missing PyYAML is an error: these are the only
 tests pinning the workflows, and build.yml's "Script tests" step must never skip them silently.
+
+The outcome tests (StepOutcomeTest) run a step's `run:` block under bash as GitHub does (-e -o pipefail) with a stub
+`gh` first on PATH that answers from canned output and, on an HTTP error, prints the error body on stdout and exits 1
+as gh 2.89 does. They need bash 4 (mapfile) and jq; without them they skip, except under GITHUB_ACTIONS on Linux.
 """
 import importlib
 import json
 import os
 import re
+import shlex
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 try:
@@ -17,6 +25,18 @@ except ImportError:
 
 if yaml is None and os.environ.get("GITHUB_ACTIONS"):
     raise RuntimeError("PyYAML is required in CI")
+
+
+def bash_can_run_steps() -> bool:
+    if not shutil.which("bash") or not shutil.which("jq"):
+        return False
+    major = subprocess.run(["bash", "-c", 'echo "${BASH_VERSINFO[0]}"'], capture_output=True, text=True).stdout.strip()
+    return major.isdigit() and int(major) >= 4
+
+
+BASH = bash_can_run_steps()
+if not BASH and os.environ.get("GITHUB_ACTIONS") and os.environ.get("RUNNER_OS") == "Linux":
+    raise RuntimeError("bash 4 and jq are required in CI: the step outcome tests must not skip")
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 DRIFT = os.path.join(ROOT, ".github/workflows/drift-fix.yml")
@@ -28,6 +48,8 @@ DENY = {"Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Writ
         "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)",
         "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"}
 ALLOWLIST = "'^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\\.md$)'"
+GATE_IF = "steps.classify.outputs.kind == 'decoder' || steps.classify.outputs.kind == 'reader'"
+REPORT_IF = "steps.precheck.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'unknown'"
 
 
 def load(path: str) -> dict:
@@ -66,6 +88,52 @@ def allowed_tools(text: str) -> set[str]:
 tools = allowed_tools
 
 
+def stub_gh(answers: list[tuple[str, str, int]]) -> str:
+    """A bash `gh` that logs each call's argument line ("$*") to $GH_STUB_LOG and answers the first entry whose prefix
+    matches it with that stdout and exit code; an unmatched call fails with status 2, so a step never passes on a call
+    the test did not expect."""
+    lines = ["#!/usr/bin/env bash", 'printf "%s\\n" "$*" >> "$GH_STUB_LOG"', 'case "$*" in']
+    for prefix, stdout, code in answers:
+        lines.append("  '" + prefix.replace("'", "'\\''") + f"'*) printf '%s' {shlex.quote(stdout)}; exit {code};;")
+    lines += ['  *) echo "stub gh: unexpected call: $*" >&2; exit 2;;', "esac", ""]
+    return "\n".join(lines)
+
+
+def run_step(wf: dict, job: str, name: str, env: dict, gh: list[tuple[str, str, int]], files: dict | None = None) -> tuple[int, str, str, str]:
+    """Runs the step's `run:` under bash as GitHub does, in an empty working directory (plus `files`), with the stub gh
+    first on PATH, GITHUB_OUTPUT in a temporary file and the step's env from `env`, which must name every key the step
+    declares. Returns (exit code, stdout and stderr, GITHUB_OUTPUT's text, the stub's call log)."""
+    s = step(wf, job, name)
+    missing = set(s.get("env", {})) - set(env)
+    if missing:
+        raise AssertionError(f"the test must supply the step's env: {sorted(missing)}")
+    with tempfile.TemporaryDirectory() as tmp:
+        bindir, work = os.path.join(tmp, "bin"), os.path.join(tmp, "work")
+        os.mkdir(bindir)
+        os.mkdir(work)
+        script, output, log = os.path.join(tmp, "step.sh"), os.path.join(tmp, "output"), os.path.join(tmp, "calls")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(s["run"])
+        with open(os.path.join(bindir, "gh"), "w", encoding="utf-8") as f:
+            f.write(stub_gh(gh))
+        os.chmod(os.path.join(bindir, "gh"), 0o755)
+        open(output, "w").close()
+        open(log, "w").close()
+        for path, text in (files or {}).items():
+            os.makedirs(os.path.dirname(os.path.join(work, path)), exist_ok=True)
+            with open(os.path.join(work, path), "w", encoding="utf-8") as f:
+                f.write(text)
+        full = {"PATH": bindir + os.pathsep + os.environ.get("PATH", ""), "HOME": tmp, "GITHUB_OUTPUT": output, "GH_STUB_LOG": log,
+                "GITHUB_REPOSITORY": "daarko10/tandem", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "99", **env}
+        proc = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", script], cwd=work, env=full,
+                              capture_output=True, text=True, timeout=60)
+        with open(output, encoding="utf-8") as f:
+            out = f.read()
+        with open(log, encoding="utf-8") as f:
+            calls = f.read()
+        return proc.returncode, proc.stdout + proc.stderr, out, calls
+
+
 @unittest.skipUnless(yaml, "PyYAML is not installed")
 class DriftFixWorkflowTest(unittest.TestCase):
     def test_the_fixer_listens_to_the_nightly_only(self):
@@ -80,9 +148,12 @@ class DriftFixWorkflowTest(unittest.TestCase):
     def test_permissions_concurrency_and_guards(self):
         wf = load(DRIFT)
         self.assertEqual({"id-token": "write", "contents": "read", "pull-requests": "read", "issues": "write", "actions": "read"}, wf["permissions"])   # the fix branch is pushed with the App token, never the workflow token, which the agent's test code can read: no pull-request write
-        gate = step(wf, "fix", "Skip when a fix is already waiting")["run"]
-        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" -f body=', gate)   # the comment goes through the issues endpoint: issues: write covers it
-        self.assertEqual([], [s.get("name") for s in steps(wf, "fix") if "gh pr comment" in s.get("run", "")])   # nothing in the fix job needs pull-requests: write
+        gate = step(wf, "fix", "Skip when a fix is already waiting")
+        self.assertEqual(GATE_IF, gate["if"])
+        self.assertNotIn("gh pr comment", gate["run"])                                # a comment on a PR needs pull-requests: write even through the issues endpoint: the remind job's
+        self.assertNotIn("/comments", gate["run"])
+        self.assertIn("printf 'proceed=false\\nwaiting=%s\\n' \"$pr\" >> \"$GITHUB_OUTPUT\"", gate["run"])
+        self.assertEqual([], [s.get("name") for s in steps(wf, "fix") if "gh pr comment" in s.get("run", "") or "/comments" in s.get("run", "")])   # nothing in the fix job needs pull-requests: write
         self.assertEqual({"group": "drift-fix", "cancel-in-progress": False}, wf["concurrency"])
         job = wf["jobs"]["fix"]
         self.assertEqual(90, job["timeout-minutes"])
@@ -120,16 +191,18 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual(expected, names)                                             # the allowlist step is the enforce job's, after this job
         wf = load(DRIFT)
         self.assertEqual(["Enforce the edit allowlist"], [s.get("name") for s in steps(wf, "enforce")])
+        self.assertEqual(["Comment on the waiting pull request"], [s.get("name") for s in steps(wf, "remind")])
         self.assertTrue(step(wf, "fix", "Reproduce the red")["continue-on-error"])
         self.assertIn("--rerun", step(wf, "fix", "Reproduce the red")["run"])        # the build cache never replays a pass on another recording
         for name in ("Name the red run", "Fetch the recording", "Report a run the agent cannot fix", "Skip when a fix is already waiting",
                      "Require a protected main"):
             self.assertEqual("${{ github.token }}", step(wf, "fix", name)["env"]["GH_TOKEN"])
         self.assertEqual("${{ github.token }}", step(wf, "enforce", "Enforce the edit allowlist")["env"]["GH_TOKEN"])
+        self.assertEqual("${{ github.token }}", step(wf, "remind", "Comment on the waiting pull request")["env"]["GH_TOKEN"])
         name_run = step(wf, "fix", "Name the red run")["run"]
         self.assertIn('.conclusion == "failure"', name_run)                           # a green or foreign run is refused before any spend
         self.assertIn('.head_branch == "main"', name_run)                             # so is a run of another branch, whose recording that branch produced
-        for s in steps(wf, "fix") + steps(wf, "enforce"):
+        for s in steps(wf, "fix") + steps(wf, "remind") + steps(wf, "enforce"):
             self.assertNotIn("${{", s.get("run", ""), s.get("name"))                 # inputs and outputs reach the shell through env only
         mutate = step(wf, "fix", "Mutate a recording for the rehearsal")
         self.assertIn("scripts/make_drift.py", mutate["run"])
@@ -152,10 +225,13 @@ class DriftFixWorkflowTest(unittest.TestCase):
         for name in ("Reproduce the red", "Classify"):
             self.assertIn("steps.precheck.outputs.kind != 'cli-did-not-answer'", step(wf, "fix", name)["if"])
         report = step(wf, "fix", "Report a run the agent cannot fix")
-        self.assertIn("steps.precheck.outputs.kind == 'cli-did-not-answer'", report["if"])
+        self.assertEqual(REPORT_IF, report["if"])
         self.assertIn("precheck.json", report["run"])
         enforce = step(wf, "enforce", "Enforce the edit allowlist")
-        self.assertIn('repos/$GITHUB_REPOSITORY/branches/$BRANCH', enforce["run"])    # the branch is read through the API with GH_TOKEN: there is no checkout here
+        self.assertIn('if branch="$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name 2>/dev/null)"; then', enforce["run"])   # by exit status: gh prints the error body on stdout, so the old [ -n ] test was never empty
+        self.assertIn("status=\"$(jq -r '.status // empty' <<<\"$branch\" 2>/dev/null || true)\"", enforce["run"])
+        self.assertIn('if [ "$status" != "404" ]; then', enforce["run"])              # only a 404 is "no branch"; a 5xx or a rate limit is red without a verdict
+        self.assertNotIn("|| true)\"\n            if [ -n", enforce["run"])
         self.assertNotIn("git ls-remote", enforce["run"])
         self.assertNotIn("gh pr close", enforce["run"])                               # an offending PR is commented on and left open: closing would re-arm the loop nightly
         self.assertIn("gh pr comment", enforce["run"])
@@ -164,7 +240,6 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertNotIn("gh pr view", enforce["run"])
         self.assertIn(ALLOWLIST, enforce["run"])                                      # the edit allowlist, exactly
         self.assertNotIn("if", enforce)                                               # the job's if decides; see test_the_allowlist_is_enforced_in_its_own_job
-        self.assertNotIn('no branch was pushed"; exit 0', enforce["run"])              # no PR after the gate proceeded is red, never green and silent
         self.assertIn("pushed no branch and opened no PR", enforce["run"])
         self.assertIn("pushed $BRANCH but opened no PR", enforce["run"])
         self.assertEqual("${{ needs.fix.outputs.kind }}", enforce["env"]["KIND"])    # the fix job's outputs, not its steps: this is another job
@@ -191,14 +266,16 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertIn("exit 1", protect["run"].split("else", 1)[1])                 # anything else ends the step red
         self.assertNotIn("-lt", protect["run"])                                       # a non-number made [ -lt ] false and passed the step
         self.assertEqual("drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}", protect["env"]["BRANCH"])
-        self.assertIn('if gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name >/dev/null 2>&1; then', protect["run"])   # a kept branch would reject the push after the spend
+        self.assertIn('if existing="$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name 2>/dev/null)"; then', protect["run"])   # a kept branch would reject the push after the spend
         self.assertIn("delete it to retry", protect["run"].split("branches/$BRANCH", 1)[1])
         self.assertIn("exit 1", protect["run"].split("delete it to retry", 1)[1])
+        self.assertIn("status=\"$(jq -r '.status // empty' <<<\"$existing\" 2>/dev/null || true)\"", protect["run"])   # only a 404 lets the agent start: a 5xx would be a push rejected after the spend
+        self.assertIn('if [ "$status" != "404" ]; then', protect["run"])
         self.assertLess(protect["run"].index("rules/branches/main"), protect["run"].index("branches/$BRANCH"))   # the ruleset first: it is the loop's precondition
 
     def test_the_allowlist_is_enforced_in_its_own_job(self):
         wf = load(DRIFT)
-        self.assertEqual(["fix", "enforce"], list(wf["jobs"]))
+        self.assertEqual(["fix", "remind", "enforce"], list(wf["jobs"]))
         enforce = wf["jobs"]["enforce"]
         self.assertEqual("fix", enforce["needs"])                                      # a fresh runner: code the agent ran in fix cannot reach it
         self.assertEqual("always() && needs.fix.outputs.proceed == 'true' && needs.fix.outputs.protected == 'success'", enforce["if"])
@@ -206,7 +283,8 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual(10, enforce["timeout-minutes"])
         self.assertEqual([], [s for s in enforce["steps"] if "uses" in s])            # no checkout, no action: nothing the agent could have changed
         self.assertEqual("${{ github.repository }}", step(wf, "enforce", "Enforce the edit allowlist")["env"]["GH_REPO"])   # gh has no remote to infer it from
-        self.assertEqual({"proceed": "${{ steps.gate.outputs.proceed }}", "protected": "${{ steps.protect.outcome }}",
+        self.assertEqual({"proceed": "${{ steps.gate.outputs.proceed }}", "waiting": "${{ steps.gate.outputs.waiting }}",
+                          "protected": "${{ steps.protect.outcome }}",
                           "kind": "${{ steps.classify.outputs.kind }}", "agent": "${{ steps.agent.outputs.conclusion }}",
                           "id": "${{ steps.run.outputs.id }}", "url": "${{ steps.run.outputs.url }}", "date": "${{ steps.run.outputs.date }}"},
                          wf["jobs"]["fix"]["outputs"])                                # all but agent are written before the agent starts
@@ -216,13 +294,27 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertLess(names.index("Classify"), names.index("Fix the drift"))
         enforce_run = step(wf, "enforce", "Enforce the edit allowlist")["run"]
         self.assertEqual("drift/${{ needs.fix.outputs.date }}-${{ needs.fix.outputs.id }}", step(wf, "enforce", "Enforce the edit allowlist")["env"]["BRANCH"])
-        self.assertIn('open="$(gh pr list --state open --limit 100 --json number,headRefName,labels)"', enforce_run)   # a failed list fails the step
-        self.assertIn('jq -r --arg branch "$BRANCH" \'.[] | select(.headRefName == $branch or any(.labels[]; .name == "contract-drift"))', enforce_run)   # this run's branch first, then the label: an unlabelled PR is checked, not misread as a stopped agent
+        self.assertIn('open="$(gh pr list --state open --limit 100 --json number,headRefName,labels,isCrossRepository)"', enforce_run)   # a failed list fails the step
+        self.assertIn('jq -r --arg branch "$BRANCH" \'.[] | select((.headRefName == $branch and .isCrossRepository == false) or any(.labels[]; .name == "contract-drift"))', enforce_run)   # this run's branch in this repository first, then the label: an unlabelled PR is checked, not misread as a stopped agent; a fork's PR named after the run is never labelled
         self.assertIn('gh api "repos/$GITHUB_REPOSITORY/issues/$pr/labels" -f "labels[]=contract-drift"', enforce_run)   # so the gate holds while it is open
         self.assertIn('for entry in "${prs[@]}"; do', enforce_run)                    # every PR is checked, never only the first
         self.assertIn('if [ "${#prs[@]}" -gt 1 ]; then', enforce_run)                  # a second PR is red: the agent opens one
         self.assertIn('exit "$red"', enforce_run)
         self.assertNotIn("][0].number", enforce_run)                               # not the first contract-drift PR only
+
+    def test_the_reminder_is_its_own_job(self):
+        wf = load(DRIFT)
+        remind = wf["jobs"]["remind"]
+        self.assertEqual("fix", remind["needs"])
+        self.assertEqual("needs.fix.outputs.proceed == 'false'", remind["if"])        # the fix job ends green when the gate skipped: no always()
+        self.assertEqual({"pull-requests": "write", "issues": "write"}, remind["permissions"])   # a comment on a PR needs pull-requests: write; issues: write alone is a 403
+        self.assertEqual(5, remind["timeout-minutes"])
+        self.assertEqual([], [s for s in remind["steps"] if "uses" in s])             # no checkout, no agent code
+        comment = step(wf, "remind", "Comment on the waiting pull request")
+        self.assertEqual({"GH_TOKEN": "${{ github.token }}", "GH_REPO": "${{ github.repository }}", "WAITING": "${{ needs.fix.outputs.waiting }}",
+                          "RUN_URL": "${{ needs.fix.outputs.url }}", "DATE": "${{ needs.fix.outputs.date }}"}, comment["env"])
+        self.assertIn('gh pr comment "$WAITING" --body "The nightly of $DATE is still red: $RUN_URL.', comment["run"])
+        self.assertIn('[[ "$WAITING" =~ ^[0-9]+$ ]] || {', comment["run"])
 
     def test_main_s_codeowners_owns_every_file(self):
         with open(os.path.join(ROOT, ".github/CODEOWNERS"), encoding="utf-8") as f:
@@ -265,6 +357,212 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual(DENY, set(deny))                                             # the spec's list, exactly: nothing dropped, nothing unexplained
         self.assertEqual(len(DENY), len(deny))
         self.assertEqual({"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}, json.loads(agent["with"]["settings"])["env"])   # ./gradlew check outlives the Bash tool's two-minute default
+
+
+BRANCH = "drift/2026-10-22-7"
+RUN_URL = "https://github.com/daarko10/tandem/actions/runs/7"
+NOT_FOUND = '{"message":"Branch not found","documentation_url":"https://docs.github.com/rest/branches/branches#get-a-branch","status":"404"}'
+SERVER_ERROR = '{"message":"Server Error","status":"502"}'
+PR_LIST = "pr list --state open --limit 100 --json number,headRefName,labels,isCrossRepository"
+BRANCH_READ = f"api repos/daarko10/tandem/branches/{BRANCH} --jq .name"
+ISSUE_LIST = "issue list --label contract-drift --state open --search"
+ISSUE_CREATE = "issue create --title CLI contract: the CLI did not answer --label contract-drift --body"
+CLEAN_FILES = "src/main/kotlin/dev/daarkolabs/tandem/protocol/Ndjson.kt\nsrc/test/resources/fixtures/drift-2026-10-22.ndjson\ndocs/protocol.md\n"
+ENFORCE_ENV = {"GH_TOKEN": "stub", "GH_REPO": "daarko10/tandem", "BRANCH": BRANCH, "RUN_URL": RUN_URL, "KIND": "decoder", "AGENT": "success"}
+RUN_VIEW = {"html_url": RUN_URL, "created_at": "2026-10-21T03:17:09Z", "name": "CLI contract", "conclusion": "failure", "head_branch": "main",
+            "head_repository": {"full_name": "daarko10/tandem"}, "event": "schedule"}
+NAME_ENV = {"GH_TOKEN": "stub", "EVENT_RUN_ID": "7", "INPUT_RUN_ID": "", "REHEARSE": "false"}
+RULES = "api repos/daarko10/tandem/rules/branches/main?per_page=100"
+CODEOWNERS = "api -H Accept: application/vnd.github.raw+json repos/daarko10/tandem/contents/.github/CODEOWNERS?ref=main"
+
+
+def pr(number: int, head: str = BRANCH, labelled: bool = False, fork: bool = False) -> dict:
+    return {"number": number, "headRefName": head, "labels": [{"name": "contract-drift"}] if labelled else [], "isCrossRepository": fork}
+
+
+@unittest.skipUnless(yaml and BASH, "PyYAML, bash 4 and jq are needed to run the steps")
+class StepOutcomeTest(unittest.TestCase):
+    """Each step's run: block under bash with a stub gh: what the step does, not what its text says."""
+
+    def enforce(self, prs: list[dict], gh: list[tuple[str, str, int]]) -> tuple[int, str, str, str]:
+        return run_step(load(DRIFT), "enforce", "Enforce the edit allowlist", ENFORCE_ENV, [(PR_LIST, json.dumps(prs), 0)] + gh)
+
+    def test_enforce_with_no_pr_and_no_branch_is_red_and_says_so(self):
+        rc, out, _, calls = self.enforce([], [(BRANCH_READ, NOT_FOUND, 1)])
+        self.assertEqual(1, rc, out)
+        self.assertIn("The classification was decoder but the agent pushed no branch and opened no PR (its step ended 'success')", out)
+        self.assertNotIn("but opened no PR; reported", out)                           # the old [ -n "$(gh … || true)" ] read gh's error body as a branch name
+        self.assertNotIn("issue", calls)
+
+    def test_enforce_with_a_branch_and_no_pr_reports_the_stopped_agent(self):
+        rc, out, _, calls = self.enforce([], [(BRANCH_READ, BRANCH + "\n", 0), (ISSUE_LIST, "", 0), (ISSUE_CREATE, "https://github.com/daarko10/tandem/issues/9\n", 0)])
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"The agent pushed {BRANCH} but opened no PR; reported on the standing issue.", out)
+        self.assertIn(f"{ISSUE_CREATE} The drift fix for {RUN_URL} pushed the branch {BRANCH} but opened no pull request", calls)
+        self.assertIn("its step ended 'success'", calls)
+
+    def test_enforce_comments_on_the_standing_issue_when_it_is_open(self):
+        rc, out, _, calls = self.enforce([], [(BRANCH_READ, BRANCH + "\n", 0), (ISSUE_LIST, "3\n", 0), ("issue comment 3 --body", "", 0)])
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"issue comment 3 --body The drift fix for {RUN_URL} pushed the branch", calls)
+        self.assertNotIn("issue create", calls)
+
+    def test_enforce_is_red_without_a_verdict_when_the_branch_read_fails(self):
+        rc, out, _, calls = self.enforce([], [(BRANCH_READ, SERVER_ERROR, 1)])
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"Reading the branch {BRANCH} failed (HTTP status '502')", out)
+        self.assertNotIn("pushed no branch", out)
+        self.assertNotIn("issue", calls)
+
+    def test_enforce_passes_one_clean_pr_and_labels_it(self):
+        rc, out, _, calls = self.enforce([pr(5)], [("api repos/daarko10/tandem/issues/5/labels -f labels[]=contract-drift", "{}", 0),
+                                                  ("api --paginate repos/daarko10/tandem/pulls/5/files", CLEAN_FILES, 0)])
+        self.assertEqual(0, rc, out)
+        self.assertIn(f"PR #5 ({BRANCH}) stays within the allowlist", out)
+        self.assertIn("PR #5 from drift/2026-10-22-7 carried no contract-drift label; added", out)
+        self.assertIn("api repos/daarko10/tandem/issues/5/labels -f labels[]=contract-drift", calls)
+        self.assertNotIn("pr comment", calls)
+
+    def test_enforce_comments_on_an_offending_pr_leaves_it_open_and_is_red(self):
+        files = CLEAN_FILES + "build.gradle.kts\nscripts/redact_fixture.py\n"                     # the last one a rename's old path
+        rc, out, _, calls = self.enforce([pr(5, labelled=True)], [("api --paginate repos/daarko10/tandem/pulls/5/files", files, 0), ("pr comment 5 --body", "", 0)])
+        self.assertEqual(1, rc, out)
+        self.assertIn("PR #5 edits files outside the allowlist; commented and left open.", out)
+        self.assertIn("pr comment 5 --body drift-fix.yml: this fix edits files outside the allowlist", calls)
+        self.assertIn("\nbuild.gradle.kts\nscripts/redact_fixture.py", calls)
+        self.assertNotIn("Ndjson.kt", calls.split("pr comment 5", 1)[1])            # only the offending paths are named
+        self.assertNotIn("pr close", calls)
+        self.assertNotIn("issues/5/labels", calls)                                    # already labelled
+
+    def test_enforce_is_red_with_two_prs_even_when_both_are_clean(self):
+        rc, out, _, calls = self.enforce([pr(5, labelled=True), pr(6, head="drift/2026-10-21-6", labelled=True)],
+                                         [("api --paginate repos/daarko10/tandem/pulls/5/files", CLEAN_FILES, 0),
+                                          ("api --paginate repos/daarko10/tandem/pulls/6/files", CLEAN_FILES, 0)])
+        self.assertEqual(1, rc, out)
+        self.assertIn("2 open pull requests belong to the loop (5 6); the agent opens one.", out)
+        self.assertIn("PR #5", out)
+        self.assertIn("PR #6", out)                                                   # every file list was checked before the verdict
+        self.assertNotIn("pr comment", calls)
+
+    def test_enforce_never_selects_or_labels_a_fork_s_pr_named_after_the_run(self):
+        rc, out, _, calls = self.enforce([pr(5, fork=True)], [(BRANCH_READ, NOT_FOUND, 1)])
+        self.assertEqual(1, rc, out)
+        self.assertIn("pushed no branch and opened no PR", out)                        # the fork's PR is not the loop's
+        self.assertNotIn("issues/5/labels", calls)
+        self.assertNotIn("pulls/5/files", calls)
+
+    def test_the_gate_skips_and_names_the_waiting_pr_without_commenting(self):
+        rc, out, output, calls = run_step(load(DRIFT), "fix", "Skip when a fix is already waiting", {"GH_TOKEN": "stub"},
+                                          [("pr list --label contract-drift --state open --json number --jq", "12\n", 0)])
+        self.assertEqual(0, rc, out)
+        self.assertEqual("proceed=false\nwaiting=12\n", output)
+        self.assertEqual(1, len(calls.splitlines()))                                  # the comment is the remind job's: this token cannot post it
+
+    def test_the_gate_proceeds_when_no_fix_is_waiting(self):
+        rc, out, output, _ = run_step(load(DRIFT), "fix", "Skip when a fix is already waiting", {"GH_TOKEN": "stub"},
+                                      [("pr list --label contract-drift --state open --json number --jq", "", 0)])
+        self.assertEqual(0, rc, out)
+        self.assertEqual("proceed=true\n", output)
+
+    def test_the_gate_fails_closed_when_the_list_fails(self):
+        rc, out, output, _ = run_step(load(DRIFT), "fix", "Skip when a fix is already waiting", {"GH_TOKEN": "stub"},
+                                      [("pr list --label contract-drift --state open --json number --jq", SERVER_ERROR, 1)])
+        self.assertEqual(1, rc, out)
+        self.assertEqual("", output)
+
+    def test_the_reminder_comments_on_the_waiting_pr(self):
+        env = {"GH_TOKEN": "stub", "GH_REPO": "daarko10/tandem", "WAITING": "12", "RUN_URL": RUN_URL, "DATE": "2026-10-22"}
+        rc, out, _, calls = run_step(load(DRIFT), "remind", "Comment on the waiting pull request", env, [("pr comment 12 --body", "", 0)])
+        self.assertEqual(0, rc, out)
+        self.assertEqual(f"pr comment 12 --body The nightly of 2026-10-22 is still red: {RUN_URL}. This pull request is still waiting; merge or close it to re-arm the loop.\n", calls)
+        rc, out, _, calls = run_step(load(DRIFT), "remind", "Comment on the waiting pull request", {**env, "WAITING": ""}, [])
+        self.assertEqual(1, rc, out)
+        self.assertEqual("", calls)
+
+    def name_the_red_run(self, env: dict, view: dict | None) -> tuple[int, str, str, str]:
+        gh = [] if view is None else [("api repos/daarko10/tandem/actions/runs/", json.dumps(view), 0)]
+        return run_step(load(DRIFT), "fix", "Name the red run", env, gh)
+
+    def test_name_the_red_run_accepts_the_nightly_s_own_red_run(self):
+        rc, out, output, _ = self.name_the_red_run(NAME_ENV, RUN_VIEW)
+        self.assertEqual(0, rc, out)
+        self.assertEqual(f"id=7\nurl={RUN_URL}\ndate=2026-10-21\nrehearse=false\n", output)
+
+    def test_name_the_red_run_refuses_a_fork_s_a_green_and_another_branch_s_run(self):
+        for field, value in (("head_repository", {"full_name": "someone/tandem"}), ("conclusion", "success"), ("head_branch", "feature"),
+                             ("event", "pull_request"), ("name", "Build")):
+            rc, out, output, calls = self.name_the_red_run(NAME_ENV, {**RUN_VIEW, field: value})
+            self.assertEqual(1, rc, (field, out))
+            self.assertEqual("", output, field)                                       # nothing reaches GITHUB_OUTPUT: the branch name and the fetch depend on it
+            self.assertIn("Run 7 is not a failed scheduled or dispatched CLI contract run on main of daarko10/tandem", out)
+            self.assertIn("api repos/daarko10/tandem/actions/runs/7\n", calls)
+
+    def test_name_the_red_run_refuses_an_id_that_is_not_a_number_before_any_call(self):
+        for bad in ("7;rm", "7\n8", "abc"):
+            rc, out, output, calls = self.name_the_red_run({**NAME_ENV, "EVENT_RUN_ID": "", "INPUT_RUN_ID": bad}, None)
+            self.assertEqual(1, rc, (bad, out))
+            self.assertIn("run_id must be a number", out)
+            self.assertEqual(("", ""), (output, calls))
+        rc, out, output, calls = self.name_the_red_run({**NAME_ENV, "EVENT_RUN_ID": ""}, None)
+        self.assertEqual(1, rc, out)
+        self.assertIn("No run to fix", out)
+        self.assertEqual(("", ""), (output, calls))
+
+    def test_name_the_red_run_names_this_run_for_a_rehearsal_without_a_call(self):
+        rc, out, output, calls = self.name_the_red_run({**NAME_ENV, "EVENT_RUN_ID": "", "REHEARSE": "true"}, None)
+        self.assertEqual(0, rc, out)
+        self.assertRegex(output, r"^id=99\nurl=https://github\.com/daarko10/tandem/actions/runs/99\ndate=\d{4}-\d{2}-\d{2}\nrehearse=true\n$")
+        self.assertEqual("", calls)
+
+    def protect(self, rules: str, owners: str, branch: tuple[str, int]) -> tuple[int, str, str, str]:
+        return run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
+                        [(RULES, rules, 0), (CODEOWNERS, owners, 0), (BRANCH_READ, branch[0], branch[1])])
+
+    def test_protect_passes_a_ruleset_an_owner_and_a_missing_branch(self):
+        rc, out, _, calls = self.protect("1\n", "* @daarko10\n", (NOT_FOUND, 1))
+        self.assertEqual(0, rc, out)
+        self.assertIn("main requires a pull request, an approving review from a code owner and approval of the last push (ruleset)", out)
+        self.assertEqual([RULES, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0]], [c.split(" --jq", 1)[0] for c in calls.splitlines()])   # the ruleset first
+
+    def test_protect_refuses_without_the_ruleset_the_owner_line_or_a_404(self):
+        for rules, owners, branch, message in (("0\n", "* @daarko10\n", (NOT_FOUND, 1), "No ruleset on main requires a pull request"),
+                                               ("x\n", "* @daarko10\n", (NOT_FOUND, 1), "No ruleset on main requires a pull request"),
+                                               ("1\n", "docs/ @daarko10\n", (NOT_FOUND, 1), "CODEOWNERS has no line owning every file"),
+                                               ("1\n", "* @daarko10\n", (BRANCH + "\n", 0), f"The branch {BRANCH} exists"),
+                                               ("1\n", "* @daarko10\n", (SERVER_ERROR, 1), f"Reading the branch {BRANCH} failed (HTTP status '502')"),
+                                               ("1\n", "* @daarko10\n", ("", 1), f"Reading the branch {BRANCH} failed (HTTP status 'none')")):
+            rc, out, _, _ = self.protect(rules, owners, branch)
+            self.assertEqual(1, rc, (message, out))
+            self.assertIn(message, out)
+
+    def test_the_report_opens_or_comments_on_the_standing_issue(self):
+        classification = json.dumps({"kind": "cli-did-not-answer", "cli_version": "2.1.301", "detail": "no system/init", "files": ["contract-hello.ndjson"]})
+        env = {"GH_TOKEN": "stub", "RUN_URL": RUN_URL}
+        rc, out, _, calls = run_step(load(DRIFT), "fix", "Report a run the agent cannot fix", env,
+                                     [(ISSUE_LIST, "", 0), (ISSUE_CREATE, "https://github.com/daarko10/tandem/issues/9\n", 0)], {"build/drift/precheck.json": classification})
+        self.assertEqual(0, rc, out)
+        self.assertIn(f"{ISSUE_CREATE} The CLI contract run {RUN_URL} is red and the drift loop cannot fix it.\n\n- kind: cli-did-not-answer\n- CLI version: 2.1.301\n- detail: no system/init\n- files: contract-hello.ndjson", calls)
+        rc, out, _, calls = run_step(load(DRIFT), "fix", "Report a run the agent cannot fix", env,
+                                     [(ISSUE_LIST, "3\n", 0), ("issue comment 3 --body", "", 0)],
+                                     {"build/drift/precheck.json": classification, "build/drift/classification.json": classification.replace("cli-did-not-answer", "unknown")})
+        self.assertEqual(0, rc, out)
+        self.assertIn("issue comment 3 --body The CLI contract run", calls)
+        self.assertIn("- kind: unknown", calls)                                       # the classification when Gradle ran, else the precheck
+        self.assertNotIn("issue create", calls)
+
+    def test_the_fetch_tells_no_recording_from_a_failed_listing(self):
+        env = {"GH_TOKEN": "stub", "RUN_ID": "7"}
+        listing = "api repos/daarko10/tandem/actions/runs/7/artifacts --jq"
+        rc, out, _, calls = run_step(load(DRIFT), "fix", "Fetch the recording", env, [(listing, "null\n", 0)])
+        self.assertEqual(0, rc, out)
+        self.assertIn("the run left no recording", out)
+        self.assertNotIn("run download", calls)
+        rc, out, _, calls = run_step(load(DRIFT), "fix", "Fetch the recording", env, [(listing, "0\n", 0), ("run download 7 -n contract-recording -D build/drift/recording", "", 0)])
+        self.assertEqual(0, rc, out)
+        self.assertIn("run download 7 -n contract-recording -D build/drift/recording\n", calls)
+        rc, out, _, calls = run_step(load(DRIFT), "fix", "Fetch the recording", env, [(listing, SERVER_ERROR, 1)])
+        self.assertEqual(1, rc, out)                                                  # a failed listing is not "the CLI did not answer"
+        self.assertNotIn("run download", calls)
 
 
 if __name__ == "__main__":
