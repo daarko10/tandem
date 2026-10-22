@@ -390,6 +390,33 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `setModel sends set_model and records the model shown before under its request id`() = runBlocking {
+        val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > '${stdin.path}'"))
+        session.start()
+        session.setModel("opus")
+        // The request id is what lets a refusal put back the model shown before (Reducer, ModelChange).
+        val (requestId, change) = session.state.value.modelChanges.entries.single()
+        assertEquals(ModelChange("opus", null, previousPending = false, previousWarning = null), change)
+
+        val written = withTimeout(10_000) {
+            var lines = stdin.readLines()
+            while (lines.none { "set_model" in it }) {
+                delay(20)
+                lines = stdin.readLines()
+            }
+            lines
+        }
+        val frame = Json.parseToJsonElement(written.single { "set_model" in it }).jsonObject
+        assertEquals(requestId, frame["request_id"]!!.jsonPrimitive.content)
+        val request = frame["request"]!!.jsonObject
+        assertEquals("set_model", request["subtype"]!!.jsonPrimitive.content)
+        assertEquals("opus", request["model"]!!.jsonPrimitive.content)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
     fun `rename asks the CLI to rename the session`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
