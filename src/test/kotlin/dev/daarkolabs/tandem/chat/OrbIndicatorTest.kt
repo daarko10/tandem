@@ -61,17 +61,26 @@ class OrbIndicatorTest {
             assertTrue(near.radius > far.radius, "$far then $near")
             assertTrue(near.alpha >= far.alpha, "$far then $near")
         }
-        assertTrue(OrbIndicator.project(0f, 0f, -0.3f).alpha < OrbIndicator.project(0f, 0f, -0.1f).alpha, "fades behind the centre")
+        // The desktop app shows a far orb by its size alone: full colour down to the ring's far side, the deepest a shape goes.
+        assertEquals(1f, OrbIndicator.project(0f, 0f, -0.34f).alpha, "opaque at the ring's far side")
         assertEquals(1f, OrbIndicator.project(0f, 0f, 0f).alpha, "opaque at the centre's depth")
+        assertTrue(OrbIndicator.project(0f, 0f, -0.6f).alpha < 0.3f, "a flipping orb at its deepest fades as it vanishes")
         assertTrue(orbs.last().x > orbs.first().x, "a near orb sits further from the centre")
     }
 
     @Test
-    fun `an orb far behind the shapes all but vanishes, while the shapes keep the camera's sizes`() {
+    fun `a flipping orb at its deepest all but vanishes, while the single orb and the shapes stay in sight`() {
         val centre = OrbIndicator.project(0f, 0f, 0f).radius
         assertTrue(OrbIndicator.project(0f, 0f, -0.6f).radius < 0.25f * centre, "a flipping orb at its deepest")
-        val solo = OrbIndicator.frame(Phase.SOLO_AFTER_RING.startMs + Phase.SOLO_AFTER_RING.durationMs / 2).single()
-        assertTrue(solo.radius < 0.25f * centre, "the single orb backed away: $solo")
+        // The desktop app's single orb dips to about two thirds of its radius between two shapes, at full colour, and never vanishes.
+        for (phase in listOf(Phase.SOLO_AFTER_RING, Phase.SOLO_AFTER_SQUARE, Phase.SOLO_AFTER_TRIAD)) {
+            for (t in phase.startMs until phase.startMs + phase.durationMs step 5) {
+                val solo = OrbIndicator.frame(t).single()
+                assertTrue(solo.radius >= 0.5f * centre && solo.alpha >= 0.8f, "$phase at $t: $solo")
+            }
+            val deepest = OrbIndicator.frame(phase.startMs + phase.durationMs / 2).single()
+            assertTrue(deepest.radius < 0.85f * centre, "$phase: the single orb backs away: $deepest")
+        }
         // The ring's far side, the deepest a shape goes, is only the camera's perspective away from the centre's size.
         assertEquals(centre * 1.25f / (1.25f + 0.34f), OrbIndicator.project(0f, 0f, -0.34f).radius, 1e-4f)
     }
@@ -87,6 +96,18 @@ class OrbIndicatorTest {
             val later = OrbIndicator.frame(t + 100).first()
             assertTrue(later.alpha > newcomer.alpha && later.radius > newcomer.radius, "at $join ms: $newcomer, then $later")
         }
+    }
+
+    @Test
+    fun `the ring tips its near side low, then high`() {
+        // A quarter of the way through the ring the near orb is below the far one; three quarters of the way, above it.
+        val low = OrbIndicator.frame(Phase.RING.startMs + Phase.RING.durationMs / 4)
+        assertTrue(low.last().y - low.first().y > 0.2f, "$low")
+        val high = OrbIndicator.frame(Phase.RING.startMs + Phase.RING.durationMs * 3 / 4)
+        assertTrue(high.first().y - high.last().y > 0.2f, "$high")
+        // Edge on in between, half way through: every orb on the centre's line.
+        val edgeOn = OrbIndicator.frame(Phase.RING.startMs + Phase.RING.durationMs / 2)
+        assertTrue(edgeOn.all { kotlin.math.abs(it.y - 0.5f) < 0.01f }, "$edgeOn")
     }
 
     @Test

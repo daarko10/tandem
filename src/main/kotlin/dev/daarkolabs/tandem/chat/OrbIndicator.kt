@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.chat
 
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -13,15 +14,17 @@ data class Orb(val x: Float, val y: Float, val radius: Float, val alpha: Float)
 /**
  * The working row's indicator (spec 4.9.1) after the desktop app's: a cluster of coral orbs that turns in 3D. Each orb is a point in a
  * world centred on the box, x right, y down and z towards the viewer, seen through a perspective camera ([project]): a near orb is
- * bigger and further from the centre, a far one smaller, closer to the centre and fainter, and one far behind the shapes all but
- * vanishes, as the desktop app's do. The orbs take four shapes in turn and
- * merge into one between them, as the desktop app's do; one cycle lasts [PERIOD_MS]:
- * - a ring of three, edge on, that spins about the vertical once in 3 s and tips towards the viewer half way ([Phase.RING]);
+ * bigger and further from the centre, a far one smaller and closer to the centre, at full colour, as the desktop app's are; only
+ * an orb that flips through the depth behind the shapes all but vanishes and fades, as the desktop app's do. The orbs take four
+ * shapes in turn and merge into one between them, as the desktop app's do. The shapes, their timings and the merges were measured
+ * from the desktop app's recording; the cycle of [PERIOD_MS] that strings them together is composed:
+ * - a ring of three, edge on, that spins about the vertical once in 3 s, tipping its near side low and then high ([Phase.RING]);
  * - a square of four whose diagonal pairs swap places in turn, each half turn bulging towards the other pair, every 0.6 s
  *   ([Phase.SQUARE]);
  * - three orbs on the corners of a hexagon, each flipping through the back to the opposite corner one after another, 1/3 s apart,
  *   every orb back home in 2 s ([Phase.TRIAD]);
- * - one orb between them, which backs away and comes back ([Phase.SOLO_AFTER_RING] and the like) before it splits again.
+ * - one orb between them, which backs away a little, never out of sight, and comes back ([Phase.SOLO_AFTER_RING] and the like)
+ *   before it splits again.
  * Pure: the same time always gives the same frame. Under Reduce motion the row shows [STILL].
  */
 object OrbIndicator {
@@ -34,22 +37,30 @@ object OrbIndicator {
     /** An orb's radius at the depth of the box's centre. */
     private const val ORB_RADIUS = 0.11f
 
-    /** How far back an orb fades to [FAR_ALPHA]; nearer than the centre it is opaque. */
+    /**
+     * Behind the shapes, from [VANISH_FROM] back (the ring's far side, the deepest a shape goes), an orb shrinks beyond the camera's
+     * term too, to [VANISH_SCALE] of its size at [FAR_DEPTH], and fades with it to [FAR_ALPHA]: a flipping orb at its deepest ends at
+     * about a fifth of an orb at the centre, as the desktop app's do. Nearer than [VANISH_FROM] an orb is opaque: the desktop app
+     * shows a far orb by its size alone.
+     */
+    private const val VANISH_FROM = 0.35f
+    private const val VANISH_SCALE = 0.3f
     private const val FAR_DEPTH = 0.6f
     private const val FAR_ALPHA = 0.25f
 
     /**
-     * Behind the shapes, from [VANISH_FROM] back (the ring's far side, the deepest a shape goes), an orb shrinks beyond the camera's
-     * term too, to [VANISH_SCALE] of its size at [FAR_DEPTH]: a flipping orb at its deepest and the single orb backing away end at
-     * about a fifth of an orb at the centre, as the desktop app's do.
+     * How far the single orb backs away between two shapes: to the ring's far side, where [VANISH_FROM] begins, and no further, so
+     * that it dips to about four fifths of its radius and stays opaque. The desktop app's dips to about two thirds and never vanishes.
      */
-    private const val VANISH_FROM = 0.35f
-    private const val VANISH_SCALE = 0.3f
+    private const val SOLO_BACK = VANISH_FROM
 
     private const val RING_RADIUS = 0.34f
     private const val RING_SPIN_MS = 3_000L
 
-    /** The ring's tip towards the viewer half way through [Phase.RING], in radians: edge on most of the time, as the desktop app's. */
+    /**
+     * How far the ring tips at its most, in radians: edge on most of the time, its near side low about a quarter of the way through
+     * [Phase.RING] and high about three quarters of the way, each tip about 0.5 s, as the desktop app's.
+     */
     private const val RING_TILT = 0.75f
 
     /** Half the side of the square of four. */
@@ -82,8 +93,8 @@ object OrbIndicator {
     /** The corners of the square in degrees, clockwise from the right: top left, top right, bottom right, bottom left. */
     private val CORNERS: FloatArray = floatArrayOf(225f, 315f, 45f, 135f)
 
-    /** How far the single orb backs away between two shapes, and where the hexagon's later orbs come from. */
-    private const val SOLO_DEPTH = 0.6f
+    /** Where the hexagon's later orbs come from: as deep as a flip goes, all but vanished ([VANISH_SCALE]). */
+    private const val JOIN_DEPTH = 0.6f
 
     /** When the orbs of [Phase.TRIAD_SPLIT] leave the centre, and how long each takes to reach the hexagon. */
     private val TRIAD_JOINS_MS: LongArray = longArrayOf(0, 150, 300)
@@ -135,13 +146,14 @@ object OrbIndicator {
 
     /**
      * The world point ([x], [y], [z]) as drawn: moved away from the centre and grown in proportion to the camera's distance over its
-     * own, shrunk further from [VANISH_FROM] behind the centre to [VANISH_SCALE] at [FAR_DEPTH], opaque from the centre's depth forwards
-     * and fading to [FAR_ALPHA] at [FAR_DEPTH] behind it.
+     * own; opaque down to [VANISH_FROM] behind the centre, and from there shrunk further, to [VANISH_SCALE] at [FAR_DEPTH], and faded
+     * with it, to [FAR_ALPHA].
      */
     internal fun project(x: Float, y: Float, z: Float): Orb {
         val scale = CAMERA / (CAMERA - z)
-        val vanish = 1f - (1f - VANISH_SCALE) * easeInOut(((-z - VANISH_FROM) / (FAR_DEPTH - VANISH_FROM)).coerceIn(0f, 1f))
-        val alpha = FAR_ALPHA + (1f - FAR_ALPHA) * (1f + z / FAR_DEPTH).coerceIn(0f, 1f)
+        val deep = easeInOut(((-z - VANISH_FROM) / (FAR_DEPTH - VANISH_FROM)).coerceIn(0f, 1f))
+        val vanish = 1f - (1f - VANISH_SCALE) * deep
+        val alpha = 1f - (1f - FAR_ALPHA) * deep
         return Orb(0.5f + x * scale, 0.5f + y * scale, ORB_RADIUS * scale * vanish, alpha)
     }
 
@@ -170,19 +182,26 @@ object OrbIndicator {
             Phase.TRIAD_SPLIT -> triadSplit(elapsed - phase.durationMs, elapsed)
             Phase.TRIAD -> (0 until 3).map { triad(it, elapsed) }
             Phase.TRIAD_MERGE -> (0 until 3).map { triad(it, Phase.TRIAD.durationMs + elapsed).lerp(CENTRE, easeIn(u)) }
-            Phase.SOLO_AFTER_RING, Phase.SOLO_AFTER_SQUARE, Phase.SOLO_AFTER_TRIAD -> listOf(Point(0f, 0f, -SOLO_DEPTH * sin(PI.toFloat() * u)))
+            Phase.SOLO_AFTER_RING, Phase.SOLO_AFTER_SQUARE, Phase.SOLO_AFTER_TRIAD -> listOf(Point(0f, 0f, -SOLO_BACK * sin(PI.toFloat() * u)))
         }
     }
 
-    /** The ring of three [tau] into [Phase.RING] (negative before it): one turn per [RING_SPIN_MS], tipped half way through. */
+    /**
+     * The ring of three [tau] into [Phase.RING] (negative before it): one turn per [RING_SPIN_MS], its near side tipped low a quarter of
+     * the way through and high three quarters of the way, each tip a fourth power of a sine, so that it lasts about 0.5 s.
+     */
     private fun ringAt(tau: Long, radius: Float = RING_RADIUS): List<Point> {
         val spin = 2f * PI.toFloat() * tau / RING_SPIN_MS
         val along = (tau.toFloat() / Phase.RING.durationMs).coerceIn(0f, 1f)
-        val tilt = RING_TILT * sin(PI.toFloat() * along).let { it * it * it * it }
+        val wave = sin(2f * PI.toFloat() * along)
+        val tilt = RING_TILT * wave * wave * wave * abs(wave)
         return (0 until 3).map { ring(it, spin, tilt, radius) }
     }
 
-    /** Orb [i] of a ring of three of [radius], turned [spin] radians about the vertical and tipped [tilt] radians: the near side low. */
+    /**
+     * Orb [i] of a ring of three of [radius], turned [spin] radians about the vertical and tipped [tilt] radians: the near side low
+     * for a positive [tilt], high for a negative one.
+     */
     private fun ring(i: Int, spin: Float, tilt: Float, radius: Float): Point {
         val angle = spin + i * 2f * PI.toFloat() / 3f
         val depth = radius * cos(angle)
@@ -232,13 +251,13 @@ object OrbIndicator {
 
     /**
      * The hexagon forming [tau] before [Phase.TRIAD] begins ([elapsed] into [Phase.TRIAD_SPLIT]): the single orb moves out to its
-     * place, then the others come out of the depth behind the centre one after another, from all but vanished ([SOLO_DEPTH]) and
+     * place, then the others come out of the depth behind the centre one after another, from all but vanished ([JOIN_DEPTH]) and
      * unseen ([Point.fade] 0), growing and fading in as they come forward to their places; an orb not yet out is not drawn.
      */
     private fun triadSplit(tau: Long, elapsed: Long): List<Point> = (0 until 3).mapNotNull { i ->
         val since = elapsed - TRIAD_JOINS_MS[i]
         if (i > 0 && since <= 0) return@mapNotNull null
-        val start = if (i == 0) CENTRE else Point(0f, 0f, -SOLO_DEPTH, fade = 0f)
+        val start = if (i == 0) CENTRE else Point(0f, 0f, -JOIN_DEPTH, fade = 0f)
         start.lerp(triad(i, tau), easeOut((since.toFloat() / TRIAD_JOIN_MS[i]).coerceIn(0f, 1f)))
     }
 
