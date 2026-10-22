@@ -26,6 +26,36 @@ class ComposerImagesTest {
     lateinit var dir: Path
 
     @Test
+    fun `the file chooser opens once, in a task of its own, never in the click`() {
+        val tasks = ArrayList<Runnable>()
+        val opened = AtomicInteger()
+        val chosen = ArrayList<List<Path>>()
+        val picked = listOf(dir.resolve("a.png"))
+        ComposerImages.chooseLater(
+            choose = {
+                opened.incrementAndGet()
+                picked
+            },
+            onChosen = { chosen += it },
+            launcher = { tasks += it },
+        )
+        assertEquals(0, opened.get())
+        assertTrue(chosen.isEmpty())
+        tasks.single().run()
+        assertEquals(1, opened.get())
+        assertEquals(listOf(picked), chosen)
+    }
+
+    @Test
+    fun `a cancelled file chooser adds nothing`() {
+        val tasks = ArrayList<Runnable>()
+        val chosen = ArrayList<List<Path>>()
+        ComposerImages.chooseLater(choose = { emptyList() }, onChosen = { chosen += it }, launcher = { tasks += it })
+        tasks.single().run()
+        assertTrue(chosen.isEmpty())
+    }
+
+    @Test
     fun `text with an image rendering pastes as text`() {
         assertFalse(ComposerImages.clipboardHasImage { listOf(DataFlavor.stringFlavor, DataFlavor.imageFlavor) })
         assertTrue(ComposerImages.clipboardHasImage { listOf(DataFlavor.imageFlavor) })

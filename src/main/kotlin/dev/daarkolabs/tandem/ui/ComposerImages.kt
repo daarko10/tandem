@@ -1,5 +1,7 @@
 package dev.daarkolabs.tandem.ui
 
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileChooser.FileChooser
@@ -24,8 +26,9 @@ import javax.imageio.ImageIO
 
 /**
  * Where the composer's images come from (polish spec 2.7): the clipboard, a drop and the `+` menu's file chooser. Only
- * [clipboardHasImage] (the clipboard's flavours) and [chooseImages] (a modal chooser) run on the EDT; everything that reads data runs
- * on [Dispatchers.IO]. A file is named by its file name, which the notices quote; nothing here logs a name or a byte of it.
+ * [clipboardHasImage] (the clipboard's flavours) and [chooseImages] (a modal chooser, opened through [chooseImagesLater]) run on the
+ * EDT; everything that reads data runs on [Dispatchers.IO]. A file is named by its file name, which the notices quote; nothing here
+ * logs a name or a byte of it.
  */
 internal object ComposerImages {
     private val LOG: Logger = logger<ComposerImages>()
@@ -91,8 +94,32 @@ internal object ComposerImages {
         }
     }
 
-    /** The images the user picks in the IDE's file chooser, which is modal: call it on the EDT. */
+    /**
+     * The images the user picks in the IDE's file chooser, which is modal: call it only from [chooseImagesLater], never from a Compose
+     * callback or a coroutine launched from composition.
+     */
     fun chooseImages(project: Project): List<Path> = FileChooser.chooseFiles(descriptor(), project, null).map { it.toNioPath() }
+
+    /**
+     * Opens [project]'s image chooser ([chooseImages]) as an EDT event of its own, after the current one, in the default modality, and
+     * passes the images picked to [onChosen]; see [chooseLater]. Nothing opens once [project] is disposed.
+     */
+    fun chooseImagesLater(project: Project, onChosen: (List<Path>) -> Unit): Unit =
+        chooseLater({ chooseImages(project) }, onChosen) { task ->
+            ApplicationManager.getApplication().invokeLater(task, ModalityState.defaultModalityState(), project.disposed)
+        }
+
+    /**
+     * Runs the modal [choose] in the task [launcher] schedules, never in the caller's own call, and passes what it returns to
+     * [onChosen] unless that is empty (a cancelled chooser). The `+` menu's click runs inside the Compose scene's pointer event, and a
+     * coroutine launched from composition runs on the scene's effect dispatcher, which that event and every frame flush. A modal
+     * chooser there runs its nested event loop while the scene drops its own invalidations, so no frame is drawn while it is open, and
+     * a frame painted during that loop re-enters both the dispatcher's flush and the frame: the chat then stopped painting until the
+     * next input, even after the chooser closed (macOS, 2026.1).
+     */
+    fun chooseLater(choose: () -> List<Path>, onChosen: (List<Path>) -> Unit, launcher: (Runnable) -> Unit) {
+        launcher(Runnable { choose().takeIf { it.isNotEmpty() }?.let(onChosen) })
+    }
 
     /** The file chooser's descriptor: several files, the image types of [Attachments.EXTENSIONS] only. */
     fun descriptor(): FileChooserDescriptor =
