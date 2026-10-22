@@ -7,6 +7,7 @@ import dev.daarkolabs.tandem.session.TANDEM_MCP_SERVER
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
+import java.net.URI
 
 // The MCP panel's rows (docs/superpowers/specs/2026-10-21-mcp-controls-design.md 3.2, 4.3): pure, built off the EDT.
 
@@ -32,7 +33,7 @@ enum class McpSource(val title: String) {
 
 /**
  * One server as the panel draws it. [key] is unique in the panel (two entries may share a [name]); [name] is what every request
- * sends, [displayName] what the row shows. [detail] is line 2 (the url without its query and fragment, else the command without its
+ * sends, [displayName] what the row shows. [detail] is line 2 (the url's scheme, host and port only, else the command without its
  * args); [error] the entry's error verbatim, whatever the status. [readOnly]: Tandem's own server, which has no action. [rawSource]
  * is the wire source of an [McpSource.OTHER] row, for its pill.
  */
@@ -170,9 +171,20 @@ private fun actionsOf(server: McpServerInfo, loginHinted: Set<String>): Immutabl
     McpStatus.OTHER -> persistentListOf(McpAction.DISABLE)
 }
 
-/** Line 2: the url up to its query or fragment, else the command alone; args and query values can carry tokens and never show. */
+/**
+ * Line 2: the url's scheme, host and port, else the command alone. Args, user info, the path (some hosted servers put their key in
+ * it) and the query can carry tokens, and never show (spec 3.2). A url that does not parse, or has no host, falls back to the command.
+ */
 private fun detailOf(server: McpServerInfo): String? {
     val config = server.config ?: return null
-    val url = config.url?.let { url -> url.substring(0, url.indexOfAny(charArrayOf('?', '#')).takeIf { it >= 0 } ?: url.length) }
-    return url?.takeIf { it.isNotBlank() } ?: config.command?.takeIf { it.isNotBlank() }
+    return config.url?.let(::origin) ?: config.command?.takeIf { it.isNotBlank() }
+}
+
+/** `scheme://host[:port]` of [url], its user info dropped, or null when it does not parse as one with a scheme and an authority. */
+private fun origin(url: String): String? {
+    val uri = runCatching { URI(url.trim()) }.getOrNull() ?: return null
+    val scheme = uri.scheme ?: return null
+    // The raw authority keeps an `@` inside user info escaped, so the host and port follow the last one.
+    val authority = uri.rawAuthority?.substringAfterLast('@')?.takeIf { it.isNotBlank() } ?: return null
+    return "$scheme://$authority"
 }

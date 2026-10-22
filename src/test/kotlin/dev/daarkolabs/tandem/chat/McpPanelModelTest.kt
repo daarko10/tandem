@@ -110,16 +110,25 @@ class McpPanelModelTest {
     }
 
     @Test
-    fun `line two is the command without args or the url without query and fragment`() {
-        val http = server("h", config = McpConfig("http", null, emptyList(), "http://h/mcp?x=1#f"))
-        assertEquals("http://h/mcp", row(http).detail)
-        assertEquals("http://h/mcp", row(server("f", config = McpConfig("http", null, emptyList(), "http://h/mcp#f?x=1"))).detail)
+    fun `line two is the command without args or the url's scheme, host and port`() {
+        fun url(url: String) = row(server("h", config = McpConfig("http", "/bin/fallback", emptyList(), url))).detail
+        assertEquals("http://h", url("http://h/mcp?x=1#f"))
+        assertEquals("http://h", url("http://h/mcp#f?x=1"))
+        // User info and a key in the path never show (spec 3.2: a screen share).
+        assertEquals("https://h", url("https://u:secret@h/x"))
+        assertEquals("https://h", url("https://h/api/mcp/s/SECRET/mcp"))
+        assertEquals("https://h:8443", url("https://h:8443/mcp"))
+        assertEquals("https://h:1", url("https://u:p%40ss@h:1/x"))
+        assertEquals("http://my_server.local:9", url("http://my_server.local:9/mcp"))
+        // No host, or no parse: the command instead, never the raw url.
+        assertEquals("/bin/fallback", url("not a url"))
+        assertEquals("/bin/fallback", url("mcp/relative"))
         val stdio = server("s", config = McpConfig("stdio", "/usr/bin/python3", listOf("-I", "--token=secret"), null))
         assertEquals("/usr/bin/python3", row(stdio).detail)
         assertNull(row(server("bare")).detail)
         assertNull(row(server("empty", config = McpConfig(null, null, emptyList(), null))).detail)
         // Recorded: mcp-status:18.
-        assertEquals(listOf("/usr/bin/python3", "/bin/false", "http://127.0.0.1:33041/mcp"), mcpPanel(listed(18)).rows().map { it.detail })
+        assertEquals(listOf("/usr/bin/python3", "/bin/false", "http://127.0.0.1:33041"), mcpPanel(listed(18)).rows().map { it.detail })
     }
 
     @Test
