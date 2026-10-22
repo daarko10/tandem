@@ -185,6 +185,8 @@ tasks {
                 "-Dtandem.ideVersion=${ideVersion.get()}",
             )
         }
+        // Set by build.yml's IDE test jobs: <index>/<total> runs every total-th test of each class (IdeTestShard). Empty runs all.
+        systemProperty("tandem.ideTestShard", providers.systemProperty("tandem.ideTestShard").getOrElse(""))
         // IDE Starter downloads the IDE under test and keeps its logs and screenshots in out/ide-tests (gitignored).
     }
 }
