@@ -1,8 +1,9 @@
 # CLI stream-json protocol reference
 
-How Tandem talks to the user's `claude` binary (Claude Code; recorded with CLI 2.1.300 to 2.1.306) over stdin/stdout
+How Tandem talks to the user's `claude` binary (Claude Code; recorded with CLI 2.1.300 to 2.1.308) over stdin/stdout
 NDJSON. Every claim names the fixture line that shows it and the CLI version it was recorded on, or the source it rests
-on (below); the traps that cost the most time are collected in section 9 (Gotchas).
+on (below); the traps that cost the most time are collected in section 9 (Gotchas): read it first. It keeps its number
+because it cites sections 1 to 8, and the specs and the code cite all of them by these numbers.
 
 Sources, in order of authority:
 1. Recorded transcripts in `src/test/resources/fixtures/`, cited as `<name>.ndjson:<line>` (also `<name>:<line>`, and
@@ -23,6 +24,8 @@ Sources, in order of authority:
      image's `data` verbatim), `bash-mode` and `bash-mode-respond` (shell escapes, section 3;
      `transcripts/bash-mode-interactive.jsonl` is the terminal's own `!`, with no stream twin), and the MCP recordings
      `mcp-status`, `mcp-tool-call` and `mcp-slash` (how they were made: section 10).
+   - 2.1.308, with its transcript: `bash-mode-context` (a context-only shell escape as Tandem sends it, one quiet frame,
+     section 3; recorded with `--model claude-sonnet-5-5`).
    `synthetic-long-reply` is generated from `plain-reply` by `scripts/make_long_reply.py`, the only fixture that was not
    recorded; nothing here cites it. Re-record with `scripts/record-fixture.sh` (one-shot prompt) or
    `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too and redact the recording in the
@@ -290,12 +293,13 @@ string, not a block array, and every frame carries `client_composed:true` (`Host
 |---|---|---|
 | `bashInput` (`shouldQuery:false`) | the command, replies on | `bash-mode-respond.ndjson:3-7`: lifecycle, `init`, a zero-turn `result` (`num_turns:0`, `result:""`, `duration_api_ms:0`) naming its uuid (`:6`) |
 | `bashOutput` (no `shouldQuery`) | the output, replies on, sent only once that zero-turn result is in | `bash-mode-respond.ndjson:8-11`: a normal turn, `status requesting` naming its uuid (`:11`), its `result` (`:41`) |
-| `bashContext` (`shouldQuery:false`) | command and output, replies off | **unrecorded** as one host frame: the probe sent two quiet frames back to back, which the CLI queued together (`bash-mode.ndjson:3-6`), answered with one zero-turn `result` naming both (`:8`) and merged into this content (`transcripts/bash-mode.jsonl:5`) |
+| `bashContext` (`shouldQuery:false`) | command and output, replies off | `bash-mode-context.ndjson:3-6` (2.1.308): lifecycle, `init`, a zero-turn `result` naming its uuid (`:6`); the transcript keeps the content as sent (`transcripts/bash-mode-context.jsonl:3`). It is the content the CLI writes when it merges two quiet frames sent back to back (`bash-mode.ndjson:3-8`, `transcripts/bash-mode.jsonl:5`, 2.1.306) |
 
 stderr is merged into stdout in order, so `<bash-stderr>` is empty, as in the 2.1.306 terminal; Tandem's note for a stopped or capped
 command (`Stopped after 3.0s`, `Killed after 10 minutes`) is the last line of `<bash-stdout>`. The CLI echoes none of these frames.
 The CLI batches the sends queued before it starts processing, so Tandem keeps the recorded order: the output frame waits for the
-command frame's zero-turn result, and an escape sent behind a prompt waits for that prompt's result. Two quiet frames can still go
+command frame's zero-turn result (or after 5 s without it, when the CLI never answers the quiet frame), and an escape sent behind a
+prompt waits for that prompt's result. Two quiet frames can still go
 out back to back (a context-only escape and the escape held behind the same prompt), the recorded shape of `bash-mode.ndjson:3-8`.
 Nothing holds a prompt: one sent before a context-only escape's zero-turn result, or one queued behind an escape while the process
 starts, goes out right after the quiet frame, and what the CLI makes of that quiet + querying batch is **unrecorded**. A `result`
@@ -637,8 +641,8 @@ server the `init` leaves out is dropped, except a claude.ai connector (`source:"
 `mcp-slash.ndjson:4`, the names of the initialize `commands`, 4.2) and `terminal_slash_commands` the ones that need the
 terminal (`["doctor","color","focus","reload-plugins"]`, `:4`). In the other fixtures the redactor empties these lists.
 
-`effort` is typed in the SDK but missing from every recorded `init` (2.1.300 and 2.1.301), which carry only
-`per_turn_effort_active: true`. So Tandem shows the effort it passed with `--effort`, which for a session loaded from
+`effort` is typed in the SDK but missing from every recorded `init` (2.1.300 to 2.1.308, e.g. `plain-reply.ndjson:4`,
+`mcp-status.ndjson:6`, `bash-mode-context.ndjson:5`), which carry only `per_turn_effort_active: true`. So Tandem shows the effort it passed with `--effort`, which for a session loaded from
 disk is the last `assistant` line's `effort` in its transcript (section 11).
 
 ### 5.2 Other typed subtypes
@@ -974,6 +978,10 @@ A row that cites a fixture was recorded (versions in Sources); the others come f
 | API error | Fixture `invalid-model`: a synthetic `assistant` line (`model:"<synthetic>"`, `error:"model_not_found"`, `api_error_status:404`), then `result{subtype:"success", is_error:true, terminal_reason:"api_error"}` (section 7). A failed turn, named by `terminal_reason`, not by the subtype. |
 | Undocumented stdout types | See section 10. The SDK passes them through untouched. |
 | Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init` (`plain-reply.ndjson:1,2,4`, 2.1.300). Do not assume `init` is first. |
+| Local commands | A typed local command (`/mcp`, `/model`, `/help`) runs no turn and is not echoed: the CLI answers with a synthetic `assistant` line carrying `local_command_*` and a zero-turn `result` (`mcp-slash.ndjson:5`-`:6`, `:17`-`:18`, 2.1.306). No model output follows; show the line as the reply (6.1, 7). |
+| Batched and merged sends | The CLI batches the user frames queued before it starts processing (`bash-mode.ndjson:3-6`: both queued, then both started) and merges quiet ones (`shouldQuery:false`) into one transcript line with `mergedSendUuids` (`transcripts/bash-mode.jsonl:5`), answered by one zero-turn `result` naming both (`bash-mode.ndjson:8`, 2.1.306). A `result` can end several sends: read `user_message_uuids` (section 3, 7). |
+| `mcp_status` before the first prompt | The stdio servers are still `pending` (`mcp-status.ndjson:2`, 2.1.306); the first `init` already has settled states (`:6`). Ask again later (4.4). |
+| `mcp_set_servers` | Replaces only the servers it added itself, though every server of `--mcp-config` reports `source:"dynamic"` too: `{}` removes `echo2` alone (`mcp-status.ndjson:44`) and `echo`, `broken`, `authy` stay (`:45`, 2.1.306). The source does not tell the two apart (4.4). |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
 | Ordering | complete `assistant` precedes `content_block_stop` (`plain-reply.ndjson:10,11`; section 6.4). |
 | stdin close | Closing stdin = end of input. The SDK only calls `endInput()` after the last result when no bidirectional needs (permissions, hooks, MCP) remain. **Keep stdin open for the whole session**; close it to shut down gracefully, then wait for exit. |
@@ -1016,18 +1024,28 @@ Parse them leniently; any of them can change without notice.
 | assistant `tool_use_meta`, user `tool_use_result._meta` / `structuredContent`, `can_use_tool.server_policy_ask_only` | an MCP tool call's label, result and request (4.3, 6.1, 6.2) | not in `sdk.d.ts` 0.3.300 (`mcp-tool-call.ndjson:34`, `:35`, `:39`, 2.1.306) |
 | `mcp_authenticate` and its answer | 4.4, MCP requests | not in the typed request union of `sdk.d.ts` 0.3.306 (`mcp-status.ndjson:40`, 2.1.306) |
 
-The MCP fixtures (CLI 2.1.306, each with its transcript) were recorded by a one-off driver, not yet a
-`scripts/record-scenario.sh` scenario, with `scripts/drive_cli.py`'s argv minus
+The MCP fixtures (CLI 2.1.306, each with its transcript) were recorded by a one-off driver whose frames are now the
+`mcp-status`, `mcp-tool-call` and `mcp-slash` scenarios of `scripts/record-scenario.sh` (`scripts/drive_cli.py`; the nightly
+`cli-contract.yml` records `mcp-status` and `mcp-slash` and `ContractTest` checks them), with `scripts/drive_cli.py`'s argv minus
 `--safe-mode` (which turns MCP servers off), plus `--mcp-config <cwd>/mcp.json --strict-mcp-config --setting-sources
 project,local`, against three local servers: `echo` (stdio, one tool `echo` with an output schema), `broken` (`/bin/false`,
 so it fails at once) and `authy` (local HTTP that always answers 401 with OAuth metadata and dynamic client registration,
-and never issues a token). The redactor kept their `init` lists, which it empties elsewhere.
+and never issues a token). `scripts/mcp_probe_servers.py` serves `echo` and `authy` with Python's standard library only; the
+one-off driver's `echo` used the Python MCP SDK. The redactor kept their `init` lists, which it empties elsewhere
+(`INIT_KEEP`, by fixture name). A re-recording shifts the line numbers that the tests and this document cite, so the
+committed MCP fixtures stay those of 2.1.306.
 
 | Fixture | Host frames (not in the file) | What it records |
 |---|---|---|
-| `mcp-status` | `initialize`; `mcp_status`; a turn; `mcp_status`; `mcp_toggle echo false`; `mcp_status`; a turn; `mcp_toggle echo true`; `mcp_status`; `mcp_reconnect broken`; `mcp_reconnect authy`; `mcp_toggle nosuch`; `mcp_status`; `mcp_authenticate authy`; `mcp_status`; `mcp_set_servers {echo2}`; `mcp_status`; `mcp_set_servers {}`; `mcp_status`; a turn | every answer of 4.4's MCP requests, `pending` before the first turn (`:2`), the thin `init` list (`:6`, `:23`, `:48`). In `:40` the OAuth nonces of the run were replaced by hand with the URL-safe `REDACTED_CODE_CHALLENGE` and `REDACTED_STATE` (in `authUrl`'s query and in `state`), so the link still parses as a URI; the redactor now does the same. Its transcript holds only the three turns |
+| `mcp-status` | `initialize`; `mcp_status`; a turn; `mcp_status`; `mcp_toggle echo false`; `mcp_status`; a turn; `mcp_toggle echo true`; `mcp_status`; `mcp_reconnect broken`; `mcp_reconnect authy`; `mcp_toggle nosuch`; `mcp_status`; `mcp_authenticate authy`; `mcp_status`; `mcp_set_servers {echo2}`; `mcp_status`; `mcp_set_servers {}`; `mcp_status`; a turn | every answer of 4.4's MCP requests, `pending` before the first turn (`:2`), the thin `init` list (`:6`, `:23`, `:48`). In `:40` the OAuth nonces read the URL-safe `REDACTED_CODE_CHALLENGE` and `REDACTED_STATE` (in `authUrl`'s query and in `state`), so the link still parses as a URI: first replaced by hand, but today's `scripts/redact_fixture.py`, run over the run's raw output, gives the committed stream and transcript byte for byte (checked on 2026-10-22). Its transcript holds only the three turns |
 | `mcp-tool-call` | `initialize`; a prompt asking for `mcp__echo__echo` with `hello tandem`, allowed; a prompt asking again with `second`, denied with `The user denied this call.` | the deferred tool's `ToolSearch` (`:22`, `:24`), `tool_use_meta` (`:34`), `can_use_tool` with `mcp_server` and `server_policy_ask_only` (`:35`), the result's `structuredContent` and `_meta` (`:39`), the denial (`:62`, `:73`). Transcript: `mcpMeta` (`transcripts/mcp-tool-call.jsonl:32`), `toolDenialKind` (`:41`) |
 | `mcp-slash` | `initialize`; the prompts `/mcp`, `/model`, `/help`, then `/hello` (a project command, `.claude/commands/hello.md` in the working directory) | the initialize `commands` catalogue (`:1`), `init.slash_commands` and `terminal_slash_commands` (`:4`), three local commands answered without the model (`:5`-`:6`, `:11`-`:12`, `:17`-`:18`) and one project command that runs a turn (`:22`-`:34`). Transcript: the `local_command` lines of 11.2 (`transcripts/mcp-slash.jsonl:5`, `:10`, `:13`, `:14`); `:13`'s `submitUuid` reads `<leaked-1>`, the redactor's safety net (the redactor now replaces that key) |
+
+The shell-escape fixtures are `scripts/record-scenario.sh` scenarios too: `bash-mode` and `bash-mode-respond` (2.1.306;
+the nightly records both again) and `bash-mode-context` (2.1.308). `transcripts/bash-mode.jsonl:5`'s `mergedSendUuids` read
+`<leaked-1>`, the redactor's safety net: it was replaced by hand with `<command_uuid-4>`, the first quiet frame's uuid (the
+line's own `uuid` is the second's, `<command_uuid-6>`, as `bash-mode.ndjson:3-4` queued them), and the redactor now replaces
+that key.
 
 ---
 
@@ -1036,7 +1054,7 @@ and never issues a token). The redactor kept their `init` lists, which it emptie
 The CLI keeps each session as a JSONL file that it only ever appends to. Tandem has no session store of its own: the
 sidebar lists these files and a session's history loads from its file (`session/transcript/`), so sessions started in a
 terminal show up too. Sources: SDK 0.3.300 (`sdk.mjs` reads and writes the same files), the transcript fixtures in
-`src/test/resources/fixtures/transcripts/` (CLI 2.1.301 to 2.1.306, as Sources at the top lists them), and measurements
+`src/test/resources/fixtures/transcripts/` (CLI 2.1.301 to 2.1.308, as Sources at the top lists them), and measurements
 where noted.
 
 ### 11.1 Where they are
@@ -1164,15 +1182,16 @@ decoder reads the on-disk names (`toolUseResult`, `thinkingDurationMs`, `agentId
 
 | Row element | Live source | On disk (`fixtures/transcripts/*.jsonl`) | On reload |
 |---|---|---|---|
-| tool bodies, stats | `tool_use_result` | `toolUseResult` (`tools-edit.jsonl` has `structuredPatch`) | identical bodies |
-| `DONE` / `FAILED` / `DENIED` | `tool_result_meta` / `is_error` | `permissionDecision` + `toolDenialKind` (`ask-deny.jsonl:20`), `is_error` in the block | identical states |
-| thinking summary, duration | deltas, `thinking_duration_ms` | the block text as recorded, `thinkingDurationMs` (`think-default.jsonl`: 2143) | `Thought for 2s`; the summary only if the session ran summarized (`think-display-summarized.jsonl:18`) |
+| tool bodies, stats | `tool_use_result` | `toolUseResult` (`transcripts/tools-edit.jsonl` has `structuredPatch`) | identical bodies |
+| `DONE` / `FAILED` / `DENIED` | `tool_result_meta` / `is_error` | `permissionDecision` + `toolDenialKind` (`transcripts/ask-deny.jsonl:20`), `is_error` in the block | identical states |
+| thinking summary, duration | deltas, `thinking_duration_ms` | the block text as recorded, `thinkingDurationMs` (`transcripts/think-default.jsonl`: 2143) | `Thought for 2s`; the summary only if the session ran summarized (`transcripts/think-display-summarized.jsonl:18`) |
 | thinking tokens | `system/thinking_tokens` | not on disk | no ` · n tokens` (the row is complete anyway) |
 | `Worked for …` footer | `result` | no `result` lines | no footer; `Interrupted · …` from the marker notice only |
 | working row | `turn` | settled state | none; every call without a result is `INTERRUPTED` |
-| subagent children | sidechain lines with `parent_tool_use_id` | not in `<id>.jsonl` (they live in `<id>/subagents/agent-*.jsonl`, not read) | `Agent` row with `Done (…)` from `toolUseResult.totalToolUseCount/totalTokens/totalDurationMs` (`agent-sync.jsonl`) and no children; its body is the agent's final text |
+| subagent children | sidechain lines with `parent_tool_use_id` | not in `<id>.jsonl` (they live in `<id>/subagents/agent-*.jsonl`, not read) | `Agent` row with `Done (…)` from `toolUseResult.totalToolUseCount/totalTokens/totalDurationMs` (`transcripts/agent-sync.jsonl`) and no children; its body is the agent's final text |
 | user send time, elapsed | `sentAtMillis` | `timestamp` on the user line | unused on a settled state |
 | notices (retries, fallbacks) | `system/*` lines | not on disk | absent |
+| shell row status | the runner's end (`ShellEnded`: exit code, `Stopped after …`, `Killed after 10 minutes`) | not on disk: only the command and its output (`transcripts/bash-mode.jsonl:5`, `transcripts/bash-mode-respond.jsonl:3,6`) | no status line under the row |
 | `cwd` for relative names | `system/init.cwd` | every line's `cwd` | identical names |
 
 `cwd`: the first line's `cwd` (the first line of the current history that has one), so relative file names match the
