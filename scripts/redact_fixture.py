@@ -48,7 +48,8 @@ ID_KEYS = {
     "sourceToolAssistantUUID", "serverClassifierRequest",
     "organizationUuid",  # credential_org attachment: the signed-in account's organization
 }
-ID_LIST_KEYS = {"user_message_uuids", "retracted_message_uuids", "supersedes"}
+ID_LIST_KEYS = {"user_message_uuids", "retracted_message_uuids", "supersedes",
+                "mergedSendUuids"}  # a transcript's merged quiet sends (transcripts/bash-mode.jsonl:5)
 INIT_LISTS = {"mcp_servers", "plugins", "skills", "agents", "slash_commands", "terminal_slash_commands", "commands"}
 # The INIT_LISTS a fixture keeps, by fixture name: what the MCP fixtures' tests read (mcp probes 3.6).
 INIT_KEEP = {"mcp-status": {"mcp_servers"}, "mcp-tool-call": {"mcp_servers"},

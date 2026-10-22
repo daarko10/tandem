@@ -584,5 +584,150 @@ class ConnectorScenarioTest(unittest.TestCase):
             self.assertTrue(cli.inbox.empty(), run.__name__)
 
 
+
+class ToolCallCli(FakeCli):
+    """A CLI whose every prompt asks for one MCP tool call (can_use_tool) before its result."""
+
+    def send(self, msg: dict) -> None:
+        self.sent.append(msg)
+        if msg.get("type") == "control_request":
+            self.inbox.put(self.answer(msg["request_id"], msg["request"]))
+        elif msg.get("type") == "user":
+            self.inbox.put({"type": "control_request", "request_id": f"cli-{len(self.sent)}",
+                            "request": {"subtype": "can_use_tool", "tool_name": "mcp__echo__echo",
+                                        "input": {"text": "x"}, "tool_use_id": f"toolu_{len(self.sent)}"}})
+            self.inbox.put({"type": "result", "user_message_uuids": [msg["uuid"]]})
+
+
+class ProbeScenarioTest(unittest.TestCase):
+    def test_the_mcp_status_scenario_sends_every_mcp_request_between_three_turns(self):
+        cli = FakeCli(success)
+        drive_cli.mcp_status(cli)
+        kinds = [m["request"]["subtype"] if m["type"] == "control_request" else m["message"]["content"][0]["text"]
+                 for m in cli.sent]
+        self.assertEqual(["mcp_status", "Reply with the single word: one", "mcp_status", "mcp_toggle", "mcp_status",
+                          "Reply with the single word: two", "mcp_toggle", "mcp_status", "mcp_reconnect", "mcp_reconnect",
+                          "mcp_toggle", "mcp_status", "mcp_authenticate", "mcp_status", "mcp_set_servers", "mcp_status",
+                          "mcp_set_servers", "mcp_status", "Reply with the single word: three"], kinds)
+        named = [(r.get("serverName"), r.get("enabled")) for r in requests(cli) if "serverName" in r]
+        self.assertEqual([("echo", False), ("echo", True), ("broken", None), ("authy", None), ("nosuch", False),
+                          ("authy", None)], named)
+        added = [r["servers"] for r in requests(cli) if r["subtype"] == "mcp_set_servers"]
+        self.assertEqual([{"echo2": drive_cli.echo_config()}, {}], added)
+        self.assertEqual(["-I", drive_cli.PROBE_SERVERS, "echo"], drive_cli.echo_config()["args"])
+
+    def test_the_mcp_status_scenario_records_the_expected_errors_and_fails_on_others(self):
+        def refusing(allowed: set):
+            def answer(request_id: str, request: dict) -> dict:
+                key = (request["subtype"], request.get("serverName"))
+                return error(request_id, request) if key in allowed else success(request_id, request)
+            return answer
+
+        expected = {("mcp_reconnect", "broken"), ("mcp_reconnect", "authy"), ("mcp_toggle", "nosuch"),
+                    ("mcp_authenticate", "authy")}
+        drive_cli.mcp_status(FakeCli(refusing(expected)))  # goes on
+        for fatal in (("mcp_status", None), ("mcp_toggle", "echo"), ("mcp_set_servers", None)):
+            with self.assertRaises(RuntimeError, msg=fatal):
+                drive_cli.mcp_status(FakeCli(refusing({fatal})))
+
+    def test_the_tool_call_scenario_allows_the_first_call_and_denies_the_second(self):
+        cli = ToolCallCli(success)
+        drive_cli.mcp_tool_call(cli)
+        answers = [m["response"]["response"] for m in cli.sent if m["type"] == "control_response"]
+        self.assertEqual(["allow", "deny"], [a["behavior"] for a in answers])
+        self.assertEqual({"text": "x"}, answers[0]["updatedInput"])
+        self.assertEqual("The user denied this call.", answers[1]["message"])
+        prompts = [m["message"]["content"][0]["text"] for m in cli.sent if m["type"] == "user"]
+        self.assertIn("mcp__echo__echo", prompts[0])
+        self.assertIn("hello tandem", prompts[0])
+        self.assertIn("second", prompts[1])
+
+    def test_the_slash_scenario_sends_four_commands_each_to_its_result(self):
+        cli = FakeCli(success)
+        drive_cli.mcp_slash(cli)
+        self.assertEqual(["/mcp", "/model", "/help", "/hello"],
+                         [m["message"]["content"][0]["text"] for m in cli.sent])
+
+    def test_the_probe_scenarios_drop_safe_mode_and_name_the_probe_config(self):
+        argvs = []
+
+        class Popen:  # a claude that exits at once: main fails on initialize, after the argv is built
+            def __init__(self, argv, **kwargs):
+                argvs.append(argv)
+                self.stdin, self.stdout = io.StringIO(), io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+        servers = mock.Mock()
+        with tempfile.TemporaryDirectory() as work, contextlib.chdir(work):
+            for scenario in ("mcp-status", "mcp-tool-call", "mcp-slash"):
+                with mock.patch.object(drive_cli.subprocess, "Popen", Popen), \
+                        mock.patch.object(drive_cli, "start_probe_servers", return_value=servers) as start, \
+                        contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "exited"):
+                    drive_cli.main(scenario, os.path.join(work, f"{scenario}.ndjson"), ["--model", "m"])
+                start.assert_called_once_with(os.getcwd(), scenario)
+            for argv in argvs:
+                self.assertNotIn("--safe-mode", argv)
+                at = argv.index("--mcp-config")
+                self.assertEqual(["--mcp-config", os.path.join(os.getcwd(), "mcp.json"), "--strict-mcp-config",
+                                  "--setting-sources", "project,local"], argv[at:at + 5])
+                self.assertIn("--model", argv)
+        self.assertEqual(3, servers.kill.call_count, "authy ends with every run")
+        for name in ("mcp-status", "mcp-tool-call", "mcp-slash"):
+            self.assertIn(name, redact_fixture.INIT_KEEP, "the redactor keeps the lists the fixture's tests read")
+
+    def test_the_probe_servers_start_and_answer(self):
+        with tempfile.TemporaryDirectory() as work:
+            authy = drive_cli.start_probe_servers(work, "mcp-slash")
+            try:
+                with open(os.path.join(work, "mcp.json"), encoding="utf-8") as f:
+                    servers = json.load(f)["mcpServers"]
+                self.assertEqual(["echo", "broken", "authy"], list(servers))
+                self.assertEqual(drive_cli.echo_config(), servers["echo"])
+                self.assertEqual("/bin/false", servers["broken"]["command"])
+                url = servers["authy"]["url"]
+                self.assertRegex(url, r"^http://127\.0\.0\.1:\d+/mcp$")
+                with open(os.path.join(work, ".claude", "commands", "hello.md"), encoding="utf-8") as f:
+                    self.assertEqual(drive_cli.HELLO_COMMAND, f.read())
+                import urllib.error
+                import urllib.request
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with self.assertRaises(urllib.error.HTTPError) as refused:
+                    opener.open(urllib.request.Request(url, data=b"{}", method="POST"), timeout=10)
+                self.assertEqual(401, refused.exception.code)
+                self.assertIn("resource_metadata=", refused.exception.headers["WWW-Authenticate"])
+                base = url.removesuffix("/mcp")
+                with opener.open(base + "/.well-known/oauth-authorization-server", timeout=10) as answer:
+                    self.assertEqual(base + "/authorize", json.load(answer)["authorization_endpoint"])
+            finally:
+                authy.kill()
+                authy.wait()
+        with tempfile.TemporaryDirectory() as work:
+            authy = drive_cli.start_probe_servers(work, "mcp-status")
+            authy.kill()
+            authy.wait()
+            self.assertFalse(os.path.exists(os.path.join(work, ".claude")), "only mcp-slash gets the project command")
+
+    def test_the_echo_server_answers_as_an_mcp_server(self):
+        import mcp_probe_servers
+        frames = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+                  {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                  {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                  {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                   "params": {"name": "echo", "arguments": {"text": "hello tandem"}}},
+                  {"jsonrpc": "2.0", "id": 4, "method": "resources/list"}]
+        out = io.StringIO()
+        mcp_probe_servers.serve_echo(io.StringIO("\n".join(json.dumps(f) for f in frames) + "\nnot json\n"), out)
+        answers = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual([1, 2, 3, 4], [a["id"] for a in answers], "a notification gets no answer")
+        self.assertEqual({"name": "echo", "version": "0.1.0"}, answers[0]["result"]["serverInfo"])
+        self.assertEqual("2025-06-18", answers[0]["result"]["protocolVersion"])
+        self.assertEqual(["echo"], [t["name"] for t in answers[1]["result"]["tools"]])
+        self.assertIn("outputSchema", answers[1]["result"]["tools"][0])
+        self.assertEqual({"content": [{"type": "text", "text": "hello tandem"}],
+                          "structuredContent": {"result": "hello tandem"}, "isError": False}, answers[2]["result"])
+        self.assertEqual(-32601, answers[3]["error"]["code"])
+
 if __name__ == "__main__":
     unittest.main()

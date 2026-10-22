@@ -45,6 +45,17 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
                    bash-mode-respond with the two frames back to back (whether a merged quiet + querying batch gets a reply)
   bash-mode-context
                    context only as one frame, the line the CLI writes when it merges the pair, then bash-mode's prompt
+  mcp-status       the MCP requests of docs/protocol.md 4.4 against three local servers (mcp_probe_servers.py: echo, a stdio
+                   server with one tool; broken, /bin/false; authy, local HTTP that needs a sign-in it never grants):
+                   mcp_status; a turn; mcp_status; mcp_toggle echo off; mcp_status; a turn; mcp_toggle echo on; mcp_status;
+                   mcp_reconnect broken and authy; mcp_toggle nosuch; mcp_status; mcp_authenticate authy; mcp_status;
+                   mcp_set_servers {echo2}; mcp_status; mcp_set_servers {}; mcp_status; a turn
+  mcp-tool-call    the same servers: a prompt asking for mcp__echo__echo with "hello tandem", allowed; a prompt asking again
+                   with "second", denied
+  mcp-slash        the same servers and a project command (.claude/commands/hello.md): the prompts /mcp, /model, /help and
+                   /hello, each to its result
+                   The three MCP scenarios run without --safe-mode (it turns MCP servers off) and with
+                   --mcp-config <cwd>/mcp.json --strict-mcp-config --setting-sources project,local
 
 Run it from an empty directory (scripts/record-scenario.sh does this) and redact the output
 with redact_fixture.py before committing. Uses whatever sign-in the local `claude` already has.
@@ -460,6 +471,111 @@ def mcp_connectors_all(cli: Cli, connector: str) -> None:
     mcp_connectors(cli, connector)
 
 
+# The MCP fixtures' local servers (docs/protocol.md 10): scripts/mcp_probe_servers.py serves echo and authy.
+PROBE_SERVERS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_probe_servers.py")
+PROBE_SCENARIOS = {"mcp-status", "mcp-tool-call", "mcp-slash"}
+# mcp-slash's project command, in the working directory's .claude/commands/.
+HELLO_COMMAND = "---\ndescription: Says hello from a project command\n---\nReply with exactly: hello from the hello command\n"
+
+
+def echo_config() -> dict:
+    return {"type": "stdio", "command": sys.executable, "args": ["-I", PROBE_SERVERS, "echo"]}
+
+
+def probe_flags(work: str) -> list[str]:
+    """The MCP scenarios' flags: only the probe servers, and no user settings (which could add hooks or servers)."""
+    return ["--mcp-config", os.path.join(work, "mcp.json"), "--strict-mcp-config", "--setting-sources", "project,local"]
+
+
+def start_probe_servers(work: str, scenario: str, wait: float = 10.0) -> subprocess.Popen:
+    """Starts authy, then writes <work>/mcp.json naming echo, broken and authy (and, for mcp-slash, the project command
+    /hello). Returns authy's process, which the caller ends."""
+    port_file = os.path.join(work, "authy.port")
+    authy = subprocess.Popen([sys.executable, "-I", PROBE_SERVERS, "authy", port_file], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + wait
+    while not os.path.exists(port_file):
+        if authy.poll() is not None or time.monotonic() > deadline:
+            authy.kill()
+            raise RuntimeError("the authy probe server did not start")
+        time.sleep(0.05)
+    with open(port_file, encoding="utf-8") as f:
+        port = f.read().strip()
+    os.remove(port_file)
+    servers = {"echo": echo_config(), "broken": {"type": "stdio", "command": "/bin/false", "args": []},
+               "authy": {"type": "http", "url": f"http://127.0.0.1:{port}/mcp"}}
+    with open(os.path.join(work, "mcp.json"), "w", encoding="utf-8") as f:
+        json.dump({"mcpServers": servers}, f)
+    if scenario == "mcp-slash":
+        commands = os.path.join(work, ".claude", "commands")
+        os.makedirs(commands, exist_ok=True)
+        with open(os.path.join(commands, "hello.md"), "w", encoding="utf-8") as f:
+            f.write(HELLO_COMMAND)
+    return authy
+
+
+def mcp_status(cli: Cli) -> None:
+    """Every MCP request of docs/protocol.md 4.4, the error answers included (allowed: the answer is what the recording is
+    for). An mcp_status, the toggle of echo or an mcp_set_servers that fails ends the run."""
+    status = {"subtype": "mcp_status"}
+
+    def toggle(name: str, enabled: bool) -> dict:
+        return {"subtype": "mcp_toggle", "serverName": name, "enabled": enabled}
+
+    def turn(word: str) -> None:
+        cli.user(f"Reply with the single word: {word}")
+        cli.until(result_of(cli.last_uuid()))
+
+    cli.call(status)  # before the first turn: the stdio servers are still pending (mcp-status.ndjson:2)
+    turn("one")
+    cli.call(status)
+    cli.call(toggle("echo", False))
+    cli.call(status)
+    turn("two")  # its init lists echo disabled
+    cli.call(toggle("echo", True))
+    cli.call(status)
+    cli.call({"subtype": "mcp_reconnect", "serverName": "broken"}, allow_error=True)
+    cli.call({"subtype": "mcp_reconnect", "serverName": "authy"}, allow_error=True)
+    cli.call(toggle("nosuch", False), allow_error=True)
+    cli.call(status)
+    cli.call({"subtype": "mcp_authenticate", "serverName": "authy"}, allow_error=True)
+    cli.call(status)
+    cli.call({"subtype": "mcp_set_servers", "servers": {"echo2": echo_config()}})
+    cli.call(status)
+    cli.call({"subtype": "mcp_set_servers", "servers": {}})
+    cli.call(status)
+    turn("three")
+
+
+def mcp_tool_call(cli: Cli) -> None:
+    """An MCP tool call allowed, then one denied (each can_use_tool in turn: allow, then deny)."""
+    decisions = iter(["allow", "deny"])
+
+    def answer(msg: dict) -> None:
+        req = msg.get("request", {})
+        if msg.get("type") != "control_request" or req.get("subtype") != "can_use_tool":
+            return
+        if next(decisions, "deny") == "allow":
+            body = {"behavior": "allow", "updatedInput": req.get("input", {}), "toolUseID": req.get("tool_use_id")}
+        else:
+            body = {"behavior": "deny", "message": "The user denied this call.", "toolUseID": req.get("tool_use_id")}
+        cli.send({"type": "control_response",
+                  "response": {"subtype": "success", "request_id": msg["request_id"], "response": body}})
+
+    cli.user("Use the echo tool of the echo MCP server (mcp__echo__echo) with text: hello tandem. "
+             "Reply with exactly the text it returns.")
+    cli.until(result_of(cli.last_uuid()), answer)
+    cli.user("Call the same echo tool again with text: second. If the call is denied, reply with the single word: denied.")
+    cli.until(result_of(cli.last_uuid()), answer)
+
+
+def mcp_slash(cli: Cli) -> None:
+    """Three local commands the CLI answers without the model, then a project command, which runs a turn."""
+    for prompt in ("/mcp", "/model", "/help", "/hello"):
+        cli.user(prompt)
+        cli.until(result_of(cli.last_uuid()))
+
+
 # The bash probes' frames (docs/superpowers/research/2026-10-21-bash-mode-probe.md 1); BASH_CONTEXT is the line the CLI
 # writes when it merges the two quiet sends (transcripts/bash-mode.jsonl:5).
 BASH_INPUT = "<bash-input>echo bash-mode-probe && printf err >&2</bash-input>"
@@ -506,7 +622,8 @@ SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": m
              "user-image": user_image, "ask-two": ask_two,
              "mcp-connectors": mcp_connectors, "mcp-connectors-all": mcp_connectors_all,
              "bash-mode": bash_mode, "bash-mode-respond": bash_mode_respond,
-             "bash-mode-respond-together": bash_mode_respond_together, "bash-mode-context": bash_mode_context}
+             "bash-mode-respond-together": bash_mode_respond_together, "bash-mode-context": bash_mode_context,
+             "mcp-status": mcp_status, "mcp-tool-call": mcp_tool_call, "mcp-slash": mcp_slash}
 # Scenarios whose run also takes the connector's name (connector_name).
 CONNECTOR_SCENARIOS = {"mcp-connectors", "mcp-connectors-all"}
 
@@ -520,16 +637,26 @@ SCENARIO_FLAGS = {"settings": ["--setting-sources", "project,local"],
                   # record mcp-connectors-all). Never --setting-sources: it would hide what the user's settings enable.
                   "mcp-connectors": ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']}
 # Base flags a scenario removes from Cli's argv: --safe-mode turns MCP servers off.
-SCENARIO_ARGV_DROPS = {"mcp-connectors": ["--safe-mode"], "mcp-connectors-all": ["--safe-mode"]}
+SCENARIO_ARGV_DROPS = {"mcp-connectors": ["--safe-mode"], "mcp-connectors-all": ["--safe-mode"],
+                       **{name: ["--safe-mode"] for name in PROBE_SCENARIOS}}
 
 
 def main(scenario: str, out: str, extra: list[str]) -> None:
     run = SCENARIOS[scenario]
     args = []
+    servers = None
     if scenario in CONNECTOR_SCENARIOS:
         name, extra = connector_name(extra)
         args.append(name)
         cli = Cli(extra + SCENARIO_FLAGS.get(scenario, []), drop=SCENARIO_ARGV_DROPS.get(scenario, []))
+    elif scenario in PROBE_SCENARIOS:
+        work = os.getcwd()
+        servers = start_probe_servers(work, scenario)
+        try:
+            cli = Cli(extra + probe_flags(work), drop=SCENARIO_ARGV_DROPS[scenario])
+        except BaseException:
+            servers.kill()
+            raise
     else:
         cli = Cli(extra + SCENARIO_FLAGS.get(scenario, []), model=FIRST_MODEL if scenario == "model-switch" else None)
     try:
@@ -537,6 +664,9 @@ def main(scenario: str, out: str, extra: list[str]) -> None:
         run(cli, *args)
     finally:
         code = cli.close()
+        if servers is not None:
+            servers.kill()
+            servers.wait()
         with open(out, "w", encoding="utf-8") as f:
             f.write("\n".join(cli.lines) + "\n")
         print(f"{scenario}: {len(cli.lines)} lines, claude exit code {code}", file=sys.stderr)

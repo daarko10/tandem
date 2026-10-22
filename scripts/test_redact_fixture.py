@@ -195,6 +195,15 @@ class RedactTest(unittest.TestCase):
         self.assertNotIn("leaked", json.dumps(out))
         self.assertEqual("", err)
 
+    def test_merged_send_uuids_get_the_placeholders_of_their_sends(self):
+        (stream, line), err = self.redact(
+            {"type": "command_lifecycle", "command_uuid": "11111111-2222-4333-8444-555555555555", "state": "queued"},
+            {"type": "user", "uuid": "99999999-2222-4333-8444-555555555555",
+             "mergedSendUuids": ["11111111-2222-4333-8444-555555555555"]})
+        self.assertEqual([stream["command_uuid"]], line["mergedSendUuids"])
+        self.assertNotIn("leaked", json.dumps(line))
+        self.assertEqual("", err)
+
     def test_connector_fixtures_keep_only_claudeai_entries(self):
         for name in ("mcp-connectors", "mcp-connectors-all"):
             importlib.reload(redact_fixture)
