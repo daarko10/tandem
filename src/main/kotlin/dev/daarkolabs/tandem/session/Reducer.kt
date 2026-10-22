@@ -71,14 +71,15 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
         turn = TurnProgress(event.uuid, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
     )
     // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch. A refusal takes it back.
-    is SessionEvent.ModelRequested -> state.copy(
-        requestedModel = event.model,
-        modelWarning = null,
-        modelSwitchPending = true,
-        modelChanges = event.requestId
-            ?.let { state.modelChanges + (it to ModelChange(event.model, state.requestedModel, state.modelSwitchPending, state.modelWarning)) }
-            ?: state.modelChanges,
-    )
+    is SessionEvent.ModelRequested -> {
+        val change = ModelChange(event.model, state.requestedModel, state.modelSwitchPending, state.modelWarning)
+        state.copy(
+            requestedModel = event.model,
+            modelWarning = null,
+            modelSwitchPending = true,
+            modelChanges = event.requestId?.let { state.modelChanges + (it to change) } ?: state.modelChanges,
+        )
+    }
     // Shown at once; what the CLI reports next (system/status, system/init) has the last word, and a rejection takes it back.
     is SessionEvent.PermissionModeRequested -> state.copy(
         permissionMode = event.mode,
@@ -195,7 +196,8 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
             effortChange != null && message.isSuccess -> state.copy(effortChanges = state.effortChanges - message.requestId)
             effortChange != null -> state.rejectEffortChange(message.requestId, effortChange, message.error)
             // Accepted: the switch still waits for the next system/init to confirm it.
-            modelChange != null && message.isSuccess -> state.copy(modelChanges = state.modelChanges - message.requestId).withModels(message.payload)
+            modelChange != null && message.isSuccess -> state.copy(modelChanges = state.modelChanges - message.requestId)
+                .withModels(message.payload)
             modelChange != null -> state.rejectModelChange(message.requestId, modelChange, message.error)
             message.isSuccess -> answered.withModels(message.payload)
             change == null -> answered.notice(NoticeLevel.ERROR, "The CLI rejected a request: ${message.error ?: "unknown error"}")
@@ -326,7 +328,7 @@ private fun ChatState.rejectEffortChange(requestId: String, change: EffortChange
 
 /**
  * The CLI answered the `set_model` [change], request [requestId], with [error] and kept the model it had (hard rule 5: the chat says
- * so). As [rejectModeChange] does for modes, the next change still waiting now starts from what was shown before [change]; if none
+ * so, and which model it stays on). As [rejectModeChange] does for modes, the next change still waiting now starts from what was shown before [change]; if none
  * waits, the footer goes back to it: the model picked before, whether that pick still waited for its `system/init`, and its warning,
  * unless another pick replaced [change] meanwhile. The CLI answers a control request before it starts the next turn, so no
  * `system/init` comes between a pick and its answer.
@@ -338,7 +340,12 @@ private fun ChatState.rejectModelChange(requestId: String, change: ModelChange, 
     var pending = modelChanges - requestId
     if (next != null) {
         val waiting = pending.getValue(next)
-        pending = pending + (next to waiting.copy(previous = change.previous, previousPending = change.previousPending, previousWarning = change.previousWarning))
+        val handed = waiting.copy(
+            previous = change.previous,
+            previousPending = change.previousPending,
+            previousWarning = change.previousWarning,
+        )
+        pending = pending + (next to handed)
     }
     val restored = if (next == null && requestedModel == change.requested) {
         copy(requestedModel = change.previous, modelSwitchPending = change.previousPending, modelWarning = change.previousWarning)
@@ -347,7 +354,12 @@ private fun ChatState.rejectModelChange(requestId: String, change: ModelChange, 
     }
     val reason = error?.let { " ($it)" }.orEmpty()
     val target = change.requested?.let { "model $it" } ?: "the default model"
-    return restored.copy(modelChanges = pending).notice(NoticeLevel.ERROR, "The CLI rejected the switch to $target$reason.")
+    // What the CLI runs now, as rejectModeChange says it: with a later pick still waiting, that pick shows, but the CLI stays where
+    // it was. No pick before means the model the session runs (its last system/init), when one is known.
+    val now = (if (next == null) restored.requestedModel else change.previous) ?: activeModel
+    val stays = now?.let { "model $it" } ?: "the default model"
+    return restored.copy(modelChanges = pending)
+        .notice(NoticeLevel.ERROR, "The CLI rejected the switch to $target$reason; it stays on $stays.")
 }
 
 private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at: Long): ChatState {

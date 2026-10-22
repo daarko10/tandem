@@ -99,11 +99,16 @@ class ReducerTest {
     fun `a requested model switch confirmed by init produces no warning`() {
         var state = ChatState(requestedModel = "claude-sonnet-5-5")
         for (message in Fixtures.decode("model-switch")) {
-            if (message is CliMessage.ControlResponse && message.payload == null) state = reduce(state, SessionEvent.ModelRequested("claude-haiku-5-5"))
+            // The recorded set_model answer (<request_id-25>) goes through the set_model answer matching (ModelChange).
+            if (message is CliMessage.ControlResponse && message.payload == null) {
+                state = reduce(state, SessionEvent.ModelRequested("claude-haiku-5-5", message.requestId))
+            }
             state = reduce(state, SessionEvent.Cli(message))
             assertNull(state.modelWarning, "unexpected warning: ${state.modelWarning}")
         }
         assertEquals("claude-haiku-5-5", state.activeModel)
+        assertEquals(emptyMap(), state.modelChanges, "the recorded success answered the switch")
+        assertTrue(state.entries.none { it is ChatEntry.Notice })
     }
 
     @Test
@@ -505,11 +510,18 @@ class ReducerTest {
 
     @Test
     fun `a refused set_model puts back the model shown before, ends the pending switch and says so`() {
-        val before = ChatState(requestedModel = "sonnet", activeModel = "claude-haiku-5-5", modelWarning = "You picked sonnet, but the CLI is using claude-haiku-5-5.")
+        val before = ChatState(
+            requestedModel = "sonnet",
+            activeModel = "claude-haiku-5-5",
+            modelWarning = "You picked sonnet, but the CLI is using claude-haiku-5-5.",
+        )
         val requested = reduce(before, SessionEvent.ModelRequested("opus", "r1"))
         assertTrue(requested.modelSwitchPending)
         assertNull(requested.modelWarning)
-        assertEquals(mapOf("r1" to ModelChange("opus", "sonnet", previousPending = false, previousWarning = before.modelWarning)), requested.modelChanges)
+        assertEquals(
+            mapOf("r1" to ModelChange("opus", "sonnet", previousPending = false, previousWarning = before.modelWarning)),
+            requested.modelChanges,
+        )
 
         val accepted = reduce(requested, success("r1"))
         assertEquals("opus", accepted.requestedModel)
@@ -522,12 +534,22 @@ class ReducerTest {
         assertFalse(refused.modelSwitchPending, "the footer leaves its pending state")
         assertEquals(before.modelWarning, refused.modelWarning)
         assertEquals(emptyMap(), refused.modelChanges)
-        val notice = ChatEntry.Notice("notice-0", NoticeLevel.ERROR, "The CLI rejected the switch to model opus (Model opus is not available).")
-        assertEquals(notice, refused.entries.last())
+        val text = "The CLI rejected the switch to model opus (Model opus is not available); it stays on model sonnet."
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.ERROR, text), refused.entries.last())
 
         val defaultRefused = reduce(reduce(ChatState(), SessionEvent.ModelRequested(null, "r2")), rejection("r2", "no"))
-        assertEquals("The CLI rejected the switch to the default model (no).", (defaultRefused.entries.last() as ChatEntry.Notice).text)
+        assertEquals(
+            "The CLI rejected the switch to the default model (no); it stays on the default model.",
+            (defaultRefused.entries.last() as ChatEntry.Notice).text,
+        )
         assertFalse(defaultRefused.modelSwitchPending)
+        // No pick before: the model the session runs, from its last system/init.
+        val running = ChatState(activeModel = "claude-haiku-5-5")
+        val runningRefused = reduce(reduce(running, SessionEvent.ModelRequested("opus", "r3")), rejection("r3", "no"))
+        assertEquals(
+            "The CLI rejected the switch to model opus (no); it stays on model claude-haiku-5-5.",
+            (runningRefused.entries.last() as ChatEntry.Notice).text,
+        )
     }
 
     @Test
@@ -540,11 +562,20 @@ class ReducerTest {
         assertEquals("fable", firstRefused.requestedModel, "the later pick still shows")
         assertTrue(firstRefused.modelSwitchPending)
         assertEquals(mapOf("r3" to ModelChange("fable", "opus", previousPending = true, previousWarning = null)), firstRefused.modelChanges)
+        // The footer shows fable, still waiting, so the notice says what the CLI runs meanwhile.
+        assertEquals(
+            "The CLI rejected the switch to model haiku (no); it stays on model opus.",
+            (firstRefused.entries.last() as ChatEntry.Notice).text,
+        )
 
         val bothRefused = reduce(firstRefused, rejection("r3", "no"))
         assertEquals("opus", bothRefused.requestedModel)
         assertTrue(bothRefused.modelSwitchPending, "opus, accepted, still waits for its init")
         assertEquals(emptyMap(), bothRefused.modelChanges)
+        assertEquals(
+            "The CLI rejected the switch to model fable (no); it stays on model opus.",
+            (bothRefused.entries.last() as ChatEntry.Notice).text,
+        )
     }
 
     @Test
