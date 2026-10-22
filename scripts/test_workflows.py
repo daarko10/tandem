@@ -22,7 +22,8 @@ DRIFT = os.path.join(ROOT, ".github/workflows/drift-fix.yml")
 SKILL = os.path.join(ROOT, ".claude/skills/fix-contract-drift/SKILL.md")
 DENY = {"Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)",
         "Write(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)",
-        "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew compileKotlin:*)",
+        "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)",
+        "Bash(./gradlew check *-*)", "Bash(./gradlew compileKotlin:*)",
         "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"}
 ALLOWLIST = "'^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\\.md$)'"
 
@@ -121,8 +122,8 @@ class DriftFixWorkflowTest(unittest.TestCase):
                      "Require a protected main", "Enforce the edit allowlist"):
             self.assertEqual("${{ github.token }}", step(wf, "fix", name)["env"]["GH_TOKEN"])
         name_run = step(wf, "fix", "Name the red run")["run"]
-        self.assertIn("conclusion", name_run)                                         # a green or foreign run is refused before any spend
-        self.assertIn("headBranch", name_run)                                         # so is a run of another branch, whose recording that branch produced
+        self.assertIn('.conclusion == "failure"', name_run)                           # a green or foreign run is refused before any spend
+        self.assertIn('.head_branch == "main"', name_run)                             # so is a run of another branch, whose recording that branch produced
         for s in steps(wf, "fix"):
             self.assertNotIn("${{", s.get("run", ""), s.get("name"))                 # inputs and outputs reach the shell through env only
         mutate = step(wf, "fix", "Mutate a recording for the rehearsal")
@@ -171,11 +172,32 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual("protect", protect["id"])
         self.assertEqual("steps.gate.outputs.proceed == 'true'", protect["if"])
         self.assertIn("set -euo pipefail", protect["run"])                            # a failed read fails the step, and the agent never starts
-        self.assertIn('repos/$GITHUB_REPOSITORY/branches/main" --jq .protected', protect["run"])
-        self.assertIn('repos/$GITHUB_REPOSITORY/rules/branches/main"', protect["run"])
+        self.assertIn('repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"', protect["run"])
         self.assertIn('select(.type == "pull_request") | .parameters.required_approving_review_count', protect["run"])
-        self.assertIn('[ "$protected" != "true" ] && [ "$reviews" -lt 1 ]', protect["run"])
-        self.assertIn("exit 1", protect["run"])
+        self.assertNotIn(".protected", protect["run"])                                # classic protected: true accepts a direct push when no option is ticked
+        self.assertIn('if [[ "$reviews" =~ ^[0-9]+$ ]] && [ "$reviews" -ge 1 ]; then', protect["run"])   # fail closed: only a number >= 1 passes
+        self.assertIn("exit 1", protect["run"].split("else", 1)[1])                 # anything else ends the step red
+        self.assertNotIn("-lt", protect["run"])                                       # a non-number made [ -lt ] false and passed the step
+
+    def test_a_fork_s_run_never_reaches_the_agent(self):
+        wf = load(DRIFT)
+        for clause in ("github.event.workflow_run.head_repository.full_name == github.repository",
+                       "github.event.workflow_run.event == 'schedule'", "github.event.workflow_run.event == 'workflow_dispatch'"):
+            self.assertIn(clause, wf["jobs"]["fix"]["if"])                            # a fork names its own workflow "CLI contract" and branch main
+        name_run = step(wf, "fix", "Name the red run")["run"]
+        self.assertIn('view="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id")"', name_run)   # the REST run names the head repository and the event
+        self.assertNotIn("gh run view", name_run)
+        for check in ('.name == "CLI contract"', '.head_repository.full_name == $repo', '(.event == "schedule" or .event == "workflow_dispatch")',
+                      "jq -e", "jq -r .html_url", ".created_at[0:10]"):
+            self.assertIn(check, name_run)                                            # a run_id passed by dispatch is held to the same rule
+        self.assertIn('[[ "$id" =~ ^[0-9]+$ ]] || {', name_run)                        # no newline reaches GITHUB_OUTPUT or the branch name
+        self.assertLess(name_run.index("=~ ^[0-9]+$"), name_run.index("gh api"))
+        self.assertIn("jq -c '[.name, .conclusion, .head_branch, .head_repository.full_name, .event]'", name_run)   # one line: no field starts a workflow command
+
+    def test_the_gradle_cache_is_read_only(self):
+        gradle = [s for s in steps(load(DRIFT), "fix") if s.get("uses", "").startswith("gradle/actions/setup-gradle@")]
+        self.assertEqual(1, len(gradle))
+        self.assertEqual({"cache-read-only": True}, gradle[0]["with"])                # the agent's test code runs here; main's cache must not carry it
 
     def test_the_only_push_is_exact_and_the_broad_rules_are_gone(self):
         allowed = tools(step(load(DRIFT), "fix", "Fix the drift")["with"]["claude_args"])

@@ -2,7 +2,8 @@
 # (scripts/classify_drift.py), and runs the repository skill fix-contract-drift with Workload Identity Federation (the same
 # four identifiers as cli-contract.yml; the federation rule admits runs on main only). A run the CLI did not answer is
 # reported on the issue "CLI contract: the CLI did not answer" instead, and an open PR labelled contract-drift skips the
-# agent. The agent never starts unless main is protected (a pull request plus one approving review): that protection,
+# agent. Only a scheduled or dispatched run of this repository's own nightly is fixed, never a fork's or a pull request's.
+# The agent never starts unless a ruleset on main requires a pull request and one approving review: that protection,
 # not the tool allowlist, keeps the App token off main. Nothing here merges or publishes. Rehearsal: `gh workflow run
 # cli-contract.yml -f drift=<mode>` makes the nightly mutate its own recording, so this workflow fires as for a real red;
 # workflow_dispatch with rehearse=true runs the fixer alone on a mutated fixture. CLAUDE.md names the loop.
@@ -51,10 +52,16 @@ jobs:
     # github.ref is refs/heads/main for a workflow_run job, whose OIDC subject is then
     # repo:daarko10@34120174/tandem@1421183639:ref:refs/heads/main, the one the federation rule admits. A dispatch from
     # another branch is skipped here instead of failing at the federation exchange after the disk and Gradle setup.
+    # workflow_run also fires for a fork's pull request, whose head_branch and workflow name are the fork's to choose: a
+    # fork can name a workflow "CLI contract", run it from its own branch main, fail it on purpose and upload its own
+    # contract-recording. So the run must come from this repository and from the nightly's own triggers (schedule,
+    # workflow_dispatch); "Name the red run" checks the same through the API, for a run_id too.
     if: >-
       github.repository == 'daarko10/tandem' && github.ref == 'refs/heads/main' &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main'))
+       (github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch')))
     steps:
       # The platform tests the skill runs need the room, as in build.yml.
       - name: Free disk space
@@ -71,15 +78,22 @@ jobs:
         with:
           distribution: zulu
           java-version: 21
+      # Read-only: the agent runs test code it wrote in this job, which can rewrite the Gradle User Home (build cache
+      # entries, dependency jars); a cache saved from main's scope here would be restored by Build on main and on every PR.
       - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
       - name: Ensure the labels exist
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh label create contract-drift --force --color B60205 --description "Opened or reported by the drift loop (drift-fix.yml)"
           gh label create rehearsal --force --color FBCA04 --description "A drift-loop rehearsal: close, do not merge"
-      # Outputs: id, url and UTC date of the red run (this run itself when rehearse=true), and rehearse=true|false. A run_id
-      # must name a failed CLI contract run on main: a branch's run carries that branch's own recording.
+      # Outputs: id, url and UTC date of the red run (this run itself when rehearse=true), and rehearse=true|false. The id
+      # must be a number and name a failed run of this repository's CLI contract on main, scheduled or dispatched (the
+      # nightly's only triggers): a branch's run carries that branch's own recording, and a fork's pull request can name a
+      # workflow "CLI contract" and a branch main. The REST run object names the head repository and the event, which
+      # gh run view does not. The refusal prints those fields as compact JSON, so no field can start a workflow command.
       - name: Name the red run
         id: run
         env:
@@ -94,10 +108,11 @@ jobs:
           else
             id="${EVENT_RUN_ID:-$INPUT_RUN_ID}"
             if [ -z "$id" ]; then echo "::error title=Drift fix::No run to fix: pass run_id, or rehearse=true."; exit 1; fi
-            view="$(gh run view "$id" --json url,createdAt,conclusion,workflowName,headBranch)"
-            url="$(jq -r .url <<<"$view")"; date="$(jq -r '.createdAt[0:10]' <<<"$view")"
-            if [ "$(jq -r .workflowName <<<"$view")" != "CLI contract" ] || [ "$(jq -r .conclusion <<<"$view")" != "failure" ] || [ "$(jq -r .headBranch <<<"$view")" != "main" ]; then
-              echo "::error title=Drift fix::Run $id is not a failed CLI contract run on main: $(jq -r '[.workflowName, .conclusion, .headBranch] | join(", ")' <<<"$view")."; exit 1
+            [[ "$id" =~ ^[0-9]+$ ]] || { echo "::error title=Drift fix::run_id must be a number."; exit 1; }
+            view="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id")"
+            url="$(jq -r .html_url <<<"$view")"; date="$(jq -r '.created_at[0:10]' <<<"$view")"
+            if ! jq -e --arg repo "$GITHUB_REPOSITORY" '.name == "CLI contract" and .conclusion == "failure" and .head_branch == "main" and .head_repository.full_name == $repo and (.event == "schedule" or .event == "workflow_dispatch")' <<<"$view" >/dev/null; then
+              echo "::error title=Drift fix::Run $id is not a failed scheduled or dispatched CLI contract run on main of $GITHUB_REPOSITORY: $(jq -c '[.name, .conclusion, .head_branch, .head_repository.full_name, .event]' <<<"$view")."; exit 1
             fi
           fi
           printf 'id=%s\nurl=%s\ndate=%s\nrehearse=%s\n' "$id" "$url" "$date" "$([ "$REHEARSE" = "true" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
@@ -180,9 +195,12 @@ jobs:
             echo "proceed=true" >> "$GITHUB_OUTPUT"
           fi
       # The precondition the whole loop rests on, checked before any spend: the App token the action exports can push to
-      # any unprotected branch, main included. Classic protection counts when present (the workflow token cannot read its
-      # review count, which needs administration access); a ruleset counts when its pull_request rule requires at least one
-      # approving review. A failed read fails the step too. Either way the run is red and the agent does not start.
+      # any branch no rule protects, main included. Only a ruleset counts: the workflow token can read its rules (metadata
+      # access) but not a classic protection's review count (administration access), and a classic rule with no option
+      # ticked still reads protected: true while it accepts a direct push. main passes when an active ruleset's
+      # pull_request rule requires at least one approving review; anything else, a failed read or an answer that is not a
+      # number included, fails the step: the run is red and the agent does not start. A ruleset bypass list naming the
+      # Claude App would defeat the rule; keeping the App off that list is the owner's part.
       - name: Require a protected main
         id: protect
         if: steps.gate.outputs.proceed == 'true'
@@ -190,21 +208,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          protected="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)"
-          reviews="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main" --jq '[.[] | select(.type == "pull_request") | .parameters.required_approving_review_count] | max // 0')"
-          if [ "$protected" != "true" ] && [ "$reviews" -lt 1 ]; then
-            echo "::error title=Drift fix::main is not protected (a pull request plus one approving review); the agent is not started."; exit 1
+          reviews="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100" --jq '[.[] | select(.type == "pull_request") | .parameters.required_approving_review_count] | max // 0')"
+          if [[ "$reviews" =~ ^[0-9]+$ ]] && [ "$reviews" -ge 1 ]; then
+            echo "main requires a pull request and $reviews approving review(s) (ruleset)"
+          else
+            echo "::error title=Drift fix::No ruleset on main requires a pull request and one approving review; the agent is not started."; exit 1
           fi
-          echo "main is protected (classic: $protected, ruleset reviews: $reviews)"
       # No github_token input: the action authenticates as the Claude GitHub App, sets the origin URL and the commit identity
       # before the CLI starts, and the PR it opens starts the Build workflow. The allowlist names the invocations the skill
       # prescribes; the push rule is exact (a :* rule matches the prefix followed by a space, so drift/:* would never match
       # the push). The deny rules keep the CLI's Edit and Write tools out of the files that run code before the push and
       # out of a second CLI. `cp` is not bound by them, so the allowlist step below checks the result. The action also loads
       # the project's .claude/settings.json, whose allow rules are merged in; the deny rules below take back the Gradle
-      # tasks and ktlint it allows that the skill never prescribes, and `./gradlew check -x`. Neither list is what protects
-      # main: branch protection on main (a pull request plus one approving review, required by the step above) and the
-      # App token's scope are.
+      # tasks and ktlint it allows that the skill never prescribes, and every flag after `./gradlew check` (its rule there
+      # is a prefix): `-x` and `--exclude-task` as prefix rules, and the wildcard rule `./gradlew check *-*` (a rule with a
+      # `*` not in a trailing `:*` is a pattern) for `--exclude-task=koverVerify`, `--init-script` and the rest, so the
+      # agent never reports a `check` that skipped koverVerify. Neither list is what protects main: the ruleset on main
+      # (a pull request plus one approving review, required by the step above) and the App token's scope are.
       - name: Fix the drift
         id: agent
         if: steps.gate.outputs.proceed == 'true' && steps.protect.outcome == 'success'
@@ -221,7 +241,7 @@ jobs:
             --max-turns 120
             --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
           settings: |
-            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}}
+            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}}
       # The check that does not depend on the agent obeying the skill: a PR touching anything outside the allowlist is
       # commented on, left open and the run is red. It is never closed: the gate above keys on an open contract-drift PR, so
       # a close would re-arm the loop and the next nightly would produce the same fix again, every night.
