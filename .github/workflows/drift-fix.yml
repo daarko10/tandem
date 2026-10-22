@@ -4,7 +4,8 @@
 # reported on the issue "CLI contract: the CLI did not answer" instead, and an open PR labelled contract-drift skips the
 # agent. Only a scheduled or dispatched run of this repository's own nightly is fixed, never a fork's or a pull request's.
 # The agent never starts unless a ruleset on main requires a pull request and one approving review: that protection,
-# not the tool allowlist, keeps the App token off main. Nothing here merges or publishes. Rehearsal: `gh workflow run
+# not the tool allowlist, keeps the App token off main. A second job, enforce, checks the pull request's file list on a
+# fresh runner once the agent's job has ended. Nothing here merges or publishes. Rehearsal: `gh workflow run
 # cli-contract.yml -f drift=<mode>` makes the nightly mutate its own recording, so this workflow fires as for a real red;
 # workflow_dispatch with rehearse=true runs the fixer alone on a mutated fixture. CLAUDE.md names the loop.
 name: Drift fix
@@ -30,7 +31,7 @@ on:
 
 permissions:
   id-token: write # the federation exchange, and the Claude GitHub App token exchange
-  contents: write # the fix branch
+  contents: read # the checkout, and the drift branch read through the API; the fix branch is pushed with the App token
   pull-requests: write
   issues: write # the report for a run the CLI did not answer
   actions: read # the red run and its artifact
@@ -49,6 +50,16 @@ jobs:
   fix:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # Read by the enforce job. All but agent were written before the agent started, and a step's GITHUB_OUTPUT is read
+    # when that step ends, so code the agent ran later in this job cannot change them; agent only appears in a message.
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      protected: ${{ steps.protect.outcome }}
+      kind: ${{ steps.classify.outputs.kind }}
+      agent: ${{ steps.agent.outputs.conclusion }}
+      id: ${{ steps.run.outputs.id }}
+      url: ${{ steps.run.outputs.url }}
+      date: ${{ steps.run.outputs.date }}
     # github.ref is refs/heads/main for a workflow_run job, whose OIDC subject is then
     # repo:daarko10@34120174/tandem@1421183639:ref:refs/heads/main, the one the federation rule admits. A dispatch from
     # another branch is skipped here instead of failing at the federation exchange after the disk and Gradle setup.
@@ -78,8 +89,10 @@ jobs:
         with:
           distribution: zulu
           java-version: 21
-      # Read-only: the agent runs test code it wrote in this job, which can rewrite the Gradle User Home (build cache
-      # entries, dependency jars); a cache saved from main's scope here would be restored by Build on main and on every PR.
+      # Read-only against an accidental save: setup-gradle's post step never saves this job's Gradle User Home, which the
+      # test code the agent wrote can rewrite (build cache entries, dependency jars), into main's scope, which Build on
+      # main and on every PR restores. It does not bind hostile code: that test code runs with sudo on a job on main and
+      # could write such a cache itself with the runner's cache token (a remaining risk the spec's Safeguards list).
       - uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: true
@@ -200,31 +213,43 @@ jobs:
       # ticked still reads protected: true while it accepts a direct push. main passes when an active ruleset's
       # pull_request rule requires at least one approving review; anything else, a failed read or an answer that is not a
       # number included, fails the step: the run is red and the agent does not start. A ruleset bypass list naming the
-      # Claude App would defeat the rule; keeping the App off that list is the owner's part.
+      # Claude App would defeat the rule; keeping the App off that list is the owner's part. A ruleset on a private
+      # repository owned by a personal account is enforced only with GitHub Pro: on Free the repository goes public before
+      # the ruleset and the rehearsals, and what this endpoint lists for an unenforced ruleset is not known, so reading
+      # the rule here does not prove enforcement. The same step refuses a drift branch that already exists (a closed PR
+      # whose branch was kept, and the same run dispatched again): the agent's `git push -u origin HEAD` would be rejected
+      # as non-fast-forward after the spend, and the enforce job would misread the old branch as a stopped agent.
       - name: Require a protected main
         id: protect
         if: steps.gate.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
         run: |
           set -euo pipefail
           reviews="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100" --jq '[.[] | select(.type == "pull_request") | .parameters.required_approving_review_count] | max // 0')"
           if [[ "$reviews" =~ ^[0-9]+$ ]] && [ "$reviews" -ge 1 ]; then
             echo "main requires a pull request and $reviews approving review(s) (ruleset)"
           else
-            echo "::error title=Drift fix::No ruleset on main requires a pull request and one approving review; the agent is not started."; exit 1
+            echo "::error title=Drift fix::No ruleset on main requires a pull request and one approving review (a private repository of a personal account enforces one only with GitHub Pro); the agent is not started."; exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name >/dev/null 2>&1; then
+            echo "::error title=Drift fix::The branch $BRANCH exists (a closed pull request's branch, kept); delete it to retry this run."; exit 1
           fi
       # No github_token input: the action authenticates as the Claude GitHub App, sets the origin URL and the commit identity
       # before the CLI starts, and the PR it opens starts the Build workflow. The allowlist names the invocations the skill
       # prescribes; the push rule is exact (a :* rule matches the prefix followed by a space, so drift/:* would never match
-      # the push). The deny rules keep the CLI's Edit and Write tools out of the files that run code before the push and
-      # out of a second CLI. `cp` is not bound by them, so the allowlist step below checks the result. The action also loads
-      # the project's .claude/settings.json, whose allow rules are merged in; the deny rules below take back the Gradle
-      # tasks and ktlint it allows that the skill never prescribes, and every flag after `./gradlew check` (its rule there
-      # is a prefix): `-x` and `--exclude-task` as prefix rules, and the wildcard rule `./gradlew check *-*` (a rule with a
-      # `*` not in a trailing `:*` is a pattern) for `--exclude-task=koverVerify`, `--init-script` and the rest, so the
-      # agent never reports a `check` that skipped koverVerify. Neither list is what protects main: the ruleset on main
-      # (a pull request plus one approving review, required by the step above) and the App token's scope are.
+      # the push). The deny rules keep the CLI's Edit and Write tools out of some of the files that run code before the
+      # push (the build scripts, gradle.properties and the wrapper, scripts/, the hooks in .claude/ and .git/) and out of
+      # a second CLI; test code under src/test runs anyway, and `cp` is not bound by them, so the enforce job checks the
+      # result on a fresh runner. The action also loads the project's .claude/settings.json, whose allow rules are merged
+      # in; the deny rules below take back the Gradle tasks and ktlint it allows that the skill never prescribes, every
+      # flag after `./gradlew check` (its rule there is a prefix): `-x` and `--exclude-task` as prefix rules, and the
+      # wildcard rule `./gradlew check *-*` (a rule with a `*` not in a trailing `:*` is a pattern) for
+      # `--exclude-task=koverVerify`, `--init-script` and the rest, and `./gradlew test *check*`, the other spelling of a
+      # check that skips koverVerify. What runs the real `./gradlew check` is Build on the pull request, not the agent's
+      # report. Neither list is what protects main: the ruleset on main (a pull request plus one approving review,
+      # required by the step above) and the App token's scope are.
       - name: Fix the drift
         id: agent
         if: steps.gate.outputs.proceed == 'true' && steps.protect.outcome == 'success'
@@ -241,27 +266,41 @@ jobs:
             --max-turns 120
             --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(date:*)"
           settings: |
-            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}}
-      # The check that does not depend on the agent obeying the skill: a PR touching anything outside the allowlist is
-      # commented on, left open and the run is red. It is never closed: the gate above keys on an open contract-drift PR, so
-      # a close would re-arm the loop and the next nightly would produce the same fix again, every night.
-      # Once the gate proceeded, no PR is a red run: a pushed branch without one (the agent was stopped by the timeout or the
-      # turn limit) is reported on the standing issue; no branch at all is a denied command, a redactor stop, an action that
-      # skipped the agent, or an agent that gave up. The branch is read through the API with the workflow token: the checkout
-      # has persist-credentials: false, the action revokes its App token before this step, and the repository is private, so
-      # git itself would get a 401 here. No draft is opened: GITHUB_TOKEN cannot create a pull request unless the repository
-      # setting "Allow GitHub Actions to create and approve pull requests" is on. The PR's file list is read on its own line,
-      # so a failed read fails the step instead of passing as "no offending path". It comes from the REST files list, paged
-      # (up to 3000 files), with the old path of each rename: GraphQL's `files` (gh pr view) stops at 100 and names only a
-      # rename's new path, so a file moved into src/test/ from outside the allowlist would pass.
+            {"permissions": {"deny": ["Edit(.github/**)", "Write(.github/**)", "Edit(build.gradle.kts)", "Write(build.gradle.kts)", "Edit(settings.gradle.kts)", "Write(settings.gradle.kts)", "Edit(gradle.properties)", "Write(gradle.properties)", "Edit(gradle/**)", "Write(gradle/**)", "Edit(.git/**)", "Write(.git/**)", "Edit(scripts/**)", "Write(scripts/**)", "Edit(.claude/**)", "Write(.claude/**)", "Edit(CLAUDE.md)", "Write(CLAUDE.md)", "Bash(claude:*)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "900000", "BASH_MAX_TIMEOUT_MS": "1800000"}}
+  # The check that depends neither on the agent obeying the skill nor on the runner its code ran on: the fix job runs test
+  # code the agent wrote (./gradlew test) with sudo, and that code can change what a later step of the same job sees (a
+  # gh first on PATH, BASH_ENV, GITHUB_PATH, GITHUB_ENV), so the step that reads the PR's file list runs here, on a fresh
+  # runner, with no checkout and only the permissions it needs. What it reads from the fix job was written before the
+  # agent started (see that job's outputs); agent only appears in a message. A PR touching anything outside the allowlist
+  # is commented on, left open and the run is red. It is never closed: the gate keys on an open contract-drift PR, so a
+  # close would re-arm the loop and the next nightly would produce the same fix again, every night.
+  # Once the gate proceeded, no PR is a red run: a pushed branch without one (the agent was stopped by the timeout or the
+  # turn limit) is reported on the standing issue; no branch at all is a denied command, a redactor stop, an action that
+  # skipped the agent, or an agent that gave up. The branch is read through the API with the workflow token (contents:
+  # read; the App token was revoked in the fix job's post step), and GH_REPO names the repository because no checkout is
+  # there to infer it from. No draft is opened: GITHUB_TOKEN cannot create a pull request unless the repository setting
+  # "Allow GitHub Actions to create and approve pull requests" is on. The PR's file list is read on its own line, so a
+  # failed read fails the step instead of passing as "no offending path". It comes from the REST files list, paged (up to
+  # 3000 files), with the old path of each rename: GraphQL's `files` (gh pr view) stops at 100 and names only a rename's
+  # new path, so a file moved into src/test/ from outside the allowlist would pass.
+  enforce:
+    needs: fix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: always() && needs.fix.outputs.proceed == 'true' && needs.fix.outputs.protected == 'success'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
       - name: Enforce the edit allowlist
-        if: always() && steps.gate.outputs.proceed == 'true' && steps.protect.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
-          RUN_URL: ${{ steps.run.outputs.url }}
-          KIND: ${{ steps.classify.outputs.kind }}
-          AGENT: ${{ steps.agent.outputs.conclusion }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: drift/${{ needs.fix.outputs.date }}-${{ needs.fix.outputs.id }}
+          RUN_URL: ${{ needs.fix.outputs.url }}
+          KIND: ${{ needs.fix.outputs.kind }}
+          AGENT: ${{ needs.fix.outputs.agent }}
         run: |
           set -euo pipefail
           pr="$(gh pr list --label contract-drift --state open --json number,headRefName --jq '[.[] | select(.headRefName | startswith("drift/"))][0].number // empty')"
