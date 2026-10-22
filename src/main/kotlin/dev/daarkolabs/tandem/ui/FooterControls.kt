@@ -150,15 +150,17 @@ internal data class EffortItem(val level: String, val label: String, val checked
 internal data class EffortMenu(val trailing: String, val items: List<EffortItem>)
 
 /**
- * The effort page (spec 2.3), or null when the model menu has none: the shown model's levels, the current one checked. While the
- * CLI has not listed its models, a known effort lists low, medium, high and max (edge 1). A current level the shown model does not
- * list comes last, checked and disabled: the CLI decides at the next turn.
+ * The effort page (spec 2.3), or null when the model menu has none: the shown model's levels, the current one checked. While no
+ * entry stands for the model (the CLI has not listed its models, or the model it runs is none of theirs), a known effort lists low,
+ * medium, high and max (edge 1): only a shown model without effort levels hides the page (edge 15). A current level the shown model
+ * does not list comes last, checked and disabled: the CLI decides at the next turn.
  */
 internal fun effortMenu(composer: ComposerModel): EffortMenu? {
     val effort = composer.effort
+    val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
     val levels = when {
         composer.effortLevels.isNotEmpty() -> composer.effortLevels
-        composer.models.isEmpty() && effort != null -> EFFORT_LEVELS
+        shown == null && effort != null -> EFFORT_LEVELS
         else -> return null
     }
     val items = levels.map { EffortItem(it, Modes.effortLabel(it), checked = it == effort, enabled = true) }

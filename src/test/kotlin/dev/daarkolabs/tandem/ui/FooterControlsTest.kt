@@ -179,6 +179,15 @@ class FooterControlsTest {
     }
 
     @Test
+    fun `a running model no entry stands for keeps the effort in the label`() {
+        // Models are listed, but none resolves to the running one (rule 4: the footer shows its wire id).
+        val composer = composer(activeModel = "claude-x", effort = "high")
+        assertEquals(ModelLabel("claude-x", "High"), modelLabel(composer))
+        assertEquals(listOf("low", "medium", "high", "max"), effortMenu(composer)!!.items.map { it.level })
+        assertNull(effortMenu(composer(activeModel = "claude-x", effort = null)), "with no effort known, no Effort item")
+    }
+
+    @Test
     fun `a level the shown model lacks stays checked and disabled`() {
         val opus46 = listOf(ModelOption("opus46", "Opus 4.6", null, "claude-opus-4-6", true, listOf("low", "medium", "high", "max")))
         val composer = composer(models = opus46, activeModel = "claude-opus-4-6", effort = "xhigh")
