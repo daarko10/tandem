@@ -300,6 +300,7 @@ object Ndjson {
                 usage.asObject()?.long("contextWindow")?.let { model to it }
             }?.toMap().orEmpty(),
             localCommand = o.string("local_command"),
+            userMessageUuids = o.strings("user_message_uuids"),
             raw = o,
         )
     }

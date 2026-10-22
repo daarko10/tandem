@@ -93,6 +93,13 @@ data class ChatState(
     val slashCommandNames: List<String> = emptyList(),
     /** The commands the latest `system/init` says work only in a terminal (`terminal_slash_commands`). */
     val terminalCommands: Set<String> = emptySet(),
+    /** The id of the [ChatEntry.Shell] whose command runs now; null when none runs. */
+    val runningShell: String? = null,
+    /**
+     * The uuids of the frames sent with `shouldQuery: false` (a shell escape's) whose zero-turn `result` is still to come, in the order
+     * sent. Empty once the process that owed them ends, and once [settled].
+     */
+    val quietSends: Set<String> = emptySet(),
 )
 
 /**
@@ -250,6 +257,22 @@ sealed interface ChatEntry {
     ) : ChatEntry
 
     /**
+     * A shell escape (`! command`), in place of a prompt: the [command] as typed after `!`, its [output] so far (stdout and stderr
+     * merged), whether it still [running], how it ended ([end]; null while it runs and on a reloaded one, whose transcript keeps no
+     * end) and how long it ran. [sent]: its frames went to the CLI.
+     */
+    data class Shell(
+        override val id: String,
+        val command: String,
+        val output: String,
+        val running: Boolean,
+        val end: ShellEnd? = null,
+        val durationMs: Long? = null,
+        val startedAtMillis: Long? = null,
+        val sent: Boolean = false,
+    ) : ChatEntry
+
+    /**
      * The end of a turn: how it ended, how long it took and its output tokens, and the calls denied in it. [error] is set on a
      * [TurnEnd.FAILED] turn only: its API error, else the result's error text or what the process said as it ended. Its id is
      * `end-<n>`, [ChatState.turnsEnded] once it is counted.
@@ -313,8 +336,9 @@ data class PendingPermission(
 )
 
 /**
- * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming.
- * A transcript loaded by `TranscriptReader` comes back settled.
+ * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming. No quiet send waits
+ * for its result either: the process that owed it is gone, and the next one starts from this. A shell escape stays as it is (a
+ * command runs on in Tandem's own process). A transcript loaded by `TranscriptReader` comes back settled.
  */
 internal fun ChatState.settled(): ChatState = copy(
     entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it },
@@ -326,4 +350,5 @@ internal fun ChatState.settled(): ChatState = copy(
     ended = false,
     turnInterrupted = false,
     turn = null,
+    quietSends = emptySet(),
 )

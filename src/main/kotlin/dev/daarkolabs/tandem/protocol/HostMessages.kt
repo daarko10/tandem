@@ -49,6 +49,26 @@ object HostMessages {
         put("uuid", uuid)
     }
 
+    /**
+     * A shell escape's command, frame 1 of bash probes 1: content a string, `client_composed` (no `@path` expansion or slash
+     * dispatch) and `shouldQuery: false`, so it only appends; the CLI answers it with a zero-turn `result` naming [uuid].
+     */
+    fun bashInput(command: String, uuid: String): JsonObject = bashFrame(BashEscape.input(command), uuid, query = false)
+
+    /**
+     * A shell escape's output, frame 2 of bash probes 1: with [query], the key `shouldQuery` is left out and the send starts a turn
+     * that answers it (`bash-mode-respond`); without, `shouldQuery: false` only appends it.
+     */
+    fun bashOutput(stdout: String, stderr: String, uuid: String, query: Boolean): JsonObject =
+        bashFrame(BashEscape.output(stdout, stderr), uuid, query)
+
+    /**
+     * A shell escape for the context only, in one frame: the merged content of `transcripts/bash-mode.jsonl:5`, `shouldQuery: false`.
+     * Unrecorded as one host frame (the probe sent two quiet frames, which the CLI merged into this content).
+     */
+    fun bashContext(command: String, stdout: String, stderr: String, uuid: String): JsonObject =
+        bashFrame(BashEscape.context(command, stdout, stderr), uuid, query = false)
+
     /** `forwardSubagentText` makes the CLI forward a subagent's text replies as assistant lines with an `agent_id`. */
     fun initialize(requestId: String): JsonObject = request(requestId, "initialize") {
         put("hooks", JsonNull)
@@ -121,6 +141,20 @@ object HostMessages {
             put("request_id", requestId)
             put("error", message)
         }
+    }
+
+    /** A `user` frame whose content is the string [content], in the keys' order of bash probes 1. */
+    private fun bashFrame(content: String, uuid: String, query: Boolean): JsonObject = buildJsonObject {
+        put("type", "user")
+        put("session_id", "")
+        put("parent_tool_use_id", JsonNull)
+        put("uuid", uuid)
+        putJsonObject("message") {
+            put("role", "user")
+            put("content", content)
+        }
+        put("client_composed", true)
+        if (!query) put("shouldQuery", false)
     }
 
     private fun request(requestId: String, subtype: String, fields: JsonObjectBuilder.() -> Unit): JsonObject = buildJsonObject {

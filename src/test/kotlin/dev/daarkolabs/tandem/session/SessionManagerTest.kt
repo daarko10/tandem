@@ -123,6 +123,8 @@ class SessionManagerTest {
         environment: Map<String, String> = emptyMap(),
         mcpAuthEvery: Duration = 2.seconds,
         mcpAuthTimeout: Duration = 3.minutes,
+        respondToShell: () -> Boolean = { true },
+        shell: ShellRunner = ShellRunner(environment = { mapOf("SHELL" to "/bin/sh") }),
     ): SessionManager {
         val fake = buildMap {
             put("TANDEM_FAKE_LOG", log.toString())
@@ -145,6 +147,8 @@ class SessionManagerTest {
             deleteFiles = deleteFiles,
             mcpAuthEvery = mcpAuthEvery,
             mcpAuthTimeout = mcpAuthTimeout,
+            respondToShell = respondToShell,
+            shell = shell,
         )
     }
 
@@ -1870,5 +1874,263 @@ class SessionManagerTest {
         results.forEach { assertEquals(listOf("echo", "broken", "authy"), it.ok().map { server -> server.name }) }
         val sent = requests("mcp_status").size - before
         assertTrue(sent in 1..2, "$sent mcp_status requests for three refreshes at once")
+    }
+    // Bash mode (spec 12.8): a real /bin/sh runs each command, the fake CLI takes the frames.
+
+    private fun unix() = org.junit.jupiter.api.Assumptions.assumeTrue(!System.getProperty("os.name").lowercase().contains("windows"))
+
+    /** The `user` frames the host wrote, in order. */
+    private fun userFrames(): List<JsonObject> = frames().filter { it.type() == "user" }
+
+    private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
+
+    private fun ChatState.shell(): ChatEntry.Shell = entries.filterIsInstance<ChatEntry.Shell>().single()
+
+    /** The `sleep` processes among this test JVM's descendants. */
+    private fun sleeps(): List<ProcessHandle> = ProcessHandle.current().descendants()
+        .filter { it.isAlive && it.info().command().orElse("").substringAfterLast('/') == "sleep" }.toList()
+
+    private val earlierSleeps: Set<Long> = sleeps().map { it.pid() }.toSet()
+
+    private fun ownSleeps(): List<Long> = sleeps().map { it.pid() }.filter { it !in earlierSleeps }
+
+    @Test
+    fun `a shell escape runs, shows its output and sends the two frames`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "echo hi")
+        assertEquals("! echo hi", handle.title.value, "titled by the command before any index listing")
+        val done = handle.state.first { it.turnsEnded == 1 && !it.busy }
+        val shell = done.shell()
+        assertEquals(ShellEnd.Exited(0), shell.end)
+        assertEquals("hi\n", shell.output)
+        assertTrue(shell.sent)
+        val (input, output) = userFrames()
+        assertEquals("<bash-input>echo hi</bash-input>", input.content())
+        assertEquals(true, input["client_composed"]!!.jsonPrimitive.boolean)
+        assertEquals(false, input["shouldQuery"]!!.jsonPrimitive.boolean)
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", output.content())
+        assertEquals(true, output["client_composed"]!!.jsonPrimitive.boolean)
+        assertFalse("shouldQuery" in output)
+        assertTrue(done.replyText().contains("The probe ran"))
+        assertEquals(1, done.entries.count { it is ChatEntry.TurnEnded })
+        // The quiet result named the first frame's uuid (the fake's rule (g)): it left the quiet sends and ended no turn.
+        assertTrue(done.quietSends.isEmpty())
+        assertEquals("! echo hi", handle.title.value)
+    }
+
+    @Test
+    fun `with replies off a shell escape sends one context frame`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode", respondToShell = { false })
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "echo hi")
+        val quiet = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.sent } && s.quietSends.isEmpty() }
+        val frame = userFrames().single()
+        assertEquals(dev.daarkolabs.tandem.protocol.BashEscape.context("echo hi", "hi\n", ""), frame.content())
+        assertEquals(false, frame["shouldQuery"]!!.jsonPrimitive.boolean)
+        assertTrue(quiet.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(quiet.busy)
+
+        manager.send(handle.id, "Reply with only the text the command printed to stdout")
+        val replied = handle.state.first { it.turnsEnded == 1 && !it.busy }
+        assertEquals("bash-mode-probe", replied.replyText())
+    }
+
+    @Test
+    fun `stopShell kills the command and the frames say so`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "sleep 30")
+        handle.state.first { it.runningShell != null }
+        while (ownSleeps().isEmpty()) delay(20)
+        val started = System.currentTimeMillis()
+        manager.stopShell(handle.id)
+        val stopped = withTimeout(2_000) { handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } } }
+        assertTrue(System.currentTimeMillis() - started < 2_000)
+        assertEquals(ShellEnd.Stopped, stopped.shell().end)
+        awaitLog { userFrames().size == 2 }
+        assertTrue(
+            Regex("^<bash-stdout>Stopped after \\d+\\.\\ds</bash-stdout><bash-stderr></bash-stderr>$").matches(userFrames()[1].content()),
+            userFrames()[1].content(),
+        )
+        assertEquals(emptyList(), ownSleeps())
+    }
+
+    @Test
+    fun `a shell escape on a stopped session queues its frames and starts a process`() = test {
+        unix()
+        seed(seeded)
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.open(seeded, spawn = false)
+        assertNull(handle.liveSession())
+        manager.runShell(handle.id, "echo hi")
+        handle.state.first { s -> s.turnsEnded > 0 && !s.busy && s.entries.any { it is ChatEntry.Shell && it.sent } }
+        assertEquals(1, spawns().size)
+        val logged = frames()
+        assertEquals(listOf("__spawn__", "control_request", "user", "user"), logged.map { it.type() })
+        assertEquals("initialize", logged[1].subtype())
+        assertEquals("<bash-input>echo hi</bash-input>", logged[2].content())
+    }
+
+    @Test
+    fun `a shell escape that cannot start sends nothing`() = test {
+        unix()
+        val launcher = ShellLauncher { _, _, _ -> throw IOException("Cannot run program", IOException("error=2, No such file or directory")) }
+        val manager = manager(fixtures = "bash-mode-respond", shell = ShellRunner(launcher, environment = { mapOf("SHELL" to "/opt/none/zsh") }))
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.runShell(handle.id, "echo hi")
+        val ended = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } }
+        assertEquals(ShellEnd.NotStarted("/opt/none/zsh", "No such file or directory"), ended.shell().end)
+        assertNull(ended.runningShell)
+        delay(300)
+        assertEquals(emptyList(), userFrames())
+    }
+
+    @Test
+    fun `a shell escape whose output cannot be read ends Failed and sends nothing`() = test {
+        unix()
+        val launcher = ShellLauncher { argv, directory, env ->
+            val real = ProcessBuilder(argv).directory(directory.toFile()).apply { environment().putAll(env) }.start()
+            object : Process() {
+                override fun getOutputStream() = real.outputStream
+                override fun getInputStream() = object : java.io.InputStream() {
+                    override fun read(): Int = throw IOException("boom")
+                    override fun available(): Int = throw IOException("boom")
+                }
+                override fun getErrorStream() = real.errorStream
+                override fun waitFor(): Int = real.waitFor()
+                override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = real.waitFor(timeout, unit)
+                override fun exitValue(): Int = real.exitValue()
+                override fun isAlive(): Boolean = real.isAlive
+                override fun pid(): Long = real.pid()
+                override fun toHandle(): ProcessHandle = real.toHandle()
+                override fun descendants() = real.descendants()
+                override fun destroy() = real.destroy()
+                override fun destroyForcibly(): Process = real.destroyForcibly()
+            }
+        }
+        val manager = manager(fixtures = "bash-mode-respond", shell = ShellRunner(launcher, environment = { mapOf("SHELL" to "/bin/sh") }))
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.runShell(handle.id, "sleep 1")
+        val ended = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } }
+        assertEquals(ShellEnd.Failed("boom"), ended.shell().end)
+        assertNull(ended.runningShell)
+        delay(300)
+        assertEquals(emptyList(), userFrames())
+    }
+
+    @Test
+    fun `a second shell escape while one runs is ignored`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "sleep 30")
+        manager.runShell(handle.id, "echo again")
+        handle.state.first { it.runningShell != null }
+        delay(200)
+        assertEquals(listOf("sleep 30"), handle.state.value.entries.filterIsInstance<ChatEntry.Shell>().map { it.command })
+        manager.stopShell(handle.id)
+        handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } }
+        assertEquals(1, handle.state.value.entries.count { it is ChatEntry.Shell })
+    }
+
+    @Test
+    fun `closing the session kills a running command`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.runShell(handle.id, "sleep 30")
+        while (ownSleeps().isEmpty()) delay(20)
+        val started = System.currentTimeMillis()
+        manager.close(handle.id)
+        assertTrue(System.currentTimeMillis() - started < 2_000, "close returns at once")
+        assertEquals(ShellEnd.Stopped, handle.state.value.shell().end)
+        assertEquals(emptyList(), userFrames())
+        assertEquals(emptyList(), ownSleeps())
+    }
+
+    @Test
+    fun `a project close sends no frame for a running command`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        while (handle.liveSession()?.process == null) delay(20)
+        manager.runShell(handle.id, "sleep 30")
+        while (ownSleeps().isEmpty()) delay(20)
+        scope.coroutineContext.job.cancelAndJoin()
+        // The handle's mirror went with the scope: the process's own state has the end.
+        assertEquals(ShellEnd.Stopped, handle.liveSession()!!.state.value.shell().end)
+        delay(300)
+        assertEquals(emptyList(), userFrames())
+        assertEquals(emptyList(), ownSleeps())
+    }
+
+    @Test
+    fun `the timed-out command sends the kill note`() = test {
+        unix()
+        val manager = manager(
+            fixtures = "bash-mode-respond",
+            shell = ShellRunner(environment = { mapOf("SHELL" to "/bin/sh") }, timeoutMillis = 200),
+        )
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "sleep 5")
+        val ended = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } }
+        assertEquals(ShellEnd.TimedOut, ended.shell().end)
+        awaitLog { userFrames().size == 2 }
+        assertEquals("<bash-stdout>Killed after 10 minutes</bash-stdout><bash-stderr></bash-stderr>", userFrames()[1].content())
+    }
+
+    @Test
+    fun `the command and its output are never logged`() = test {
+        unix()
+        val records = Collections.synchronizedList(ArrayList<String>())
+        val previous = com.intellij.openapi.diagnostic.Logger.getFactory()
+        com.intellij.openapi.diagnostic.Logger.setFactory(com.intellij.openapi.diagnostic.Logger.Factory { category -> CapturingLogger(category, records) })
+        try {
+            val manager = manager(fixtures = "bash-mode-respond")
+            val handle = manager.create(NewSessionOptions())
+            manager.runShell(handle.id, "echo tandem-log-marker")
+            val done = handle.state.first { it.turnsEnded == 1 && !it.busy }
+            assertEquals("tandem-log-marker\n", done.shell().output)
+            manager.close(handle.id)
+        } finally {
+            com.intellij.openapi.diagnostic.Logger.setFactory(previous)
+        }
+        assertTrue(records.isNotEmpty(), "the capturing factory saw the session's records")
+        assertEquals(emptyList(), records.filter { "tandem-log-marker" in it })
+    }
+
+    /** Keeps every record's message and throwable text. */
+    private class CapturingLogger(private val category: String, private val records: MutableList<String>) : com.intellij.openapi.diagnostic.Logger() {
+        override fun isDebugEnabled(): Boolean = true
+        override fun debug(message: String?, t: Throwable?) = keep(message, t)
+        override fun info(message: String?, t: Throwable?) = keep(message, t)
+        override fun warn(message: String?, t: Throwable?) = keep(message, t)
+        override fun error(message: String?, t: Throwable?, vararg details: String?) = keep(message + details.joinToString(), t)
+
+        private fun keep(message: String?, t: Throwable?) {
+            records += "$category: $message ${t?.stackTraceToString().orEmpty()}"
+        }
+    }
+
+    @Test
+    fun `a command stopped at once still ends Stopped`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "sleep 30")
+        manager.stopShell(handle.id)
+        val ended = withTimeout(2_000) { handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } && s.runningShell == null } }
+        assertEquals(ShellEnd.Stopped, ended.shell().end)
+        assertNull(ended.runningShell)
+        assertFalse(handle.shellJob!!.isActive)
+        assertEquals(emptyList(), ownSleeps())
     }
 }

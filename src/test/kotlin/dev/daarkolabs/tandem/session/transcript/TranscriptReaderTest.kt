@@ -12,6 +12,7 @@ import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.PendingPermission
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.UserImage
+import dev.daarkolabs.tandem.session.firstPrompt
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
 import kotlinx.coroutines.job
@@ -73,6 +74,7 @@ class TranscriptReaderTest {
             is ChatEntry.ToolResult -> "result: ${entry.text}" + if (entry.isError) " (error)" else ""
             is ChatEntry.Notice -> "${entry.level}: ${entry.text}"
             is ChatEntry.TurnEnded -> "end: ${entry.end}"
+            is ChatEntry.Shell -> "shell: !${entry.command} → ${entry.output}"
         }
     }
 
@@ -639,7 +641,7 @@ class TranscriptReaderTest {
     }
 
     @Test
-    fun `a shell escape loads as its command, and output and notifications are skipped`(@TempDir dir: Path) = runBlocking<Unit> {
+    fun `a shell escape loads with its output, and a stray stderr line and notifications are skipped`(@TempDir dir: Path) = runBlocking<Unit> {
         val f = dir.resolve("19191919-1919-4191-8191-191919191919.jsonl")
         f.writeLines(
             """{"type":"user","uuid":"b1","parentUuid":null,"message":{"role":"user","content":"<bash-input>ls -la</bash-input>"}}""",
@@ -649,8 +651,77 @@ class TranscriptReaderTest {
             """{"type":"user","uuid":"n1","parentUuid":"c1","message":{"role":"user","content":"<task-notification>\n<task-id>bg-1</task-id>\n<status>completed</status>\n</task-notification>"}}""",
         )
         val loaded = TranscriptReader.read(f)
-        assertEquals(listOf("user: !ls -la"), loaded.state.shape())
-        assertEquals("!ls -la", loaded.meta.firstPrompt)
+        assertEquals(listOf("shell: !ls -la → notes.txt"), loaded.state.shape())
+        assertEquals("! ls -la", loaded.meta.firstPrompt)
+        assertEquals("! ls -la", loaded.state.firstPrompt())
+    }
+
+    private fun ChatState.shells(): List<ChatEntry.Shell> = entries.filterIsInstance<ChatEntry.Shell>()
+
+    @Test
+    fun `a merged shell escape line loads as the command and its output`() = runBlocking<Unit> {
+        val state = TranscriptReader.read(Fixtures.transcript("bash-mode")).state
+        val shell = state.entries.first() as ChatEntry.Shell
+        assertEquals("echo bash-mode-probe && printf err >&2", shell.command)
+        assertEquals("bash-mode-probe\nerr", shell.output)
+        assertFalse(shell.running)
+        assertNull(shell.end)
+        assertEquals(1, state.shells().size)
+        assertEquals(listOf("Reply with only the text the command printed to stdout"), state.userTexts())
+        assertTrue(state.entries.indexOfFirst { it is ChatEntry.User } > 0, "the prompt comes after the shell escape")
+        assertEquals(listOf("bash-mode-probe"), state.assistantTexts())
+    }
+
+    @Test
+    fun `a shell escape on two lines loads the same`() = runBlocking<Unit> {
+        val state = TranscriptReader.read(Fixtures.transcript("bash-mode-respond")).state
+        val shell = state.shells().single()
+        assertEquals("echo bash-mode-probe && printf err >&2", shell.command)
+        assertEquals("bash-mode-probe\nerr", shell.output)
+        assertEquals(shell, state.entries.first())
+        assertTrue(state.userTexts().isEmpty())
+        assertTrue(state.assistantTexts().single().startsWith("The probe ran"))
+    }
+
+    @Test
+    fun `a shell escape reloads as the stream showed it`() = runBlocking<Unit> {
+        val sends = mapOf(
+            "bash-mode" to SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>", "<command_uuid-6>"), null, 0),
+            "bash-mode-respond" to SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), "<command_uuid-10>", 0),
+        )
+        for ((name, sent) in sends) {
+            val shown = listOf(
+                SessionEvent.ShellStarted("shell-1", "echo bash-mode-probe && printf err >&2", 0),
+                SessionEvent.ShellOutput("shell-1", "bash-mode-probe\nerr"),
+                SessionEvent.ShellEnded("shell-1", dev.daarkolabs.tandem.session.ShellEnd.Exited(0), 12),
+                sent,
+            ).fold(ChatState(), ::reduce)
+            val streamed = Fixtures.decode(name).fold(shown) { s, m -> reduce(s, SessionEvent.Cli(m)) }
+            val loaded = TranscriptReader.read(Fixtures.transcript(name)).state
+            assertEquals(streamed.shells().map { it.command to it.output }, loaded.shells().map { it.command to it.output }, name)
+            // A thinking block's estimate and clock come from the stream's deltas and the host's time, which no line on disk keeps
+            // (docs/protocol.md 11.4): its text and duration are what both show.
+            fun ChatState.blocks() = entries.filterIsInstance<ChatEntry.Assistant>().map { entry ->
+                entry.blocks.map { if (it is AssistantBlock.Thinking) AssistantBlock.Thinking(it.text, durationMs = it.durationMs) else it }
+            }
+            assertEquals(streamed.blocks(), loaded.blocks(), name)
+        }
+    }
+
+    @Test
+    fun `the first prompt of a shell escape session is the command`(@TempDir dir: Path) = runBlocking<Unit> {
+        for (name in listOf("bash-mode", "bash-mode-respond")) {
+            assertEquals("! echo bash-mode-probe && printf err >&2", TranscriptReader.meta(Fixtures.transcript(name)).firstPrompt, name)
+            assertEquals("! echo bash-mode-probe && printf err >&2", TranscriptReader.read(Fixtures.transcript(name)).meta.firstPrompt, name)
+        }
+        val f = dir.resolve("20202020-2020-4202-8202-202020202020.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"o1","parentUuid":null,"message":{"role":"user","content":"<bash-stdout>x</bash-stdout><bash-stderr></bash-stderr>"}}""",
+        )
+        assertNull(TranscriptReader.meta(f).firstPrompt)
+        val stray = TranscriptReader.read(f)
+        assertNull(stray.meta.firstPrompt)
+        assertTrue(stray.state.entries.isEmpty(), "an output line with no shell escape before it is skipped")
     }
 
     @Test

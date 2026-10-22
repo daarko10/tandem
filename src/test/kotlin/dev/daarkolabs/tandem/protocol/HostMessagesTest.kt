@@ -1,12 +1,15 @@
 package dev.daarkolabs.tandem.protocol
 
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.junit.Test
+import kotlin.io.path.readLines
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** Exact wire shapes from docs/protocol.md sections 3 and 4. */
@@ -135,5 +138,26 @@ class HostMessagesTest {
         )
         assertEquals(PermissionMode.PLAN, PermissionMode.fromWire("plan"))
         assertEquals(null, PermissionMode.fromWire("nope"))
+    }
+
+    @Test
+    fun `the bash escape frames match the probe's`() {
+        // Bash probes 1, frames 1 and 2 (uuid replaced): compared as parsed objects, key order is not significant.
+        val input = """{"type":"user","session_id":"","parent_tool_use_id":null,"uuid":"u1","message":{"role":"user",""" +
+            """"content":"<bash-input>echo bash-mode-probe && printf err >&2</bash-input>"},"client_composed":true,"shouldQuery":false}"""
+        val output = """{"type":"user","session_id":"","parent_tool_use_id":null,"uuid":"u2","message":{"role":"user",""" +
+            """"content":"<bash-stdout>bash-mode-probe\nerr</bash-stdout><bash-stderr></bash-stderr>"},"client_composed":true,"shouldQuery":false}"""
+        assertEquals(Json.parseToJsonElement(input), HostMessages.bashInput("echo bash-mode-probe && printf err >&2", "u1"))
+        assertEquals(Json.parseToJsonElement(output), HostMessages.bashOutput("bash-mode-probe\nerr", "", "u2", query = false))
+
+        val respond = HostMessages.bashOutput("bash-mode-probe\nerr", "", "u2", query = true)
+        assertFalse("shouldQuery" in respond)
+        assertEquals(JsonPrimitive(true), respond["client_composed"])
+
+        val recorded = Json.parseToJsonElement(Fixtures.transcript("bash-mode").readLines()[4]).jsonObject
+        val context = HostMessages.bashContext("echo bash-mode-probe && printf err >&2", "bash-mode-probe\nerr", "", "u3")
+        assertEquals(recorded["message"]!!.jsonObject["content"], context["message"]!!.jsonObject["content"])
+        assertEquals(JsonPrimitive(false), context["shouldQuery"])
+        assertEquals(JsonPrimitive("u3"), context["uuid"])
     }
 }

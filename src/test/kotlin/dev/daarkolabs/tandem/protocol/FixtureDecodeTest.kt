@@ -756,4 +756,31 @@ class FixtureDecodeTest {
         assertTrue(denied.content.filterIsInstance<ContentBlock.ToolResult>().single().isError)
         assertEquals("permission-rule", denied.toolResultMeta[0].nonExecutionKind)
     }
+    // spec: bash-mode: the quiet sends end in a zero-turn result naming both uuids
+    @Test
+    fun `bash-mode - the quiet sends end in a zero-turn result naming both uuids`() {
+        val quiet = assertIs<CliMessage.Result>(at("bash-mode", 8))
+        assertEquals(0, quiet.numTurns)
+        assertEquals(0L, quiet.durationApiMs)
+        assertEquals("", quiet.result)
+        assertEquals(2, quiet.userMessageUuids.size)
+        assertEquals(listOf("<command_uuid-4>", "<command_uuid-6>"), quiet.userMessageUuids)
+        val prompt = assertIs<CliMessage.Result>(at("bash-mode", 23))
+        assertEquals(1, prompt.numTurns)
+        assertEquals(1, prompt.userMessageUuids.size)
+    }
+
+    // spec: bash-mode-respond: the output send starts a normal turn
+    @Test
+    fun `bash-mode-respond - the output send starts a normal turn`() {
+        val quiet = assertIs<CliMessage.Result>(at("bash-mode-respond", 6))
+        assertEquals(0, quiet.numTurns)
+        assertEquals(listOf("<command_uuid-4>"), quiet.userMessageUuids)
+        assertEquals("requesting", assertIs<CliMessage.SystemStatus>(at("bash-mode-respond", 11)).status)
+        val reply = assertIs<CliMessage.Assistant>(at("bash-mode-respond", 36))
+        assertTrue(reply.content.filterIsInstance<ContentBlock.Text>().single().text.contains("merged"))
+        val ended = assertIs<CliMessage.Result>(at("bash-mode-respond", 41))
+        assertEquals(1, ended.numTurns)
+        assertEquals(listOf("<command_uuid-10>"), ended.userMessageUuids)
+    }
 }

@@ -72,6 +72,30 @@ sealed interface SessionEvent {
      * local-command line applies.
      */
     data class LocalCommandOutput(val text: String, val runCommand: String?) : SessionEvent
+
+    /** A shell escape [id] started running [command] at [atMillis]: a running [ChatEntry.Shell], which [ChatState.runningShell] names. */
+    data class ShellStarted(val id: String, val command: String, val atMillis: Long) : SessionEvent
+
+    /** Shell escape [id] printed [text] (stdout and stderr merged; the runner caps it, not the reducer). */
+    data class ShellOutput(val id: String, val text: String) : SessionEvent
+
+    /** Shell escape [id] ended, how and after how long; no command runs any more. */
+    data class ShellEnded(val id: String, val end: ShellEnd, val durationMs: Long) : SessionEvent
+
+    /**
+     * Shell escape [id]'s frames went to the CLI: [quiet] are the uuids sent with `shouldQuery: false`, whose zero-turn results are
+     * still to come ([ChatState.quietSends]); [query], the uuid of the frame sent without it (replies on), opens a turn as a prompt does.
+     */
+    data class ShellSent(val id: String, val quiet: List<String>, val query: String?, val atMillis: Long) : SessionEvent
+
+    /** A shell escape from a loaded transcript: finished, without an end (the transcript keeps none). */
+    data class ShellLoaded(val id: String, val command: String, val output: String, val atMillis: Long) : SessionEvent
+
+    /**
+     * The reply to shell escape [id] was dropped before its frame went out (the user stopped while the output frame waited for the
+     * quiet result): the turn [ShellSent] opened ends as stopped, without a footer, since no model call ran.
+     */
+    data class ShellReplyDropped(val id: String) : SessionEvent
 }
 
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
@@ -108,6 +132,35 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.Ended -> reduceEnded(state, event)
     is SessionEvent.McpServersListed -> state.copy(mcp = state.mcp.copy(servers = event.servers, detailed = true))
     is SessionEvent.LocalCommandOutput -> state.localCommandNotice(event.text, event.runCommand)
+    is SessionEvent.ShellStarted ->
+        state.append(ChatEntry.Shell(event.id, event.command, "", running = true, startedAtMillis = event.atMillis)).copy(runningShell = event.id)
+    is SessionEvent.ShellOutput -> state.updateShell(event.id) { it.copy(output = it.output + event.text) }
+    is SessionEvent.ShellEnded -> state.updateShell(event.id) { it.copy(running = false, end = event.end, durationMs = event.durationMs) }
+        .let { if (it.runningShell == event.id) it.copy(runningShell = null) else it }
+    is SessionEvent.ShellSent -> {
+        val sent = state.updateShell(event.id) { it.copy(sent = true) }.copy(quietSends = state.quietSends + event.quiet)
+        // A reply is asked for: the turn opens as UserSent opens it, with no prompt entry (the shell entry stands for it).
+        if (event.query == null) {
+            sent
+        } else {
+            sent.copy(
+                busy = true,
+                turnInterrupted = false,
+                turn = TurnProgress(event.query, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
+            )
+        }
+    }
+    is SessionEvent.ShellLoaded ->
+        state.append(ChatEntry.Shell(event.id, event.command, event.output, running = false, startedAtMillis = event.atMillis))
+    // As an interrupt marker shows it, but no model call ran: no footer, no turn end counted.
+    is SessionEvent.ShellReplyDropped -> state.notice(NoticeLevel.INFO, "Stopped.", NoticeKind.INTERRUPTED)
+        .copy(busy = false, turn = null, turnInterrupted = false)
+}
+
+/** This state with the shell entry [id] changed by [change]; unchanged without one. */
+private inline fun ChatState.updateShell(id: String, change: (ChatEntry.Shell) -> ChatEntry.Shell): ChatState {
+    val shell = entries.getOrNull(positionOf(id)) as? ChatEntry.Shell ?: return this
+    return upsert(change(shell))
 }
 
 /**
@@ -155,6 +208,8 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
         turnsEnded = if (end != null) state.turnsEnded + 1 else state.turnsEnded,
         turnInterrupted = false,
         turn = null,
+        // No process owes those results any more: none of them may keep the session from being idle.
+        quietSends = emptySet(),
     ).notice(if (event.isError || failedTurn) NoticeLevel.ERROR else NoticeLevel.INFO, said)
 }
 
@@ -185,7 +240,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
     is CliMessage.Assistant -> reduceAssistant(state, message, at)
     is CliMessage.User -> reduceUser(state, message, at)
     is CliMessage.StreamEvent -> reduceStream(state, message, at)
-    is CliMessage.Result -> reduceResult(state, message)
+    is CliMessage.Result -> reduceQuietOr(state, message)
     is CliMessage.ControlRequest -> when (val request = message.request) {
         is InboundRequest.CanUseTool -> state.copy(
             pendingPermissions = state.pendingPermissions + PendingPermission(
@@ -581,6 +636,26 @@ private fun reduceStream(state: ChatState, message: CliMessage.StreamEvent, at: 
             state.withTurn { it.copy(outputTokens = it.outputTokens + (event.outputTokens ?: 0), thinkingEstimate = 0) }
         // A late content_block_stop for an already completed block is a no-op (docs/protocol.md 6.4).
         is StreamEvent.ContentBlockStop, is StreamEvent.Other -> state
+    }
+}
+
+/**
+ * A `result`, with the quiet sends ([ChatState.quietSends]) told apart. One that names only quiet sends is theirs: they leave the set,
+ * the session id is taken, and nothing else changes (no turn end, no footer; the turn a responding shell escape opened stays open
+ * for its own result). One that names quiet sends among others drops them and is reduced as today, and so is one that names none,
+ * except a zero-turn result while quiet sends wait: from a CLI that leaves `user_message_uuids` out, it is the oldest one's.
+ */
+private fun reduceQuietOr(state: ChatState, result: CliMessage.Result): ChatState {
+    if (state.quietSends.isEmpty()) return reduceResult(state, result)
+    val uuids = result.userMessageUuids
+    val quiet = uuids.filter { it in state.quietSends }
+    return when {
+        uuids.isNotEmpty() && quiet.size == uuids.size ->
+            state.copy(quietSends = state.quietSends - quiet.toSet(), sessionId = result.sessionId ?: state.sessionId)
+        quiet.isNotEmpty() -> reduceResult(state.copy(quietSends = state.quietSends - quiet.toSet()), result)
+        uuids.isEmpty() && result.numTurns == 0 ->
+            state.copy(quietSends = state.quietSends - state.quietSends.first(), sessionId = result.sessionId ?: state.sessionId)
+        else -> reduceResult(state, result)
     }
 }
 

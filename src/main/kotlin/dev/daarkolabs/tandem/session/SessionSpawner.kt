@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
@@ -15,8 +16,10 @@ import kotlinx.coroutines.withContext
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
-// The manager's log category: the spawn pipeline was part of it, and debug settings name it.
-private val LOG = logger<SessionManager>()
+// The manager's log category: the spawn pipeline was part of it, and debug settings name it. Looked up on every use, as
+// ShellRunner's is: a test's capturing factory must see every record of a shell escape's run.
+private val LOG: Logger
+    get() = logger<SessionManager>()
 
 /**
  * The permission modes Tandem offers, in the order its menus list them (`chat/Modes` labels them). A process never starts in another

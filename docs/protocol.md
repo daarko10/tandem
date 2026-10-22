@@ -259,6 +259,27 @@ image, which the reader skips as it skips every `isMeta` line (section 11).
 Slash commands are sent as plain text (`"/compact"`) unless `client_composed:true`.
 Messages sent while a turn is running are queued and may be folded into the running turn; `result.user_message_uuids` lists which sends a turn consumed.
 
+**Shell escapes (`! command`, bash mode).** Tandem runs the command itself and sends what the terminal's own `!` sends: `content` is a
+string, not a block array, and every frame carries `client_composed:true` (`HostMessages.bashInput`, `bashOutput`, `bashContext`):
+
+```json
+{"type":"user","session_id":"","parent_tool_use_id":null,"uuid":"…","message":{"role":"user","content":"<bash-input>echo bash-mode-probe && printf err >&2</bash-input>"},"client_composed":true,"shouldQuery":false}
+{"type":"user","session_id":"","parent_tool_use_id":null,"uuid":"…","message":{"role":"user","content":"<bash-stdout>bash-mode-probe\nerr</bash-stdout><bash-stderr></bash-stderr>"},"client_composed":true}
+{"type":"user","session_id":"","parent_tool_use_id":null,"uuid":"…","message":{"role":"user","content":"<bash-input>CMD</bash-input>\n<bash-stdout>OUT</bash-stdout><bash-stderr></bash-stderr>"},"client_composed":true,"shouldQuery":false}
+```
+
+| Frame | When | Recorded |
+|---|---|---|
+| `bashInput` (`shouldQuery:false`) | the command, replies on | `bash-mode-respond.ndjson:3-7`: lifecycle, `init`, a zero-turn `result` (`num_turns:0`, `result:""`, `duration_api_ms:0`) naming its uuid (`:6`) |
+| `bashOutput` (no `shouldQuery`) | the output, replies on, sent only once that zero-turn result is in | `bash-mode-respond.ndjson:8-11`: a normal turn, `status requesting` naming its uuid (`:11`), its `result` (`:41`) |
+| `bashContext` (`shouldQuery:false`) | command and output, replies off | **unrecorded** as one host frame: the probe sent two quiet frames back to back, which the CLI queued together (`bash-mode.ndjson:3-6`), answered with one zero-turn `result` naming both (`:8`) and merged into this content (`transcripts/bash-mode.jsonl:5`) |
+
+stderr is merged into stdout in order, so `<bash-stderr>` is empty, as in the 2.1.306 terminal; Tandem's note for a stopped or capped
+command (`Stopped after 3.0s`, `Killed after 10 minutes`) is the last line of `<bash-stdout>`. The CLI echoes none of these frames.
+Tandem never writes two of them back to back (the CLI batches the sends queued before it starts processing): the output frame waits
+for the command frame's zero-turn result, and an escape sent behind a prompt waits for that prompt's result. A `result` whose
+`user_message_uuids` names only quiet sends ends no turn and draws no footer.
+
 ---
 
 ## 4. Control protocol
@@ -964,8 +985,8 @@ fixture has a rewind, a compaction or parallel tool calls yet; `TranscriptReader
 | `[Request interrupted` (`by user`, `by user for tool use`) | an interrupt | the interrupt notice, shown as `Interrupted · What should Claude do instead?`, as live |
 | `<command-name>` or `<command-message>`, with `<command-args>` | a slash command | `/name args`, never as the title |
 | `<local-command-stdout>`, `<local-command-stderr>` | a command's output | nothing |
-| `<bash-input>` | a `!command` shell escape | `!command` |
-| `<bash-stdout>`, `<bash-stderr>` | its output | nothing |
+| `<bash-input>` | a `! command` shell escape | the shell row `! command` (the title form too, as the CLI's own `last-prompt`); its output on the same line (`transcripts/bash-mode.jsonl:5`) is the row's output |
+| `<bash-stdout>`, `<bash-stderr>` | its output, on a line of its own (`transcripts/bash-mode-respond.jsonl:6`) | the row's output: stdout, then a non-empty stderr on a line of its own; skipped when no shell row before it is still without output |
 | `<task-notification>` | a background task | nothing |
 
 Only the interrupt line is recorded (`history-interrupt`, 2.1.301):

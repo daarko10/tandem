@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.CliMessage
@@ -26,6 +27,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,7 +46,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
-private val LOG = logger<ClaudeSession>()
+/** Looked up on every use, as [ShellRunner]'s is: a test's capturing factory must see every record of a shell escape's run. */
+private val LOG: Logger
+    get() = logger<ClaudeSession>()
 
 /** How long `mcp_status` and `mcp_toggle` wait for their answer. */
 private const val MCP_STATUS_SECONDS = 15
@@ -145,6 +149,8 @@ class ClaudeSession(
     private val clock: () -> Long = System::currentTimeMillis,
     /** How long one second of an MCP request's wait is; tests shrink it. The error still names the seconds ([McpError.TimedOut]). */
     private val mcpMillisPerSecond: Long = 1_000L,
+    /** How long a shell escape's output frame waits for the quiet result of its command frame before it goes out anyway. */
+    private val quietWaitMillis: Long = 5_000L,
 ) {
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext.job) + CoroutineName("ClaudeSession"))
     private val _state = MutableStateFlow(
@@ -171,6 +177,25 @@ class ClaudeSession(
     /** Set by [killNow]: Tandem ended the process at once, as when the IDE exits, so the turn in progress did not fail. */
     @Volatile
     private var killed = false
+
+    /**
+     * Guards [heldEscapes] and [pendingOutput]: a shell escape's frames go out in the recorded order (spec 12.4), never two sends back
+     * to back, since the CLI batches the sends queued before it starts processing and merges them into one (`bash-mode:3-6`).
+     */
+    private val shellLock = Any()
+
+    /** Shell escapes waiting for the turn in progress (a prompt sent just before them) to end, in order. */
+    private val heldEscapes = ArrayDeque<HeldEscape>()
+
+    /** A responding shell escape's output frame, waiting for the quiet result of its command frame. */
+    private var pendingOutput: PendingOutput? = null
+
+    private class HeldEscape(val id: String, val command: String, val output: String, val respond: Boolean)
+
+    /** Shell escape [id]'s output [frame], to send once [quiet] has left [ChatState.quietSends]; [fallback] sends it anyway later. */
+    private class PendingOutput(val id: String, val quiet: String, val frame: JsonObject) {
+        var fallback: Job? = null
+    }
 
     private val _reportedSessionId = MutableStateFlow<String?>(null)
     private val _lastFrameAtMillis = MutableStateFlow(0L)
@@ -228,6 +253,7 @@ class ClaudeSession(
             val reason = e.message ?: e.javaClass.simpleName
             val text = "Could not start `${config.binary}`: $reason. Is the claude CLI (Claude Code) installed?"
             ended = true // ahead of the chat saying so: a request made once it shows answers Ended at once
+            dropShellFrames()
             dispatch(SessionEvent.Ended(text, isError = true, atMillis = clock()))
             return
         }
@@ -247,6 +273,7 @@ class ClaudeSession(
             writer.cancel()
             LOG.info("claude exited with code $code")
             ended = true // ahead of the chat saying so: a request made once it shows answers Ended at once
+            dropShellFrames()
             dispatch(exitEvent(code))
             this.coroutineContext.job.children.forEach { it.cancel() }
         }
@@ -263,7 +290,91 @@ class ClaudeSession(
         send(HostMessages.userMessage(text, images, uuid))
     }
 
-    fun interrupt(): Unit = send(HostMessages.interrupt(newRequestId()))
+    /**
+     * Interrupts the turn in progress. While a shell escape's output frame still waits for its command frame's quiet result, no model
+     * call runs yet: the frame is dropped instead, the turn it would have started ends as stopped, and no request goes out.
+     */
+    fun interrupt() {
+        val dropped = synchronized(shellLock) {
+            pendingOutput?.also {
+                pendingOutput = null
+                it.fallback?.cancel()
+                dispatch(SessionEvent.ShellReplyDropped(it.id))
+            }
+        }
+        if (dropped == null) send(HostMessages.interrupt(newRequestId())) else advanceShell()
+    }
+
+    /**
+     * Sends shell escape [id]'s frames: its [command] and its [output] (stdout and stderr merged; `<bash-stderr>` stays empty), so
+     * that the model sees what the terminal shows. With [respond], two frames as `bash-mode-respond` sent them: the command quietly,
+     * then, once its zero-turn result is in (or [quietWaitMillis] later), the output without `shouldQuery`, which starts the turn
+     * that answers it. Without, one quiet frame with both (context only). An escape sent while a turn is in progress (a prompt sent
+     * just before it) waits whole for that turn's result: a prompt and a quiet frame never go out together either.
+     */
+    fun sendShellEscape(id: String, command: String, output: String, respond: Boolean) {
+        synchronized(shellLock) {
+            val escape = HeldEscape(id, command, output, respond)
+            if (heldEscapes.isEmpty() && pendingOutput == null && _state.value.turn == null) startEscapeLocked(escape) else heldEscapes.addLast(escape)
+        }
+    }
+
+    /** Applies [event] to this chat, as one of the CLI's lines would be: a shell escape's progress, which Tandem runs itself. */
+    internal fun event(event: SessionEvent): Unit = dispatch(event)
+
+    private fun startEscapeLocked(escape: HeldEscape) {
+        if (!escape.respond) {
+            val uuid = UUID.randomUUID().toString()
+            dispatch(SessionEvent.ShellSent(escape.id, quiet = listOf(uuid), query = null, atMillis = clock()))
+            send(HostMessages.bashContext(escape.command, escape.output, "", uuid))
+            return
+        }
+        val quiet = UUID.randomUUID().toString()
+        val query = UUID.randomUUID().toString()
+        dispatch(SessionEvent.ShellSent(escape.id, quiet = listOf(quiet), query = query, atMillis = clock()))
+        send(HostMessages.bashInput(escape.command, quiet))
+        val pending = PendingOutput(escape.id, quiet, HostMessages.bashOutput(escape.output, "", query, query = true))
+        pendingOutput = pending
+        pending.fallback = scope.launch(CoroutineName("ClaudeSession.quietWait")) {
+            delay(quietWaitMillis)
+            sendOutput(pending)
+        }
+    }
+
+    /** Sends [pending] if it still waits; then the escapes held behind it may start. */
+    private fun sendOutput(pending: PendingOutput) {
+        synchronized(shellLock) {
+            if (pendingOutput !== pending) return
+            pendingOutput = null
+            pending.fallback?.cancel()
+            send(pending.frame)
+        }
+    }
+
+    /**
+     * After each line the reader reduced: the output frame goes out once its quiet send's result is in, and the escapes held behind a
+     * turn start, one at a time, once no turn is in progress.
+     */
+    private fun advanceShell() {
+        synchronized(shellLock) {
+            val pending = pendingOutput
+            if (pending != null && pending.quiet !in _state.value.quietSends) {
+                pendingOutput = null
+                pending.fallback?.cancel()
+                send(pending.frame)
+            }
+            while (pendingOutput == null && heldEscapes.isNotEmpty() && _state.value.turn == null) startEscapeLocked(heldEscapes.removeFirst())
+        }
+    }
+
+    /** The process is over: no shell escape frame goes out any more (the turn a responding escape opened ends with the process). */
+    private fun dropShellFrames() {
+        synchronized(shellLock) {
+            pendingOutput?.fallback?.cancel()
+            pendingOutput = null
+            heldEscapes.clear()
+        }
+    }
 
     /**
      * Asks for another model. The switch only counts once `system/init` reports it (see [ChatState.modelWarning]); an error answer
@@ -459,6 +570,7 @@ class ClaudeSession(
             }
             dispatch(SessionEvent.Cli(message, at))
             if (message is CliMessage.SystemInit && message.sessionId.isNotEmpty()) _reportedSessionId.value = message.sessionId
+            if (message is CliMessage.Result) advanceShell()
         }
     }
 

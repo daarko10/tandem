@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.McpAuthStart
@@ -17,6 +18,7 @@ import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -36,6 +38,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -44,13 +47,17 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.nio.file.Path
 import java.time.Instant
+import java.util.Locale
 import java.util.UUID
 import java.util.WeakHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
-private val LOG = logger<SessionManager>()
+/** Looked up on every use, as [ShellRunner]'s is: a test's capturing factory must see every record of a shell escape's run. */
+private val LOG: Logger
+    get() = logger<SessionManager>()
 
 /** How often the session list is read again where the transcript folders cannot be watched. */
 private const val INDEX_POLL_MILLIS: Long = 30_000
@@ -113,6 +120,10 @@ class SessionManager internal constructor(
     private val mcpAuthEvery: Duration = 2.seconds,
     /** How long a sign-in wait lasts at most. */
     private val mcpAuthTimeout: Duration = 3.minutes,
+    /** Whether Claude replies to a shell escape's output (the setting), read when each command ends. */
+    private val respondToShell: () -> Boolean = { true },
+    /** Runs the shell escapes ([runShell]). */
+    private val shell: ShellRunner = ShellRunner(environment = System::getenv),
 ) : McpControls {
     /** Reads histories with [TranscriptReader]. */
     constructor(
@@ -123,7 +134,16 @@ class SessionManager internal constructor(
         workingDirectory: Path,
         maxLive: () -> Int,
         clock: () -> Long = System::currentTimeMillis,
-    ) : this(scope, index, launcher, binary, workingDirectory, maxLive, clock, TranscriptReader::read)
+        respondToShell: () -> Boolean = { true },
+        shell: ShellRunner = ShellRunner(environment = System::getenv),
+    ) : this(
+        scope, index, launcher, binary, workingDirectory, maxLive, clock, TranscriptReader::read,
+        respondToShell = respondToShell,
+        shell = shell,
+    )
+
+    /** The source of shell escape ids, `shell-<n>`: distinct from a loaded entry's line uuid. */
+    private val nextShell = AtomicLong()
 
     /** Guards changes of [sessions] and [selected] together, and a session's attention against a change of the selection. */
     private val lock = Any()
@@ -274,7 +294,70 @@ class SessionManager internal constructor(
     fun send(id: SessionId, text: String, images: List<ImageBlock> = emptyList()) {
         val handle = handle(id) ?: return
         handle.lastUsed = clock()
-        if (handle.sendOrQueue(Prompt(text, images))) spawner.startInBackground(handle, forPrompts = true)
+        if (handle.sendOrQueue(Outbound.Prompt(text, images))) spawner.startInBackground(handle, forPrompts = true)
+    }
+
+    /**
+     * Runs [command], a shell escape (`! command`), in the login shell in the project directory, off the EDT, and shows it in the
+     * chat as it runs (spec 12). Once it ends, its frames go to the CLI ([ClaudeSession.sendShellEscape]), started first if no process
+     * runs, as a prompt starts one; Claude replies when [respondToShell] says so. A command that did not start, or whose output could
+     * not be read, says so in its row and sends nothing; one stopped ([stopShell]) or capped sends its output with a note. Ignored
+     * while a command runs in this session, and once it is closed.
+     */
+    @OptIn(DelicateCoroutinesApi::class)
+    fun runShell(id: SessionId, command: String) {
+        val handle = handle(id) ?: return
+        handle.lastUsed = clock()
+        handle.startShell {
+            val shellId = "shell-${nextShell.incrementAndGet()}"
+            val started = clock()
+            handle.shellEvent(SessionEvent.ShellStarted(shellId, command, started))
+            // ATOMIC: the body runs even when the job is cancelled before it is dispatched, so that its entry still ends Stopped.
+            handle.scope.launch(Dispatchers.IO + CoroutineName("SessionManager.shell"), start = CoroutineStart.ATOMIC) {
+                runShellJob(handle, shellId, command, started)
+            }
+        }
+    }
+
+    /** Stops the shell escape that runs in session [id], if any: its tree is killed, and its output goes out with a note. */
+    fun stopShell(id: SessionId) {
+        handle(id)?.shellJob?.cancel()
+    }
+
+    /** The body of [runShell]'s job: it always ends the entry, once. */
+    private suspend fun runShellJob(handle: SessionHandle, shellId: String, command: String, started: Long) {
+        val soFar = StringBuilder()
+        val result = try {
+            shell.run(command, workingDirectory) { text ->
+                soFar.append(text)
+                handle.shellEvent(SessionEvent.ShellOutput(shellId, text))
+            }
+        } catch (e: CancellationException) {
+            val ms = clock() - started // read once: the row and the frame say the same
+            withContext(NonCancellable) {
+                handle.shellEvent(SessionEvent.ShellEnded(shellId, ShellEnd.Stopped, ms))
+                LOG.info("shell escape stopped after $ms ms")
+                // A closed session, or a project that closes (its scope cancelled without a close), sends nothing.
+                if (!handle.isClosed && handle.scope.isActive) {
+                    sendShellFrames(handle, shellId, command, withNote(soFar.toString(), "Stopped after ${elapsed(ms)}"))
+                }
+            }
+            throw e
+        } catch (e: Exception) {
+            handle.shellEvent(SessionEvent.ShellEnded(shellId, ShellEnd.Failed(e.message ?: e.javaClass.simpleName), clock() - started))
+            LOG.info("shell escape failed: ${e.javaClass.simpleName}")
+            return
+        }
+        handle.shellEvent(SessionEvent.ShellEnded(shellId, result.end, result.durationMs))
+        if (result.end is ShellEnd.NotStarted) return
+        sendShellFrames(handle, shellId, command, if (result.end is ShellEnd.TimedOut) withNote(result.output, "Killed after 10 minutes") else result.output)
+    }
+
+    /** Sends a shell escape's frames to [handle]'s process, or queues them and starts one. */
+    private fun sendShellFrames(handle: SessionHandle, shellId: String, command: String, output: String) {
+        if (handle.sendOrQueue(Outbound.ShellEscape(shellId, command, output, respondToShell()))) {
+            spawner.startInBackground(handle, forPrompts = true)
+        }
     }
 
     /** Interrupts the turn in progress, if a process runs. */
@@ -443,6 +526,7 @@ class SessionManager internal constructor(
      */
     fun killAllNow() {
         spawner.killAllNow()
+        shell.killAllNow()
     }
 
     private fun handle(id: SessionId): SessionHandle? = mutableSessions.value.firstOrNull { it.id == id }
@@ -818,3 +902,21 @@ private fun signInNotice(server: String, outcome: McpAuthOutcome): Pair<NoticeLe
 /** Each session with its title, again whenever a title changes. */
 private fun titles(handles: List<SessionHandle>): Flow<List<Pair<SessionHandle, String>>> =
     if (handles.isEmpty()) flowOf(emptyList()) else combine(handles.map { handle -> handle.title.map { handle to it } }) { it.toList() }
+
+/** [output], then [note] on a line of its own: Tandem's own words for a stopped or capped command, as the last line of stdout. */
+private fun withNote(output: String, note: String): String =
+    if (output.isEmpty() || output.endsWith("\n")) output + note else output + "\n" + note
+
+/**
+ * A stopped command's elapsed time as the chat writes a duration (`chat/Text.formatDuration`, which `session/` may not import):
+ * one decimal under ten seconds (`3.0s`), then whole seconds (`12s`, `1m 12s`, `1h 1m`).
+ */
+private fun elapsed(ms: Long): String {
+    if (ms < 10_000) return String.format(Locale.ROOT, "%.1fs", ms.coerceAtLeast(0) / 1_000.0)
+    val seconds = ms / 1_000
+    return when {
+        seconds < 60 -> "${seconds}s"
+        seconds < 3_600 -> "${seconds / 60}m ${seconds % 60}s"
+        else -> "${seconds / 3_600}h ${seconds % 3_600 / 60}m"
+    }
+}

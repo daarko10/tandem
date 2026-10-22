@@ -29,6 +29,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -636,7 +637,7 @@ class ClaudeSessionTest {
      * A session on a [ScriptedProcess]: the test writes the CLI's lines with [write], and every frame the host writes lands in
      * [stdin]. Answers go through the session's own request path (spec 9.2).
      */
-    private class ScriptedSession(tmp: Path, sessionId: String, mcpMillisPerSecond: Long = 1_000L) {
+    private class ScriptedSession(tmp: Path, sessionId: String, mcpMillisPerSecond: Long = 1_000L, quietWaitMillis: Long = 5_000L) {
         val stdin: File = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > '${stdin.path}'").start())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -645,6 +646,7 @@ class ClaudeSessionTest {
             SessionConfig("claude", tmp, sessionId = sessionId),
             ProcessLauncher { _, _ -> process },
             mcpMillisPerSecond = mcpMillisPerSecond,
+            quietWaitMillis = quietWaitMillis,
         )
 
         fun write(line: String) = process.script.println(line)
@@ -1032,4 +1034,118 @@ class ClaudeSessionTest {
     }
 
     private fun assertNull(value: Any?) = kotlin.test.assertNull(value)
+    /** The `user` frames the host wrote so far, parsed. */
+    private fun ScriptedSession.userFrames(): List<JsonObject> =
+        stdin.readLines().filter { "\"type\":\"user\"" in it }.map { Json.parseToJsonElement(it).jsonObject }
+
+    private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
+
+    /** Lines [from]..[to] (1-based) of fixture [name], with [edit] applied to each as a JSON object. */
+    private fun lines(name: String, from: Int, to: Int, edit: (Int, MutableMap<String, kotlinx.serialization.json.JsonElement>) -> Unit = { _, _ -> }): List<String> =
+        (from..to).map { n ->
+            val fields = Json.parseToJsonElement(Fixtures.lines(name)[n - 1]).jsonObject.toMutableMap()
+            edit(n, fields)
+            JsonObject(fields).toString()
+        }
+
+    @Test
+    fun `the output frame waits for the quiet result`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.written("\"type\":\"user\"")
+        delay(300)
+        val first = run.userFrames().single()
+        assertEquals("<bash-input>echo hi</bash-input>", first.content())
+        assertEquals(false, first["shouldQuery"]!!.jsonPrimitive.boolean)
+        val uuid = first["uuid"]!!.jsonPrimitive.content
+        assertEquals(setOf(uuid), run.session.state.value.quietSends)
+        assertTrue(run.session.state.value.busy)
+
+        lines("bash-mode-respond", 3, 7) { n, fields ->
+            if (n == 6) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$uuid\"]")
+        }.forEach(run::write)
+        val frames = withTimeout(2_000) {
+            while (run.userFrames().size < 2) delay(20)
+            run.userFrames()
+        }
+        val output = frames[1]
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", output.content())
+        assertFalse("shouldQuery" in output)
+        assertEquals(true, output["client_composed"]!!.jsonPrimitive.boolean)
+        val state = run.session.state.value
+        assertTrue(state.busy, "the reply's turn is still open")
+        assertTrue(state.quietSends.isEmpty())
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        run.close()
+    }
+
+    @Test
+    fun `the output frame goes out after the wait without a quiet result`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 200)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        val frames = withTimeout(2_000) {
+            while (run.userFrames().size < 2) delay(20)
+            run.userFrames()
+        }
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", frames[1].content())
+        run.close()
+    }
+
+    @Test
+    fun `interrupt drops a pending output frame`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.session.interrupt()
+        run.written("\"type\":\"user\"")
+        delay(1_000)
+        assertEquals(1, run.userFrames().size)
+        assertTrue(run.stdin.readLines().none { "\"interrupt\"" in it }, "no model call runs: no interrupt request")
+        val state = run.session.state.value
+        assertFalse(state.busy)
+        assertNull(state.turn)
+        assertEquals("Stopped.", (state.entries.last() as ChatEntry.Notice).text)
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        run.close()
+    }
+
+    @Test
+    fun `Ended drops a pending output frame`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 500)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.written("\"type\":\"user\"")
+        run.process.destroyForcibly()
+        val ended = withTimeout(10_000) { run.session.state.first { it.ended } }
+        delay(700) // past the wait: a frame still pending would go out now
+        assertEquals(1, run.userFrames().size)
+        val end = ended.entries.filterIsInstance<ChatEntry.TurnEnded>().single()
+        assertEquals(TurnEnd.FAILED, end.end)
+        run.close()
+    }
+
+    @Test
+    fun `a shell escape after a prompt waits for the prompt's result`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendUserMessage("x")
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.written("\"type\":\"user\"")
+        delay(300)
+        assertEquals(1, run.userFrames().size, "only the prompt")
+        assertTrue(run.session.state.value.entries.none { it is ChatEntry.Shell && it.sent })
+
+        Fixtures.lines("plain-reply").forEach(run::write)
+        val frames = withTimeout(2_000) {
+            while (run.userFrames().size < 2) delay(20)
+            run.userFrames()
+        }
+        assertEquals("<bash-input>echo hi</bash-input>", frames[1].content())
+        val state = run.session.state.value
+        assertEquals(1, state.entries.count { it is ChatEntry.TurnEnded }, "the prompt's turn ended")
+        assertTrue(state.busy, "the shell escape's reply turn is open")
+        run.close()
+    }
 }

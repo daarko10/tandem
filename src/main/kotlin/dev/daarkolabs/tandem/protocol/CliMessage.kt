@@ -178,6 +178,8 @@ sealed interface CliMessage {
         val contextWindows: Map<String, Long> = emptyMap(),
         /** `local_command`: the local command the turn ran, e.g. `mcp`; null for a model turn or an unavailable command. */
         val localCommand: String? = null,
+        /** `user_message_uuids`: the uuids of the user sends the turn consumed (`bash-mode:8` names two); empty when absent. */
+        val userMessageUuids: List<String> = emptyList(),
         override val raw: JsonObject,
     ) : CliMessage
 

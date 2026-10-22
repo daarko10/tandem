@@ -1446,6 +1446,120 @@ class ReducerTest {
         assertEquals("claudeai", later.server("claude.ai Example").source)
         assertEquals(3, later.mcp.initCount)
     }
+    /** Line [line] (1-based) of fixture [name] as a JSON object, edited by [edit], decoded. */
+    private fun edited(name: String, line: Int, edit: (MutableMap<String, kotlinx.serialization.json.JsonElement>) -> Unit): SessionEvent {
+        val fields = Json.parseToJsonElement(Fixtures.lines(name)[line - 1]).jsonObject.toMutableMap()
+        edit(fields)
+        return SessionEvent.Cli(Ndjson.decode(JsonObject(fields).toString()))
+    }
+
+    @Test
+    fun `a shell escape is one entry that runs, prints and ends`() {
+        val started = reduce(ChatState(), SessionEvent.ShellStarted("shell-1", "x", 0))
+        assertEquals("shell-1", started.runningShell)
+        val printed = listOf(SessionEvent.ShellOutput("shell-1", "a"), SessionEvent.ShellOutput("shell-1", "b")).fold(started, ::reduce)
+        assertEquals("shell-1", printed.runningShell)
+        val ended = reduce(printed, SessionEvent.ShellEnded("shell-1", ShellEnd.Exited(0), 5))
+        val shell = ended.entries.single() as ChatEntry.Shell
+        assertEquals("ab", shell.output)
+        assertFalse(shell.running)
+        assertEquals(ShellEnd.Exited(0), shell.end)
+        assertEquals(5L, shell.durationMs)
+        assertNull(ended.runningShell)
+        assertEquals(ended.positions(), ended.entryIndex)
+    }
+
+    @Test
+    fun `the quiet result of a shell send ends no turn`() {
+        var state = reduce(ChatState(), SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>", "<command_uuid-6>"), null, 0))
+        assertEquals(setOf("<command_uuid-4>", "<command_uuid-6>"), state.quietSends)
+        state = fold(state, "bash-mode", 3, 8)
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(state.busy)
+        assertTrue(state.quietSends.isEmpty())
+        assertEquals("<session_id-2>", state.sessionId)
+        assertEquals(0, state.turnsEnded)
+    }
+
+    @Test
+    fun `a responding shell send opens a turn that its reply's result ends`() {
+        val sent = reduce(ChatState(), SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), "<command_uuid-10>", 0))
+        assertTrue(sent.busy)
+        val quiet = fold(sent, "bash-mode-respond", 3, 6)
+        assertTrue(quiet.busy, "the quiet result leaves the reply's turn open")
+        assertTrue(quiet.entries.none { it is ChatEntry.TurnEnded })
+        assertTrue(quiet.quietSends.isEmpty())
+        val answered = fold(quiet, "bash-mode-respond", 7, 41)
+        assertFalse(answered.busy)
+        assertEquals(1, answered.entries.count { it is ChatEntry.TurnEnded })
+        assertEquals(sent.turnsEnded + 1, answered.turnsEnded)
+    }
+
+    @Test
+    fun `a result that names a quiet send and a prompt is the prompt's`() {
+        val state = listOf(
+            SessionEvent.ShellSent("shell-1", listOf("a"), null, 0),
+            SessionEvent.UserSent("p", "x", 0),
+            edited("plain-reply", 15) { it["user_message_uuids"] = Json.parseToJsonElement("[\"a\",\"p\"]") },
+        ).fold(ChatState(), ::reduce)
+        assertEquals(1, state.entries.count { it is ChatEntry.TurnEnded })
+        assertTrue(state.quietSends.isEmpty())
+        assertFalse(state.busy)
+    }
+
+    @Test
+    fun `a process that ends before the quiet result leaves no quiet send`() {
+        val sent = reduce(ChatState(), SessionEvent.ShellSent("shell-1", listOf("a"), null, 0))
+        assertTrue(reduce(sent, SessionEvent.Ended("The claude CLI exited.", isError = false)).quietSends.isEmpty())
+        assertTrue(ChatState(quietSends = setOf("a")).settled().quietSends.isEmpty())
+    }
+
+    @Test
+    fun `a zero-turn result without uuids ends the quiet send without a footer`() {
+        val state = listOf(
+            SessionEvent.ShellSent("shell-1", listOf("a"), null, 0),
+            edited("bash-mode", 8) { it.remove("user_message_uuids") },
+        ).fold(ChatState(), ::reduce)
+        assertTrue(state.quietSends.isEmpty())
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(state.busy)
+        assertEquals("<session_id-2>", state.sessionId)
+    }
+
+    @Test
+    fun `a dropped shell reply ends the turn without a footer`() {
+        val state = listOf(
+            SessionEvent.ShellStarted("shell-1", "echo hi", 0),
+            SessionEvent.ShellEnded("shell-1", ShellEnd.Exited(0), 3),
+            SessionEvent.ShellSent("shell-1", listOf("a"), "q", 0),
+            SessionEvent.ShellReplyDropped("shell-1"),
+        ).fold(ChatState(), ::reduce)
+        assertFalse(state.busy)
+        assertNull(state.turn)
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        val last = state.entries.last() as ChatEntry.Notice
+        assertEquals("Stopped.", last.text)
+        assertEquals(NoticeKind.INTERRUPTED, last.kind)
+        assertTrue((state.entries.first() as ChatEntry.Shell).sent)
+    }
+
+    @Test
+    fun `the first prompt of a shell escape session is the command`() {
+        val state = reduce(ChatState(), SessionEvent.ShellStarted("shell-1", "echo hi", 0))
+        assertEquals("! echo hi", state.firstPrompt())
+        assertEquals("! echo hi", reduce(state, SessionEvent.UserSent("u1", "later", 0)).firstPrompt())
+    }
+
+    @Test
+    fun `a loaded shell escape is a finished entry without an end`() {
+        val state = reduce(ChatState(), SessionEvent.ShellLoaded("line-1", "ls", "a.txt", 7))
+        val shell = state.entries.single() as ChatEntry.Shell
+        assertFalse(shell.running)
+        assertNull(shell.end)
+        assertEquals("a.txt", shell.output)
+        assertEquals(7L, shell.startedAtMillis)
+        assertNull(state.runningShell)
+    }
 }
 
 /** A complete main-thread `assistant` line with one text block. */

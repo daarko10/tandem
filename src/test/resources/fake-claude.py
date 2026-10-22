@@ -66,6 +66,11 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
       `authUrl` (a guess, unrecorded). Any other `mcp_*` request gets a bare success.
   (e) In an MCP fixture, every replayed `init` has its `mcp_servers` rewritten from the table; every other fixture replays `init` verbatim (`mcp-slash` and `mcp-tool-call` keep their recorded thin lists, which IDE tests 3 and 4 rely on).
   (f) Every host frame is still logged.
+  (g) The fake keeps the `uuid`s of the `user` frames it reads, in order, since the last `result` it wrote; when it writes a
+      `result` line it replaces the line's `user_message_uuids` with that list (an empty list when it read none) and clears it;
+      a `system/status` line that has `user_message_uuids` gets the list as it stands. So a result names the host's own sends,
+      as the real CLI's does (`bash-mode:8` names both quiet sends, `bash-mode-respond:6` the command frame and `:41` the
+      output frame), never the recorded `<command_uuid-N>` placeholders.
 """
 import copy
 import fcntl
@@ -89,6 +94,7 @@ SPAWN_PREFIX = '{"type":"__spawn__"'
 SESSION_PLACEHOLDER = re.compile(r"<session_id-\d+>")
 SECRET_NAME_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH")
 UNKNOWN_SUBTYPE = "Unknown subtype"
+read_user_uuids = []  # rule (g): the uuids of the user frames read since the last result written
 
 
 def option(name):
@@ -142,9 +148,12 @@ def read_host():
             with open(log_path, "a", encoding="utf-8") as log:
                 log.write(line + "\n")
         try:
-            return json.loads(line)
+            frame = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(frame, dict) and frame.get("type") == "user" and isinstance(frame.get("uuid"), str):
+            read_user_uuids.append(frame["uuid"])
+        return frame
     return None
 
 
@@ -171,6 +180,11 @@ def wait_for_gate():
 
 
 def emit(message):
+    if message.get("type") == "result":
+        message["user_message_uuids"] = list(read_user_uuids)
+        del read_user_uuids[:]
+    elif message.get("type") == "system" and message.get("subtype") == "status" and "user_message_uuids" in message:
+        message["user_message_uuids"] = list(read_user_uuids)
     line = SESSION_PLACEHOLDER.sub(lambda _: escaped_session_id, json.dumps(message, separators=(",", ":")))
     sys.stdout.write(line + "\n")
     sys.stdout.flush()

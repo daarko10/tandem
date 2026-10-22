@@ -187,6 +187,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
                     textStreamed = true
                 }
                 is ChatEntry.ToolResult -> Unit
+                // No row yet (M7b gives shell escapes theirs, and their turn boundaries).
+                is ChatEntry.Shell -> Unit
             }
         }
         if (ended != null) {
@@ -402,6 +404,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
                 else -> rows.add { noticeRow(entry, gap(Kind.NOTICE, it)) }
             }
             is ChatEntry.TurnEnded -> if (context.end?.entry === entry) rows.add { footer(entry, context, it) }
+            // No row yet (M7b gives shell escapes theirs).
+            is ChatEntry.Shell -> Unit
         }
     }
 
