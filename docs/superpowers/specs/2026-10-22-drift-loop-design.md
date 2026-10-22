@@ -46,16 +46,27 @@ file and the unrecognised types). The message is in `build/test-results/test/*.x
 A second workflow, `.github/workflows/drift-fix.yml`, named `Drift fix`, runs on:
 
 - `workflow_run` of the workflow named `CLI contract`, `types: [completed]`. The job runs only when
-  `github.event.workflow_run.conclusion == 'failure'` and `github.event.workflow_run.head_branch == 'main'`. A
-  `workflow_run` job checks out `main` at its head and presents the OIDC subject `repo:daarko10@34120174/tandem@1421183639:ref:refs/heads/main` (GitHub embeds the owner
-  and repository ids),
-  the one the federation rule admits (`cli-contract.yml` says so in its header).
+  `github.event.workflow_run.conclusion == 'failure'`, `github.event.workflow_run.head_branch == 'main'`,
+  `github.event.workflow_run.head_repository.full_name == github.repository` and `github.event.workflow_run.event` is
+  `schedule` or `workflow_dispatch` (the nightly's only triggers). A `workflow_run` job checks out `main` at its head
+  and presents the OIDC subject `repo:daarko10@34120174/tandem@1421183639:ref:refs/heads/main` (GitHub embeds the
+  owner and repository ids), the one the federation rule admits (`cli-contract.yml` says so in its header).
 - `workflow_dispatch` with three inputs: `rehearse` (boolean, default `false`) and `mode` (string, default
   `init-model-key`) for the fixer-only rehearsal (see "The rehearsal"), and `run_id` (string, optional: the id of a red
-  `CLI contract` run on `main` to fix now; a green run, another workflow's or another branch's is refused, for a run that happened before this workflow reached `main` or whose automatic firing
-  was skipped; with an old run the CLI did not answer it is also the kind-1 rehearsal, see "The rehearsal"). Dispatch from `main`: the job's `if` skips a dispatch from any other branch, which would otherwise fail
-  at the federation exchange after the disk and Gradle setup. The rehearsal that proves the trigger is not a dispatch of
-  this workflow but of the nightly (`cli-contract.yml` with `drift=<mode>`, see "The rehearsal").
+  `CLI contract` run on `main` to fix now, for a run that happened before this workflow reached `main` or whose
+  automatic firing was skipped; a green run, another workflow's run, another branch's run or a run that is not a
+  number is refused; with an old run the CLI did not answer it is also the kind-1 rehearsal, see "The rehearsal").
+  Dispatch from `main`: the job's `if` skips a dispatch from any other branch, which would otherwise fail at the
+  federation exchange after the disk and Gradle setup. The rehearsal that proves the trigger is not a dispatch of this
+  workflow but of the nightly (`cli-contract.yml` with `drift=<mode>`, see "The rehearsal").
+
+`workflow_run` also fires for a run of a fork's pull request once the repository is public, and that run's
+`head_branch` and workflow name are the fork's to choose: a fork can name a workflow `CLI contract`, run it from its
+own branch `main`, fail it on purpose and upload a `contract-recording` it wrote, which the agent would then promote
+holding the App token. The head-repository and event clauses refuse it, and step "Name the red run" checks the same
+fields again through `gh api "repos/$GITHUB_REPOSITORY/actions/runs/<id>"` (`name`, `conclusion`, `head_branch`,
+`head_repository.full_name`, `event`; `gh run view` names neither the head repository nor the event), which also
+covers a `run_id` passed by dispatch.
 
 The whole job is guarded by `github.repository == 'daarko10/tandem'`, a `concurrency` group `drift-fix` without
 cancellation (one fixer at a time; a second firing waits), `timeout-minutes: 90`, and these permissions: `id-token: write`
@@ -131,7 +142,10 @@ One job, `fix`, on `ubuntu-latest`:
 
 1. `jlumbroso/free-disk-space@v2.0.0` (the same settings as `build.yml`: the platform tests need the room),
    `actions/checkout@v7` with `persist-credentials: false` (so the only GitHub credential the agent holds is the App
-   token the action exports; see step 7), `actions/setup-java@v6` (zulu 21), `gradle/actions/setup-gradle@v6`.
+   token the action exports; see step 7), `actions/setup-java@v6` (zulu 21), `gradle/actions/setup-gradle@v6` with
+   `cache-read-only: true`: the agent runs test code it wrote in this job, which can rewrite the Gradle User Home
+   (build cache entries, dependency jars), and a cache this job saved in `main`'s scope would be restored by `Build`
+   on `main` and on every pull request, past branch protection.
 2. **Fetch the recording.** `mkdir -p build/drift` first (nothing else creates the directory, and the steps below
    write into it under `set -euo pipefail`). Then, with `GITHUB_TOKEN` and the run id from `github.event.workflow_run.id`
    or the `run_id` input, the step asks whether the run has the artifact at all:
@@ -176,12 +190,14 @@ One job, `fix`, on `ubuntu-latest`:
 7. **Skip when a fix is already waiting.** `gh pr list --label contract-drift --state open` non-empty → the step
    comments on that PR ("the nightly of <date> is still red: run <link>") and the job ends. A red that persists for
    a week opens one PR, not seven. Once the gate proceeds, the step `Require a protected main` (`id: protect`, with
-   `GITHUB_TOKEN`) checks the precondition of "Safeguards" before any spend: `gh api
-   "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected` (classic protection; the workflow token cannot read its
-   review count, which needs administration access) and the largest `required_approving_review_count` of a
-   `pull_request` rule in `gh api "repos/$GITHUB_REPOSITORY/rules/branches/main"` (rulesets). Neither classic protection
-   nor a ruleset requiring one approving review, or a failed read: `::error` and `exit 1`, the agent does not start and
-   step 9 is skipped. Steps 8 and 9 run only when this step succeeded.
+   `GITHUB_TOKEN`) checks the precondition of "Safeguards" before any spend: the largest
+   `required_approving_review_count` of a `pull_request` rule in `gh api
+   "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"` (the active rulesets' rules, readable with metadata
+   access) must be a number of at least 1. Classic branch protection does not count: the workflow token cannot read its
+   review count (administration access), and `branches/main`'s `protected: true` holds for a classic rule with no
+   option ticked, which still accepts a direct push. Anything else, a failed read or an answer that is not a number
+   included: `::error` and `exit 1`, the agent does not start and step 9 is skipped. Steps 8 and 9 run only when this
+   step succeeded.
 8. **The agent.** `anthropics/claude-code-action@v1` with the federation inputs `anthropic_federation_rule_id`,
    `anthropic_organization_id`, `anthropic_service_account_id` and `anthropic_workspace_id` set to the same four
    identifiers `cli-contract.yml` carries in `env:` (they are not secrets), and no `github_token` input, so the action
@@ -204,15 +220,20 @@ One job, `fix`, on `ubuntu-latest`:
    `.claude/settings.json` is loaded as well) with `permissions.deny`: `Edit(.github/**)`, `Write(.github/**)`,
    `Edit(build.gradle.kts)`, `Write(build.gradle.kts)`, `Edit(settings.gradle.kts)`, `Write(settings.gradle.kts)`,
    `Edit(scripts/**)`, `Write(scripts/**)`, `Edit(.claude/**)`, `Write(.claude/**)`, `Edit(CLAUDE.md)`,
-   `Write(CLAUDE.md)`, `Bash(claude:*)`, and, since the project's `.claude/settings.json` allow rules are merged in,
-   `Bash(./gradlew check -x:*)`, `Bash(./gradlew compileKotlin:*)`, `Bash(./gradlew compileTestKotlin:*)`,
-   `Bash(./gradlew buildPlugin:*)`, `Bash(./gradlew verifyPlugin:*)` and `Bash(ktlint:*)` (19 rules), and `env`: `BASH_DEFAULT_TIMEOUT_MS` `900000` and `BASH_MAX_TIMEOUT_MS`
-   `1800000`. The CLI's Bash tool times a command out after two minutes by default (the model can raise it to ten),
-   and `./gradlew check` takes about three minutes on a warm runner (`Build` run 39706160759: 2m44s), so without those
-   values the first `check` is killed and its retry costs turns. The turn budget is 120: a real fixture from the newest
-   CLI also reds tests the skill names in its step 4 beyond the contract test, each needing reads and edits, and one
-   retry of `check` must fit; the step's 75 minutes and the workspace limit still bound spend. The step has
-   `id: agent`, so step 9 can read `steps.agent.outputs.conclusion`.
+   `Write(CLAUDE.md)`, `Bash(claude:*)`, and, since the project's `.claude/settings.json` allow rules are merged in
+   (among them the prefix rule `Bash(./gradlew check:*)`), `Bash(./gradlew check -x:*)`,
+   `Bash(./gradlew check --exclude-task:*)`, `Bash(./gradlew check *-*)`, `Bash(./gradlew compileKotlin:*)`,
+   `Bash(./gradlew compileTestKotlin:*)`, `Bash(./gradlew buildPlugin:*)`, `Bash(./gradlew verifyPlugin:*)` and
+   `Bash(ktlint:*)` (21 rules). The three `check` rules refuse any flag after `./gradlew check`, so the agent never
+   reports a `check` that skipped `koverVerify`: a rule whose `*` is not a trailing `:*` is a wildcard pattern in the
+   installed CLI (2.1.307), so `*-*` covers `--exclude-task=koverVerify`, `--init-script` and the rest, and the two
+   prefix rules hold on a CLI that reads it as an exact command. `env`: `BASH_DEFAULT_TIMEOUT_MS` `900000` and
+   `BASH_MAX_TIMEOUT_MS` `1800000`. The CLI's Bash tool times a command out after two minutes by default (the model can
+   raise it to ten), and `./gradlew check` takes about three minutes on a warm runner (`Build` run 39706160759: 2m44s),
+   so without those values the first `check` is killed and its retry costs turns. The turn budget is 120: a real fixture
+   from the newest CLI also reds tests the skill names in its step 4 beyond the contract test, each needing reads and
+   edits, and one retry of `check` must fit; the step's 75 minutes and the workspace limit still bound spend. The step
+   has `id: agent`, so step 9 can read `steps.agent.outputs.conclusion`.
 
    Opus is the tier for an implementation task. `Edit` and `Write` here are the CLI's own tools on the runner's
    checkout, not Tandem's. The allowlist names the invocations the skill prescribes, not programs, because the GitHub
@@ -230,9 +251,11 @@ One job, `fix`, on `ubuntu-latest`:
    CLI (2.1.307) matches a rule without `*` as the whole command (`n===e.command`) and a `:*` rule as the command
    itself or the prefix followed by a space (`n.startsWith(e.prefix+" ")`): `Bash(git push -u origin drift/:*)` would
    never match `git push -u origin drift/2026-10-22-123`, and in headless mode a denied call is a dead end, not a
-   prompt. Every command the skill prescribes is on the list exactly as the skill spells it, and nothing else is. What
-   bounds the loop whatever the agent decides is branch protection on `main` and the App token's scope
-   ("Safeguards"), not this list. The step has `timeout-minutes: 75` inside the job's 90.
+   prompt. Every command the skill prescribes is on the list exactly as the skill spells it, and the action's allowlist
+   names nothing else; the project's merged allow rules still admit their own prefixes (`./gradlew test` and
+   `./gradlew check` followed by a task name, `git status`, `git diff`, `git log`), less the deny rules above. That is
+   acceptable because what bounds the loop whatever the agent decides is the ruleset on `main` and the App token's
+   scope ("Safeguards"), not this list. The step has `timeout-minutes: 75` inside the job's 90.
 9. **Enforce the edit allowlist.** After the action, `if: always()` once the gate proceeded, a `run:` step lists the
    files the drift branch changed against `main` (`gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/<n>/files"`, each
    `filename` and a rename's `previous_filename`: `gh pr view --json files` stops at 100 files and names only a
@@ -357,20 +380,22 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 
 ### Safeguards
 
-- **Branch**: `drift/<date>-<run id>`, always from `main`, never `main` itself. The owner enables branch protection on
-  `main` requiring a pull request and one approving review before the first rehearsal (the first bullet of "What the
-  owner does"), and the workflow refuses to start the agent without it (runtime step 7, `Require a protected main`); that, not the skill's rule, is what makes "never push to main" and "never merge" true for the App
-  token. A protection that only requires a pull request does not stop a
-  `gh pr merge` by the App: a pull request is what it merges. The App cannot approve its own pull request, so with one
-  review required the merge is refused even if the tool allowlist regresses. (The owner, an administrator, still
-  merges their own pull requests unless "Do not allow bypassing the above settings" is on.)
+- **Branch**: `drift/<date>-<run id>`, always from `main`, never `main` itself. The owner creates a ruleset on `main`
+  requiring a pull request and one approving review before the first rehearsal (the first bullet of "What the owner
+  does"), and the workflow refuses to start the agent unless it reads such a rule (runtime step 7, `Require a
+  protected main`; classic branch protection is not read, since the workflow token cannot see its review count).
+  That, not the skill's rule, is what makes "never push to main" and "never merge" true for the App token. A
+  protection that only requires a pull request does not stop a `gh pr merge` by the App: a pull request is what it
+  merges. The App cannot approve its own pull request, so with one review required the merge is refused even if the
+  tool allowlist regresses. (The owner merges their own pull requests through the ruleset's bypass list, which names
+  the repository admin role and never the Claude App.)
 - **Tool allowlist and deny rules**: the allowlist names the invocations the skill prescribes, with an exact push rule,
   and the `settings` deny rules keep the agent out of `.github/`, the build files, `scripts/`, `.claude/`, `CLAUDE.md`
   and a second CLI (runtime step 8). They guide the agent; they are not what protects `main`. The App token is in the
   agent's environment (`GITHUB_TOKEN`, `GH_TOKEN`) and in the `origin` URL, `Edit` and `Write` are otherwise
-  unrestricted, and an allowlist regression is one line, so the guarantee is branch protection on `main` (a pull
-  request plus one approving review; the App cannot approve its own pull request and, not being an administrator,
-  cannot bypass) together with the App's permission scope (contents, pull requests, issues: no administration, no
+  unrestricted, and an allowlist regression is one line, so the guarantee is the ruleset on `main` (a pull request
+  plus one approving review; the App cannot approve its own pull request and, absent from the bypass list, cannot
+  bypass) together with the App's permission scope (contents, pull requests, issues: no administration, no
   workflows). The skill prescribes no command outside the list: in headless mode a denied call is a dead end, not a
   prompt.
 - **One open fix at a time**: an open PR labelled `contract-drift` (rehearsal or real) skips the agent entirely (step 7
@@ -393,12 +418,14 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 
 ### What the owner does
 
-- Once, before the first rehearsal, in this order: enables branch protection on `main` requiring a pull request and
-  one approving review (the guarantee behind the tool and edit allowlists; no rehearsal is run until it is on, and until it is on every
-  decoder or reader red ends red at `Require a protected main` without starting the agent; the
-  App is not an administrator and cannot bypass it, and whether the owner keeps their own administrator bypass is
-  theirs to decide); checks that the Claude GitHub App is installed on `daarko10/tandem` (open item 1); runs the
-  rehearsal (below). Nothing waits on a scheduled nightly: its actor is already recorded (open item 4, closed).
+- Once, before the first rehearsal, in this order: creates a ruleset (Settings | Rules | Rulesets) targeting `main`,
+  enforcement active, with "Require a pull request before merging" and one required approval (the guarantee behind the
+  tool and edit allowlists; no rehearsal is run until it is on, and until it is on every decoder or reader red ends red
+  at `Require a protected main` without starting the agent; classic branch protection alone does not pass that step).
+  Its bypass list never names the Claude App; whether it names the repository admin role, so the owner can merge their
+  own pull requests, is the owner's to decide. Then checks that the Claude GitHub App is installed on `daarko10/tandem`
+  (open item 1); runs the rehearsal (below). Nothing waits on a scheduled nightly: its actor is already recorded (open
+  item 4, closed).
 - Reads the PR. Merges it (squash), or closes it with a comment saying why (the wrong fix, a change Tandem should
   handle differently, a fixture to re-record by hand, files outside the edit allowlist, which the allowlist step's
   comment names). Either re-arms the loop. A merge is followed by the next
@@ -410,18 +437,19 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 
 ### The rehearsal
 
-The loop is proven end to end before a real CLI change, through the real trigger: `gh workflow run cli-contract.yml
---ref main -f drift=<mode>`. The nightly records live as always, then its step "Mutate the recording for a rehearsal"
-(`if: inputs.drift != ''`) runs `python3 -I scripts/make_drift.py "$DRIFT" build/contract --from build/contract`. The
-script reads the three recorded files (`contract-hello.ndjson`, `transcripts/contract-hello.jsonl`,
-`transcripts/session-id.jsonl`) before it writes any, so the recording is mutated in place, and leaves the marker
-`build/contract/rehearsal` holding the mode. The Gradle step goes red, the real artifact is uploaded, and `workflow_run`
-fires the fixer with `conclusion == failure` on `main`. Everything a dispatch of the fixer alone would skip is
-exercised: the `workflow_run` trigger and the job `if` (`github.ref`, `head_branch`), the action's checks of
-`github.actor` and `workflow_run.actor` for a `workflow_run` event, the OIDC subject of a `workflow_run` job (open item
-2), `actions: read` with the artifact listing and `gh run download`, and the artifact's layout. The fixer finds the
-marker and passes `rehearsal=true` to the skill. Two modes, each a drift the current decoder or reader rejects in the
-way a real rename would:
+The loop is proven end to end before a real CLI change, through the real trigger:
+`gh workflow run cli-contract.yml --ref main -f drift=<mode>`. The nightly records live as always, then its step "Mutate
+the recording for a rehearsal" (`if: inputs.drift != ''`) runs
+`python3 -I scripts/make_drift.py "$DRIFT" build/contract --from build/contract`. The script reads the three recorded
+files (`contract-hello.ndjson`, `transcripts/contract-hello.jsonl`, `transcripts/session-id.jsonl`) before it writes
+any, so the recording is mutated in place, and leaves the marker `build/contract/rehearsal` holding the mode. The Gradle
+step goes red, the real artifact is uploaded, and `workflow_run` fires the fixer with `conclusion == failure` on `main`.
+Everything a dispatch of the fixer alone would skip is exercised: the `workflow_run` trigger and the job `if`
+(`github.ref`, `head_branch`, `head_repository`, `event`), the action's checks of `github.actor` and
+`workflow_run.actor` for a `workflow_run` event, the OIDC subject of a `workflow_run` job (open item 2), `actions: read`
+with the artifact listing and `gh run download`, and the artifact's layout. The fixer finds the marker and passes
+`rehearsal=true` to the skill. Two modes, each a drift the current decoder or reader rejects in the way a real rename
+would:
 
 - `init-model-key` (decoder drift): the `system/init` line's `model` key becomes `model_id`. `Ndjson` requires `model`
   on `init`, so the line decodes to `Unknown` and the decode test fails with "no system/init". The line is found by
