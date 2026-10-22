@@ -218,10 +218,11 @@ internal fun takesKey(component: Component?, panel: JComponent): Boolean = compo
  * (the IDE window lost the focus) is not a move: the menu stays, and no key reaches it meanwhile.
  *
  * Only a real move counts: [owner] must be [actualOwner], the focus owner the `KeyboardFocusManager` reports, which it sets before it
- * fires the change. On macOS, skiko also sends every `focusOwner` listener a change of its own whenever a Compose node takes the focus
- * (`NativeAccessibleFocusHelper.requestMacOSFocusOnAccessible`, for VoiceOver), naming a parentless `ComposeAccessible` while the
- * focus stays where it was. A menu item takes the focus on hover and on the arrow keys, so that event alone closed the menus at the
- * first item the pointer crossed.
+ * fires the change. On macOS, Compose also sends every `focusOwner` listener a change of its own whenever a Compose node takes the
+ * focus (for VoiceOver: skiko's `NativeAccessibleFocusHelper.requestMacOSFocusOnAccessible` in IDE 2026.1, Compose's own
+ * `androidx.compose.ui.platform.a11y.AccessibleFocusHelper` in 2026.2), naming a parentless `ComposeAccessible` while the focus stays
+ * where it was. A menu item takes the focus on hover and on the arrow keys, so that event alone closed the menus at the first item the
+ * pointer crossed.
  */
 internal fun focusLeft(owner: Component?, actualOwner: Component?, panel: JComponent): Boolean =
     owner != null && owner === actualOwner && !takesKey(owner, panel)
@@ -283,6 +284,7 @@ private fun RingControl(fraction: Float, value: String) {
     if (open) {
         DisposableEffect(panel) {
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            // focusLeftListener, never a check of the new value alone: macOS sends a focus change on hover that moves nothing (focusLeft).
             val focusListener = focusLeftListener(panel, focusManager::getFocusOwner) { open = false }
             focusManager.addPropertyChangeListener("focusOwner", focusListener)
             onDispose { focusManager.removePropertyChangeListener("focusOwner", focusListener) }
@@ -547,7 +549,7 @@ internal fun pageTurn(event: AwtKeyEvent, page: Int): Int? {
  * off), which takes the keys with no Compose node focused in it, so neither a handler on the menu nor one on the control gets them.
  * Only keys in the tool window's own panel are taken ([takesKey]), and the menu closes when the AWT focus really leaves that panel
  * ([focusLeftListener]): the layer gets no click from Swing components outside it, so a menu left open under the editor would
- * otherwise take the digits and arrows typed there. The focus change skiko sends on macOS when a menu item takes the Compose focus
+ * otherwise take the digits and arrows typed there. The focus change Compose sends on macOS when a menu item takes the Compose focus
  * (on hover, or an arrow key) moves nothing, and leaves the menu open ([focusLeft]).
  *
  * The menu is placed in the control's outer box, which has no padding of its own, so that [AboveAnchor] measures from the pill's
@@ -599,6 +601,7 @@ private fun FooterControl(
                 true
             }
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            // focusLeftListener, never a check of the new value alone: macOS sends a focus change on hover that moves nothing (focusLeft).
             val focusListener = focusLeftListener(panel, focusManager::getFocusOwner) { open = false }
             focusManager.addKeyEventDispatcher(dispatcher)
             focusManager.addPropertyChangeListener("focusOwner", focusListener)
