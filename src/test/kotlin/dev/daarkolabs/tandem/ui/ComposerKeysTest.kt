@@ -142,9 +142,9 @@ class ComposerKeysTest {
         // Polish spec 2.7 "Send order" and edge 10: Enter and the Send button both go through sendDraft, which reads the sender's
         // own flag, so a click that races the encode sends nothing.
         val scope = CoroutineScope(SupervisorJob())
+        val release = CountDownLatch(1)
         try {
             val encoding = CountDownLatch(1)
-            val release = CountDownLatch(1)
             val encode: (ByteArray) -> String = {
                 encoding.countDown()
                 release.await(TIMEOUT, TimeUnit.MILLISECONDS)
@@ -176,6 +176,8 @@ class ComposerKeysTest {
             withTimeout(TIMEOUT) { sender.sending.first { !it } }
             assertEquals(listOf("first", "second"), sent)
         } finally {
+            // A failed assertion above must not leave the encoder blocked on a Dispatchers.Default thread: cancel cannot interrupt it.
+            release.countDown()
             scope.cancel()
         }
     }
