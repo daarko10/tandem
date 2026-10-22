@@ -235,14 +235,17 @@ class TandemSessionsTest {
         openProjectAsync(dir).useProjectAsync { project ->
             val sessions = TandemSessions.get(project)
             val row = WorkingRow(turnUuid = "turn", startedAtMillis = 0, step = "Pondering", outputTokens = 0, waiting = false)
-            fun animated(): Boolean = WorkingIndicator.view(row, 1_000, 1_000, sessions.rowOptions.value.reduceMotion).animated
-            assertFalse(sessions.rowOptions.value.reduceMotion)
+            fun animated(): Boolean = WorkingIndicator.view(row, 1_000, 1_000, sessions.reduceMotion.value).animated
+            assertFalse(sessions.reduceMotion.value)
             assertTrue(animated(), "the spark moves on a default IDE")
+            val options = sessions.rowOptions.value
             try {
                 TandemSettings.getInstance().state.reduceMotion = true
                 sessions.settingsChanged()
-                assertTrue(sessions.rowOptions.value.reduceMotion)
+                assertTrue(sessions.reduceMotion.value)
                 assertFalse(animated(), "the spark stands still")
+                // The rows' options, which every open chat rebuilds its rows on, do not change.
+                assertEquals(options, sessions.rowOptions.value)
             } finally {
                 // The settings are the application's: no other test may see reduceMotion = true.
                 TandemSettings.getInstance().loadState(TandemSettings.State())

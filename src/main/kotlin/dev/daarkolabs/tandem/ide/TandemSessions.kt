@@ -117,11 +117,18 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         ApplicationManager.getApplication().serviceIfCreated<TandemSettings>()?.let(::rowOptionsOf) ?: RowOptions(showThinking = true),
     )
 
-    /**
-     * What the chat rows show beyond the session's state: the `Show thinking rows` and `Reduce motion` settings, as last applied
-     * ([settingsChanged]).
-     */
+    /** What the chat rows show beyond the session's state: the `Show thinking rows` setting, as last applied ([settingsChanged]). */
     val rowOptions: StateFlow<RowOptions> = _rowOptions.asStateFlow()
+
+    private val _reduceMotion = MutableStateFlow(
+        ApplicationManager.getApplication().serviceIfCreated<TandemSettings>()?.state?.reduceMotion ?: false,
+    )
+
+    /**
+     * Tandem's `Reduce motion` setting, as last applied ([settingsChanged]): the working row's spark stands still. Apart from
+     * [rowOptions], which the rows are built from, so that toggling it rebuilds no chat's rows.
+     */
+    val reduceMotion: StateFlow<Boolean> = _reduceMotion.asStateFlow()
 
     private val started = AtomicBoolean(false)
 
@@ -139,7 +146,7 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
      * launches coroutines, and waits for nothing.
      * - Until every session's process has ended, a JVM shutdown hook kills them ([SessionManager.killAllNow]): when the IDE exits, the
      *   JVM can stop before the sessions' coroutines have ended their processes.
-     * - [rowOptions] takes the settings ([settingsChanged]), before any session is restored.
+     * - [rowOptions] and [reduceMotion] take the settings ([settingsChanged]), before any session is restored.
      * - The [SessionNotifier] starts.
      * - The sessions that were open when the project was last closed open again, without a process: the one that was selected
      *   first, and selected again at once, then the others in their order. One whose transcript is gone, or that fails to open, is
@@ -247,12 +254,14 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     }
 
     /**
-     * Takes the settings the chat rows depend on ([TandemSettings.State.showThinking], [TandemSettings.State.reduceMotion]) into
-     * [rowOptions], so that every open chat rebuilds its rows; called when the settings page applies. Safe on the EDT: it reads the
-     * settings in memory and sets a flow.
+     * Takes the settings the chat rows depend on into [rowOptions] ([TandemSettings.State.showThinking]), so that every open chat
+     * rebuilds its rows when it changes, and [TandemSettings.State.reduceMotion] into [reduceMotion]; called when the settings page
+     * applies. Safe on the EDT: it reads the settings in memory and sets two flows.
      */
     fun settingsChanged() {
-        _rowOptions.value = rowOptionsOf(TandemSettings.getInstance())
+        val settings = TandemSettings.getInstance()
+        _rowOptions.value = rowOptionsOf(settings)
+        _reduceMotion.value = settings.state.reduceMotion
     }
 
     companion object {
@@ -285,5 +294,4 @@ private fun configDir(): Path =
         ?: TranscriptFolder.configDir(ShellEnvironment.get())
 
 /** The chat rows' options as [settings] say. */
-private fun rowOptionsOf(settings: TandemSettings): RowOptions =
-    RowOptions(showThinking = settings.state.showThinking, reduceMotion = settings.state.reduceMotion)
+private fun rowOptionsOf(settings: TandemSettings): RowOptions = RowOptions(showThinking = settings.state.showThinking)

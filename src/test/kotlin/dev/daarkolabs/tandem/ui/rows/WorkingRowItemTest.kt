@@ -5,7 +5,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composition
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Recomposer
-import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.chat.WorkingRow
 import org.junit.jupiter.api.Test
 import kotlin.coroutines.EmptyCoroutineContext
@@ -13,8 +12,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * The working row's motion as composed: the tool window's [ProvideRowMotion], then [LocalReducedMotion], [reducedMotion] and
- * [workingView], whose `animated` moves the spark.
+ * The working row's motion as composed: [LocalReducedMotion], which the tool window provides from `TandemSessions.reduceMotion`, then
+ * [reducedMotion] and [workingView], whose `animated` moves the spark.
  */
 class WorkingRowItemTest {
     private val now = 1_000_000L
@@ -27,31 +26,11 @@ class WorkingRowItemTest {
     }
 
     @Test
-    fun `the spark follows Reduce motion from the tool window's row options`() {
-        assertTrue(composed { animatedUnder(RowOptions(showThinking = true)) }, "Reduce motion off")
-        assertFalse(composed { animatedUnder(RowOptions(showThinking = true, reduceMotion = true)) }, "Reduce motion on")
-        assertTrue(composed { reducedUnder(RowOptions(showThinking = true, reduceMotion = true)) })
-        assertFalse(composed { reducedUnder(RowOptions(showThinking = true)) })
-    }
-
-    @Test
-    fun `the composition local alone stills the spark`() {
+    fun `the spark follows the Reduce motion the tool window provides`() {
         assertTrue(composed { providing(true) { reducedMotion() } })
-        assertFalse(composed { providing(true) { workingView(row, now, now, agentExpanded = false).animated } })
-    }
-
-    @Composable
-    private fun animatedUnder(options: RowOptions): Boolean {
-        var animated = false
-        ProvideRowMotion(options) { animated = workingView(row, now, now, agentExpanded = false).animated }
-        return animated
-    }
-
-    @Composable
-    private fun reducedUnder(options: RowOptions): Boolean {
-        var reduced = false
-        ProvideRowMotion(options) { reduced = reducedMotion() }
-        return reduced
+        assertFalse(composed { providing(true) { workingView(row, now, now, agentExpanded = false).animated } }, "Reduce motion on")
+        assertFalse(composed { providing(false) { reducedMotion() } })
+        assertTrue(composed { providing(false) { workingView(row, now, now, agentExpanded = false).animated } }, "Reduce motion off")
     }
 
     @Composable
