@@ -201,15 +201,25 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    `kind`, `cli_version` and `detail`. The body's bold first line names the kind, since the title names kind 1 only:
    `**The CLI did not answer.**`, or `**The CLI answered; the red is unclassified.**` for `unknown`. One issue, one
    comment per red run, no branch, no PR, no agent spend. The job ends green: the loop did its work.
-7. **Skip when a fix is already waiting.** `gh pr list --label contract-drift --state open` non-empty → the step
+7. **Skip when a fix is already waiting.** First, an open issue labelled `drift-halted` (`gh issue list --label
+   drift-halted --state open`; step 9 sets the label when an agent run left no branch and no pull request) → the step
+   logs "the loop is halted by issue #<n>; remove the drift-halted label to re-arm", writes `proceed=false` and no
+   `waiting` to `GITHUB_OUTPUT`, and the job ends green with no agent and no reminder. Then
+   `gh pr list --label contract-drift --state open` non-empty → the step
    writes `proceed=false` and `waiting=<n>` (the PR's number, checked to be one) to `GITHUB_OUTPUT` and the job ends
-   green; a third job, `remind` (`needs: fix`, `if: needs.fix.outputs.proceed == 'false'`, `timeout-minutes: 5`, job
+   green; a third job, `remind` (`needs: fix`, `if: needs.fix.outputs.proceed == 'false' && needs.fix.outputs.waiting
+   != ''`, `timeout-minutes: 5`, job
    permissions `pull-requests: write` and `issues: write`, no checkout and no action, `GH_REPO` set), then comments
    on that PR ("the nightly of <date> is still red: run <link>", `gh pr comment "$WAITING"` with the `fix` job's
    outputs `waiting`, `url` and `date`). The comment is not the gate's own: commenting on a pull request needs
    `pull-requests: write` even through the issues endpoint (`issues: write` alone is a 403), and the `fix` job's token
    must hold no such write. A red that persists for a week opens one PR, not seven. Once the gate proceeds, the step `Require
-   a protected main` (`id: protect`, with `GITHUB_TOKEN`) checks the precondition of "Safeguards" before any spend: the
+   a protected main` (`id: protect`, with `GITHUB_TOKEN`) checks the precondition of "Safeguards" before any spend.
+   First the repository must answer `private: false` (`gh api "repos/$GITHUB_REPOSITORY" --jq .private`, decided by
+   `gh`'s exit status; a failed read, or any answer but `false`, is `::error` and `exit 1`): a ruleset on a private
+   repository owned by a personal account is enforced only with GitHub Pro, and no read open to the workflow token
+   tells Pro from Free or an enforced ruleset from a listed one, so the step refuses a private repository whatever the
+   plan ("What the owner does": the repository goes public before the ruleset). Then the
    `pull_request` rules in `gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"` (the active
    rulesets' rules, readable with metadata access) whose `required_approving_review_count` is at least 1,
    `require_code_owner_review` is `true` and `require_last_push_approval` is `true` must name at least one ruleset (the
@@ -234,7 +244,8 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    accepts a direct push. Anything else, a failed read or an answer that is not a number included: `::error` and
    `exit 1`, the agent does not start and step 9 is skipped. A ruleset on a private repository
    owned by a personal account is enforced only with GitHub Pro, and what the endpoint lists for an unenforced ruleset
-   is not known, so reading the rule does not prove enforcement: the owner's part ("What the owner does") comes first.
+   is not known, so reading the rule does not prove enforcement: that is why the step refuses a private repository
+   first, and the owner's part ("What the owner does") comes before any rehearsal.
    The same step then refuses a drift branch `drift/<date>-<run id>` that already exists (`gh api
    "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name` exits 0: a closed pull request whose branch was kept, and
    the same run dispatched again), with `::error … delete it to retry` and `exit 1`: the agent's `git push -u origin
@@ -247,11 +258,12 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    "repos/$GITHUB_REPOSITORY/branches?per_page=100" --jq '.[].name'`, filtered to `^drift/`), subtracts the
    `headRefName`s of `gh pr list --state open --limit 100 --json headRefName,isCrossRepository` (a fork's PR does not
    count), and on any remainder exits 1 naming the branches ("delete them to re-arm the loop"); a failed listing exits
-   1 without a verdict. Without that, a night whose agent pushed and was stopped, or pushed nothing after a denied
-   command, a redactor stop or the turn limit, or a closed fix whose branch was kept, would start another agent run
-   every night of the same red (the gate of step 7 sees no open `contract-drift` PR and this step a fresh branch name,
-   the run id being new) until the owner acted: with it, a failed night costs one run until the owner deletes the
-   branch, and the standing-issue comment of step 9 says so. The repository setting "Automatically delete head
+   1 without a verdict. Without that, a night whose agent pushed and was stopped (the step's timeout, the turn
+   limit), or a closed fix whose branch was kept, would start another agent run every night of the same red (the gate
+   sees no open `contract-drift` PR and this step a fresh branch name, the run id being new) until the owner acted:
+   with it, a failed night costs one run until the owner deletes the branch, and the standing-issue comment of step 9
+   says so. A night whose agent pushed nothing (a denied command, a redactor stop, an agent that gave up) leaves no
+   branch for this refusal; step 9 halts that case with the `drift-halted` label the gate reads first. The repository setting "Automatically delete head
    branches" ("What the owner does") removes a merged fix's branch, so a merge never trips it. Steps 8 and 9 run only
    when this step succeeded.
 8. **The agent.** `anthropics/claude-code-action@v1` with the federation inputs `anthropic_federation_rule_id`,
@@ -269,28 +281,38 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    ```
    --model claude-opus-5-5
    --max-turns 120
-   --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py:*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp build/drift/recording/* src/test/resources/fixtures/*),Bash(grep:*)"
+   --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp build/drift/recording/* src/test/resources/fixtures/*),Bash(grep:*)"
    ```
 
    (24 entries). No `cat`, `ls` or `date`: the skill prescribes none of them (`Read` covers every read), and
-   `Bash(cat:*)` admitted `cat <<EOF > .github/workflows/build.yml`, a plain write past the `Edit`/`Write` deny rules
-   below. `cp` is admitted from the recording into the fixtures only, as a wildcard pattern (a `*` not in a trailing
-   `:*` is a pattern; the installed CLI, 2.1.308 here, turns each `*` into `.*` under the dotall flag, so it matches
+   `Bash(cat:*)` was taken out as a write command the skill never needs (whether `cat <<EOF >
+   .github/workflows/build.yml` meets the `Edit` deny rules below rests on the CLI's parsing of the redirection).
+   `cp` is admitted from the recording into the fixtures only, as a wildcard pattern (a `*` not in a trailing `:*` is
+   a pattern; the installed CLI, 2.1.308 here, turns each `*` into `.*` under the dotall flag, so it matches
    anything, spaces included, which the deny rules `Bash(cp *..*)` and `Bash(cp * * *)` below take back: a `..` in
    either path and a third word, a target directory or a flag), where `Bash(cp:*)` admitted `cp x
-   scripts/hooks/format-kotlin.sh`. The action's `settings` input (JSON, merged into the CLI's permissions for this
-   run only; the project's `.claude/settings.json` is loaded as well) with `permissions.deny`: `Edit(.github/**)`,
-   `Write(.github/**)`, `Edit(build.gradle.kts)`, `Write(build.gradle.kts)`, `Edit(settings.gradle.kts)`,
-   `Write(settings.gradle.kts)`, `Edit(gradle.properties)`, `Write(gradle.properties)`, `Edit(gradle/**)`,
-   `Write(gradle/**)`, `Read(.git/**)` (the App token sits in the `origin` URL of `.git/config`; the action masks it
-   in the job log, but a read would put it into the model's context and from there into a PR body or an issue
-   comment), `Edit(.git/**)`, `Write(.git/**)`, `Edit(scripts/**)`, `Write(scripts/**)`, `Edit(.claude/**)`,
-   `Write(.claude/**)`, `Edit(CLAUDE.md)`, `Write(CLAUDE.md)`, `Bash(claude:*)`, `Bash(cp *..*)`, `Bash(cp * * *)`,
-   and, since the project's `.claude/settings.json` allow rules are merged in (among them the prefix rules
-   `Bash(./gradlew check:*)` and `Bash(./gradlew test:*)`), `Bash(./gradlew check -x:*)`,
+   scripts/hooks/format-kotlin.sh`. The redactor is admitted the same way, from the fixtures onto the fixtures only
+   (`Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*)`, with
+   the deny rules `Bash(python3 -I scripts/redact_fixture.py *..*)` and
+   `Bash(python3 -I scripts/redact_fixture.py * * *)`), because the script opens and writes its output path itself,
+   a write no `Edit` rule sees: the prefix rule `Bash(python3 -I scripts/redact_fixture.py:*)` admitted
+   `python3 -I scripts/redact_fixture.py build/drift/recording/contract-hello.ndjson .github/workflows/cli-contract.yml`.
+   The action's `settings` input
+   (JSON, merged into the CLI's permissions for this run only; the project's `.claude/settings.json` is loaded as
+   well) with `permissions.deny`: `Edit(.github/**)`, `Edit(build.gradle.kts)`, `Edit(settings.gradle.kts)`,
+   `Edit(gradle.properties)`, `Edit(gradle/**)`, `Read(.git/**)` (the App token sits in the `origin` URL of
+   `.git/config`; the action masks it in the job log, but a read would put it into the model's context and from there
+   into a PR body or an issue comment), `Edit(.git/**)`, `Edit(scripts/**)`, `Edit(.claude/**)`, `Edit(CLAUDE.md)`,
+   `Bash(claude:*)`, `Bash(cp *..*)`, `Bash(cp * * *)`, `Bash(python3 -I scripts/redact_fixture.py *..*)`,
+   `Bash(python3 -I scripts/redact_fixture.py * * *)`, and, since the project's `.claude/settings.json` allow rules
+   are merged in (among them the prefix rules `Bash(./gradlew check:*)` and `Bash(./gradlew test:*)`),
+   `Bash(./gradlew check -x:*)`,
    `Bash(./gradlew check --exclude-task:*)`, `Bash(./gradlew check *-*)`, `Bash(./gradlew test *check*)`,
    `Bash(./gradlew compileKotlin:*)`, `Bash(./gradlew compileTestKotlin:*)`, `Bash(./gradlew buildPlugin:*)`,
-   `Bash(./gradlew verifyPlugin:*)` and `Bash(ktlint:*)` (31 rules). The three
+   `Bash(./gradlew verifyPlugin:*)` and `Bash(ktlint:*)` (24 rules). No `Write(path)` rule is listed: the installed
+   CLI (2.1.308, its settings help) matches every file-writing tool (`Write`, `Edit`, `NotebookEdit`) against
+   `Edit(path)` rules and an output redirection's target against the same rules, and never consults a `Write(path)`
+   rule, so each `Edit(path)` rule above covers all of them. The three
    `check` rules refuse any flag after `./gradlew check`: a rule whose `*` is not a trailing `:*` is a wildcard pattern
    in the installed CLI (2.1.307), so `*-*` covers `--exclude-task=koverVerify`, `--init-script` and the rest, and the
    two prefix rules hold on a CLI that reads it as an exact command. `Bash(./gradlew test *check*)` refuses the other
@@ -317,11 +339,15 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    unprotected branch, `main` included while it is unprotected (the project's `.claude/settings.json` denies only the
    prefix `git push --force`),
    `Bash(python3:*)` a `python3 -c` that runs `gh` or `git` with that token, and `Bash(./gradlew:*)` any task. The
-   deny rules keep the CLI's `Edit` and `Write` tools out of some of the files that would run code before the push
-   (`build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, `gradle/`, `scripts/`, the hooks in `.claude/`
-   and `.git/`), the `Read` tool out of `.git/`, and a second CLI out, and the allowlist itself opens no write path
-   around them (no `cat`, and `cp` from the recording into the fixtures only); test code under `src/test/` runs
-   anyway, so the `enforce` job (step 9) checks the result on a fresh runner. The push rule is exact:
+   deny rules keep the CLI's `Edit`, `Write` and `NotebookEdit` tools out of some of the files that would run code
+   before the push (`build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, `gradle/`, `scripts/`, the hooks
+   in `.claude/` and `.git/`), the `Read` tool out of `.git/`, and a second CLI out. The allowlist's own write
+   commands are `cp` from the recording into the fixtures and the redactor from the fixtures onto them; a prefix rule
+   it keeps (`Bash(grep:*)`, `Bash(git log:*)`) followed by an output redirection (`grep … > .github/workflows/x.yml`)
+   meets the `Edit` deny rules only through the CLI's parsing of that redirection (2.1.308 checks a redirection's
+   target against them, read from its code, not run), so this list is not where that write is stopped; test code
+   under `src/test/` runs anyway, so the `enforce` job (step 9) checks the result on a fresh runner, and the App
+   token's missing workflows permission and the ruleset on `main` are the guard either way ("Safeguards"). The push rule is exact:
    `Bash(git push -u origin HEAD)` admits
    that command and nothing appended to it (no `--force`, no refspec such as `drift/x:main`), because the installed
    CLI (2.1.307) matches a rule without `*` as the whole command (`n===e.command`) and a `:*` rule as the command
@@ -389,9 +415,14 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
      `github-actions[bot]` could approve pull requests, and the `fix` job's token is readable by the agent's test code.
    - No branch either: the classification was `decoder` or `reader` but the agent pushed nothing and opened no PR (a
      denied command, the redactor's leak stop of skill step 3, the action skipped after a workflow-validation error
-     without running the agent, or the agent gave up). The step prints `::error title=Drift fix::The classification
-     was <kind> but the agent pushed no branch and opened no PR …` with `steps.agent.outputs.conclusion` and exits 1.
-     The leak stop therefore ends as a red run plus the issue comment, which is the signal to look.
+     without running the agent, or the agent gave up). The step comments on the standing issue (creating it when none
+     is open) naming the run, the classification and `steps.agent.outputs.conclusion`, adds the label `drift-halted`
+     to that issue (`gh issue create … --label drift-halted`, or the issues labels endpoint on the open one), prints
+     `::error title=Drift fix::The classification was <kind> but the agent pushed no branch and opened no PR …` and
+     exits 1. No branch exists for the stale-branch refusal of step 7 to read, so without the label every night of the
+     same red would start another 75-minute Opus run; with it the gate skips the agent until the owner removes the
+     label or closes the issue. The leak stop therefore ends as a red run plus the issue comment, which is the signal
+     to look.
 
 Secrets: none. The four Anthropic identifiers are workflow `env`, the GitHub credential is the App's, the Anthropic
 credential is minted from the run's OIDC token.
@@ -518,7 +549,8 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 - **One open fix at a time**: an open PR labelled `contract-drift` (rehearsal or real) skips the agent entirely (step 7
   of the runtime). Merging it, or closing it and deleting its branch, re-arms the loop: a `drift/` branch without an
   open pull request (a closed fix's branch kept, a stopped agent's push) keeps `Require a protected main` refusing
-  (step 7), so a night that produced no pull request costs one agent run, not one per night.
+  (step 7), and an open issue labelled `drift-halted` (an agent run that left no branch and no pull request, step 9)
+  keeps the gate skipping, so a night that produced no pull request costs one agent run, not one per night.
 - **Edit allowlist**: `protocol/`, `session/transcript/`, `src/test/`, `docs/protocol.md`; enforced before the push by
   the deny rules of step 8 and after the action by the `enforce` job (step 9) on a fresh runner, which comments on an
   offending PR naming the paths, leaves it open so the gate holds, and reds the run; never closes it. The allowlist
@@ -532,7 +564,9 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 - **No retrigger**: the nightly has no `push`/`pull_request` trigger; the fixer listens to `CLI contract` only.
 - **Cost**: `--max-turns 120`, `timeout-minutes` on the step and the job, one concurrency slot, kind-1 and unknown
   reds never start the agent, the open-PR skip, the refusal of a `drift/` branch without an open pull request (a
-  night that opened none costs one run until the owner deletes the branch), and the workspace spend limit the owner sets in the Claude Console
+  night that opened none costs one run until the owner deletes the branch), the `drift-halted` label on the standing
+  issue for a night that pushed nothing (one run until the owner removes the label or closes the issue), and the
+  workspace spend limit the owner sets in the Claude Console
   for `wrkspc_012JJzfEG8tDKeta7pe3CCa5` as the ceiling nothing in the repository can raise.
 - **Missing artifact**: the fixer refuses (kind 1 path) rather than recording.
 - **Remaining risk, the Actions cache**: the agent's test code runs with sudo in a job on `main`, so it can write a
@@ -541,6 +575,11 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
   save. Nothing in the repository closes this while the agent runs on `main`. The ruleset and the App token's scope
   still keep the agent off `main` and out of a merge, and the owner can clear the caches (Actions | Caches) after a
   suspect run.
+- **Remaining risk, a redirection past the deny rules**: the prefix rules the allowlist keeps (`Bash(grep:*)`,
+  `Bash(git log:*)`, and the project's merged `git status`, `git diff`) admit any arguments, so whether `grep … >
+  .github/workflows/x.yml` is refused rests on the CLI's parsing of the redirection (2.1.308 checks the target against
+  the `Edit` deny rules; a CLI that did not would let it through). The `enforce` job's file list, the App token's
+  missing workflows permission and the ruleset on `main` are the guard either way.
 - **Nothing outward-facing**: the PR and the issue are inside the repository; nothing is published, posted or merged.
 
 ### What the owner does
@@ -557,8 +596,10 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
   General | Pull Requests; `delete_branch_on_merge` is false today), so a merged fix's branch never trips the refusal
   of a `drift/` branch without an open pull request (runtime step 7); a closed fix's branch is deleted by hand
   (`gh pr close <n> --delete-branch`).
-  A ruleset on a private repository owned by a personal account is enforced only with GitHub Pro: on Free, the
-  repository goes public before the ruleset and the rehearsals, and the rehearsal (D5) waits for that. Before the
+  A ruleset on a private repository owned by a personal account is enforced only with GitHub Pro: the repository
+  goes public before the ruleset and the rehearsals, and the rehearsal (D5) waits for that. `Require a protected
+  main` checks it: it reads the repository's `private` first and refuses while it is not `false`, whatever the plan,
+  since it cannot tell Pro from Free. Before the
   first rehearsal the owner runs `gh api repos/daarko10/tandem/rules/branches/main` and sees the `pull_request` rule
   with `required_approving_review_count` of at least 1, `require_code_owner_review` true and
   `require_last_push_approval` true (what the endpoint lists for an unenforced ruleset is not known, so the check
@@ -578,7 +619,9 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
 - On a comment on the standing issue "CLI contract: the CLI did not answer": fixes the cause (the federation rule,
   the service account, the spend limit, a pinned CLI version while a broken publish lasts) and closes the issue; the
   next kind-1 red opens it again. The same issue carries the loop's other reports: a leak the redactor found (skill
-  step 3) and a branch pushed without a pull request (runtime step 9).
+  step 3), a branch pushed without a pull request and an agent run that pushed nothing (runtime step 9). The last one
+  labels the issue `drift-halted`, which skips the agent on every later red: the owner reads the run's log, then
+  removes the label (or closes the issue) to re-arm the loop.
 
 ### The rehearsal
 
@@ -660,8 +703,9 @@ line exists, the milestone is open, whatever the rehearsals showed.
   deletes it (runtime step 7).
 - The gate proceeded (`decoder` or `reader`) but the agent pushed no branch and opened no PR (a denied command, the
   leak stop of skill step 3, the action skipped after a workflow-validation error without running the agent, or the
-  agent gave up): the allowlist step exits 1 naming the classification and `steps.agent.outputs.conclusion` (runtime
-  step 9). Never a green `Drift fix` run that did nothing.
+  agent gave up): the allowlist step reports it on the standing issue, labels the issue `drift-halted` and exits 1
+  naming the classification and `steps.agent.outputs.conclusion` (runtime step 9); the gate skips the agent while
+  the label is on. Never a green `Drift fix` run that did nothing, and never one Opus run per night of it.
 - The artifact is listed but `gh run download` fails (a 403, an API outage, a renamed artifact): the job is red at the
   fetch step and the standing issue is not touched; GitHub shows it in Actions. It is never reported as "the CLI did
   not answer".
@@ -707,8 +751,8 @@ line exists, the milestone is open, whatever the rehearsals showed.
   branch read through the API and its `exit 1` whenever no PR exists; the `remind` job (`needs`, `if`, permissions,
   no checkout, the comment); the protect step's refusal of an existing drift
   branch; the exact push rule and the absence of
-  any `Bash(git push…:*)` or broad `Bash(python3:*)`/`Bash(./gradlew:*)` rule; the deny rules of the `settings` input
-  (the list, exactly) and the step id `agent`; the protection step before the agent, which the agent and the allowlist
+  any `Bash(git push…:*)` or broad `Bash(python3:*)`/`Bash(./gradlew:*)` rule; the allowlist (the 24 entries,
+  exactly) and the deny rules of the `settings` input (the list, exactly, with no `Write(path)` rule) and the step id `agent`; the protection step before the agent, which the agent and the allowlist
   step depend on; the REST file list with renames' old paths and the exact edit allowlist; `--rerun`; a `run_id` on
   `main`; no `${{` in any `run:` block); the nightly's `drift` input, mutate step, check step and
   redaction; the skill's `allowed-tools` equal to the action's. Under `GITHUB_ACTIONS` a missing PyYAML is an error,
@@ -717,22 +761,26 @@ line exists, the milestone is open, whatever the rehearsals showed.
   three jobs starts with `set -euo pipefail`, pinned) with a stub `gh` first on `PATH` that answers from canned output and, on an HTTP error, prints
   the error body on stdout and exits 1 as gh 2.89 does, with `GITHUB_OUTPUT` in a temporary file and the step's `env`
   supplied in full (a new env key fails the test until it is supplied). It asserts the exit code, `GITHUB_OUTPUT` and
-  the `gh` calls of: the enforce step with no PR and no branch (exit 1, "pushed no branch"), with a branch and no PR
+  the `gh` calls of: the enforce step with no PR and no branch (exit 1, "pushed no branch", the standing issue created
+  with the label `drift-halted`, or commented on and labelled when open), with a branch and no PR
   (the standing issue, created or commented), with a failed branch read (red without a verdict), with one clean PR
   (green, labelled), with an offending PR (the comment names only the offending paths, exit 1), with two clean PRs
   (exit 1 after both were checked) and with a fork's PR named after the run (never selected or labelled); the gate
-  with a waiting PR (`proceed=false`, `waiting=<n>`, no comment), without one and with a failed list; the reminder's
+  with a waiting PR (`proceed=false`, `waiting=<n>`, no comment), without one, with an open `drift-halted` issue
+  (`proceed=false` and no `waiting`, the PR list unread) and with a failed or malformed list; the reminder's
   comment and its refusal of a missing number; "Name the red run" with the nightly's own run (the four outputs), a
   fork's, a green one, another branch's, another event's, another workflow's (exit 1, nothing in `GITHUB_OUTPUT`),
-  an id that is not a number (exit 1 before any call) and a rehearsal (no call); the protect step with the ruleset,
-  the owner line and a 404 (green, the ruleset read first) and without each of them, with a ruleset whose bypass list
+  an id that is not a number (exit 1 before any call) and a rehearsal (no call); the protect step with a public
+  repository, the ruleset, the owner line and a 404 (green, the visibility read first, then the ruleset), with a
+  private repository, a `null` answer or a failed read (exit 1 before any other read), and without each of the others, with a ruleset whose bypass list
   names an App (exit 1, the actor's type and id named), names only a role (green), is withheld (green, said in the
   log) or fails to read (exit 1 without a verdict), with two rulesets of which the second names an App, with a kept
   branch and with a failed read, with a `drift/` branch that has no open pull request (exit 1 naming it and not the
-  one whose pull request is open), with one whose pull request is open (green) and with a failed branch or
+  one whose pull request is open; also when no pull request is open at all, where only `grep -x` keeps the empty
+  pattern from matching every branch), with one whose pull request is open (green) and with a failed branch or
   pull-request listing (exit 1 without a verdict); the classify steps with the real `classify_drift.py` on a
   hand-built recording (`kind=` and, from the marker, `rehearsal=` in `GITHUB_OUTPUT`, the JSON kept in the log by
-  `tee`, kind 1 without a recording) and on a decode failure in the JUnit XML (`kind=decoder`); the labels step creating `contract-drift` and `rehearsal` before the agent; the
+  `tee`, kind 1 without a recording) and on a decode failure in the JUnit XML (`kind=decoder`); the labels step creating `contract-drift`, `rehearsal` and `drift-halted` before the agent; the
   report step creating or commenting on the standing issue from the precheck or the classification, its first line
   naming the kind;
   and the fetch telling no recording (kind 1) from a failed listing (red). The exact `if:` of the gate and the report
