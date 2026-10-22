@@ -45,11 +45,15 @@ import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.jetbrains.jewel.markdown.extensions.autolink.AutolinkProcessorExtension
 import org.jetbrains.jewel.markdown.processing.MarkdownProcessor
 import org.junit.jupiter.api.Test
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.CRC32
+import java.util.zip.Deflater
 import javax.swing.SwingUtilities
 import kotlin.io.path.readLines
 import kotlin.test.assertEquals
@@ -395,6 +399,16 @@ class ChatPresenterTest {
     }
 
     @Test
+    fun `an image whose header claims more pixels than the cap is not decoded`() {
+        // A few hundred bytes whose IHDR claims 10,000 x 6,000 pixels (60 million, 240 MB once decoded): well within the attachment cap.
+        val huge = png(10_000, 6_000)
+        assertTrue(huge.size < 3_932_160)
+        assertNull(decodeImageBytes(huge))
+        // The same construction under the cap decodes, so the null above is the cap's.
+        assertNotNull(decodeImageBytes(png(4, 4)))
+    }
+
+    @Test
     fun `a redacted image yields no bitmap and no exception`() = runBlocking {
         assertNull(decodeUserImage(UserImage("u1#0", "image/png", "<base64>")))
         val user = ChatEntry.User("u1", "", images = listOf(UserImage("u1#0", "image/png", "<base64>")))
@@ -415,6 +429,35 @@ class ChatPresenterTest {
     }
 
     /** The 2 x 2 PNG the `user-image` fixture sent, as its transcript line holds it. */
+    /**
+     * A grey 8-bit PNG whose IHDR says [width] x [height], with one IDAT of at most four zero rows: the whole image when it is that
+     * small, else a truncated one, whose header is all `Image.makeFromEncoded` reads. Each chunk carries its CRC-32.
+     */
+    private fun png(width: Int, height: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun chunk(type: String, data: ByteArray) {
+            val body = type.toByteArray(Charsets.US_ASCII) + data
+            val crc = CRC32().apply { update(body) }.value
+            out.write(ByteBuffer.allocate(4).putInt(data.size).array())
+            out.write(body)
+            out.write(ByteBuffer.allocate(4).putInt(crc.toInt()).array())
+        }
+        out.write(byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte(), 0x0D, 0x0A, 0x1A, 0x0A))
+        // Width, height, bit depth 8, colour type 0 (grey), deflate, adaptive filtering, no interlace.
+        chunk("IHDR", ByteBuffer.allocate(13).putInt(width).putInt(height).put(8).put(0).put(0).put(0).put(0).array())
+        val rows = ByteArray(minOf(height, 4) * (width + 1)) // each row: filter type 0, then its zero pixels
+        val deflater = Deflater()
+        deflater.setInput(rows)
+        deflater.finish()
+        val compressed = ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        while (!deflater.finished()) compressed.write(buffer, 0, deflater.deflate(buffer))
+        deflater.end()
+        chunk("IDAT", compressed.toByteArray())
+        chunk("IEND", ByteArray(0))
+        return out.toByteArray()
+    }
+
     private fun fixturePng(): String = Fixtures.transcript("user-image").readLines().filter { it.isNotBlank() }.map(Ndjson::decode)
         .filterIsInstance<CliMessage.User>().first().content.filterIsInstance<ContentBlock.Image>().single().data
 

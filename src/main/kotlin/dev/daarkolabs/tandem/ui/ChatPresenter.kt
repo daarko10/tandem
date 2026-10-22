@@ -425,9 +425,24 @@ internal fun decodeUserImage(image: UserImage): ImageBitmap? = runCatching { dec
     .onFailure { IMAGE_LOG.debug("${image.mediaType} image ${image.id.substringAfterLast('#')} not decoded: ${it.javaClass.name}") }
     .getOrNull()
 
-/** [bytes] (PNG, JPEG, GIF or WebP) decoded with Skia and scaled to a longest side of at most 480 px; null when they cannot be. */
+/**
+ * The most pixels an image may claim to be decoded for its thumbnail: 50 million, room for an 8K screenshot (33 million) and a
+ * 48-megapixel photo. A decode holds width x height x 4 bytes (N32) whatever the thumbnail's size, so the cap bounds it at 200 MB,
+ * 400 MB for the two decodes [ChatPresenter] runs at once. The attachment checks cap the file, not its canvas: a uniform 30,000 x
+ * 30,000 PNG fits in a few MB and would decode to 3.6 GB.
+ */
+internal const val MAX_IMAGE_PIXELS: Long = 50_000_000L
+
+/**
+ * [bytes] (PNG, JPEG, GIF or WebP) decoded with Skia and scaled to a longest side of at most 480 px; null when they cannot be, or when
+ * the header claims more than [MAX_IMAGE_PIXELS]: `Image.makeFromEncoded` reads only the header, so that is checked before any decode.
+ */
 internal fun decodeImageBytes(bytes: ByteArray): ImageBitmap? = runCatching {
     Image.makeFromEncoded(bytes).use { image ->
+        if (image.width.toLong() * image.height > MAX_IMAGE_PIXELS) {
+            IMAGE_LOG.debug("image not decoded: ${image.width} x ${image.height} pixels is over the cap")
+            return@use null
+        }
         val longest = maxOf(image.width, image.height)
         if (longest <= THUMBNAIL_PX) return@use image.toComposeImageBitmap()
         val scale = THUMBNAIL_PX.toFloat() / longest
