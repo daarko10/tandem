@@ -1,12 +1,16 @@
 package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
 import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.ImmutableSet
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.collections.immutable.toImmutableSet
 import java.util.Locale
 
 /** The `value` of the CLI's own entry for its default model in an `initialize` model list. */
@@ -16,7 +20,7 @@ internal const val DEFAULT_MODEL_ENTRY: String = "default"
  * What the composer and its footer show (spec 4.15, polish spec 2.3), taken from the state so that it changes only when one of its own
  * fields does, not on every streamed delta. [cardOpen]: a request waits for its answer. [defaultModel] is the model the CLI's `default`
  * entry resolves to; [effortLevels] and [autoSupported] are those of the shown model ([shownModel]); [modelSwitchPending] mirrors
- * [ChatState.modelSwitchPending].
+ * [ChatState.modelSwitchPending]. [commands], [slashCommandNames] and [terminalCommands] feed the slash palette ([slashPalette]).
  */
 data class ComposerModel(
     val busy: Boolean,
@@ -33,6 +37,9 @@ data class ComposerModel(
     val effortLevels: ImmutableList<String> = persistentListOf(),
     val autoSupported: Boolean = false,
     val modelSwitchPending: Boolean = false,
+    val commands: ImmutableList<SlashCommand> = persistentListOf(),
+    val slashCommandNames: ImmutableList<String> = persistentListOf(),
+    val terminalCommands: ImmutableSet<String> = persistentSetOf(),
 )
 
 /** The composer's model of [state]. */
@@ -53,6 +60,9 @@ fun composerModel(state: ChatState): ComposerModel {
         effortLevels = shown?.effortLevels.orEmpty().toImmutableList(),
         autoSupported = shown?.supportsAutoMode == true,
         modelSwitchPending = state.modelSwitchPending,
+        commands = state.commands.toImmutableList(),
+        slashCommandNames = state.slashCommandNames.toImmutableList(),
+        terminalCommands = state.terminalCommands.toImmutableSet(),
     )
 }
 

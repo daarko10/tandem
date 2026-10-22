@@ -314,6 +314,16 @@ class ChatRowsBuilder(private val options: RowOptions) {
     private fun imageRefs(entry: ChatEntry.User): ImmutableList<ImageRef> =
         if (entry.images.isEmpty()) persistentListOf() else entry.images.mapIndexed { i, image -> ImageRef(image.id, image.mediaType, i) }.toImmutableList()
 
+    /**
+     * The row of notice [entry]. A local command's notice keeps its command; `/mcp`'s (the CLI ran `mcp`) gets the link to the panel in
+     * place of the CLI's terminal hint, removed by exact match only (spec 3.5).
+     */
+    private fun noticeRow(entry: ChatEntry.Notice, gap: RowGap): NoticeRow {
+        val link = if (entry.kind == NoticeKind.LOCAL_COMMAND && entry.runCommand == "mcp") NoticeLink.OPEN_MCP else null
+        val text = if (link == NoticeLink.OPEN_MCP) entry.text.removeSuffix(MCP_TERMINAL_HINT) else entry.text
+        return NoticeRow("n:${entry.id}", entry.level, text, gap, entry.kind, entry.command, link)
+    }
+
     /** The previous build's instance of [row] when it is equal. */
     private fun reuse(row: ChatRow): ChatRow = live[row.key]?.takeIf { it == row } ?: row
 
@@ -389,7 +399,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
                 entry.kind == NoticeKind.INTERRUPTED ||
                     context.failureInFooter && entry.level == NoticeLevel.ERROR && saidByFooter(entry.text, context.end?.text.orEmpty()) ->
                     rows.add { footer(entry, context, it) }
-                else -> rows.add { NoticeRow("n:${entry.id}", entry.level, entry.text, gap(Kind.NOTICE, it)) }
+                else -> rows.add { noticeRow(entry, gap(Kind.NOTICE, it)) }
             }
             is ChatEntry.TurnEnded -> if (context.end?.entry === entry) rows.add { footer(entry, context, it) }
         }

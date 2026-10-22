@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.chat
 
+import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.TurnEnd
 import kotlinx.collections.immutable.ImmutableList
@@ -98,8 +99,26 @@ data class ToolRow(
     override val gap: RowGap,
 ) : ChatRow
 
-/** A notice of the chat (retries, fallbacks, errors), `n:<entry id>`. */
-data class NoticeRow(override val key: String, val level: NoticeLevel, val text: String, override val gap: RowGap = RowGap.SECTION) : ChatRow
+/**
+ * A notice of the chat (retries, fallbacks, errors, a local command's output), `n:<entry id>`. On a [NoticeKind.LOCAL_COMMAND]
+ * notice, [command] is the command it answers (its accessibility name `Reply to /<command>`, `Command output` when null) and [link]
+ * the action that replaces the CLI's terminal hint (`/mcp`'s [MCP_TERMINAL_HINT], removed from [text]).
+ */
+data class NoticeRow(
+    override val key: String,
+    val level: NoticeLevel,
+    val text: String,
+    override val gap: RowGap = RowGap.SECTION,
+    val kind: NoticeKind = NoticeKind.GENERIC,
+    val command: String? = null,
+    val link: NoticeLink? = null,
+) : ChatRow
+
+/** An action at the end of a notice, with its label. */
+enum class NoticeLink(val label: String) { OPEN_MCP("Open the MCP panel") }
+
+/** The sentence `/mcp`'s local answer ends with (`mcp-slash:5`); a notice with [NoticeLink.OPEN_MCP] drops it, by exact match. */
+const val MCP_TERMINAL_HINT: String = " Use `/mcp` in the terminal for details."
 
 /** How the latest turn ended, `e:<entry id>` (or `e:<notice id>` for an interrupt marker without a result). */
 data class TurnEndRow(override val key: String, val end: TurnEnd, val text: String, override val gap: RowGap = RowGap.SECTION) : ChatRow

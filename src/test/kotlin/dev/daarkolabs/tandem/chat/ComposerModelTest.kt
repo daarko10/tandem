@@ -2,13 +2,16 @@ package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.Delta
+import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.PendingPermission
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
@@ -116,5 +119,33 @@ class ComposerModelTest {
             composerModel(state),
         )
         assertEquals(false, composerModel(ChatState()).cardOpen)
+    }
+
+    @Test
+    fun `commands and terminal names come from the state`() {
+        val empty = composerModel(ChatState())
+        assertEquals(persistentListOf(), empty.commands)
+        assertEquals(persistentListOf(), empty.slashCommandNames)
+        assertEquals(persistentSetOf(), empty.terminalCommands)
+
+        // mcp-slash: the initialize answer (:1) lists the commands, the init (:4) the names and the terminal ones.
+        val (state, _) = replay("mcp-slash", lines = Fixtures.lines("mcp-slash").take(4))
+        val composer = composerModel(state)
+        assertEquals(73, composer.commands.size)
+        assertEquals(state.commands, composer.commands)
+        assertEquals("actions", composer.commands.first().name)
+        assertEquals(state.slashCommandNames, composer.slashCommandNames)
+        assertEquals(73, composer.slashCommandNames.size)
+        assertEquals(setOf("doctor", "color", "focus", "reload-plugins"), composer.terminalCommands)
+
+        val synthetic = ChatState(
+            commands = listOf(SlashCommand("hello", "Hi (project)")),
+            slashCommandNames = listOf("hello", "mcp"),
+            terminalCommands = setOf("doctor"),
+        )
+        val model = composerModel(synthetic)
+        assertEquals(persistentListOf(SlashCommand("hello", "Hi (project)")), model.commands)
+        assertEquals(persistentListOf("hello", "mcp"), model.slashCommandNames)
+        assertEquals(persistentSetOf("doctor"), model.terminalCommands)
     }
 }

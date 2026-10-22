@@ -1164,6 +1164,78 @@ class ChatRowsBuilderTest {
         assertEquals(ForkState.NOT_LATEST, forkState("a", "b", false))
     }
 
+    @Test
+    fun `mcp-slash golden`() {
+        // The /mcp block (mcp-slash:1-7) under the typed /mcp: the user bubble, then the CLI's own answer as a notice with the link.
+        val (state, rows) = replay("mcp-slash", prompt = "/mcp", lines = Fixtures.lines("mcp-slash").take(7))
+        assertNull(state.turn)
+        assertFalse(state.busy)
+        assertEquals(2, rows.rows.size, rows.rows.toString())
+        val user = assertIs<UserRow>(rows.rows[0])
+        assertEquals("/mcp", user.text)
+        assertTrue(user.mono)
+        val notice = assertIs<NoticeRow>(rows.rows[1])
+        assertEquals(NoticeLevel.INFO, notice.level)
+        assertEquals(NoticeKind.LOCAL_COMMAND, notice.kind)
+        assertEquals("mcp", notice.command)
+        assertEquals(NoticeLink.OPEN_MCP, notice.link)
+        assertEquals("Open the MCP panel", notice.link!!.label)
+        assertEquals("3 MCP server(s): 1 connected, 2 not connected, 0 disabled.", notice.text)
+
+        // The whole fixture under the sweep's prompt, which is not a command: each notice is named from the command the CLI ran
+        // (/help's outcome names none), and the only footer is the /hello turn's, a model turn.
+        val footers = ArrayList<Int>()
+        val (_, all) = replay("mcp-slash") { line, _, lineRows ->
+            if (lineRows.rows.any { it is TurnEndRow }) footers += line
+        }
+        val notices = all.rows.filterIsInstance<NoticeRow>()
+        assertEquals(listOf("mcp", "model", null), notices.map { it.command })
+        assertEquals(listOf(NoticeLink.OPEN_MCP, null, null), notices.map { it.link })
+        assertTrue(notices.all { it.kind == NoticeKind.LOCAL_COMMAND })
+        assertEquals("3 MCP server(s): 1 connected, 2 not connected, 0 disabled.", notices[0].text)
+        // The model notice keeps its text verbatim, backticks included.
+        assertTrue(notices[1].text.startsWith("Current model: `Fable 5.1 (default)`"), notices[1].text)
+        assertEquals("/help isn't available in this environment.", notices[2].text)
+        val footer = all.rows.filterIsInstance<TurnEndRow>().single()
+        assertEquals(TurnEnd.COMPLETED, footer.end)
+        val hello = all.rows.indexOfFirst { it is TextRow && it.markdown == "hello from the hello command" }
+        assertTrue(hello >= 0 && all.rows.indexOf(footer) > hello, all.rows.toString())
+        assertEquals(34, footers.first(), footers.toString())
+    }
+
+    @Test
+    fun `the terminal hint is removed by exact match only`() {
+        val wire = "3 MCP server(s): 1 connected, 2 not connected, 0 disabled. Use `/mcp` in the terminal for details."
+        val noBackticks = "3 MCP server(s): 1 connected, 2 not connected, 0 disabled. Use /mcp in the terminal for details."
+        assertEquals(" Use `/mcp` in the terminal for details.", MCP_TERMINAL_HINT)
+        fun row(text: String, runCommand: String?): NoticeRow {
+            val notice = ChatEntry.Notice("notice-0", NoticeLevel.INFO, text, NoticeKind.LOCAL_COMMAND, command = runCommand, runCommand = runCommand)
+            return ChatRowsBuilder(options).build(ChatState(entries = listOf(notice))).rows.filterIsInstance<NoticeRow>().single()
+        }
+        val linked = row(wire, "mcp")
+        assertEquals("3 MCP server(s): 1 connected, 2 not connected, 0 disabled.", linked.text)
+        assertEquals(NoticeLink.OPEN_MCP, linked.link)
+        val variant = row(noBackticks, "mcp")
+        assertEquals(noBackticks, variant.text)
+        assertEquals(NoticeLink.OPEN_MCP, variant.link)
+        // The hint inside the text, not at its end, stays.
+        assertEquals("$wire More.", row("$wire More.", "mcp").text)
+        // Another command keeps the sentence and gets no link: the rule keys on the command the CLI ran, not on the text.
+        val other = row(wire, "model")
+        assertEquals(wire, other.text)
+        assertNull(other.link)
+        assertEquals("model", other.command)
+        val unnamed = row(wire, null)
+        assertEquals(wire, unnamed.text)
+        assertNull(unnamed.link)
+        assertNull(unnamed.command)
+        // A generic notice keeps its kind and has neither command nor link.
+        val generic = ChatEntry.Notice("notice-1", NoticeLevel.WARNING, wire)
+        val plain = ChatRowsBuilder(options).build(ChatState(entries = listOf(generic))).rows.filterIsInstance<NoticeRow>().single()
+        assertEquals(NoticeRow("n:notice-1", NoticeLevel.WARNING, wire, RowGap.NONE), plain)
+        assertEquals(NoticeKind.GENERIC, plain.kind)
+    }
+
     private fun cliLine(json: String): SessionEvent = SessionEvent.Cli(Ndjson.decode(json))
 
     private fun assistant(id: String, vararg blocks: AssistantBlock): ChatEntry.Assistant =
