@@ -11,9 +11,10 @@ import kotlin.math.sin
 data class Orb(val x: Float, val y: Float, val radius: Float, val alpha: Float)
 
 /**
- * The working row's indicator (spec 4.9) after the desktop app's: a cluster of coral orbs that turns in 3D. Each orb is a point in a
+ * The working row's indicator (spec 4.9.1) after the desktop app's: a cluster of coral orbs that turns in 3D. Each orb is a point in a
  * world centred on the box, x right, y down and z towards the viewer, seen through a perspective camera ([project]): a near orb is
- * bigger and further from the centre, a far one smaller, closer to the centre and fainter. The orbs take four shapes in turn and
+ * bigger and further from the centre, a far one smaller, closer to the centre and fainter, and one far behind the shapes all but
+ * vanishes, as the desktop app's do. The orbs take four shapes in turn and
  * merge into one between them, as the desktop app's do; one cycle lasts [PERIOD_MS]:
  * - a ring of three, edge on, that spins about the vertical once in 3 s and tips towards the viewer half way ([Phase.RING]);
  * - a square of four whose diagonal pairs swap places in turn, each half turn bulging towards the other pair, every 0.6 s
@@ -37,6 +38,14 @@ object OrbIndicator {
     private const val FAR_DEPTH = 0.6f
     private const val FAR_ALPHA = 0.25f
 
+    /**
+     * Behind the shapes, from [VANISH_FROM] back (the ring's far side, the deepest a shape goes), an orb shrinks beyond the camera's
+     * term too, to [VANISH_SCALE] of its size at [FAR_DEPTH]: a flipping orb at its deepest and the single orb backing away end at
+     * about a fifth of an orb at the centre, as the desktop app's do.
+     */
+    private const val VANISH_FROM = 0.35f
+    private const val VANISH_SCALE = 0.3f
+
     private const val RING_RADIUS = 0.34f
     private const val RING_SPIN_MS = 3_000L
 
@@ -59,7 +68,7 @@ object OrbIndicator {
     /** How far a flipping orb's path bends off the straight line through the centre, as a share of [HEX_RADIUS]. */
     private const val FLIP_BULGE = 0.15f
 
-    /** How far behind the centre a flipping orb passes: far enough to all but vanish, as the desktop app's do. */
+    /** How far behind the centre a flipping orb passes: far enough to all but vanish ([VANISH_SCALE]), as the desktop app's do. */
     private const val FLIP_DEPTH = 0.6f
     private const val TRIAD_CYCLE_MS = 2_000L
     private const val FLIP_MS = 800L
@@ -73,8 +82,8 @@ object OrbIndicator {
     /** The corners of the square in degrees, clockwise from the right: top left, top right, bottom right, bottom left. */
     private val CORNERS: FloatArray = floatArrayOf(225f, 315f, 45f, 135f)
 
-    /** How far the single orb backs away between two shapes. */
-    private const val SOLO_DEPTH = 0.45f
+    /** How far the single orb backs away between two shapes, and where the hexagon's later orbs come from. */
+    private const val SOLO_DEPTH = 0.6f
 
     /** When the orbs of [Phase.TRIAD_SPLIT] leave the centre, and how long each takes to reach the hexagon. */
     private val TRIAD_JOINS_MS: LongArray = longArrayOf(0, 150, 300)
@@ -126,23 +135,27 @@ object OrbIndicator {
 
     /**
      * The world point ([x], [y], [z]) as drawn: moved away from the centre and grown in proportion to the camera's distance over its
-     * own, opaque from the centre's depth forwards and fading to [FAR_ALPHA] at [FAR_DEPTH] behind it.
+     * own, shrunk further from [VANISH_FROM] behind the centre to [VANISH_SCALE] at [FAR_DEPTH], opaque from the centre's depth forwards
+     * and fading to [FAR_ALPHA] at [FAR_DEPTH] behind it.
      */
     internal fun project(x: Float, y: Float, z: Float): Orb {
         val scale = CAMERA / (CAMERA - z)
+        val vanish = 1f - (1f - VANISH_SCALE) * easeInOut(((-z - VANISH_FROM) / (FAR_DEPTH - VANISH_FROM)).coerceIn(0f, 1f))
         val alpha = FAR_ALPHA + (1f - FAR_ALPHA) * (1f + z / FAR_DEPTH).coerceIn(0f, 1f)
-        return Orb(0.5f + x * scale, 0.5f + y * scale, ORB_RADIUS * scale, alpha)
+        return Orb(0.5f + x * scale, 0.5f + y * scale, ORB_RADIUS * scale * vanish, alpha)
     }
 
-    /** A point of the world. */
-    private class Point(val x: Float, val y: Float, val z: Float) {
-        fun lerp(to: Point, f: Float): Point = Point(x + (to.x - x) * f, y + (to.y - y) * f, z + (to.z - z) * f)
+    /** A point of the world, drawn at [fade] of its alpha: below 1 only while it joins a shape ([triadSplit]). */
+    private class Point(val x: Float, val y: Float, val z: Float, val fade: Float = 1f) {
+        fun lerp(to: Point, f: Float): Point = Point(x + (to.x - x) * f, y + (to.y - y) * f, z + (to.z - z) * f, fade + (to.fade - fade) * f)
     }
 
     private val CENTRE = Point(0f, 0f, 0f)
 
     /** [points] projected, far to near. */
-    private fun drawn(points: List<Point>): List<Orb> = points.sortedBy { it.z }.map { project(it.x, it.y, it.z) }
+    private fun drawn(points: List<Point>): List<Orb> = points.sortedBy { it.z }.map { point ->
+        project(point.x, point.y, point.z).let { if (point.fade < 1f) it.copy(alpha = it.alpha * point.fade) else it }
+    }
 
     /** The orbs of [phase], [elapsed] into it. */
     private fun points(phase: Phase, elapsed: Long): List<Point> {
@@ -219,12 +232,13 @@ object OrbIndicator {
 
     /**
      * The hexagon forming [tau] before [Phase.TRIAD] begins ([elapsed] into [Phase.TRIAD_SPLIT]): the single orb moves out to its
-     * place, then the others come out from behind it one after another; an orb not yet out is not drawn.
+     * place, then the others come out of the depth behind the centre one after another, from all but vanished ([SOLO_DEPTH]) and
+     * unseen ([Point.fade] 0), growing and fading in as they come forward to their places; an orb not yet out is not drawn.
      */
     private fun triadSplit(tau: Long, elapsed: Long): List<Point> = (0 until 3).mapNotNull { i ->
         val since = elapsed - TRIAD_JOINS_MS[i]
         if (i > 0 && since <= 0) return@mapNotNull null
-        val start = if (i == 0) CENTRE else Point(0f, 0f, -SOLO_DEPTH)
+        val start = if (i == 0) CENTRE else Point(0f, 0f, -SOLO_DEPTH, fade = 0f)
         start.lerp(triad(i, tau), easeOut((since.toFloat() / TRIAD_JOIN_MS[i]).coerceIn(0f, 1f)))
     }
 

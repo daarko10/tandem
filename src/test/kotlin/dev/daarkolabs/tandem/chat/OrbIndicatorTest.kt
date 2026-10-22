@@ -6,7 +6,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
-/** The working row's orbs (spec 4.9): the desktop app's choreography as measured from its recording. */
+/** The working row's orbs (spec 4.9.1): the desktop app's choreography as measured from its recording. */
 class OrbIndicatorTest {
     /** Every 5 ms of one cycle. */
     private val times: LongProgression = 0L until OrbIndicator.PERIOD_MS step 5
@@ -64,6 +64,29 @@ class OrbIndicatorTest {
         assertTrue(OrbIndicator.project(0f, 0f, -0.3f).alpha < OrbIndicator.project(0f, 0f, -0.1f).alpha, "fades behind the centre")
         assertEquals(1f, OrbIndicator.project(0f, 0f, 0f).alpha, "opaque at the centre's depth")
         assertTrue(orbs.last().x > orbs.first().x, "a near orb sits further from the centre")
+    }
+
+    @Test
+    fun `an orb far behind the shapes all but vanishes, while the shapes keep the camera's sizes`() {
+        val centre = OrbIndicator.project(0f, 0f, 0f).radius
+        assertTrue(OrbIndicator.project(0f, 0f, -0.6f).radius < 0.25f * centre, "a flipping orb at its deepest")
+        val solo = OrbIndicator.frame(Phase.SOLO_AFTER_RING.startMs + Phase.SOLO_AFTER_RING.durationMs / 2).single()
+        assertTrue(solo.radius < 0.25f * centre, "the single orb backed away: $solo")
+        // The ring's far side, the deepest a shape goes, is only the camera's perspective away from the centre's size.
+        assertEquals(centre * 1.25f / (1.25f + 0.34f), OrbIndicator.project(0f, 0f, -0.34f).radius, 1e-4f)
+    }
+
+    @Test
+    fun `the hexagon's later orbs come in unseen and all but vanished, then grow and fade in`() {
+        val centre = OrbIndicator.project(0f, 0f, 0f).radius
+        for (join in listOf(150L, 300L)) {
+            val t = Phase.TRIAD_SPLIT.startMs + join + 1
+            // The newcomer is the farthest orb, so the first drawn.
+            val newcomer = OrbIndicator.frame(t).first()
+            assertTrue(newcomer.alpha < 0.05f && newcomer.radius < 0.3f * centre, "at $join ms: $newcomer")
+            val later = OrbIndicator.frame(t + 100).first()
+            assertTrue(later.alpha > newcomer.alpha && later.radius > newcomer.radius, "at $join ms: $newcomer, then $later")
+        }
     }
 
     @Test
