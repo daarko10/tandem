@@ -644,6 +644,8 @@ class ToolWindowIdeTest {
             focusPromptBox()
             promptBox().keyboard { typeText("/", 20) }
             waitFor("the palette", 30.seconds) { described("Slash commands").present() }
+            // Every command: more than 8 rows, so the list scrolls (the scrollbar stays inside the palette, MCP spec 3.4).
+            takeScreenshot("slash-palette-all")
             promptBox().keyboard { typeText("mc", 20) }
             waitFor("the palette narrowed to /mcp", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='/mc']").present() }
             takeScreenshot("slash-palette")
@@ -680,6 +682,8 @@ class ToolWindowIdeTest {
             enterPrompt("/hello")
             waitForText("hello from the hello command")
             waitFor("the model turn's footer", 1.minutes) { ui.x(FOOTER).present() }
+            // Only /hello's: a footer added late to /help's turn (its rows and the composer's busy flag are separate flows) shows here.
+            assertEquals(1, ui.xx(FOOTER).list().size, "only the model turn has a footer")
         }
         val prompts = sent.filter { it.type == "user" }.map { it["message"]!!.jsonObject["content"].toString() }
         assertEquals(4, prompts.size, prompts.toString())
