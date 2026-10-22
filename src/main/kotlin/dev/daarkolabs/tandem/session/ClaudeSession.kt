@@ -194,7 +194,7 @@ class ClaudeSession(
     private class HeldEscape(val id: String, val command: String, val output: String, val respond: Boolean)
 
     /** Shell escape [id]'s output [frame], to send once [quiet] has left [ChatState.quietSends]; [fallback] sends it anyway later. */
-    private class PendingOutput(val id: String, val quiet: String, val frame: JsonObject) {
+    private class PendingOutput(val id: String, val command: String, val quiet: String, val frame: JsonObject) {
         var fallback: Job? = null
     }
 
@@ -254,9 +254,7 @@ class ClaudeSession(
             val reason = e.message ?: e.javaClass.simpleName
             val text = "Could not start `${config.binary}`: $reason. Is the claude CLI (Claude Code) installed?"
             ended = true // ahead of the chat saying so: a request made once it shows answers Ended at once
-            val unsent = dropShellFrames()
-            dispatch(SessionEvent.Ended(text, isError = true, atMillis = clock()))
-            noticeUnsent(unsent)
+            endWith(SessionEvent.Ended(text, isError = true, atMillis = clock()))
             return
         }
         process = p
@@ -275,9 +273,7 @@ class ClaudeSession(
             writer.cancel()
             LOG.info("claude exited with code $code")
             ended = true // ahead of the chat saying so: a request made once it shows answers Ended at once
-            val unsent = dropShellFrames()
-            dispatch(exitEvent(code))
-            noticeUnsent(unsent)
+            endWith(exitEvent(code))
             this.coroutineContext.job.children.forEach { it.cancel() }
         }
     }
@@ -313,12 +309,18 @@ class ClaudeSession(
      * that the model sees what the terminal shows. With [respond], two frames as `bash-mode-respond` sent them: the command quietly,
      * then, once its zero-turn result is in (or [quietWaitMillis] later), the output without `shouldQuery`, which starts the turn
      * that answers it. Without, one quiet frame with both (context only). An escape sent while a turn is in progress (a prompt sent
-     * just before it) waits whole for that turn's result: a prompt and a quiet frame never go out together either.
+     * just before it) waits whole for that turn's result: an escape never goes out right behind a prompt (a prompt right behind a
+     * quiet frame is spec 12.9 item 7). One sent once the process is over, before the chat shows it, sends nothing and says so.
      */
     fun sendShellEscape(id: String, command: String, output: String, respond: Boolean) {
         synchronized(shellLock) {
             val escape = HeldEscape(id, command, output, respond)
-            if (heldEscapes.isEmpty() && pendingOutput == null && _state.value.turn == null) startEscapeLocked(escape) else heldEscapes.addLast(escape)
+            when {
+                // Read under shellLock: set before dropShellFrames takes it, so an escape not dropped there is seen as unsent here.
+                ended -> notice(NoticeLevel.WARNING, unsentText(command))
+                heldEscapes.isEmpty() && pendingOutput == null && _state.value.turn == null -> startEscapeLocked(escape)
+                else -> heldEscapes.addLast(escape)
+            }
         }
     }
 
@@ -336,7 +338,7 @@ class ClaudeSession(
         val query = UUID.randomUUID().toString()
         dispatch(SessionEvent.ShellSent(escape.id, quiet = listOf(quiet), query = query, atMillis = clock()))
         send(HostMessages.bashInput(escape.command, quiet))
-        val pending = PendingOutput(escape.id, quiet, HostMessages.bashOutput(escape.output, "", query, query = true))
+        val pending = PendingOutput(escape.id, escape.command, quiet, HostMessages.bashOutput(escape.output, "", query, query = true))
         pendingOutput = pending
         pending.fallback = scope.launch(CoroutineName("ClaudeSession.quietWait")) {
             delay(quietWaitMillis)
@@ -366,33 +368,47 @@ class ClaudeSession(
                 pending.fallback?.cancel()
                 send(pending.frame)
             }
-            while (pendingOutput == null && heldEscapes.isNotEmpty() && _state.value.turn == null) startEscapeLocked(heldEscapes.removeFirst())
+            while (pendingOutput == null && heldEscapes.isNotEmpty() && _state.value.turn == null) {
+                startEscapeLocked(heldEscapes.removeFirst())
+            }
         }
     }
 
     /**
-     * The process is over: no shell escape frame goes out any more (the turn a responding escape opened ends with the process).
-     * Returns the escapes still held behind a turn, none of whose frames went out, for [noticeUnsent].
+     * The process is over: no shell escape frame goes out any more. Returns the commands of the escapes whose output never went out,
+     * in order: the one whose output frame waited for its quiet result if [withPending], then those still held behind a turn.
      */
-    private fun dropShellFrames(): List<HeldEscape> =
+    private fun dropShellFrames(withPending: Boolean): List<String> =
         synchronized(shellLock) {
-            pendingOutput?.fallback?.cancel()
+            val pending = pendingOutput
+            pending?.fallback?.cancel()
             pendingOutput = null
-            heldEscapes.toList().also { heldEscapes.clear() }
+            val held = heldEscapes.map { it.command }
+            heldEscapes.clear()
+            listOfNotNull(pending?.command?.takeIf { withPending }) + held
         }
 
-    /** Says in the chat, one notice each, that the output of the [unsent] escapes never reached the CLI (hard rule 5). */
-    private fun noticeUnsent(unsent: List<HeldEscape>) {
-        unsent.forEach {
-            notice(NoticeLevel.WARNING, "The output of ! ${it.command.lineSequence().first()} was not sent: the CLI ended first.")
-        }
+    /**
+     * The process ended by itself or never started: [end] goes in the chat in one step with a notice for each escape whose output
+     * never reached the CLI (hard rule 5), so that the handle never takes an ended chat without them. An output frame that waited for
+     * its quiet result needs none: the turn its escape opened ends with the process, as failed.
+     */
+    private fun endWith(end: SessionEvent.Ended) {
+        val unsent = dropShellFrames(withPending = false).map { SessionEvent.HostNotice(NoticeLevel.WARNING, unsentText(it)) }
+        _state.update { s -> unsent.fold(reduce(s, end)) { acc, notice -> reduce(acc, notice) } }
     }
 
     /**
-     * The handle lets this process go before it ends ([SessionHandle.stop]): no shell escape frame goes out any more, and an escape
-     * still held behind the turn in progress says that its output was not sent, ahead of the chat being taken from [state].
+     * The handle lets this process go before it ends ([SessionHandle.stop]): no shell escape frame goes out any more, and each escape
+     * whose output had not gone out says so, ahead of the chat being taken from [state] and settled (which ends the turn in progress
+     * without a word).
      */
-    internal fun letGoShellFrames(): Unit = noticeUnsent(dropShellFrames())
+    internal fun letGoShellFrames() {
+        dropShellFrames(withPending = true).forEach { notice(NoticeLevel.WARNING, unsentText(it)) }
+    }
+
+    /** The notice for a shell escape of [command] whose output never reached the CLI. */
+    private fun unsentText(command: String): String = "The output of ! ${command.lineSequence().first()} was not sent: the CLI ended first."
 
     /**
      * Asks for another model. The switch only counts once `system/init` reports it (see [ChatState.modelWarning]); an error answer

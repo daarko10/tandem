@@ -1148,7 +1148,9 @@ class ClaudeSessionTest {
         run.written("\"type\":\"user\"")
         run.process.destroyForcibly()
         val text = "The output of ! echo hi was not sent: the CLI ended first."
-        val state = withTimeout(10_000) { run.session.state.first { s -> s.entries.any { it is ChatEntry.Notice && it.text == text } } }
+        // The first ended chat has the notice already: it goes in with the end, so the handle never takes an ended chat without it.
+        val state = withTimeout(10_000) { run.session.state.first { it.ended } }
+        assertTrue(state.entries.any { it is ChatEntry.Notice && it.text == text }, "the notice is in the same step as the end")
         assertEquals(1, run.userFrames().size, "only the prompt")
         // After the prompt's failed turn and the exit's own notice, at the end of the chat.
         val notice = state.entries.last() as ChatEntry.Notice
@@ -1156,6 +1158,36 @@ class ClaudeSessionTest {
         assertEquals(NoticeLevel.WARNING, notice.level)
         assertEquals(TurnEnd.FAILED, state.entries.filterIsInstance<ChatEntry.TurnEnded>().single().end)
         assertTrue(state.entries.indexOfFirst { it is ChatEntry.TurnEnded } < state.entries.lastIndex - 1)
+        run.close()
+    }
+
+    @Test
+    fun `letting the process go says a pending output frame was not sent`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 200)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.written("\"type\":\"user\"")
+        // The session's Stop: the handle lets the process go, then settles the chat, which ends the open turn without a word.
+        run.session.letGoShellFrames()
+        val notice = run.session.state.value.entries.last() as ChatEntry.Notice
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", notice.text)
+        assertEquals(NoticeLevel.WARNING, notice.level)
+        delay(500) // past the wait: a frame still pending would go out now
+        assertEquals(1, run.userFrames().size, "only the command frame")
+        run.close()
+    }
+
+    @Test
+    fun `a shell escape sent once the process is over sends nothing and says so`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.process.destroyForcibly()
+        withTimeout(10_000) { run.session.state.first { it.ended } }
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = false)
+        val state = run.session.state.value
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", (state.entries.last() as ChatEntry.Notice).text)
+        assertEquals(emptySet(), state.quietSends, "no frame was sent, so no quiet result is awaited")
+        assertEquals(0, run.userFrames().size)
         run.close()
     }
 
