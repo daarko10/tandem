@@ -116,9 +116,10 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
 
+  # The verifier and the IDE test build the plugin themselves and start alongside Build and test rather than after it: they
+  # reuse nothing from it (a pull request's jobs never write the Gradle cache), so waiting only added its minutes.
   verify:
     name: Plugin Verifier
-    needs: [ build ]
     runs-on: ubuntu-latest
     steps:
       - name: Free disk space
@@ -160,7 +161,6 @@ jobs:
   # by side: a job runs the tests whose position in their class, sorted by name, is its index modulo three (IdeTestShard).
   ide-test:
     name: IDE test (${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: [ build ]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

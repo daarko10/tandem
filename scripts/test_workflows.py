@@ -857,7 +857,13 @@ BUILD = os.path.join(ROOT, ".github/workflows/build.yml")
 
 @unittest.skipUnless(yaml, "PyYAML is not installed")
 class BuildWorkflowTest(unittest.TestCase):
-    """build.yml: how the IDE test is split across jobs."""
+    """build.yml: which jobs wait for which, and how the IDE test is split across jobs."""
+
+    def test_the_verifier_and_the_ide_test_do_not_wait_for_build_and_test(self):
+        jobs = load(BUILD)["jobs"]
+        for name in ("verify", "ide-test"):
+            self.assertNotIn("build", jobs[name].get("needs", []), name)               # each builds its own plugin ZIP; waiting only lengthened the critical path
+        self.assertIn("plugin-distribution", [s.get("with", {}).get("name") for s in jobs["build"]["steps"]])   # the ZIP people download stays Build and test's
 
     def test_the_ide_test_runs_in_three_shards(self):
         wf = load(BUILD)
