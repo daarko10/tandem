@@ -62,8 +62,12 @@ internal fun composerKey(
     }
 }
 
-/** Whether Enter sends: some text, or an attached image with blank text (polish spec 2.7). */
-internal fun canSend(text: String, attachmentCount: Int): Boolean = text.isNotBlank() || attachmentCount > 0
+/**
+ * Whether Enter or the Send button sends: some text, or an attached image with blank text, and no prompt still being encoded
+ * ([sending]: the composer counts as busy until the last one captured has gone out, polish spec 2.7 "Send order" and edge 10).
+ */
+internal fun canSend(text: String, attachmentCount: Int, sending: Boolean = false): Boolean =
+    !sending && (text.isNotBlank() || attachmentCount > 0)
 
 /** What the composer does itself with an Enter that [composerKey] leaves to the text area (spec 4.15). */
 internal enum class ComposerFallback {

@@ -121,7 +121,8 @@ internal fun PromptBar(
     val scope = rememberCoroutineScope()
     val send = {
         val text = ui.draft.text.toString().trim()
-        if (canSend(text, ui.attachments.size)) {
+        // The sender's own flag, not the last composition's: a click or Enter during an encode sends nothing (polish spec 2.7).
+        if (canSend(text, ui.attachments.size, sender.sending.value)) {
             // Captured and cleared at once, on the EDT: the sender encodes the images off it (polish spec 2.7).
             val images = ui.attachments.map { CapturedImage(it.mediaType, it.bytes) }
             ui.draft.clearText()
@@ -197,7 +198,7 @@ internal fun PromptBar(
 /**
  * The text area, `+` and Send or Stop in one filled rounded box, as wide as the footer under it, with the attached images above them
  * ([AttachmentStrip]): Stop while [busy]. Keys go through [composerKey] with [busy] or [sending] (a prompt still being encoded) and
- * [cardOpen]; [onAction] does what it returns. `+` opens a menu whose `Add files or photos` calls [onAdd]; files dropped on the box go
+ * [cardOpen], and Send does nothing while [sending]; [onAction] does what they return. `+` opens a menu whose `Add files or photos` calls [onAdd]; files dropped on the box go
  * to [onDrop], and the box draws its focused border while a drag of files hovers it. With [focus] the text area takes the focus, and
  * then [onFocused] is called. It takes those fields, not the whole composer model, so that a change to another one leaves it alone.
  */
@@ -299,7 +300,8 @@ private fun PromptBox(
                     Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
                 }
             } else {
-                IconButton(onClick = { onAction(ComposerAction.Send) }, modifier = buttonModifier.semantics { contentDescription = "Send" }) {
+                // Gated as the keys are: while the last prompt is still being encoded the composer counts as busy (polish spec 2.7).
+                IconButton(onClick = { if (!sending) onAction(ComposerAction.Send) }, modifier = buttonModifier.semantics { contentDescription = "Send" }) {
                     Text("↵", style = JewelTheme.editorTextStyle, color = colors.text.info)
                 }
             }

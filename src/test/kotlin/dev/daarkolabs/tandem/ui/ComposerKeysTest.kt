@@ -119,6 +119,14 @@ class ComposerKeysTest {
     }
 
     @Test
+    fun `nothing sends while the last prompt is still being encoded, by Enter or by the Send button`() {
+        // Polish spec 2.7 "Send order" and edge 10: the composer counts as busy while sending; both ways in go through canSend.
+        assertFalse(canSend("x", 0, sending = true))
+        assertFalse(canSend("  ", 1, sending = true))
+        assertTrue(canSend("x", 0, sending = false))
+    }
+
+    @Test
     fun `Cmd-V with an image on the clipboard is a paste, with text it is left to the text area`() {
         assertEquals(ComposerAction.PasteImage, composer(v, ctrlOrMeta = true, clipboardHasImage = { true }))
         assertEquals(ComposerAction.PasteImage, composer(v, ctrlOrMeta = true, busy = true, clipboardHasImage = { true }))
