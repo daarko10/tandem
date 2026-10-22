@@ -552,8 +552,8 @@ above); reading it from there is left for later.
 #### MCP requests
 
 Recorded with CLI 2.1.306 (fixture `mcp-status`, three local servers: section 10). The CLI manages its MCP servers on
-request and announces no change: no `system` line in the MCP fixtures is about a server, so a host learns of a new status
-from `mcp_status`, the next turn's `init` (5.1) or the model's own text. The frames Tandem sends (`HostMessages.mcpStatus`,
+request and announces no change: no `system` line other than the next turn's `init` (5.1) reports a server's state, so a
+host learns of a new status from `mcp_status`, that `init` or the model's own text. The frames Tandem sends (`HostMessages.mcpStatus`,
 `mcpToggle`, `mcpReconnect`, `mcpAuthenticate`; the request ids here are examples):
 
 ```json
@@ -667,7 +667,7 @@ has `compact_boundary`, `api_retry`, `model_refusal_fallback`, `model_refusal_no
 | `background_tasks_changed` | background tasks; not recorded | task list |
 | `thinking_tokens` | `estimated_tokens, estimated_tokens_delta, user_message_uuid` (`think-default.ndjson:11`): a running estimate while a thinking block streams, interleaved with its `thinking_delta` frames in the `updates` and `summarized` displays, none in `highlights` (section 6.3). It overshoots the final `message_delta.usage.output_tokens_details.thinking_tokens` | token counter |
 | `ui_invalidate` | `event:"ui.render"`; usually the first line of a signed-in run, before `init` (26 of the 29 probe recordings, e.g. `tools-bash.ndjson:1`; section 10). Absent from `think-default`, `think-adaptive` and `think-opus` (2.1.302), which start with the `initialize` response, so key nothing on it | ignore |
-| `commands_changed` | `commands` | refresh palette |
+| `commands_changed` | `commands` | not decoded (an unknown line); the palette keeps the initialize answer's `commands` |
 | `files_persisted`, `memory_recall`, `elicitation_complete`, `control_request_progress`, `plugin_install`, `mirror_error`, `worker_shutting_down` | | ignore or log type |
 
 Tandem decodes `thinking_tokens` (`ThinkingTokens{estimatedTokens, estimatedTokensDelta?, userMessageUuid?}`; a line
@@ -1153,7 +1153,7 @@ Recorded: the interrupt line (`history-interrupt`, 2.1.301):
 `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"parentUuid":<the cut-off reply>,…}`,
 the shape the hand-written test uses; a slash command's line (`transcripts/mcp-slash.jsonl:4`, 2.1.306); the shell-escape
 lines (`transcripts/bash-mode.jsonl:5`, `transcripts/bash-mode-respond.jsonl:6`, 2.1.306). The others, a
-`<local-command-stdout>` user line and `<task-notification>`, come from the CLI's binary and the SDK and are pinned with
+`<local-command-stdout>` or `<local-command-stderr>` user line and `<task-notification>`, come from the CLI's binary and the SDK and are pinned with
 hand-written lines in `TranscriptReaderTest`.
 
 A loaded chat is settled whatever the file ends with: not busy, no pending permission, no streaming entry.
