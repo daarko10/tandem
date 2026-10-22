@@ -103,6 +103,10 @@ def test_no_assistant_line_uses_the_errors_field(self):
     self.assertEqual("cli-did-not-answer", out["kind"])
     self.assertEqual("The CLI did not answer (apiKeySource='none'): [\"boom\"]", out["detail"])
 
+def test_no_assistant_line_with_an_empty_result_is_the_cli_not_answering(self):   # only non-empty result text is decoder drift
+    out = classify_drift.classify(self.recording([INIT, {"type": "result", "is_error": False, "result": ""}]), self.results({}))
+    self.assertEqual(("cli-did-not-answer", "The CLI did not answer (apiKeySource='none'): "), (out["kind"], out["detail"]))
+
 def test_a_result_with_text_but_no_assistant_line_is_decoder_drift(self):
     out = classify_drift.classify(self.recording([INIT, OK]), self.results({}))        # the reply came under a type the decoder does not know
     self.assertEqual(("decoder", "2.1.302", "contract-hello.ndjson: no assistant line, result text present"), (out["kind"], out["cli_version"], out["detail"]))
@@ -479,7 +483,8 @@ They read .github/workflows/drift-fix.yml (and cli-contract.yml) with PyYAML, wh
 True. Without PyYAML they skip, except under GITHUB_ACTIONS, where a missing PyYAML is an error: these are the only
 tests pinning the workflows, and build.yml's "Script tests" step must never skip them silently.
 
-The outcome tests (StepOutcomeTest) run a step's `run:` block under bash as GitHub does (-e -o pipefail) with a stub
+The outcome tests (StepOutcomeTest) run a step's `run:` block under bash as GitHub does: `bash -e {0}` for a step
+without `shell:` (no pipefail; every multi-command step sets its own), `-o pipefail` added for `shell: bash`, with a stub
 `gh` first on PATH that answers from canned output and, on an HTTP error, prints the error body on stdout and exits 1
 as gh 2.89 does. They need bash 4 (mapfile) and jq; without them they skip, except under GITHUB_ACTIONS on Linux.
 """
@@ -575,7 +580,7 @@ def stub_gh(answers: list[tuple[str, str, int]]) -> str:
 
 
 def run_step(wf: dict, job: str, name: str, env: dict, gh: list[tuple[str, str, int]], files: dict | None = None) -> tuple[int, str, str, str]:
-    """Runs the step's `run:` under bash as GitHub does, in an empty working directory (plus `files`), with the stub gh
+    """Runs the step's `run:` under bash as GitHub does (`bash -e`, plus `-o pipefail` for `shell: bash`), in an empty working directory (plus `files`), with the stub gh
     first on PATH, GITHUB_OUTPUT in a temporary file and the step's env from `env`, which must name every key the step
     declares. Returns (exit code, stdout and stderr, GITHUB_OUTPUT's text, the stub's call log)."""
     s = step(wf, job, name)
@@ -600,8 +605,8 @@ def run_step(wf: dict, job: str, name: str, env: dict, gh: list[tuple[str, str, 
                 f.write(text)
         full = {"PATH": bindir + os.pathsep + os.environ.get("PATH", ""), "HOME": tmp, "GITHUB_OUTPUT": output, "GH_STUB_LOG": log,
                 "GITHUB_REPOSITORY": "daarko10/tandem", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "99", **env}
-        proc = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", script], cwd=work, env=full,
-                              capture_output=True, text=True, timeout=60)
+        shell = ["bash", "--noprofile", "--norc", "-e"] + (["-o", "pipefail"] if s.get("shell") == "bash" else [])
+        proc = subprocess.run(shell + [script], cwd=work, env=full, capture_output=True, text=True, timeout=60)
         with open(output, encoding="utf-8") as f:
             out = f.read()
         with open(log, encoding="utf-8") as f:
@@ -665,6 +670,11 @@ class DriftFixWorkflowTest(unittest.TestCase):
                     "Report a run the agent cannot fix", "Skip when a fix is already waiting", "Require a protected main", "Fix the drift"]
         self.assertEqual(expected, names)                                             # the allowlist step is the enforce job's, after this job
         wf = load(DRIFT)
+        labels = step(wf, "fix", "Ensure the labels exist")
+        self.assertIn("gh label create contract-drift --force", labels["run"])        # the gate, the report and the PR key on it
+        self.assertIn("gh label create rehearsal --force", labels["run"])             # the skill's `gh pr create --label rehearsal` fails after the spend without it
+        self.assertEqual("${{ github.token }}", labels["env"]["GH_TOKEN"])
+        self.assertLess(names.index("Ensure the labels exist"), names.index("Fix the drift"))
         self.assertEqual(["Enforce the edit allowlist"], [s.get("name") for s in steps(wf, "enforce")])
         self.assertEqual(["Comment on the waiting pull request"], [s.get("name") for s in steps(wf, "remind")])
         self.assertTrue(step(wf, "fix", "Reproduce the red")["continue-on-error"])
@@ -679,6 +689,8 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertIn('.head_branch == "main"', name_run)                             # so is a run of another branch, whose recording that branch produced
         for s in steps(wf, "fix") + steps(wf, "remind") + steps(wf, "enforce"):
             self.assertNotIn("${{", s.get("run", ""), s.get("name"))                 # inputs and outputs reach the shell through env only
+            if len(s.get("run", "").strip().splitlines()) > 1 and s.get("name") != "Ensure the labels exist":
+                self.assertTrue(s["run"].startswith("set -euo pipefail\n"), s.get("name"))   # GitHub's default shell is bash -e, without pipefail
         mutate = step(wf, "fix", "Mutate a recording for the rehearsal")
         self.assertIn("scripts/make_drift.py", mutate["run"])
         self.assertEqual("${{ inputs.mode }}", mutate["env"]["MODE"])                 # through env, never interpolated into the shell line
@@ -730,9 +742,13 @@ class DriftFixWorkflowTest(unittest.TestCase):
         self.assertEqual("steps.gate.outputs.proceed == 'true'", protect["if"])
         self.assertIn("set -euo pipefail", protect["run"])                            # a failed read fails the step, and the agent never starts
         self.assertIn('repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"', protect["run"])
-        self.assertIn('select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true)] | length', protect["run"])   # an App can approve a PR it did not author: a code owner's review of the last push is what it cannot give
+        self.assertIn('select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")', protect["run"])   # an App can approve a PR it did not author: a code owner's review of the last push is what it cannot give
         self.assertNotIn(".protected", protect["run"])                                # classic protected: true accepts a direct push when no option is ticked
-        self.assertIn('if [[ "$rules" =~ ^[0-9]+$ ]] && [ "$rules" -ge 1 ]; then', protect["run"])   # fail closed: only a number >= 1 passes
+        self.assertIn('if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then', protect["run"])   # fail closed: only one or more ruleset ids pass
+        self.assertIn('if ! ruleset="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" 2>/dev/null)"; then', protect["run"])   # by exit status: a failed read refuses without a verdict
+        self.assertIn('select(.actor_type == "Integration")', protect["run"])          # an App on the bypass list defeats the rule, whatever its bypass mode
+        self.assertLess(protect["run"].index("rules/branches/main"), protect["run"].index("rulesets/$id"))
+        self.assertLess(protect["run"].index("rulesets/$id"), protect["run"].index("CODEOWNERS?ref=main"))
         self.assertIn('if ! owners="$(gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=main" 2>/dev/null)"; then', protect["run"])   # the code-owner review binds only owned files; by exit status: a 5xx is not "no owner line"
         self.assertIn("status=\"$(jq -r '.status // empty' <<<\"$owners\" 2>/dev/null || true)\"", protect["run"])
         self.assertIn("grep -qE '^\\*[[:space:]]+@' <<<\"$owners\"", protect["run"])
@@ -849,6 +865,11 @@ RUN_VIEW = {"html_url": RUN_URL, "created_at": "2026-10-21T03:17:09Z", "name": "
             "head_repository": {"full_name": "daarko10/tandem"}, "event": "schedule"}
 NAME_ENV = {"GH_TOKEN": "stub", "EVENT_RUN_ID": "7", "INPUT_RUN_ID": "", "REHEARSE": "false"}
 RULES = "api repos/daarko10/tandem/rules/branches/main?per_page=100"
+RULESET = "api repos/daarko10/tandem/rulesets/17"
+APP_BYPASS = json.dumps({"id": 17, "enforcement": "active", "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"},
+                                                                     {"actor_id": 1236702, "actor_type": "Integration", "bypass_mode": "pull_request"}]})
+ROLE_ONLY = json.dumps({"id": 17, "enforcement": "active", "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]})
+WITHHELD = json.dumps({"id": 17, "enforcement": "active"})                         # GitHub's answer to a token that cannot edit the ruleset
 CODEOWNERS = "api -H Accept: application/vnd.github.raw+json repos/daarko10/tandem/contents/.github/CODEOWNERS?ref=main"
 
 
@@ -990,31 +1011,52 @@ class StepOutcomeTest(unittest.TestCase):
         self.assertRegex(output, r"^id=99\nurl=https://github\.com/daarko10/tandem/actions/runs/99\ndate=\d{4}-\d{2}-\d{2}\nrehearse=true\n$")
         self.assertEqual("", calls)
 
-    def protect(self, rules: str, owners: str | tuple[str, int], branch: tuple[str, int]) -> tuple[int, str, str, str]:
+    def protect(self, rules: str, owners: str | tuple[str, int], branch: tuple[str, int], ruleset: tuple[str, int] = (ROLE_ONLY, 0)) -> tuple[int, str, str, str]:
         owners = owners if isinstance(owners, tuple) else (owners, 0)
         return run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
-                        [(RULES, rules, 0), (CODEOWNERS, owners[0], owners[1]), (BRANCH_READ, branch[0], branch[1])])
+                        [(RULES, rules, 0), (RULESET, ruleset[0], ruleset[1]), (CODEOWNERS, owners[0], owners[1]), (BRANCH_READ, branch[0], branch[1])])
 
     def test_protect_passes_a_ruleset_an_owner_and_a_missing_branch(self):
-        rc, out, _, calls = self.protect("1\n", "* @daarko10\n", (NOT_FOUND, 1))
+        rc, out, _, calls = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1))
         self.assertEqual(0, rc, out)
-        self.assertIn("main requires a pull request, an approving review from a code owner and approval of the last push (ruleset)", out)
-        self.assertEqual([RULES, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0]], [c.split(" --jq", 1)[0] for c in calls.splitlines()])   # the ruleset first
+        self.assertIn("main requires a pull request, an approving review from a code owner and approval of the last push (ruleset 17)", out)
+        self.assertIn("ruleset 17: no App on its bypass list", out)                   # the owner's admin role is how the only code owner merges
+        self.assertEqual([RULES, RULESET, CODEOWNERS, BRANCH_READ.split(" --jq", 1)[0]], [c.split(" --jq", 1)[0] for c in calls.splitlines()])   # the ruleset first
+
+    def test_protect_says_when_github_withholds_the_bypass_list(self):
+        rc, out, _, _ = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), (WITHHELD, 0))
+        self.assertEqual(0, rc, out)                                                  # the workflow token never sees it: the owner's part, said in the log
+        self.assertIn("ruleset 17: GitHub shows its bypass list only to a caller who can edit the ruleset, not to this token; keeping the Claude App off it is the owner's part", out)
+
+    def test_protect_reads_every_qualifying_ruleset(self):
+        rc, out, _, calls = run_step(load(DRIFT), "fix", "Require a protected main", {"GH_TOKEN": "stub", "BRANCH": BRANCH},
+                                     [(RULES, "17 23\n", 0), (RULESET, ROLE_ONLY, 0), ("api repos/daarko10/tandem/rulesets/23", APP_BYPASS, 0)])
+        self.assertEqual(1, rc, out)
+        self.assertIn("The ruleset 23 on main lets an App bypass it", out)
+        self.assertNotIn("CODEOWNERS", calls)
 
     def test_protect_refuses_without_the_ruleset_the_owner_line_or_a_404(self):
-        for rules, owners, branch, message in (("0\n", "* @daarko10\n", (NOT_FOUND, 1), "No ruleset on main requires a pull request"),
+        for rules, owners, branch, message in (("\n", "* @daarko10\n", (NOT_FOUND, 1), "No ruleset on main requires a pull request"),
                                                ("x\n", "* @daarko10\n", (NOT_FOUND, 1), "No ruleset on main requires a pull request"),
-                                               ("1\n", "docs/ @daarko10\n", (NOT_FOUND, 1), "CODEOWNERS has no line owning every file"),
-                                               ("1\n", ('{"message":"Not Found","status":"404"}', 1), (NOT_FOUND, 1), "CODEOWNERS has no line owning every file"),   # no file on main: a 404, which owns nothing
-                                               ("1\n", (SERVER_ERROR, 1), (NOT_FOUND, 1), "Reading main's .github/CODEOWNERS failed (HTTP status '502')"),   # not "no owner line": red without a verdict
-                                               ("1\n", "* @daarko10\n", (BRANCH + "\n", 0), f"The branch {BRANCH} exists"),
-                                               ("1\n", "* @daarko10\n", (SERVER_ERROR, 1), f"Reading the branch {BRANCH} failed (HTTP status '502')"),
-                                               ("1\n", "* @daarko10\n", ("", 1), f"Reading the branch {BRANCH} failed (HTTP status 'none')")):
+                                               ("null\n", "* @daarko10\n", (NOT_FOUND, 1), "No ruleset on main requires a pull request"),   # a rule without its ruleset_id
+                                               ("17\n", "docs/ @daarko10\n", (NOT_FOUND, 1), "CODEOWNERS has no line owning every file"),
+                                               ("17\n", ('{"message":"Not Found","status":"404"}', 1), (NOT_FOUND, 1), "CODEOWNERS has no line owning every file"),   # no file on main: a 404, which owns nothing
+                                               ("17\n", (SERVER_ERROR, 1), (NOT_FOUND, 1), "Reading main's .github/CODEOWNERS failed (HTTP status '502')"),   # not "no owner line": red without a verdict
+                                               ("17\n", "* @daarko10\n", (BRANCH + "\n", 0), f"The branch {BRANCH} exists"),
+                                               ("17\n", "* @daarko10\n", (SERVER_ERROR, 1), f"Reading the branch {BRANCH} failed (HTTP status '502')"),
+                                               ("17\n", "* @daarko10\n", ("", 1), f"Reading the branch {BRANCH} failed (HTTP status 'none')")):
             rc, out, _, calls = self.protect(rules, owners, branch)
             self.assertEqual(1, rc, (message, out))
             self.assertIn(message, out)
             if not message.startswith(("The branch", "Reading the branch")):
                 self.assertNotIn(BRANCH, calls)                                       # refused before the branch read
+        for ruleset, message in (((APP_BYPASS, 0), 'The ruleset 17 on main lets an App bypass it ([{"actor_type":"Integration","actor_id":1236702}])'),
+                                 ((SERVER_ERROR, 1), "Reading the ruleset 17 failed (HTTP status '502')"),   # red without a verdict, never "no App"
+                                 (('{"bypass_actors":"x"}', 0), "The ruleset 17 answered a bypass list of type 'string'")):
+            rc, out, _, calls = self.protect("17\n", "* @daarko10\n", (NOT_FOUND, 1), ruleset)
+            self.assertEqual(1, rc, (message, out))
+            self.assertIn(message, out)
+            self.assertNotIn("CODEOWNERS", calls)                                     # refused before any later read
 
     def test_the_report_opens_or_comments_on_the_standing_issue(self):
         classification = json.dumps({"kind": "cli-did-not-answer", "cli_version": "2.1.301", "detail": "no system/init", "files": ["contract-hello.ndjson"]})
@@ -1022,12 +1064,12 @@ class StepOutcomeTest(unittest.TestCase):
         rc, out, _, calls = run_step(load(DRIFT), "fix", "Report a run the agent cannot fix", env,
                                      [(ISSUE_LIST, "", 0), (ISSUE_CREATE, "https://github.com/daarko10/tandem/issues/9\n", 0)], {"build/drift/precheck.json": classification})
         self.assertEqual(0, rc, out)
-        self.assertIn(f"{ISSUE_CREATE} The CLI contract run {RUN_URL} is red and the drift loop cannot fix it.\n\n- kind: cli-did-not-answer\n- CLI version: 2.1.301\n- detail: no system/init\n- files: contract-hello.ndjson", calls)
+        self.assertIn(f"{ISSUE_CREATE} **The CLI did not answer.**\n\nThe CLI contract run {RUN_URL} is red and the drift loop cannot fix it.\n\n- kind: cli-did-not-answer\n- CLI version: 2.1.301\n- detail: no system/init\n- files: contract-hello.ndjson", calls)
         rc, out, _, calls = run_step(load(DRIFT), "fix", "Report a run the agent cannot fix", env,
                                      [(ISSUE_LIST, "3\n", 0), ("issue comment 3 --body", "", 0)],
                                      {"build/drift/precheck.json": classification, "build/drift/classification.json": classification.replace("cli-did-not-answer", "unknown")})
         self.assertEqual(0, rc, out)
-        self.assertIn("issue comment 3 --body The CLI contract run", calls)
+        self.assertIn("issue comment 3 --body **The CLI answered; the red is unclassified.**\n\nThe CLI contract run", calls)   # the title names kind 1 only: the first line names the kind
         self.assertIn("- kind: unknown", calls)                                       # the classification when Gradle ran, else the precheck
         self.assertNotIn("issue create", calls)
 
@@ -1249,7 +1291,8 @@ jobs:
           python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test | tee build/drift/classification.json
           echo "kind=$(jq -r .kind build/drift/classification.json)" >> "$GITHUB_OUTPUT"
       # Kind 1 and unknown: one standing issue, one comment per red run, no branch, no agent. The job ends green. Reads the
-      # classification when Gradle ran, else the precheck.
+      # classification when Gradle ran, else the precheck. The comment's bold first line names the kind, since the title
+      # names only kind 1: an unknown red is one the CLI answered and the loop cannot classify.
       - name: Report a run the agent cannot fix
         if: steps.precheck.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'unknown'
         env:
@@ -1259,7 +1302,7 @@ jobs:
           set -euo pipefail
           file=build/drift/classification.json; [ -f "$file" ] || file=build/drift/precheck.json
           title="CLI contract: the CLI did not answer"
-          body="$(jq -r --arg url "$RUN_URL" '"The CLI contract run \($url) is red and the drift loop cannot fix it.\n\n- kind: \(.kind)\n- CLI version: \(.cli_version // "unknown")\n- detail: \(.detail)\n- files: \(if .files == [] then "none" else (.files | join(", ")) end)"' "$file")"
+          body="$(jq -r --arg url "$RUN_URL" '"\(if .kind == "unknown" then "**The CLI answered; the red is unclassified.**" else "**The CLI did not answer.**" end)\n\nThe CLI contract run \($url) is red and the drift loop cannot fix it.\n\n- kind: \(.kind)\n- CLI version: \(.cli_version // "unknown")\n- detail: \(.detail)\n- files: \(if .files == [] then "none" else (.files | join(", ")) end)"' "$file")"
           issue="$(gh issue list --label contract-drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
           if [ -z "$issue" ]; then gh issue create --title "$title" --label contract-drift --body "$body"; else gh issue comment "$issue" --body "$body"; fi
       # One open fix at a time: a red that persists for a week opens one PR, not seven. The reminder on the waiting PR
@@ -1292,7 +1335,11 @@ jobs:
       # no code owner, and cannot approve its own push), and main's .github/CODEOWNERS owns every file with a `* @owner`
       # line: the code-owner review binds only files that have an owner. Anything else, a failed read or an answer that
       # is not a number included, fails the step: the run is red and the agent does not start. A ruleset bypass list
-      # naming the Claude App would defeat the rule; keeping the App off that list is the owner's part. A ruleset on a
+      # naming the Claude App would defeat the rule, so each qualifying ruleset is read by its id (by exit status, as
+      # below) and an Integration (an App) on its bypass list refuses, whatever its bypass mode; a role (the owner's
+      # admin role, how the only code owner merges) is allowed. GitHub returns bypass_actors only to a caller who can
+      # edit the ruleset, which the workflow token never can (it has no administration permission), so on a real run
+      # the list is withheld, the step says so in its log, and keeping the App off it stays the owner's part. A ruleset on a
       # private repository owned by a personal account is enforced only with GitHub Pro: on Free the repository goes
       # public before the ruleset and the rehearsals, and what this endpoint lists for an unenforced ruleset is not
       # known, so reading the rule here does not prove enforcement. The same step refuses a drift branch that already
@@ -1310,12 +1357,30 @@ jobs:
           BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
         run: |
           set -euo pipefail
-          rules="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100" --jq '[.[] | select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true)] | length')"
-          if [[ "$rules" =~ ^[0-9]+$ ]] && [ "$rules" -ge 1 ]; then
-            echo "main requires a pull request, an approving review from a code owner and approval of the last push (ruleset)"
+          ids="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100" --jq '[.[] | select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")')"
+          if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then
+            echo "main requires a pull request, an approving review from a code owner and approval of the last push (ruleset $ids)"
           else
             echo "::error title=Drift fix::No ruleset on main requires a pull request with an approving review from a code owner and approval of the most recent push (a private repository of a personal account enforces one only with GitHub Pro); the agent is not started."; exit 1
           fi
+          for id in $ids; do
+            if ! ruleset="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" 2>/dev/null)"; then
+              status="$(jq -r '.status // empty' <<<"$ruleset" 2>/dev/null || true)"
+              echo "::error title=Drift fix::Reading the ruleset $id failed (HTTP status '${status:-none}'), so whether an App can bypass it is not known; the agent is not started."; exit 1
+            fi
+            listed="$(jq -r '.bypass_actors | type' <<<"$ruleset")"
+            if [ "$listed" = "null" ]; then
+              echo "ruleset $id: GitHub shows its bypass list only to a caller who can edit the ruleset, not to this token; keeping the Claude App off it is the owner's part"
+            elif [ "$listed" = "array" ]; then
+              apps="$(jq -c '[.bypass_actors[] | select(.actor_type == "Integration") | {actor_type, actor_id}]' <<<"$ruleset")"
+              if [ "$apps" != "[]" ]; then
+                echo "::error title=Drift fix::The ruleset $id on main lets an App bypass it ($apps), so the Claude App's token could push to main or merge without review; remove it from the bypass list. The agent is not started."; exit 1
+              fi
+              echo "ruleset $id: no App on its bypass list"
+            else
+              echo "::error title=Drift fix::The ruleset $id answered a bypass list of type '$listed'; the agent is not started."; exit 1
+            fi
+          done
           if ! owners="$(gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=main" 2>/dev/null)"; then
             status="$(jq -r '.status // empty' <<<"$owners" 2>/dev/null || true)"
             if [ "$status" != "404" ]; then
@@ -1639,7 +1704,7 @@ git commit -m "ci: the nightly redacts session-id.jsonl before upload and names 
 Under "Commands", after the `scripts/record-scenario.sh` bullet, add exactly:
 
 ```markdown
-- `.github/workflows/drift-fix.yml` runs after every red nightly `CLI contract` run: it classifies the red (`scripts/classify_drift.py`) and, for decoder or reader drift, runs the repository skill `.claude/skills/fix-contract-drift/SKILL.md`, which promotes the run's `contract-recording` artifact to a fixture, patches the decoder or reader and opens a pull request labelled `contract-drift`; a run the CLI did not answer is reported on the issue "CLI contract: the CLI did not answer" instead. By hand: `gh run download <run id> -n contract-recording -D build/drift/recording`, then `/fix-contract-drift run=<run url> recording=build/drift/recording classification=build/drift/classification.json rehearsal=false date=<YYYY-MM-DD>`. Rehearsal (needs `main`: the federation rule admits nothing else): `gh workflow run cli-contract.yml --ref main -f drift=init-model-key` (or `transcript-content-key`) makes the nightly mutate its own recording (`scripts/make_drift.py --from`) so the fixer fires through `workflow_run` as for a real red; `gh workflow run drift-fix.yml --ref main -f rehearse=true -f mode=<mode>` runs the fixer alone on the mutated `history-reply` fixture; `gh workflow run drift-fix.yml --ref main -f run_id=<id>` fixes, or reports, a red `CLI contract` run now (a run the CLI did not answer rehearses the kind-1 path with no spend). Either draft PR is closed, not merged. Repeat a rehearsal after any change to the skill, `classify_drift.py`, `make_drift.py`, `cli-contract.yml` or `drift-fix.yml`.
+- `.github/workflows/drift-fix.yml` runs after every red nightly `CLI contract` run: it classifies the red (`scripts/classify_drift.py`) and, for decoder or reader drift, runs the repository skill `.claude/skills/fix-contract-drift/SKILL.md`, which promotes the run's `contract-recording` artifact to a fixture, patches the decoder or reader and opens a pull request labelled `contract-drift`; a run the CLI did not answer is reported on the issue "CLI contract: the CLI did not answer" instead, as is a red it cannot classify (the comment's first line says the CLI answered). By hand: `gh run download <run id> -n contract-recording -D build/drift/recording`, then `/fix-contract-drift run=<run url> recording=build/drift/recording classification=build/drift/classification.json rehearsal=false date=<YYYY-MM-DD>`. Rehearsal (needs `main`: the federation rule admits nothing else, and an active ruleset on `main` requiring a pull request, a code owner's approving review and approval of the last push, with the Claude App off its bypass list: the fixer refuses to start without the ruleset): `gh workflow run cli-contract.yml --ref main -f drift=init-model-key` (or `transcript-content-key`) makes the nightly mutate its own recording (`scripts/make_drift.py --from`) so the fixer fires through `workflow_run` as for a real red; `gh workflow run drift-fix.yml --ref main -f rehearse=true -f mode=<mode>` runs the fixer alone on the mutated `history-reply` fixture; `gh workflow run drift-fix.yml --ref main -f run_id=<id>` fixes, or reports, a red `CLI contract` run now (a run the CLI did not answer rehearses the no-agent path, an issue comment and no spend). Either draft PR is closed, not merged. Repeat a rehearsal after any change to the skill, `classify_drift.py`, `make_drift.py`, `cli-contract.yml` or `drift-fix.yml`.
 ```
 
 Under "Working in this repo", after the "Work on a feature branch" bullet, add exactly:
@@ -1668,7 +1733,7 @@ git commit -m "docs: CLAUDE.md names the drift loop and its rehearsal"
 - None in the repository (the rehearsal's own pull requests are opened by the loop and closed by the owner).
 
 **Interfaces:**
-- Consumes: D1–D4 merged to `main`; the owner's one-time preparation, in this order and before any rehearsal: a ruleset on `main`, enforcement active, requiring a pull request, one approving review, "Require review from Code Owners" and "Require approval of the most recent reviewable push" (`.github/CODEOWNERS` with `* @daarko10` is on `main` once D2 is merged), with the Claude App never on its bypass list and the repository admin role on it (so that the App, which is no code owner and cannot approve its own push, can never push to `main` or merge a PR even if the tool allowlist regresses, although it can approve a PR it did not author; the owner, the only code owner, cannot approve their own PRs and merges them through the bypass; classic branch protection alone does not pass `Require a protected main`, nor does a ruleset without the two review options), the repository setting "Allow GitHub Actions to create and approve pull requests" kept off, then confirms the Claude GitHub App is still installed on `daarko10/tandem` (it is: spec open item 1, closed). A ruleset on a private repository owned by a personal account is enforced only with GitHub Pro: on Free the repository goes public before the ruleset and the rehearsals, and D5 waits for that. Before D5 the owner runs `gh api repos/daarko10/tandem/rules/branches/main` and sees the `pull_request` rule with `required_approving_review_count` of at least 1, `require_code_owner_review` true and `require_last_push_approval` true (what the endpoint lists for an unenforced ruleset is not known, so the check follows the enforcement).
+- Consumes: D1–D4 merged to `main`; the owner's one-time preparation, in this order and before any rehearsal: a ruleset on `main`, enforcement active, requiring a pull request, one approving review, "Require review from Code Owners" and "Require approval of the most recent reviewable push" (`.github/CODEOWNERS` with `* @daarko10` is on `main` once D2 is merged), with the Claude App never on its bypass list and the repository admin role on it (so that the App, which is no code owner and cannot approve its own push, can never push to `main` or merge a PR even if the tool allowlist regresses, although it can approve a PR it did not author; the owner, the only code owner, cannot approve their own PRs and merges them through the bypass; classic branch protection alone does not pass `Require a protected main`, nor does a ruleset without the two review options), the repository setting "Allow GitHub Actions to create and approve pull requests" kept off, then confirms the Claude GitHub App is still installed on `daarko10/tandem` (it is: spec open item 1, closed). A ruleset on a private repository owned by a personal account is enforced only with GitHub Pro: on Free the repository goes public before the ruleset and the rehearsals, and D5 waits for that. Before D5 the owner runs `gh api repos/daarko10/tandem/rules/branches/main` and sees the `pull_request` rule with `required_approving_review_count` of at least 1, `require_code_owner_review` true and `require_last_push_approval` true (what the endpoint lists for an unenforced ruleset is not known, so the check follows the enforcement), then `gh api repos/daarko10/tandem/rulesets/<its ruleset_id> --jq '.bypass_actors'` with their own sign-in and sees no `"actor_type": "Integration"`: `Require a protected main` refuses an App on the bypass list when it can see it, but GitHub returns `bypass_actors` only to a caller who can edit the ruleset, never to `GITHUB_TOKEN`, so on a real run the step only says in its log that the list is withheld.
 
 - [ ] **Step 1: Open the pull request for `ci/drift-loop` and hand the merge to the owner**
 
@@ -1694,7 +1759,7 @@ Expected: "Mutate a recording for the rehearsal" writes the four files; "Classif
 - [ ] **Step 5: Rehearse the kind-1 path with an old red run**
 
 Steps 2-4 never exercise the commonest red: the fetch with no artifact, the precheck short-circuit (Gradle skipped) and "Report a run the agent cannot fix" (the most hand-written `jq`/`gh` shell in the workflow, pinned by `test_workflows.py` only as string presence) would otherwise first run on a real night, and a wrong report step would end every kind-1 night as a red `Drift fix` run, training the owner to ignore the signal the loop relies on. It is provable for free with the existing `run_id` input. Run: `gh workflow run drift-fix.yml --ref main -f run_id=<id>` with the id of one of the six red scheduled `CLI contract` runs, 2026-10-17 to 2026-10-21 (`gh run list --workflow cli-contract.yml --status failure --json databaseId,createdAt,url`), choosing one that left no artifact or whose artifact is still within its 14-day retention (an expired artifact is listed but cannot be downloaded, so "Fetch the recording" reds the job by design: that is the fetch-failure path, not kind 1), then `sleep 20 && gh run list --workflow drift-fix.yml --limit 1 --json databaseId --jq '.[0].databaseId' | xargs -I{} gh run watch {} --exit-status`.
-Expected: "Name the red run" prints `fixing run <that run's url> (<its date>)`; "Fetch the recording" prints `the run left no recording` (or downloads a stream whose `result` has `is_error: true`); "Classify before Gradle" prints `"kind": "cli-did-not-answer"` and `rehearsal=false`; "Reproduce the red", "Classify", "Skip when a fix is already waiting", "Fix the drift" and "Enforce the edit allowlist" are skipped; "Report a run the agent cannot fix" creates the issue "CLI contract: the CLI did not answer" with the label `contract-drift` (or comments on it when one is open); the job is green with no Gradle and no agent spend. Then `gh issue view <n>` shows the run link, `kind`, the CLI version (`unknown` when the stream had no `system/init`), `detail` and `files` (`none` without an artifact). Keep the issue open or close it; either is fine for the next rehearsal.
+Expected: "Name the red run" prints `fixing run <that run's url> (<its date>)`; "Fetch the recording" prints `the run left no recording` (or downloads a stream whose `result` has `is_error: true`); "Classify before Gradle" prints `"kind": "cli-did-not-answer"` and `rehearsal=false`; "Reproduce the red", "Classify", "Skip when a fix is already waiting", "Fix the drift" and "Enforce the edit allowlist" are skipped; "Report a run the agent cannot fix" creates the issue "CLI contract: the CLI did not answer" with the label `contract-drift` (or comments on it when one is open); the job is green with no Gradle and no agent spend. Then `gh issue view <n>` shows the bold first line `The CLI did not answer.`, the run link, `kind`, the CLI version (`unknown` when the stream had no `system/init`), `detail` and `files` (`none` without an artifact). Keep the issue open or close it; either is fine for the next rehearsal.
 
 - [ ] **Step 6: Record what the rehearsal answered**
 

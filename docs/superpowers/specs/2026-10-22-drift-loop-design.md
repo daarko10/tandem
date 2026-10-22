@@ -193,8 +193,9 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    `cli-did-not-answer`, or the classification says `unknown`, and reads whichever of the two JSON files exists (the
    classification when Gradle ran, else the precheck). It comments on the standing issue titled
    "CLI contract: the CLI did not answer" (label `contract-drift`), creating it when none is open, with the run link,
-   `kind`, `cli_version` and `detail`. One issue, one comment per red run, no branch, no PR, no agent spend. The job
-   ends green: the loop did its work.
+   `kind`, `cli_version` and `detail`. The body's bold first line names the kind, since the title names kind 1 only:
+   `**The CLI did not answer.**`, or `**The CLI answered; the red is unclassified.**` for `unknown`. One issue, one
+   comment per red run, no branch, no PR, no agent spend. The job ends green: the loop did its work.
 7. **Skip when a fix is already waiting.** `gh pr list --label contract-drift --state open` non-empty → the step
    writes `proceed=false` and `waiting=<n>` (the PR's number, checked to be one) to `GITHUB_OUTPUT` and the job ends
    green; a third job, `remind` (`needs: fix`, `if: needs.fix.outputs.proceed == 'false'`, `timeout-minutes: 5`, job
@@ -204,10 +205,18 @@ Two jobs on `ubuntu-latest`: `fix` (steps 1-8) and `enforce` (step 9):
    `pull-requests: write` even through the issues endpoint (`issues: write` alone is a 403), and the `fix` job's token
    must hold no such write. A red that persists for a week opens one PR, not seven. Once the gate proceeds, the step `Require
    a protected main` (`id: protect`, with `GITHUB_TOKEN`) checks the precondition of "Safeguards" before any spend: the
-   number of `pull_request` rules in `gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"` (the active
+   `pull_request` rules in `gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100"` (the active
    rulesets' rules, readable with metadata access) whose `required_approving_review_count` is at least 1,
-   `require_code_owner_review` is `true` and `require_last_push_approval` is `true` must be a number of at least 1, and
-   `main`'s `.github/CODEOWNERS` (read raw through the contents API; `contents: read` covers it) must have a line
+   `require_code_owner_review` is `true` and `require_last_push_approval` is `true` must name at least one ruleset (the
+   rules' `ruleset_id`s, each a number), and each such ruleset is read by its id (`gh api
+   "repos/$GITHUB_REPOSITORY/rulesets/$id"`, decided by `gh`'s exit status: a failed read is `::error … Reading the
+   ruleset … failed` and `exit 1`, without a verdict). An `Integration` (an App) on its `bypass_actors`, whatever its
+   `bypass_mode`, is `::error` naming each one's `actor_type` and `actor_id` and `exit 1`: a bypass would let the App
+   token push to `main` or merge without review. A role (the repository admin role, how the only code owner merges)
+   is allowed. GitHub returns `bypass_actors` only to a caller who can edit the ruleset, which `GITHUB_TOKEN` never
+   can (no administration permission), so on a real run the list is absent; the step then says in its log that it
+   cannot see the bypass list and that keeping the Claude App off it is the owner's part ("What the owner does"),
+   and goes on. Then `main`'s `.github/CODEOWNERS` (read raw through the contents API; `contents: read` covers it) must have a line
    owning every file (`* @owner`), since the code-owner review binds only files that have an owner. That read is
    decided by `gh`'s exit status like the branch read below: a body whose `status` is `404` is a missing file, which
    owns nothing (the "no line owning every file" refusal), and any other failure (a 5xx, a rate limit, no body) is
@@ -515,7 +524,10 @@ a one-line `description`, and `allowed-tools` equal to the action's allowlist. T
   `require_last_push_approval` true (what the endpoint lists for an unenforced ruleset is not known, so the check
   follows the enforcement, never replaces it).
   Its bypass list never names the Claude App, and names the repository admin role: the owner is the only code owner
-  and cannot approve their own pull requests, so the bypass is how they merge anything. Then confirms that the Claude
+  and cannot approve their own pull requests, so the bypass is how they merge anything. The workflow cannot check
+  this (GitHub withholds the bypass list from `GITHUB_TOKEN`), so before the first rehearsal, and after any change to
+  the ruleset, the owner runs `gh api repos/daarko10/tandem/rulesets/<id> --jq '.bypass_actors'` with their own
+  sign-in and sees no `"actor_type": "Integration"`. Then confirms that the Claude
   GitHub App is still installed on `daarko10/tandem` (it is; open item 1, closed); runs the rehearsal (below). Nothing
   waits on a scheduled nightly: its actor is already recorded (open item 4, closed).
 - Reads the PR. Merges it (squash), or closes it with a comment saying why (the wrong fix, a change Tandem should
@@ -659,7 +671,8 @@ line exists, the milestone is open, whatever the rehearsals showed.
   `main`; no `${{` in any `run:` block); the nightly's `drift` input, mutate step, check step and
   redaction; the skill's `allowed-tools` equal to the action's. Under `GITHUB_ACTIONS` a missing PyYAML is an error,
   not a skip. Its `StepOutcomeTest` pins outcomes, not text: it writes a step's `run:` to a file and runs it under
-  `bash -e -o pipefail` with a stub `gh` first on `PATH` that answers from canned output and, on an HTTP error, prints
+  GitHub's default `bash -e` (`-o pipefail` added only for a step with `shell: bash`; every multi-command step of the
+  three jobs starts with `set -euo pipefail`, pinned) with a stub `gh` first on `PATH` that answers from canned output and, on an HTTP error, prints
   the error body on stdout and exits 1 as gh 2.89 does, with `GITHUB_OUTPUT` in a temporary file and the step's `env`
   supplied in full (a new env key fails the test until it is supplied). It asserts the exit code, `GITHUB_OUTPUT` and
   the `gh` calls of: the enforce step with no PR and no branch (exit 1, "pushed no branch"), with a branch and no PR
@@ -670,8 +683,12 @@ line exists, the milestone is open, whatever the rehearsals showed.
   comment and its refusal of a missing number; "Name the red run" with the nightly's own run (the four outputs), a
   fork's, a green one, another branch's, another event's, another workflow's (exit 1, nothing in `GITHUB_OUTPUT`),
   an id that is not a number (exit 1 before any call) and a rehearsal (no call); the protect step with the ruleset,
-  the owner line and a 404 (green, the ruleset read first) and without each of them, with a kept branch and with a
-  failed read; the report step creating or commenting on the standing issue from the precheck or the classification;
+  the owner line and a 404 (green, the ruleset read first) and without each of them, with a ruleset whose bypass list
+  names an App (exit 1, the actor's type and id named), names only a role (green), is withheld (green, said in the
+  log) or fails to read (exit 1 without a verdict), with two rulesets of which the second names an App, with a kept
+  branch and with a failed read; the labels step creating `contract-drift` and `rehearsal` before the agent; the
+  report step creating or commenting on the standing issue from the precheck or the classification, its first line
+  naming the kind;
   and the fetch telling no recording (kind 1) from a failed listing (red). The exact `if:` of the gate and the report
   steps are pinned as well. Each one-line regression of the safety and red paths (an `exit 1` made `exit 0`, a
   `red=1` dropped, the gate proceeding while a fix waits, the branch read by `[ -n ]`, the cross-repository clause
@@ -691,8 +708,8 @@ line exists, the milestone is open, whatever the rehearsals showed.
   a stream whose `result` has `is_error: true`); "Classify before Gradle" prints `"kind": "cli-did-not-answer"`;
   "Reproduce the red", "Classify", the gate, "Fix the drift" and the allowlist step are skipped; "Report a run the
   agent cannot fix" creates the issue "CLI contract: the CLI did not answer" with the label `contract-drift` (or
-  comments on it); the job is green with no Gradle and no agent spend; `gh issue view` shows the run link, `kind`, the
-  CLI version, `detail` and `files`. The issue may stay open or be closed; either is fine for the next rehearsal.
+  comments on it); the job is green with no Gradle and no agent spend; `gh issue view` shows the bold first line
+  `The CLI did not answer.`, the run link, `kind`, the CLI version, `detail` and `files`. The issue may stay open or be closed; either is fine for the next rehearsal.
 - `./gradlew check` unchanged: the new scripts and workflows do not touch Kotlin.
 - Not testable before merge: the `workflow_run` firing itself (the workflow must be on `main`), the federation
   exchange of a `workflow_run` job (inferred from GitHub's subject rules; the first fixer run's federation log line
