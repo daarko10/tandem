@@ -1195,6 +1195,24 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `a shell escape sent once the CLI's output has ended sends nothing and says so`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.written("\"subtype\":\"initialize\"")
+        // The CLI's stdout ends while the process lives on: waitFor still blocks, so only the end of the output can count.
+        run.process.script.close()
+        withTimeout(10_000) {
+            while (run.session.request(50) { HostMessages.interrupt(it) } != Reply.Ended) delay(20)
+        }
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = false)
+        val state = run.session.state.value
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", (state.entries.last() as ChatEntry.Notice).text)
+        assertEquals(emptySet(), state.quietSends, "no frame was sent, so no quiet result is awaited")
+        assertEquals(0, run.userFrames().size)
+        run.close()
+    }
+
+    @Test
     fun `a shell escape after a prompt waits for the prompt's result`() = runBlocking {
         val run = ScriptedSession(tmp, newSessionId)
         run.session.start()

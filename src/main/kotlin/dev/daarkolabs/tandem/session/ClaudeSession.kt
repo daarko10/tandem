@@ -268,6 +268,9 @@ class ClaudeSession(
             val writer = launch { writeLoop(p) }
             val stderr = launch { readOutput(p) { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } } }
             readLoop(p)
+            // Past the CLI's stdout end it can neither answer a request nor read a frame: from here a request answers Ended and a
+            // shell escape says its output was not sent, rather than writing to a process that no longer reads (hard rule 5).
+            ended = true
             val code = runInterruptible { p.waitFor() }
             stderr.join()
             writer.cancel()
