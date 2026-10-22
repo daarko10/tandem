@@ -91,13 +91,15 @@ internal data class ModelLabel(val model: String, val effort: String?)
 
 /**
  * What the model control reads (spec 2.3, `<Model>` and `<Effort>`): the shown model's display name ([shownModel]), else the model the
- * CLI reports, else "Model"; and the effort, unless there is none or the effort page would not list it ([effortMenu]: a shown model
- * without effort levels).
+ * CLI reports, else the model picked (a session started with a pick, before its first `system/init` and the CLI's model list; the
+ * CLI's own `default` entry is no pick), else "Model"; and the effort, unless there is none or the effort page would not list it
+ * ([effortMenu]: a shown model without effort levels).
  */
 internal fun modelLabel(composer: ComposerModel): ModelLabel {
     val shown = shownModel(composer.models, composer.requestedModel, composer.activeModel, composer.modelSwitchPending)
     val effort = composer.effort?.takeIf { effortMenu(composer) != null }?.let(Modes::effortLabel)
-    return ModelLabel(shown?.displayName ?: composer.activeModel ?: NO_MODEL_LABEL, effort)
+    val picked = composer.requestedModel?.takeIf { it != DEFAULT_MODEL_ENTRY }
+    return ModelLabel(shown?.displayName ?: composer.activeModel ?: picked ?: NO_MODEL_LABEL, effort)
 }
 
 /** What the mode control reads: the session's mode by its footer label, or "Mode" while there is none. */
