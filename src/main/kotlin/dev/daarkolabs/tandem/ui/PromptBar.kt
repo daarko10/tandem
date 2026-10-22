@@ -317,9 +317,9 @@ internal fun PromptBar(
  * while [sending]; [onAction] does what they return. `+` opens a menu whose `Add files or photos` calls [onAdd] and whose
  * `Slash commands` puts `/` in an empty draft and focuses the text area; files dropped on the box go to [onDrop], and the box draws
  * its focused border while a drag of files hovers it. With [focus] the text area takes the focus, and then [onFocused] is called;
- * whether it has the focus is [inputFocused]. The palette ([SlashPaletteView]) opens above the box, as wide as it, and a click on
- * one of its rows goes to [onPalettePick]. It takes those fields, not the whole composer model, so that a change to another one
- * leaves it alone.
+ * whether it has the focus is [inputFocused]. The palette ([SlashPaletteView]) opens above the box at its left edge, never wider than
+ * it, and a click on one of its rows goes to [onPalettePick]; while it is open on a lone `/` the text area reads `/Type to filter`
+ * ([FilterHint]). It takes those fields, not the whole composer model, so that a change to another one leaves it alone.
  */
 @Composable
 private fun PromptBox(
@@ -348,6 +348,9 @@ private fun PromptBox(
     LaunchedEffect(refocus) { if (refocus > 0) inputFocus.requestFocus() }
     val currentOnDrop by rememberUpdatedState(onDrop)
     val currentOnAction by rememberUpdatedState(onAction)
+    // Derived, so that the box recomposes when the hint comes or goes, not at every keystroke.
+    val currentPalette by rememberUpdatedState(palette)
+    val filterHint by remember(ui) { derivedStateOf { filterHintShown(ui.draft.text, currentPalette()) } }
     val imagePaste = remember { ImagePasteProvider { currentOnAction(ComposerAction.PasteImage) } }
     val dropTarget = remember {
         object : DragAndDropTarget {
@@ -413,26 +416,32 @@ private fun PromptBox(
                     refocus++
                 },
             )
-            TextArea(
-                ui.draft,
-                Modifier.weight(1f).heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
-                    .focusRequester(inputFocus)
-                    .onFocusChanged { inputFocused.value = it.hasFocus }
-                    // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it: while the
-                    // clipboard holds images, the focused composer's paste provider takes the paste from the Compose text paste (polish
-                    // spec 2.7). Asked for only by a paste, so the clipboard's flavours are not queried on every action update.
-                    .provideData {
-                        lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
-                            imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
+            // The text area, and over it `Type to filter` after a lone `/` while the palette is open (MCP spec 14): its own
+            // placeholder shows only while it is empty.
+            Box(Modifier.weight(1f)) {
+                TextArea(
+                    ui.draft,
+                    Modifier.fillMaxWidth().heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
+                        .focusRequester(inputFocus)
+                        .onFocusChanged { inputFocused.value = it.hasFocus }
+                        // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it: while
+                        // the clipboard holds images, the focused composer's paste provider takes the paste from the Compose text paste
+                        // (polish spec 2.7). Asked for only by a paste, so the clipboard's flavours are not queried on every action
+                        // update.
+                        .provideData {
+                            lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
+                                imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
+                            }
                         }
-                    }
-                    .onPreviewKeyEvent { event ->
-                        composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, interceptable, onAction)
-                    },
-                lineLimits = TextFieldLineLimits.MultiLine(1, 8),
-                undecorated = true,
-                placeholder = { Text("Type / for commands", color = colors.text.info) },
-            )
+                        .onPreviewKeyEvent { event ->
+                            composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, interceptable, onAction)
+                        },
+                    lineLimits = TextFieldLineLimits.MultiLine(1, 8),
+                    undecorated = true,
+                    placeholder = { Text("Type / for commands", color = colors.text.info) },
+                )
+                if (filterHint) FilterHint(top = 8.dp)
+            }
             // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
             val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
             if (busy) {
@@ -455,7 +464,7 @@ private fun PromptBox(
         val shown = palette()
         if (shown != null && boxWidth > 0) {
             val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
-            SlashPaletteView(shown, boxWidth, maxHeightPx = boxTop - gap) { item ->
+            SlashPaletteView(shown, boxWidthPx = boxWidth, maxHeightPx = boxTop - gap) { item ->
                 onPalettePick(item)
                 inputFocus.requestFocus()
             }

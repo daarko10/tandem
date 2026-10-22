@@ -349,8 +349,7 @@ private fun WaitCaption(wait: McpAuthWait) {
 }
 
 /**
- * A plain text pill (base 4.2 pill style, not a focusable `Chip`): an `Other` row's wire source, a palette row's scope (MCP spec 3.2,
- * 3.4).
+ * A plain text pill (base 4.2 pill style, not a focusable `Chip`): an `Other` row's wire source (MCP spec 3.2).
  */
 @Composable
 internal fun TextPill(text: String) {

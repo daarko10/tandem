@@ -647,10 +647,19 @@ class ToolWindowIdeTest {
             focusPromptBox()
             promptBox().keyboard { typeText("/", 20) }
             waitFor("the palette", 30.seconds) { described("Slash commands").present() }
-            // Every command: more than 8 rows, so the list scrolls (the scrollbar stays inside the palette, MCP spec 3.4).
+            // The desktop's form (MCP spec 14): the composer reads `/Type to filter`, and the first row's description is in its box,
+            // the scope first (the fixture's first command is the project's `actions`).
+            waitForText("Type to filter")
+            waitFor("the first row's description", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'project · Implement')]").present()
+            }
+            // Every command: more than 10 rows, so the list scrolls (the scrollbar stays inside the palette, MCP spec 3.4).
             takeScreenshot("slash-palette-all")
             promptBox().keyboard { typeText("mc", 20) }
             waitFor("the palette narrowed to /mcp", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='/mc']").present() }
+            // The highlighted row's description, now /mcp's (rows show only names), and no hint once the filter has text.
+            waitForText("Manage MCP servers")
+            assertFalse(ui.x("//div[@class='ComposeNode' and @visible_text='Type to filter']").present(), "the hint follows only a lone /")
             takeScreenshot("slash-palette")
             ui.keyboard { enter() }
             waitFor("the MCP panel", 1.minutes) { described("MCP servers panel").present() }
