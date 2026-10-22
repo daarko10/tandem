@@ -77,6 +77,25 @@ object HostMessages {
         put("source", "host")
     }
 
+    /** Asks for every MCP server's state, config and tools (`mcp_status`). */
+    fun mcpStatus(requestId: String): JsonObject = request(requestId, "mcp_status") {}
+
+    /** Disables or enables the MCP server [serverName], named exactly as `mcp_status` reports it. The success has no `response`. */
+    fun mcpToggle(requestId: String, serverName: String, enabled: Boolean): JsonObject = request(requestId, "mcp_toggle") {
+        put("serverName", serverName)
+        put("enabled", enabled)
+    }
+
+    /** Reconnects the MCP server [serverName]; a failure answers with the CLI's error text. */
+    fun mcpReconnect(requestId: String, serverName: String): JsonObject = request(requestId, "mcp_reconnect") {
+        put("serverName", serverName)
+    }
+
+    /** Starts the MCP server [serverName]'s sign-in: the answer carries the `authUrl` the host opens itself. No `redirectUri`. */
+    fun mcpAuthenticate(requestId: String, serverName: String): JsonObject = request(requestId, "mcp_authenticate") {
+        put("serverName", serverName)
+    }
+
     /** Allows a `can_use_tool` request. Always echo the (possibly edited) input. */
     fun allow(requestId: String, toolUseId: String?, updatedInput: JsonObject, updatedPermissions: List<JsonObject> = emptyList()): JsonObject =
         success(requestId) {

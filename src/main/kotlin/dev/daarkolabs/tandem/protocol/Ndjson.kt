@@ -55,6 +55,9 @@ object Ndjson {
                 claudeCodeVersion = o.string("claude_code_version"),
                 tools = o.strings("tools"),
                 capabilities = o.strings("capabilities"),
+                mcpServers = o.objects("mcp_servers").mapNotNull(::mcpServerSummary),
+                slashCommands = o.strings("slash_commands"),
+                terminalSlashCommands = o.strings("terminal_slash_commands"),
                 raw = o,
             )
         }
@@ -143,6 +146,8 @@ object Ndjson {
             subagentType = o.string("subagent_type") ?: o.string("subagentType"),
             taskDescription = o.string("task_description") ?: o.string("taskDescription"),
             timestampMillis = timestampMillis(o),
+            localCommand = localCommand(o),
+            toolUseMeta = toolUseMeta(o),
             raw = o,
         )
     }
@@ -306,6 +311,7 @@ object Ndjson {
             contextWindows = o.obj("modelUsage")?.mapNotNull { (model, usage) ->
                 usage.asObject()?.long("contextWindow")?.let { model to it }
             }?.toMap().orEmpty(),
+            localCommand = o.string("local_command"),
             raw = o,
         )
     }
@@ -334,6 +340,8 @@ object Ndjson {
                     requiresUserInteraction = r.boolean("requires_user_interaction") == true,
                     decisionReasonType = r.string("decision_reason_type"),
                     agentId = r.string("agent_id"),
+                    mcpServer = mcpServerRef(r),
+                    serverPolicyAskOnly = r.boolean("server_policy_ask_only") == true,
                 )
             }
         }

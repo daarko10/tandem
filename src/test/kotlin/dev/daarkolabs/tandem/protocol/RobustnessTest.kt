@@ -1,10 +1,14 @@
 package dev.daarkolabs.tandem.protocol
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import org.junit.Test
 import kotlin.io.path.readLines
 import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -151,5 +155,137 @@ class RobustnessTest {
                 Ndjson.decode(String(chars))
             }
         }
+    }
+
+    /** Line [line] (1-based) of fixture [name] with [old], which must occur there exactly once, replaced by [new]. */
+    private fun mutated(name: String, line: Int, old: String, new: String): String {
+        val text = Fixtures.lines(name)[line - 1]
+        assertEquals(1, text.split(old).size - 1, "$name:$line must hold $old once")
+        return text.replace(old, new)
+    }
+
+    private fun payloadOf(line: String): JsonObject? = assertIs<CliMessage.ControlResponse>(Ndjson.decode(line)).payload
+
+    private fun mcpServers(line: String): List<McpServerInfo> = assertNotNull(ControlPayloads.mcpStatus(payloadOf(line))).servers
+
+    private fun json(text: String): JsonObject = Json.parseToJsonElement(text).jsonObject
+
+    @Test
+    fun `mutated mcp shapes degrade, never throw`() {
+        val numbered = mcpServers(mutated("mcp-status", 18, "\"name\":\"echo\",\"status\":\"connected\"", "\"name\":\"echo\",\"status\":7"))
+        assertEquals(Triple("echo", McpStatus.OTHER, ""), numbered.first().let { Triple(it.name, it.status, it.statusText) })
+        val unknown = mcpServers(mutated("mcp-status", 18, "\"name\":\"echo\",\"status\":\"connected\"", "\"name\":\"echo\",\"status\":\"connecting\""))
+        assertEquals(McpStatus.OTHER to "connecting", unknown.first().let { it.status to it.statusText })
+
+        val nameless = mcpServers(mutated("mcp-status", 18, "{\"name\":\"broken\",", "{"))
+        assertEquals(listOf("echo", "authy"), nameless.map { it.name })
+        val thinNameless = assertIs<CliMessage.SystemInit>(
+            Ndjson.decode(mutated("mcp-status", 6, "{\"name\":\"broken\",\"status\":\"failed\",", "{\"status\":\"failed\",")),
+        )
+        assertEquals(listOf("echo", "authy"), thinNameless.mcpServers.map { it.name })
+        val thinNumbered = assertIs<CliMessage.SystemInit>(Ndjson.decode(mutated("mcp-status", 6, "\"status\":\"failed\"", "\"status\":7")))
+        assertEquals(McpStatus.OTHER to "", thinNumbered.mcpServers[1].let { it.status to it.statusText })
+
+        val bare = mutated(
+            "mcp-slash",
+            1,
+            "{\"name\":\"mcp\",\"description\":\"Manage MCP servers\",\"argumentHint\":\"[reconnect|enable|disable [<server>|all]]\",",
+            "{\"name\":\"mcp\",",
+        )
+        val commands = assertNotNull(ControlPayloads.initialize(payloadOf(bare))).commands
+        val mcp = commands.single { it.name == "mcp" }
+        assertEquals("" to "", mcp.description to mcp.argumentHint)
+        assertTrue(mcp.builtin)
+        val withoutHello = assertNotNull(ControlPayloads.initialize(payloadOf(mutated("mcp-slash", 1, "{\"name\":\"hello\",", "{")))).commands
+        assertEquals(72, withoutHello.size)
+
+        val init = assertIs<CliMessage.SystemInit>(Ndjson.decode(mutated("mcp-slash", 4, "\"slash_commands\":[\"actions\",", "\"slash_commands\":[7,{},\"actions\",")))
+        assertEquals(73, init.slashCommands.size)
+    }
+
+    @Test
+    fun `a mistyped config or tools entry keeps the server`() {
+        val echoConfig = "\"config\":{\"type\":\"stdio\",\"command\":\"/usr/bin/python3\",\"args\":[\"-I\",\"<path>\"]}"
+        val configless = mcpServers(mutated("mcp-status", 18, echoConfig, "\"config\":\"x\"")).first()
+        assertEquals("echo", configless.name)
+        assertNull(configless.config)
+        assertEquals(listOf(McpTool("echo")), configless.tools)
+
+        val toolless = mcpServers(mutated("mcp-status", 18, "\"tools\":[{\"name\":\"echo\",\"annotations\":{}}]", "\"tools\":{}")).first()
+        assertEquals("echo", toolless.name)
+        assertNull(toolless.tools)
+        assertEquals("0.1.0", toolless.serverInfo?.version)
+
+        val mixedTools = mcpServers(mutated("mcp-status", 18, "\"tools\":[{\"name\":\"echo\",", "\"tools\":[7,{\"name\":3},{\"name\":\"echo\",")).first()
+        assertEquals(listOf(McpTool("echo")), mixedTools.tools)
+
+        val argless = mcpServers(mutated("mcp-status", 18, "\"args\":[\"-I\",\"<path>\"]", "\"args\":\"x\"")).first()
+        assertEquals(McpConfig(type = "stdio", command = "/usr/bin/python3", args = emptyList(), url = null), argless.config)
+
+        val peerless = mcpServers(mutated("mcp-status", 18, "\"serverInfo\":{\"name\":\"echo\",\"version\":\"0.1.0\"}", "\"serverInfo\":\"x\"")).first()
+        assertEquals("echo", peerless.name)
+        assertNull(peerless.serverInfo)
+    }
+
+    // unrecorded: no fixture has a <local-command-stderr> wrapper; the CLI's on-disk lines name it (TranscriptReader).
+    @Test
+    fun `a stderr wrapper unwraps like stdout`() {
+        val stdout = "<local-command-stdout>/help isn't available in this environment.</local-command-stdout>"
+        val stderr = Ndjson.decode(mutated("mcp-slash", 17, stdout, "<local-command-stderr>oops</local-command-stderr>"))
+        assertEquals("oops", assertIs<CliMessage.Assistant>(stderr).localCommand?.stdout)
+        val plain = Ndjson.decode(mutated("mcp-slash", 17, stdout, "plain text"))
+        assertEquals("plain text", assertIs<CliMessage.Assistant>(plain).localCommand?.stdout)
+    }
+
+    @Test
+    fun `mcp fields without their shape read as null, empty or skipped`() {
+        assertNull(ControlPayloads.mcpStatus(null))
+        assertNull(ControlPayloads.mcpStatus(json("""{"mcpServers":{}}""")))
+        assertNull(ControlPayloads.initialize(null))
+        assertNull(ControlPayloads.initialize(json("""{"commands":"x"}""")))
+        assertNull(ControlPayloads.mcpAuthenticate(null))
+        assertNull(ControlPayloads.mcpAuthenticate(json("""{"other":1}""")))
+        assertEquals(
+            McpAuthStart(authUrl = null, callbackPort = 1),
+            ControlPayloads.mcpAuthenticate(json("""{"authUrl":5,"callbackPort":1,"requiresUserAction":"yes"}""")),
+        )
+        assertNull(ControlPayloads.mcpSetServers(null))
+        assertNull(ControlPayloads.mcpSetServers(json("""{"errors":{}}""")))
+        assertEquals(
+            McpSetServersResponse(added = listOf("a"), removed = emptyList(), errors = emptyMap()),
+            ControlPayloads.mcpSetServers(json("""{"added":["a",7],"errors":[]}""")),
+        )
+        assertEquals(McpStatus.OTHER, McpStatus.fromWire(null))
+        assertEquals(McpStatus.OTHER, McpStatus.fromWire(""))
+
+        val init = assertIs<CliMessage.SystemInit>(
+            Ndjson.decode("""{"type":"system","subtype":"init","model":"m","mcp_servers":5,"slash_commands":{},"terminal_slash_commands":[1]}"""),
+        )
+        assertEquals(Triple(emptyList(), emptyList(), emptyList()), Triple(init.mcpServers, init.slashCommands, init.terminalSlashCommands))
+
+        val assistant = assertIs<CliMessage.Assistant>(
+            Ndjson.decode("""{"type":"assistant","message":{"content":[]},"tool_use_meta":[{"display_name":"x"},5,{"id":"t","tool_name":7}]}"""),
+        )
+        assertEquals(listOf(ToolUseMeta("t", displayName = null, serverDisplayName = null, toolName = null)), assistant.toolUseMeta)
+        assertNull(assistant.localCommand)
+        val mistypedRun = assertIs<CliMessage.Assistant>(
+            Ndjson.decode("""{"type":"assistant","message":{"content":[]},"local_command_run":5,"local_command_outcome":{"kind":3}}"""),
+        )
+        assertEquals(LocalCommand(command = null, args = null, outcomeKind = null, stdout = null), mistypedRun.localCommand)
+        val nullRun = assertIs<CliMessage.Assistant>(Ndjson.decode("""{"type":"assistant","message":{"content":[]},"local_command_run":null}"""))
+        assertNull(nullRun.localCommand)
+
+        assertNull(assertIs<CliMessage.Result>(Ndjson.decode("""{"type":"result","subtype":"success","local_command":5}""")).localCommand)
+
+        val ask = assertIs<InboundRequest.CanUseTool>(
+            assertIs<CliMessage.ControlRequest>(
+                Ndjson.decode(
+                    """{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"mcp__x__y","input":{},""" +
+                        """"mcp_server":{"source":"dynamic"},"server_policy_ask_only":"yes"}}""",
+                ),
+            ).request,
+        )
+        assertNull(ask.mcpServer)
+        assertEquals(false, ask.serverPolicyAskOnly)
     }
 }

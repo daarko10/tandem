@@ -85,6 +85,23 @@ class HostMessagesTest {
     }
 
     @Test
+    fun `the four mcp requests match the probe frames`() {
+        assertEquals("""{"type":"control_request","request_id":"m1","request":{"subtype":"mcp_status"}}""", wire(HostMessages.mcpStatus("m1")))
+        assertEquals(
+            """{"type":"control_request","request_id":"m2","request":{"subtype":"mcp_toggle","serverName":"echo","enabled":false}}""",
+            wire(HostMessages.mcpToggle("m2", "echo", enabled = false)),
+        )
+        assertEquals(
+            """{"type":"control_request","request_id":"m3","request":{"subtype":"mcp_reconnect","serverName":"broken"}}""",
+            wire(HostMessages.mcpReconnect("m3", "broken")),
+        )
+        assertEquals(
+            """{"type":"control_request","request_id":"m4","request":{"subtype":"mcp_authenticate","serverName":"authy"}}""",
+            wire(HostMessages.mcpAuthenticate("m4", "authy")),
+        )
+    }
+
+    @Test
     fun `can_use_tool answers`() {
         val input = buildJsonObject { put("command", "ls") }
         assertEquals(
