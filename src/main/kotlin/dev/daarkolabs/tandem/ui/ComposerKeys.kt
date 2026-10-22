@@ -1,8 +1,10 @@
 package dev.daarkolabs.tandem.ui
 
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.clearText
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import dev.daarkolabs.tandem.chat.ScrollEvent
 
 /** What a key typed in the composer does (spec 4.15, 4.18). */
 internal enum class ComposerAction {
@@ -66,8 +68,26 @@ internal fun composerKey(
  * Whether Enter or the Send button sends: some text, or an attached image with blank text, and no prompt still being encoded
  * ([sending]: the composer counts as busy until the last one captured has gone out, polish spec 2.7 "Send order" and edge 10).
  */
-internal fun canSend(text: String, attachmentCount: Int, sending: Boolean = false): Boolean =
+internal fun canSend(text: String, attachmentCount: Int, sending: Boolean): Boolean =
     !sending && (text.isNotBlank() || attachmentCount > 0)
+
+/**
+ * Enter or the Send button: sends [ui]'s draft and attachments through [sender] when [canSend] lets it, checked against the
+ * sender's own flag, not the last composition's, so a click or an Enter during an encode sends nothing and leaves the draft and the
+ * attachments as they are (polish spec 2.7). On the EDT: the prompt is captured and cleared at once, and the sender encodes its
+ * images off it. Returns whether it sent, so that the caller scrolls the list to its bottom.
+ */
+internal fun sendDraft(ui: ChatUiState, sender: ComposerSender): Boolean {
+    val text = ui.draft.text.toString().trim()
+    if (!canSend(text, ui.attachments.size, sender.sending.value)) return false
+    val images = ui.attachments.map { CapturedImage(it.mediaType, it.bytes) }
+    ui.draft.clearText()
+    ui.attachments.clear()
+    ui.composerNotice.value = null
+    sender.submit(CapturedPrompt(text, images))
+    ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
+    return true
+}
 
 /** What the composer does itself with an Enter that [composerKey] leaves to the text area (spec 4.15). */
 internal enum class ComposerFallback {
