@@ -29,6 +29,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.ExtendWith
 import java.awt.Point
 import java.awt.event.KeyEvent
 import java.nio.file.Files
@@ -57,8 +58,9 @@ import kotlin.time.Duration.Companion.seconds
  * the UI sends and logs every frame it receives, so each test checks both the rendered UI and the protocol traffic.
  *
  * Unlike the platform tests, the plugin is loaded by its own plugin classloader here, as it is for users.
- * Run with `xvfb-run ./gradlew integrationTest` when there is no display.
+ * Run with `xvfb-run ./gradlew integrationTest` when there is no display. CI splits the tests across jobs ([IdeTestShard]).
  */
+@ExtendWith(IdeTestShard::class)
 class ToolWindowIdeTest {
     private val pluginZip = Path.of(System.getProperty("tandem.pluginZip"))
     private val fakeClaude = System.getProperty("tandem.fakeClaude")
@@ -578,10 +580,18 @@ class ToolWindowIdeTest {
     /** The header's "+". */
     private fun Driver.newSessionButton(): UiComponent = iconButton("New session")
 
-    /** Creates a session with the header's "+" and the popup's defaults; it is selected. */
+    /**
+     * Creates a session with the header's "+" and the popup's defaults; it is selected. The popup is a window of its own, and a
+     * click that lands while it is still being placed moves nothing (seen once on a loaded CI runner: the popup open, no session),
+     * so a Create that leaves the popup open is pressed once more, and the helper returns only with the new session's prompt box.
+     */
     private fun Driver.newSession() {
         newSessionButton().click(Point(10, 10))
+        waitFor("the new-session popup", 30.seconds) { button("Create").present() }
         clickButton("Create")
+        val closed = runCatching { waitFor("the popup closed", 5.seconds) { !button("Create").present() } }.isSuccess
+        if (!closed) clickButton("Create")
+        waitFor("the new session's prompt box", 30.seconds) { promptBox().present() }
     }
 
     /**
