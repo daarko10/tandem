@@ -106,19 +106,20 @@ Key choices:
    back the model shown before the pick and says so in the chat, naming the model the CLI stays on, as a refused
    permission mode or effort does (`protocol.md` 8). **Status: implemented on feat/chat-redesign.**
 
-   **Phase 2c, MCP controls and bash mode** (spec docs/superpowers/specs/2026-10-21-mcp-controls-design.md). The MCP
-   servers panel, opened from the header's button with its connected/total badge, lists the session's servers with their
-   state and error and disables, enables, reconnects or signs in to each. The sign-in is the CLI's own OAuth flow
-   (`mcp_authenticate`): Tandem only opens the link in the system browser and waits for the server to connect, and never
-   sees a token (hard rule 3). A `/` in the composer opens the slash-command palette, built from the CLI's own catalogue:
-   `/mcp`, `/model`, `/permissions` and `/mode` open Tandem's panel and menus, every other command goes to the CLI, and a
-   command the CLI answers itself (`/mcp`, `/help`) shows as a notice, not a reply, with no `Worked for` footer. Bash
-   mode: a composer line starting with `!` runs in the user's login shell, its output shows live in the chat as a shell
-   row, and it reaches the CLI as the terminal's own shell escape, so Claude answers it (or, with the setting off, keeps
-   it as context only). Recorded with CLI 2.1.306 against local probe servers (`protocol.md` 3, 4.4, 6.1, 11.2); docs only
-   until a recording on a machine with claude.ai connectors (spec 11 item 1): the connectors themselves, the OAuth
-   callback completing, and whether the CLI answers `mcp_*` requests while a turn runs. **Status: implemented on
-   feat/mcp-controls.**
+   **Phase 2c, MCP controls and bash mode** (spec docs/superpowers/specs/2026-10-21-mcp-controls-design.md; Phase 2b is
+   reserved for the task-list widget, chat redesign spec 4.6). The MCP servers panel, opened from the header's button
+   with its connected/total badge, lists the session's servers with their state and error and disables, enables,
+   reconnects or signs in to each. The sign-in is the CLI's own OAuth flow (`mcp_authenticate`): Tandem only opens the
+   link in the system browser and waits for the server to connect, and never sees a token (hard rule 3). A `/` in the
+   composer opens the slash-command palette, built from the CLI's own catalogue: `/mcp`, `/model`, `/permissions` and
+   `/mode` open Tandem's panel and menus, every other command goes to the CLI, and a command the CLI answers itself
+   (`/help`, or `/mcp` with arguments or from a session started in a terminal) shows as a notice, not a reply, with no
+   `Worked for` footer. Bash mode: a composer line starting with `!` runs in the user's login shell, its output shows
+   live in the chat as a shell row, and it reaches the CLI as the terminal's own shell escape, so Claude answers it (or,
+   with the setting off, keeps it as context only). Recorded with CLI 2.1.306 against local probe servers (`protocol.md`
+   3, 4.4, 6.1, 11.2); docs only until a recording on a machine with claude.ai connectors (spec 11 item 1): the
+   connectors themselves, the OAuth callback completing, and whether the CLI answers `mcp_*` requests while a turn runs.
+   **Status: implemented on feat/mcp-controls.**
 2. **IDE-native edits.** MCP edit tools, diff preview, undo.
 3. **Parity.** Slash commands, plan mode, AskUserQuestion, rewind, subagent status.
 4. **Hardening.** Windows/WSL, Remote Development, IDE matrix in CI, published benchmarks.

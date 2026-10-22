@@ -12,10 +12,11 @@ Sources, in order of authority:
    - 2.1.300: `plain-reply`, `permission`, `interrupt`, `model-switch` (no transcripts).
    - 2.1.301: `history-reply`, `history-permission`, `history-interrupt` and `fork`, each with its transcript (`fork-origin`
      is the transcript of the session `fork` forks, with no stream twin); `permission-mode` (no transcript).
-   - 2.1.302: 29 probe recordings made on 2026-10-18, each with its transcript: `ask-*` (`AskUserQuestion` answered in each
-     way a host can), `plan-*` (`ExitPlanMode`), `think-*` (the thinking displays), `tools-*` (Read, Edit, Write, Bash and an
-     unknown tool), `agent-*` (subagents and Bash tasks), `misc-*` (an image, the web tools, the session-state lines). Also
-     `invalid-model` (a `--model` that does not exist) and `permission-mode-rejected`, each with its transcript.
+   - 2.1.302: 29 probe recordings made on 2026-10-18, each with its transcript: `ask-*` (`AskUserQuestion` answered in
+     each way a host can), `plan-*` (`ExitPlanMode`), `think-*` (the thinking displays), `tools-*` (Read, Glob, Grep,
+     Edit, Write, Bash, and a call to a tool missing from the session's tool set), `agent-*` (subagents, Bash tasks and
+     the task-list tools), `misc-*` (an image, the web tools, the session-state lines). Also `invalid-model` (a
+     `--model` that does not exist) and `permission-mode-rejected`, each with its transcript.
    - 2.1.306, each with its transcript: `ask-two` (one `AskUserQuestion` call with two questions, a one-answer and a
      multi-select, answered together), `effort-switch` (a live effort change, 4.4), `permission-mode-auto` (the `auto` mode,
      8), `user-image` (a text block then a base64 PNG block, section 3; the transcript's user line keeps both blocks, the
@@ -968,9 +969,9 @@ A row that cites a fixture was recorded (versions in Sources); the others come f
 | Interrupt | Fixture `interrupt`: the receipt `{still_queued:[]}` arrives, then the partial `assistant`, a synthetic `user` text `[Request interrupted by user]`, the remaining stream frames, and `result{subtype:"error_during_execution", is_error:true, terminal_reason:"aborted_streaming", stop_reason:null}`. Treat that result as "stopped", not as a failure. Recorded again with 2.1.301 as `history-interrupt`, with its transcript (section 11): the same order; closing stdin afterwards ended the process with exit code 1. |
 | API error | Fixture `invalid-model`: a synthetic `assistant` line (`model:"<synthetic>"`, `error:"model_not_found"`, `api_error_status:404`), then `result{subtype:"success", is_error:true, terminal_reason:"api_error"}` (section 7). A failed turn, named by `terminal_reason`, not by the subtype. |
 | Undocumented stdout types | See section 10. The SDK passes them through untouched. |
-| Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init`. Do not assume `init` is first. |
+| Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init` (`plain-reply.ndjson:1,2,4`, 2.1.300). Do not assume `init` is first. |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
-| Ordering | complete `assistant` precedes `content_block_stop` (section 6.4). |
+| Ordering | complete `assistant` precedes `content_block_stop` (`plain-reply.ndjson:10,11`; section 6.4). |
 | stdin close | Closing stdin = end of input. The SDK only calls `endInput()` after the last result when no bidirectional needs (permissions, hooks, MCP) remain. **Keep stdin open for the whole session**; close it to shut down gracefully, then wait for exit. |
 | Shutdown | On dispose: close stdin, wait briefly, then SIGTERM, then SIGKILL (inferred timings). Writes after the child exits raise EPIPE: treat as session ended. |
 | Exit codes | `0` normal. Non-zero: SDK error text `Claude Code process exited with code N` + stderr tail. Killed by signal: report the signal. Startup failures may first write a zeroed `result{subtype:"error_during_execution", startup_failure_reason}`; show `errors[]`. |
