@@ -1135,7 +1135,7 @@ pass (`TranscriptChain`) works out which conversational lines (`user` or `assist
 line with `subtype: local_command`, neither `isSidechain` nor `isMeta`) belong to it:
 
 1. The current history is the `parentUuid` chain that ends at the last conversational line with a `uuid`. The chain runs through lines
-   of any type (in the fixtures every `assistant` line's parent is an `attachment` line), so every line with a `uuid` is
+   of any type (in the fixtures 110 of the 136 `assistant` lines have an `attachment` line as parent), so every line with a `uuid` is
    indexed. A line whose parent is not in the file is a root.
 2. If that chain starts at a compaction root, a `user` line with `isCompactSummary` or a `system` line with
    `subtype: compact_boundary`, the chain before the compaction is kept as well, and so on back to the first compaction. A
