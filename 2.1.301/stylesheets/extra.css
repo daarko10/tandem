@@ -54,3 +54,4 @@
 .md-typeset details.note > summary { background: transparent; font-weight: 500; color: var(--md-default-fg-color--light); }
 .md-typeset details.note > summary::before { background-color: var(--md-default-fg-color--light); }
 .md-typeset p strong { font-weight: 650; }
+.md-typeset pre > code { white-space: pre-wrap; overflow-wrap: anywhere; }
