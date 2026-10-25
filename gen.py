@@ -26,27 +26,22 @@ def chips(n, by_gotcha, versions):
 def admonition(n, by_gotcha, view):
     seen = by_gotcha[n]
     if view in seen:
-        return (f'!!! success "Recorded on CLI {view}"\n\n'
-                f"    In {fixture_links(seen[view])}.\n")
-    others = "; ".join(f"[{v}](../{v}/#g{n}) ({fixture_links(seen[v])})" for v in sorted(seen, key=vkey))
-    return (f'!!! quote "Not recorded on CLI {view}"\n\n'
-            f"    None of the {view} recordings shows this, which says nothing either way: "
-            f"no {view} recording ran this scenario. Recorded on {others}.\n")
+        links = ", ".join(f'<a href="{BLOB}{f}.ndjson"><code>{f}</code></a>' for f in seen[view])
+        return f'<div class="vstate on"><span class="vchip on">{view}</span> Recorded on this version, in {links}</div>'
+    others = "".join(f'<a class="vchip on" href="../{v}/#g{n}">{v}</a>' for v in sorted(seen, key=vkey))
+    return (f'<div class="vstate off"><span class="vchip off">{view}</span> Not seen in this version\'s recordings, '
+            f'which is not the same as fixed. Recorded on {others}</div>')
 
 def banner(view, by_gotcha, by_version):
     if view == "all":
-        return ('!!! info "Every CLI version at once"\n\n'
-                "    Each gotcha lists the CLI versions whose recordings show it. Click a version, "
-                "or pick one in the header, for that version's view. [The versions page](versions.md) "
-                "has the whole table.\n")
+        return ('!!! tip "Pick a CLI version"\n\n'
+                "    Under each gotcha are the versions it was recorded on. Click one, or use the "
+                "version menu at the top. [All versions in one table](versions.md).\n")
     hits = [n for n in range(1, 11) if view in by_gotcha[n]]
     count = len(by_version[view])
-    return (f'!!! info "The CLI {view} view"\n\n'
-            f"    {count} recording{'s' if count != 1 else ''} made with CLI {view}; "
-            f"{len(hits)} of the 10 gotchas show up in them"
-            + (f" (numbers {', '.join(map(str, hits))})" if hits else "")
-            + ". Every gotcha says whether this version's recordings show it. "
-              "Pick another version in the header, or see [every version at once](../all/).\n")
+    return (f'!!! tip "CLI {view}"\n\n'
+            f"    {len(hits)} of the 10 gotchas show up in the {count} recording{'s' if count != 1 else ''} "
+            f"made with this version. [See all versions](../all/).\n")
 
 def article(src, view, by_gotcha, by_version, versions):
     src = src.replace("\n## The gotchas\n", "\n" + banner(view, by_gotcha, by_version) + "\n## The gotchas\n", 1)
@@ -72,7 +67,7 @@ def versions_page(src, by_gotcha, by_version, versions):
 
 Every view of this site is built from the same recordings. A version's view marks each gotcha
 as recorded or not recorded on that version; nothing is claimed for a version that no recording covers.
-A dot means no recording on that version ran a scenario that would show it, not that the version fixed it.
+A dot means no recording on that version shows it, which is not the same as fixed.
 
 {head}{rows}
 ## How a new version gets here

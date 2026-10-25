@@ -48,3 +48,9 @@
 .md-typeset table:not([class]) td:not(:first-child), .md-typeset table:not([class]) th:not(:first-child) { text-align: center; }
 .md-banner--warning { background: color-mix(in srgb, var(--md-accent-fg-color) 18%, var(--md-default-bg-color)); color: var(--md-default-fg-color); }
 .md-banner--warning a { color: var(--md-typeset-a-color); }
+.md-typeset .vstate { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; font-size: .72rem; margin: .4rem 0 1rem; color: var(--md-default-fg-color--light); }
+.md-typeset .vstate code { font-size: .68rem; }
+.md-typeset details.note { border-color: var(--md-default-fg-color--lightest); box-shadow: none; }
+.md-typeset details.note > summary { background: transparent; font-weight: 500; color: var(--md-default-fg-color--light); }
+.md-typeset details.note > summary::before { background-color: var(--md-default-fg-color--light); }
+.md-typeset p strong { font-weight: 650; }
