@@ -76,6 +76,9 @@ private val SIDEBAR_WIDTH: Dp = 220.dp
  * A card (spec 4.12) takes the focus when it opens, and gives it back to the composer when it closes, only while the chat holds the
  * focus ([focusInChat]): a request that arrives or ends while the user is in the editor, the title field, the filter or the
  * sidebar leaves the focus there, so that an Enter meant for them never answers it.
+ *
+ * The header's `MCP servers` button opens the selected session's MCP panel ([McpPanelHost]) over its chat, under the sidebar over the
+ * chat when both are open: Escape, Close or a click on the dimmed chat closes it, and the composer gets the focus back (MCP spec 3.2).
  */
 @Composable
 internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
@@ -98,6 +101,11 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     // The header's "+" and the sidebar over the chat's "New session": Tab goes from one to the other past the dimmed chat.
     val newSessionFocus = remember { FocusRequester() }
     val drawerEntryFocus = remember { FocusRequester() }
+    // The header's MCP servers button, the header's last focusable, and the MCP panel's first button (MCP spec 3.1, 3.2).
+    val mcpFocus = remember { FocusRequester() }
+    val mcpSheetFocus = remember { FocusRequester() }
+    // The panel's Close: where Tab lands when the first action button's row has scrolled out of the panel's list.
+    val mcpCloseFocus = remember { FocusRequester() }
     // The session whose title is being edited in the header; it ends as soon as another session is selected.
     var renaming by remember { mutableStateOf<SessionId?>(null) }
     // The session whose prompt box takes the focus when it shows: the one last picked or created. One still being opened when
@@ -116,6 +124,16 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
         drawerOpen = false
         promptFocusFor = id
     }
+    // The selected session's MCP panel (MCP spec 3.2): its state lives in the session's ChatUiState.
+    val mcpPanelOpen = selected?.let { presenters.ui(it.id).mcpPanelOpen }
+    val sheetOpen = mcpPanelOpen?.value == true
+    // Closing it gives the composer the focus back.
+    val closeMcpPanel: () -> Unit = {
+        selected?.let { handle ->
+            presenters.ui(handle.id).mcpPanelOpen.value = false
+            promptFocusFor = handle.id
+        }
+    }
 
     BoxWithConstraints(
         Modifier.fillMaxSize()
@@ -123,10 +141,17 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
             // The context menu key opens the focused row's menu, and does nothing elsewhere.
             .pointerInput(rowMenus) { interceptContextClicks(rowMenus::contextMenuKey) }
             .onKeyEvent { event ->
-                // Escape that nothing inside took (the title field takes its own) closes the sidebar over the chat.
-                if (!drawerOpen || event.type != KeyEventType.KeyDown || event.key != Key.Escape) return@onKeyEvent false
-                drawerOpen = false
-                toggleFocus.requestFocus()
+                // Escape that nothing inside took (the title field takes its own) closes the sidebar over the chat, else the MCP
+                // panel (precedence drawer, then MCP panel: MCP spec 3.2).
+                if (event.type != KeyEventType.KeyDown || event.key != Key.Escape) return@onKeyEvent false
+                when {
+                    drawerOpen -> {
+                        drawerOpen = false
+                        toggleFocus.requestFocus()
+                    }
+                    sheetOpen -> closeMcpPanel()
+                    else -> return@onKeyEvent false
+                }
                 true
             },
     ) {
@@ -182,14 +207,34 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     onRename = { title -> selected?.let { actions.rename(it.id, title) } },
                     toggleFocus = toggleFocus,
                     newSessionFocus = newSessionFocus,
+                    mcp = selected?.mcpServers,
+                    status = selected?.status,
+                    // Closing the panel from its button also gives the composer the focus back (MCP spec 3.2).
+                    onToggleMcp = { if (sheetOpen) closeMcpPanel() else selected?.let { presenters.ui(it.id).openMcpPanel() } },
+                    mcpFocus = mcpFocus,
                 )
                 Box(Modifier.weight(1f).fillMaxWidth()) {
-                    // Under the sidebar over the chat, the dimmed chat takes no focus: Tab and Shift+Tab pass it by.
+                    // Under the sidebar over the chat, or the MCP panel, the dimmed chat takes no focus: Tab and Shift+Tab pass it by,
+                    // back to the header's last focusable (its MCP servers button when a session is selected, else its "+") or on to
+                    // the sidebar's "New session" or the panel's first button.
+                    val headerEnd = if (selected != null) mcpFocus else newSessionFocus
                     val chatFocus = Modifier.focusProperties {
                         onEnter = {
+                            val previous = requestedFocusDirection == FocusDirection.Previous
+                            when {
+                                drawerShown -> (if (previous) headerEnd else drawerEntryFocus).requestFocus()
+                                previous && sheetOpen -> headerEnd.requestFocus()
+                                // The first action button's row may have scrolled out of the panel's list: then its Close.
+                                sheetOpen -> if (!mcpSheetFocus.requestFocus(FocusDirection.Enter)) mcpCloseFocus.requestFocus()
+                            }
+                        }
+                    }.focusGroup()
+                    // Under the sidebar over the chat, the MCP panel takes no focus either: Tab and Shift+Tab pass it by as they pass
+                    // the chat, so that Esc there never closes the panel before the sidebar (MCP spec 3.2's precedence).
+                    val sheetFocus = Modifier.focusProperties {
+                        onEnter = {
                             if (drawerShown) {
-                                val to = if (requestedFocusDirection == FocusDirection.Previous) newSessionFocus else drawerEntryFocus
-                                to.requestFocus()
+                                (if (requestedFocusDirection == FocusDirection.Previous) headerEnd else drawerEntryFocus).requestFocus()
                             }
                         }
                     }.focusGroup()
@@ -228,9 +273,26 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                         onPromptFocused = { promptFocusFor = null },
                                         onFocusComposer = { promptFocusFor = selected.id },
                                         cardTakesFocus = chatHoldsFocus,
+                                        onOpenMcp = { ui.openMcpPanel() },
+                                        onStop = { manager.stopShell(selected.id) },
                                     )
                                 }
                             }
+                        }
+                    }
+                    if (selected != null && sheetOpen) {
+                        key(selected.id) {
+                            McpPanelHost(
+                                selected,
+                                takeStartOnOpen = { presenters.ui(selected.id).takeMcpStartOnOpen() },
+                                controls = manager,
+                                opener = sessions.browserOpener,
+                                onClose = closeMcpPanel,
+                                firstFocus = mcpSheetFocus,
+                                modifier = Modifier.matchParentSize().then(sheetFocus),
+                                closeFocus = mcpCloseFocus,
+                                drawerOver = drawerShown,
+                            )
                         }
                     }
                     if (drawerShown) {

@@ -8,12 +8,14 @@ import com.intellij.openapi.components.Storage
 import com.intellij.openapi.components.StoragePathMacros
 import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
+import dev.daarkolabs.tandem.protocol.SlashCommand
+import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ModelOption
 
 /**
  * What Tandem remembers about a project between IDE runs, in its workspace file (never shared): the sessions that were open, the one
- * selected, the sidebar, the last choices for a new session, and the models the CLI last listed. [TandemSessions] keeps the sessions,
- * the selection and the models up to date.
+ * selected, the sidebar, the last choices for a new session, and the models and slash commands the CLI last listed. [TandemSessions]
+ * keeps the sessions, the selection, the models and the commands up to date.
  */
 @Service(Service.Level.PROJECT)
 @State(name = "TandemWorkspace", storages = [Storage(StoragePathMacros.WORKSPACE_FILE)])
@@ -40,6 +42,21 @@ class TandemWorkspaceState : SimplePersistentStateComponent<TandemWorkspaceState
 
         /** The models a session's CLI last listed in its `initialize` response ([knownModels]). */
         var knownModels: MutableList<StoredModel> by list()
+
+        /** The slash commands a session's CLI last listed in its `initialize` response ([knownCommands]). */
+        var knownCommands: MutableList<StoredCommand> by list()
+
+        /** The commands a session's CLI last said work only in its terminal (`terminal_slash_commands`, [knownCommands]). */
+        var knownTerminalCommands: MutableList<String> by list()
+    }
+
+    /** A slash command as [State.knownCommands] stores it: a [SlashCommand]. */
+    class StoredCommand : BaseState() {
+        var name: String? by string()
+        var description: String? by string()
+        var argumentHint: String? by string()
+        var builtin: Boolean by property(false)
+        var aliases: MutableList<String> by list()
     }
 
     /** A model as [State.knownModels] stores it: a [ModelOption]. */
@@ -74,6 +91,37 @@ class TandemWorkspaceState : SimplePersistentStateComponent<TandemWorkspaceState
                 supportsAutoMode = model.supportsAutoMode
                 effortLevels = model.effortLevels.toMutableList()
             }
+        }
+    }
+
+    /**
+     * The slash commands a session's CLI offered last, in this IDE run or an earlier one: what the palette of a session without its own
+     * offers until its process answers. An entry without a name, which only a hand-edited file has, is left out.
+     */
+    fun knownCommands(): CommandCatalogue = CommandCatalogue(
+        commands = state.knownCommands.mapNotNull { stored ->
+            val name = stored.name ?: return@mapNotNull null
+            SlashCommand(name, stored.description.orEmpty(), stored.argumentHint.orEmpty(), stored.builtin, stored.aliases.toList())
+        },
+        terminal = state.knownTerminalCommands.toSet(),
+    )
+
+    /** Remembers [catalogue], which a session's CLI offered, as [knownCommands]; an empty part leaves the last one as it was. */
+    fun rememberCommands(catalogue: CommandCatalogue) {
+        val known = knownCommands()
+        if (catalogue.commands.isNotEmpty() && catalogue.commands != known.commands) {
+            state.knownCommands = catalogue.commands.mapTo(ArrayList()) { command ->
+                StoredCommand().apply {
+                    name = command.name
+                    description = command.description
+                    argumentHint = command.argumentHint
+                    builtin = command.builtin
+                    aliases = command.aliases.toMutableList()
+                }
+            }
+        }
+        if (catalogue.terminal.isNotEmpty() && catalogue.terminal != known.terminal) {
+            state.knownTerminalCommands = catalogue.terminal.sorted().toMutableList()
         }
     }
 

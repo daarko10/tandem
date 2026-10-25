@@ -19,11 +19,14 @@ import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.CommandCatalogue
+import dev.daarkolabs.tandem.session.McpResult
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.PermissionAnswers
 import dev.daarkolabs.tandem.session.SessionStatus
+import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import dev.daarkolabs.tandem.ui.ChatPresenter
@@ -41,6 +44,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
 import java.nio.file.Files
@@ -271,6 +275,83 @@ class TandemSessionsTest {
             while (workspace.knownModels() != models) delay(20)
         }
         awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `the commands a session's CLI offers are remembered and offered in the next IDE run`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("commands").createDirectories()
+        val offered = openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            // A recording whose `initialize` response lists the commands.
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "mcp-slash")
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            val commands = handle.state.first { it.commands.isNotEmpty() }.commands
+            val workspace = TandemWorkspaceState.getInstance(project)
+            while (workspace.knownCommands().commands != commands) delay(20)
+            commands
+        }
+        awaitNoOwnFakeCli()
+        val next = tempDir.get().resolve("remembered-commands").createDirectories()
+        openProjectAsync(next).useProjectAsync { project ->
+            TandemWorkspaceState.getInstance(project).rememberCommands(CommandCatalogue(offered))
+            val sessions = TandemSessions.get(project)
+            sessions.ensureStarted()
+            // A session restored without a process has no initialize answer of its own: its palette offers these (ChatPresenter).
+            assertEquals(offered, sessions.manager.commands.first { it.commands.isNotEmpty() }.commands)
+        }
+    }
+
+    @Test
+    fun `refreshing a session's servers through the service's manager sends mcp_status to the fake`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("mcp").createDirectories()
+        val log = tempDir.get().resolve("mcp-sent.ndjson")
+        val listed = openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "mcp-status", "TANDEM_FAKE_LOG" to log.toString())
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            // The process attaches asynchronously; until then the manager answers NotRunning.
+            handle.status.first { it == SessionStatus.IDLE }
+            sessions.manager.refreshMcp(handle.id)
+        }
+        awaitNoOwnFakeCli()
+        assertTrue(listed is McpResult.Ok, listed.toString())
+        val frames = log.readText().split('\n').dropLast(1).filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+        val requests = frames.filter { it["type"]?.jsonPrimitive?.content == "control_request" }
+            .map { it["request"]!!.jsonObject["subtype"]!!.jsonPrimitive.content }
+        assertTrue("mcp_status" in requests, requests.toString())
+    }
+
+    @Test
+    fun `a shell escape through the service runs in the project directory and reaches the fake`() = timeoutRunBlocking(30.seconds) {
+        assumeTrue(!System.getProperty("os.name").lowercase().contains("windows"), "the command runs in a POSIX login shell")
+        val dir = tempDir.get().resolve("bang").createDirectories()
+        val log = tempDir.get().resolve("bang-sent.ndjson")
+        val shell = openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            sessions.extraEnvironment = mapOf("TANDEM_FAKE_FIXTURE" to "bash-mode-respond", "TANDEM_FAKE_LOG" to log.toString())
+            sessions.ensureStarted()
+            val handle = sessions.manager.create(NewSessionOptions())
+            handle.status.first { it == SessionStatus.IDLE }
+            sessions.manager.runShell(handle.id, "pwd")
+            // The output frame asks for a reply: the turn it opens ends with the reply's result.
+            handle.state.first { it.turnsEnded == 1 && !it.busy }.entries.filterIsInstance<ChatEntry.Shell>().single()
+        }
+        awaitNoOwnFakeCli()
+        assertEquals(ShellEnd.Exited(0), shell.end)
+        assertTrue(shell.sent)
+        // The login shell runs the user's profile, which may print first: the command's own output is the last line.
+        assertEquals(dir.toRealPath().toString(), shell.output.trimEnd('\n').lines().last())
+        // As SessionManagerTest.frames: the last piece is empty, or a line the fake is still writing.
+        val frames = log.readText().split('\n').dropLast(1).filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+        val users = frames.filter { it["type"]?.jsonPrimitive?.content == "user" }
+        assertEquals(2, users.size, users.toString())
+        assertEquals("<bash-input>pwd</bash-input>", users[0]["message"]!!.jsonObject["content"]!!.jsonPrimitive.content)
+        assertEquals("false", users[0]["shouldQuery"]?.jsonPrimitive?.content)
+        val output = users[1]["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
+        assertEquals("<bash-stdout>${shell.output}</bash-stdout><bash-stderr></bash-stderr>", output)
+        assertFalse("shouldQuery" in users[1])
     }
 
     @Test

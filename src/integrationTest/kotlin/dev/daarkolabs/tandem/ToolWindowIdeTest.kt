@@ -30,6 +30,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -117,13 +118,13 @@ class ToolWindowIdeTest {
             answerCard()
             // The card held the focus, so it gives it back to the composer when it closes (spec 4.12).
             waitFor("focus back in the prompt box", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
-            waitFor("tool row", 2.minutes) { toolRow("Ran Create empty fixture file").present() }
+            waitFor("tool row", 2.minutes) { described("Ran Create empty fixture file").present() }
             // The first turn has ended, so Send is back for the next prompt.
             waitForText("done.")
             typePrompt("Now remove it")
             waitForText("Allow Claude to Run rm tandem-fixture.txt?")
             iconButton("Deny").click(Point(10, 10))
-            waitFor("denied row", 2.minutes) { toolRow("Remove fixture file · Denied").present() }
+            waitFor("denied row", 2.minutes) { described("Remove fixture file · Denied").present() }
             waitForText("denied.")
         }
         val answers = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
@@ -164,7 +165,7 @@ class ToolWindowIdeTest {
             }
             // The model's reply, ask-single:31.
             waitForText("Blue")
-            waitFor("Questions row", 2.minutes) { toolRow("Questions").present() }
+            waitFor("Questions row", 2.minutes) { described("Questions").present() }
         }
         val answer = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
             .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-27>" }["response"]!!.jsonObject
@@ -222,7 +223,7 @@ class ToolWindowIdeTest {
             }
             // The model's reply, ask-two:43.
             waitForText("Red and Cheese, Ham")
-            waitFor("Questions row", 2.minutes) { toolRow("Questions").present() }
+            waitFor("Questions row", 2.minutes) { described("Questions").present() }
         }
         val answer = sent.filter { it.type == "control_response" }.map { it["response"]!!.jsonObject }
             .single { it["request_id"]!!.jsonPrimitive.content == "<request_id-38>" }["response"]!!.jsonObject
@@ -260,7 +261,7 @@ class ToolWindowIdeTest {
                 node("Claude is working") { "contains($it, ' · ') and substring($it, string-length($it)) = 's'" }.present()
             }
             // A lone running call opens on its command (polish spec 2.1) while its permission request is still held back.
-            toolRow("Creating empty fixture file").click(Point(10, 10))
+            described("Creating empty fixture file").click(Point(10, 10))
             waitFor("a lone running call opens on its command", 30.seconds) {
                 ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, '\$ touch tandem-fixture.txt')]").present()
             }
@@ -277,7 +278,7 @@ class ToolWindowIdeTest {
             waitFor("waiting again", 1.minutes) { workingRow("Claude is waiting for you").present() }
             iconButton("Deny").click(Point(10, 10))
             waitFor("denied row and footer, working row gone", 2.minutes) {
-                toolRow("Remove fixture file · Denied").present() && ui.x(FOOTER).present() &&
+                described("Remove fixture file · Denied").present() && ui.x(FOOTER).present() &&
                     !workingRow("Claude is working").present() && !workingRow("Claude is waiting for you").present()
             }
         }
@@ -295,9 +296,9 @@ class ToolWindowIdeTest {
             typePrompt("Read the file")
             waitFor("running group row", 1.minutes) { runningGroupRow().present() }
             runningGroupRow().click(Point(10, 10))
-            waitFor("finished sub-row inside the open box", 30.seconds) { toolRow("Read <path>").present() }
+            waitFor("finished sub-row inside the open box", 30.seconds) { described("Read <path>").present() }
             waitFor("the group finished with its box still open", 1.minutes) {
-                toolRow("Read a file, found files, searched for a pattern").present() && toolRow("Searched for seven · 1 match").present()
+                described("Read a file, found files, searched for a pattern").present() && described("Searched for seven · 1 match").present()
             }
         }
     }
@@ -505,14 +506,19 @@ class ToolWindowIdeTest {
             ui.keyboard { escape() }
             waitFor("Escape closes the sidebar", 30.seconds) { !row("Alpha").present() }
 
-            // The dimmed chat under the sidebar is out of the Tab order: Shift+Tab from "New session" goes to the header's "+",
-            // and Tab from there back to "New session".
+            // The dimmed chat under the sidebar is out of the Tab order: Shift+Tab from "New session" goes to the header's last
+            // focusable, its MCP servers button (a session is selected), then to its "+"; Tab from there stops on MCP servers, and the
+            // next Tab passes the chat by, back to "New session" (MCP spec 3.1).
             openSidebar()
             waitFor("filter focused for Shift+Tab", 30.seconds) { focusedEditable("").present() }
             ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
             waitFor("New session focused", 30.seconds) { focusedButton("New session").present() }
             ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
-            waitFor("Shift+Tab passes the chat by, to the header's +", 30.seconds) { focusedIconButton("New session").present() }
+            waitFor("Shift+Tab passes the chat by, to the header's MCP servers", 30.seconds) { focusedIconButton("MCP servers").present() }
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("Shift+Tab goes on to the header's +", 30.seconds) { focusedIconButton("New session").present() }
+            ui.keyboard { tab() }
+            waitFor("Tab from + stops on MCP servers", 30.seconds) { focusedIconButton("MCP servers").present() }
             ui.keyboard { tab() }
             waitFor("Tab passes the chat by, back to New session", 30.seconds) { focusedButton("New session").present() }
             ui.keyboard { escape() }
@@ -574,6 +580,176 @@ class ToolWindowIdeTest {
         assertEquals(1, spawns.count { "--resume" in it }, spawns.toString())
         assertTrue(sent.any { it["request"]?.jsonObject?.get("subtype")?.jsonPrimitive?.content == "rename_session" })
         assertFalse(configDir.walk().any { it.fileName.toString() == "$seeded.jsonl" }, "the seeded transcript is deleted")
+    }
+
+    @Test
+    fun `the MCP panel lists the servers and Disable sends mcp_toggle`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("mcp-panel", fixtures = listOf("mcp-status"), sentLog = log) {
+            newSession()
+            // The process attaches asynchronously; the button's requests need it (MCP spec 9.5).
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("MCP servers").click(Point(10, 10))
+            // The fake answers the first mcp_status with its pending servers; the panel asks again 2 s later.
+            waitFor("echo listed, connected", 1.minutes) { described("echo, Connected").present() }
+            // A click on the sheet where it has nothing to click (its title) never reaches the scrim under it: the panel stays open.
+            ui.x("//div[@class='ComposeNode' and (starts-with(@visible_text,'MCP servers ·') or starts-with(@text,'MCP servers ·'))]")
+                .click(Point(10, 10))
+            Thread.sleep(1_000)
+            assertTrue(described("MCP servers panel").present(), "a click on the sheet's title leaves the panel open")
+            iconButton("Disable echo").click(Point(10, 10))
+            waitFor("echo disabled after the follow-up refresh", 1.minutes) { described("echo, Disabled").present() }
+            takeScreenshot("mcp-panel")
+            iconButton("Close").click(Point(10, 10))
+            waitFor("the panel closed", 30.seconds) { !described("MCP servers panel").present() }
+        }
+        val toggle = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject }
+            .single { it["subtype"]?.jsonPrimitive?.content == "mcp_toggle" }
+        assertEquals("echo", toggle["serverName"]!!.jsonPrimitive.content)
+        assertEquals(false, toggle["enabled"]!!.jsonPrimitive.booleanOrNull)
+        assertFalse(toggle["enabled"]!!.jsonPrimitive.isString, "enabled is a JSON boolean")
+    }
+
+    @Test
+    fun `Authenticate opens the browser link and the row connects`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat(
+            "mcp-authenticate",
+            fixtures = listOf("mcp-status"),
+            sentLog = log,
+            // The fake turns authy connected 4 s after its sign-in starts: two of the sign-in poll's 2 s ticks, for the Driver to see the wait.
+            extraEnv = mapOf("TANDEM_FAKE_AUTH_DONE_MS" to "4000"),
+            browserLog = true,
+        ) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("MCP servers").click(Point(10, 10))
+            waitFor("authy listed, needing auth", 1.minutes) { described("authy, Needs auth").present() }
+            iconButton("Authenticate authy").click(Point(10, 10))
+            // The wait's own Cancel: its caption sits inside the row's merged node, whose text starts with the name.
+            waitFor("the sign-in wait, with its Cancel", 1.minutes) { iconButton("Cancel authy").present() }
+            waitFor("authy connected", 1.minutes) { described("authy, Connected").present() }
+        }
+        val browse = sent.filter { it.type == "__browse__" }
+        assertEquals(1, browse.size, browse.toString())
+        val url = browse.single()["url"]!!.jsonPrimitive.content
+        assertTrue(url.startsWith("http://127.0.0.1:33041/authorize?"), url)
+        assertTrue(sent.any { it["request"]?.jsonObject?.get("subtype")?.jsonPrimitive?.content == "mcp_authenticate" })
+    }
+
+    // spec: typing slash opens the palette and /mcp opens the panel
+    @Test
+    fun `typing slash opens the palette and mcp opens the panel`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("slash-palette", fixtures = listOf("mcp-slash"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            focusPromptBox()
+            promptBox().keyboard { typeText("/", 20) }
+            waitFor("the palette", 30.seconds) { described("Slash commands").present() }
+            // The desktop's form (MCP spec 14): the composer reads `/Type to filter`, and the first row's description is in its box,
+            // the scope first (the fixture's first command is the project's `actions`).
+            waitForText("Type to filter")
+            waitFor("the first row's description", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'project · Implement')]").present()
+            }
+            // Every command: more than 10 rows, so the list scrolls (the scrollbar stays inside the palette, MCP spec 3.4).
+            takeScreenshot("slash-palette-all")
+            promptBox().keyboard { typeText("mc", 20) }
+            waitFor("the palette narrowed to /mcp", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='/mc']").present() }
+            // The highlighted row's description, now /mcp's (rows show only names), and no hint once the filter has text.
+            waitForText("Manage MCP servers")
+            assertFalse(ui.x("//div[@class='ComposeNode' and @visible_text='Type to filter']").present(), "the hint follows only a lone /")
+            takeScreenshot("slash-palette")
+            ui.keyboard { enter() }
+            waitFor("the MCP panel", 1.minutes) { described("MCP servers panel").present() }
+            // The fake's fixture has no mcpServers payload: it answers mcp_status as a CLI that does not know it (MCP spec 9.2 (c)).
+            waitForText("Could not list servers: Unknown subtype")
+            waitFor("the composer cleared", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
+        }
+        assertTrue(sent.none { it.type == "user" }, "an intercepted /mcp sends nothing: ${sent.map { it.type }}")
+        assertTrue(sent.any { it["request"]?.jsonObject?.get("subtype")?.jsonPrimitive?.content == "mcp_status" })
+    }
+
+    // spec: local commands show as notices without a footer
+    @Test
+    fun `local commands show as notices without a footer`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // The fake replays mcp-slash's turns in order, one per prompt: /mcp's reply under /usage, /model's under /context, /help's
+        // under /help, and /hello's model turn under /hello (MCP spec 9.5).
+        val sent = runChat("local-commands", fixtures = listOf("mcp-slash"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            for (command in listOf("usage", "context", "help")) {
+                enterPrompt("/$command")
+                waitFor("the notice of /$command", 1.minutes) { described("Reply to /$command").present() }
+                waitForTurnEnd()
+                if (command == "usage") {
+                    // /mcp's recorded block: the CLI's terminal hint becomes the link to the panel.
+                    assertTrue(described("Open the MCP panel").present(), "the /mcp block's notice carries the panel link")
+                }
+                assertFalse(ui.x(FOOTER).present(), "a local command's turn has no footer (after /$command)")
+            }
+            takeScreenshot("local-commands")
+            enterPrompt("/hello")
+            waitForText("hello from the hello command")
+            waitFor("the model turn's footer", 1.minutes) { ui.x(FOOTER).present() }
+            // Only /hello's: a footer added late to /help's turn (its rows and the composer's busy flag are separate flows) shows here.
+            assertEquals(1, ui.xx(FOOTER).list().size, "only the model turn has a footer")
+        }
+        val prompts = sent.filter { it.type == "user" }.map { it["message"]!!.jsonObject["content"].toString() }
+        assertEquals(4, prompts.size, prompts.toString())
+        listOf("/usage", "/context", "/help", "/hello").forEachIndexed { index, text -> assertTrue(text in prompts[index], prompts.toString()) }
+    }
+
+    @Test
+    fun `a bang command runs locally and Claude replies`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("bang-command", fixtures = listOf("bash-mode-respond"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            // The same send path as a prompt: Send runs the command instead of sending it.
+            typePrompt("! echo hi")
+            // The row's header, by its description and its text: the session's title in the header is described the same way.
+            waitFor("the shell row", 1.minutes) { node("! echo hi") { "$it='! echo hi'" }.present() }
+            // The output's last line: the IDE runs the user's real login profile, which may print first.
+            waitFor("the command's output", 1.minutes) { ui.xx(shellOutputEndingWith("hi")).list().isNotEmpty() }
+            // Any node holding the reply's text: the reply's whole sentence is one text row (bash-mode-respond:41).
+            waitFor("Claude's reply", 2.minutes) {
+                ui.xx("//div[@class='ComposeNode' and contains(@visible_text, 'The probe ran')]").list().isNotEmpty()
+            }
+            waitFor("the turn footer", 1.minutes) { ui.xx(FOOTER).list().isNotEmpty() }
+            waitForTurnEnd()
+            takeScreenshot("bang-command")
+            // The quiet result of the command frame draws no footer: only the reply's turn has one.
+            assertEquals(1, ui.xx(FOOTER).list().size, "one footer")
+            assertFalse(described("Stop command").present(), "no Stop on the row once the command ended")
+        }
+        val users = sent.filter { it.type == "user" }
+        assertEquals(2, users.size, users.toString())
+        val (input, output) = users
+        assertEquals("<bash-input>echo hi</bash-input>", input.content())
+        assertEquals(false, input["shouldQuery"]?.jsonPrimitive?.booleanOrNull)
+        val stdout = output.content()
+        assertTrue(stdout.startsWith("<bash-stdout>"), stdout)
+        assertTrue(stdout.endsWith("hi\n</bash-stdout><bash-stderr></bash-stderr>"), stdout)
+        assertFalse("shouldQuery" in output, output.toString())
+    }
+
+    @Test
+    fun `a bang command stops from the row`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        runChat("bang-stop", fixtures = listOf("bash-mode-respond"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            typePrompt("! sleep 30")
+            waitFor("the row's Stop", 1.minutes) { described("Stop command").present() }
+            iconButton("Stop command").click(Point(10, 10))
+            waitFor("the stopped status", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'Stopped after')]").present()
+            }
+            assertFalse(described("Stop command").present(), "no Stop on the row once the command stopped")
+        }
     }
 
     @Test
@@ -850,6 +1026,8 @@ class ToolWindowIdeTest {
      * fixture N of [fixtures] (the last one once they run out). [configDir] becomes the CLI's config directory
      * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists and sleeps
      * [lineDelayMs] before each stream line. The frames go to [sentLog] as the fake CLI reads them, so that [script] can wait for one.
+     * [extraEnv] adds variables to the IDE's environment, which the fake CLI inherits; with [browserLog] a link the plugin opens in
+     * the browser is a `{"type":"__browse__","url":…}` line in [sentLog] instead (`tandem.browserOpener=log`).
      */
     private fun runChat(
         name: String,
@@ -859,9 +1037,21 @@ class ToolWindowIdeTest {
         project: Path = newProject(),
         sentLog: Path = Files.createTempFile("tandem-sent", ".ndjson"),
         lineDelayMs: Int? = null,
+        extraEnv: Map<String, String> = emptyMap(),
+        browserLog: Boolean = false,
         script: Driver.() -> Unit,
     ): List<JsonObject> {
-        ideContext(name, fixtures, configDir, gateFile, project, sentLog, lineDelayMs).runTandem(name, script)
+        ideContext(
+            name,
+            fixtures,
+            configDir,
+            gateFile,
+            project,
+            sentLog,
+            lineDelayMs,
+            extraEnv = extraEnv,
+            browserLog = browserLog,
+        ).runTandem(name, script)
         return if (sentLog.exists()) sentLog.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject } else emptyList()
     }
 
@@ -874,6 +1064,8 @@ class ToolWindowIdeTest {
         project: Path,
         sentLog: Path,
         lineDelayMs: Int? = null,
+        extraEnv: Map<String, String> = emptyMap(),
+        browserLog: Boolean = false,
     ): IDETestContext =
         Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
@@ -887,6 +1079,8 @@ class ToolWindowIdeTest {
                 if (configDir != null) withEnv("CLAUDE_CONFIG_DIR", configDir.toString())
                 if (gateFile != null) withEnv("TANDEM_FAKE_GATE_FILE", gateFile.toString())
                 if (lineDelayMs != null) withEnv("TANDEM_FAKE_LINE_DELAY_MS", lineDelayMs.toString())
+                extraEnv.forEach { (key, value) -> withEnv(key, value) }
+                if (browserLog) addSystemProperty("tandem.browserOpener", "log")
             }
         }
 
@@ -990,8 +1184,12 @@ class ToolWindowIdeTest {
             "((${textPredicate("@text")}) or (${textPredicate("@visible_text")}))]",
     )
 
-    /** A tool row (a lone call, a group or a group's sub-row), found by its label, which is what it says to assistive technology. */
-    private fun Driver.toolRow(label: String): UiComponent = ui.x("//div[@class='ComposeNode' and @contentdescription='$label']")
+    /**
+     * The node that assistive technology knows as [description]: a tool row (a lone call, a group or a group's sub-row) by its label,
+     * an MCP server row (`echo, Connected`), the MCP panel.
+     */
+    private fun Driver.described(description: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @contentdescription='$description']")
 
     /**
      * The header of a running group, a row only a running group has: its sentence ends with `…` and reads `Reading <count>…` or
@@ -1046,8 +1244,44 @@ class ToolWindowIdeTest {
         iconButton("Show sessions").click(Point(10, 10))
     }
 
+    /**
+     * A shell row's output whose last line ends with [text]: the output node (`Shell output`) itself when its text is merged into it,
+     * else the text node inside it.
+     */
+    private fun shellOutputEndingWith(text: String): String {
+        fun endsWith(attr: String) = "substring($attr, string-length($attr) - ${text.length - 1}) = '$text'"
+        val output = "//div[@class='ComposeNode' and @contentdescription='Shell output']"
+        return "$output[${endsWith("@text")} or ${endsWith("@visible_text")}] | $output//div[@class='ComposeNode' and ${endsWith("@visible_text")}]"
+    }
+
+    /** A `user` frame's `message.content`, a string in the shell escape frames. */
+    private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
+
     private fun Driver.waitForText(text: String) {
         waitFor("'$text' rendered", 2.minutes) { ui.x("//div[@class='ComposeNode' and @visible_text='$text']").present() }
+    }
+
+    /** Clicks the prompt box and waits until it has the keyboard focus. */
+    private fun Driver.focusPromptBox() {
+        promptBox().click(Point(20, 20))
+        waitFor("prompt box focused", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
+    }
+
+    /**
+     * Types [text] into the prompt box like a person and sends it with Enter, never with a click on Send: with the slash palette
+     * open, whether a press on Send reaches it is unverified (MCP spec 11 item 14), and Enter picks through the palette.
+     */
+    private fun Driver.enterPrompt(text: String) {
+        focusPromptBox()
+        promptBox().keyboard { typeText(text, 20) }
+        waitFor("prompt box holds '$text'", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='$text']").present() }
+        ui.keyboard { enter() }
+        waitFor("prompt box cleared after Enter", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
+    }
+
+    /** Waits until no turn runs: Send is back in place of Stop, so the next Enter sends (a busy Enter does nothing). */
+    private fun Driver.waitForTurnEnd() {
+        waitFor("the turn ended", 1.minutes) { iconButton("Send").present() && !iconButton("Stop").present() }
     }
 
     /** Types [text] into the prompt box like a person and presses Send, checking each step landed. */

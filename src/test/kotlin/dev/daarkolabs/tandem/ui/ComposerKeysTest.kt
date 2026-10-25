@@ -5,6 +5,8 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.text.TextRange
+import dev.daarkolabs.tandem.chat.intercepts
+import dev.daarkolabs.tandem.session.ModelOption
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -28,6 +30,9 @@ class ComposerKeysTest {
     private val escape = key(AwtKeyEvent.VK_ESCAPE)
     private val v = key(AwtKeyEvent.VK_V)
     private val backspace = key(AwtKeyEvent.VK_BACK_SPACE)
+    private val up = key(AwtKeyEvent.VK_UP)
+    private val down = key(AwtKeyEvent.VK_DOWN)
+    private val tab = key(AwtKeyEvent.VK_TAB)
 
     private fun composer(
         key: Key,
@@ -39,8 +44,25 @@ class ComposerKeysTest {
         cardOpen: Boolean = false,
         draftEmpty: Boolean = false,
         hasAttachments: Boolean = false,
+        paletteOpen: Boolean = false,
+        panelOpen: Boolean = false,
+        interceptable: () -> Boolean = { false },
         clipboardHasImage: () -> Boolean = { false },
-    ): ComposerAction? = composerKey(key, type, shift, alt, ctrlOrMeta, busy, cardOpen, draftEmpty, hasAttachments, clipboardHasImage)
+    ): ComposerAction? = composerKey(
+        key,
+        type,
+        shift,
+        alt,
+        ctrlOrMeta,
+        busy,
+        cardOpen,
+        draftEmpty = draftEmpty,
+        hasAttachments = hasAttachments,
+        paletteOpen = paletteOpen,
+        panelOpen = panelOpen,
+        interceptable = interceptable,
+        clipboardHasImage = clipboardHasImage,
+    )
 
     @Test
     fun `Enter sends`() {
@@ -56,6 +78,28 @@ class ComposerKeysTest {
     fun `Enter does nothing while busy`() {
         assertNull(composer(enter, busy = true))
         assertNull(composer(enter, busy = true, cardOpen = true))
+    }
+
+    // MCP spec 3.4: the interception table runs palette or not, so a busy Enter on `/mcp` (the palette closed by Esc) or on
+    // `/model opus` (closed by the space) still runs it; the send path then sends nothing.
+    @Test
+    fun `Enter on a draft Tandem intercepts runs it while busy or while a card is open`() {
+        val models = listOf(ModelOption("opus", "Opus", null))
+        for (draft in listOf("/mcp", "/model opus", "/permissions")) {
+            val interceptable = { intercepts(draft, models) }
+            assertEquals(ComposerAction.Send, composer(enter, busy = true, interceptable = interceptable), draft)
+            assertEquals(ComposerAction.Send, composer(enter, cardOpen = true, interceptable = interceptable), draft)
+            assertEquals(ComposerAction.Send, composer(key(AwtKeyEvent.VK_ENTER, numPad = true), busy = true, interceptable = interceptable))
+            // Modifiers keep their own rules: Shift+Enter stays a newline, Cmd-Enter does nothing.
+            assertNull(composer(enter, shift = true, busy = true, interceptable = interceptable))
+            assertNull(composer(enter, ctrlOrMeta = true, busy = true, interceptable = interceptable))
+        }
+        for (draft in listOf("/model nosuch", "/hello", "hello")) {
+            assertNull(composer(enter, busy = true, interceptable = { intercepts(draft, models) }), draft)
+        }
+        // Asked only for a busy plain Enter: an idle Enter sends without it.
+        assertEquals(ComposerAction.Send, composer(enter, interceptable = { error("not asked") }))
+        assertNull(composer(escape, interceptable = { error("not asked") }))
     }
 
     @Test
@@ -119,6 +163,108 @@ class ComposerKeysTest {
     fun `Esc with a card open routes to the card`() {
         assertEquals(ComposerAction.CardEscape, composer(escape, busy = true, cardOpen = true))
         assertEquals(ComposerAction.CardEscape, composer(escape, busy = false, cardOpen = true))
+    }
+
+    @Test
+    fun `Esc with the panel open closes it, never stops`() {
+        assertEquals(ComposerAction.ClosePanel, composer(escape, busy = true, panelOpen = true))
+        assertEquals(ComposerAction.ClosePanel, composer(escape, busy = true, cardOpen = true, panelOpen = true))
+        assertEquals(ComposerAction.ClosePanel, composer(escape, panelOpen = true))
+        assertNull(composer(escape, type = KeyEventType.KeyUp, busy = true, panelOpen = true))
+        // Only Esc: Enter still sends, Backspace still removes an image.
+        assertEquals(ComposerAction.Send, composer(enter, panelOpen = true))
+        assertEquals(ComposerAction.RemoveLastImage, composer(backspace, draftEmpty = true, hasAttachments = true, panelOpen = true))
+    }
+
+    @Test
+    fun `calls without the new argument behave as before`() {
+        assertEquals(
+            ComposerAction.Stop,
+            composerKey(escape, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = false, busy = true, cardOpen = false),
+        )
+        assertEquals(
+            ComposerAction.CardEscape,
+            composerKey(escape, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = false, busy = true, cardOpen = true),
+        )
+        // The trailing parameters by name, clipboardHasImage as a trailing lambda: it still compiles and still pastes.
+        assertEquals(
+            ComposerAction.PasteImage,
+            composerKey(v, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = true, busy = false, cardOpen = false, draftEmpty = true) { true },
+        )
+        assertNull(composerKey(escape, KeyEventType.KeyDown, shift = false, alt = false, ctrlOrMeta = false, busy = false, cardOpen = false))
+    }
+
+    // spec: palette keys map to the palette actions
+    @Test
+    fun `palette keys map to the palette actions`() {
+        assertEquals(ComposerAction.PaletteUp, composer(up, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteDown, composer(down, paletteOpen = true))
+        assertEquals(ComposerAction.PalettePick, composer(enter, paletteOpen = true))
+        assertEquals(ComposerAction.PalettePick, composer(key(AwtKeyEvent.VK_ENTER, numPad = true), paletteOpen = true))
+        assertEquals(ComposerAction.PaletteInsert, composer(tab, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteClose, composer(escape, paletteOpen = true))
+        // While a turn runs the palette still takes its keys (MCP spec 3.4): pick decides what a busy Enter does, Esc never stops.
+        assertEquals(ComposerAction.PalettePick, composer(enter, busy = true, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteInsert, composer(tab, busy = true, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteClose, composer(escape, busy = true, paletteOpen = true))
+        // Key releases, Shift+Tab (focus traversal) and the arrows with a modifier stay the text area's.
+        assertNull(composer(enter, type = KeyEventType.KeyUp, paletteOpen = true))
+        assertNull(composer(tab, shift = true, paletteOpen = true))
+        assertNull(composer(up, shift = true, paletteOpen = true))
+        assertNull(composer(down, ctrlOrMeta = true, paletteOpen = true))
+        // Closed, the arrows and Tab are the text area's.
+        assertNull(composer(up))
+        assertNull(composer(down))
+        assertNull(composer(tab))
+    }
+
+    // spec: Enter sends when the palette is closed
+    @Test
+    fun `Enter sends when the palette is closed`() {
+        assertEquals(ComposerAction.Send, composer(enter, paletteOpen = false))
+        assertNull(composer(escape, paletteOpen = false))
+    }
+
+    // spec: Esc goes to the palette before the card
+    @Test
+    fun `Esc goes to the palette before the card`() {
+        assertEquals(ComposerAction.PaletteClose, composer(escape, cardOpen = true, paletteOpen = true))
+        assertEquals(ComposerAction.PaletteClose, composer(escape, busy = true, cardOpen = true, paletteOpen = true))
+        assertEquals(ComposerAction.CardEscape, composer(escape, cardOpen = true, paletteOpen = false))
+    }
+
+    // spec: Shift+Enter with the palette open is still a newline
+    @Test
+    fun `Shift+Enter with the palette open is still a newline`() {
+        assertNull(composer(enter, shift = true, paletteOpen = true))
+        assertEquals(ComposerFallback.Newline, fallback(enter, shift = true))
+        assertNull(composer(enter, alt = true, paletteOpen = true))
+        assertNull(composer(enter, ctrlOrMeta = true, paletteOpen = true))
+    }
+
+    // spec: Enter with a card and the palette open picks
+    @Test
+    fun `Enter with a card and the palette open picks`() {
+        assertEquals(ComposerAction.PalettePick, composer(enter, cardOpen = true, paletteOpen = true))
+        assertEquals(ComposerAction.PalettePick, composer(enter, busy = true, cardOpen = true, paletteOpen = true))
+    }
+
+    // spec: Esc with the panel and the palette open closes the panel
+    @Test
+    fun `Esc with the panel and the palette open closes the panel`() {
+        assertEquals(ComposerAction.ClosePanel, composer(escape, paletteOpen = true, panelOpen = true))
+        assertEquals(ComposerAction.ClosePanel, composer(escape, busy = true, cardOpen = true, paletteOpen = true, panelOpen = true))
+        // Only Esc goes to the panel first: the other palette keys still reach the palette.
+        assertEquals(ComposerAction.PalettePick, composer(enter, paletteOpen = true, panelOpen = true))
+    }
+
+    // spec: a call passing clipboardHasImage as a trailing lambda still compiles
+    @Test
+    fun `a call passing clipboardHasImage as a trailing lambda still compiles`() {
+        assertEquals(
+            ComposerAction.Send,
+            composerKey(enter, KeyEventType.KeyDown, false, false, false, busy = false, cardOpen = false, draftEmpty = true, hasAttachments = false) { false },
+        )
     }
 
     @Test

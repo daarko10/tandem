@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.NoticeRow
 import dev.daarkolabs.tandem.chat.ScrollEvent
+import dev.daarkolabs.tandem.chat.ShellRow
 import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ThinkingRow
 import dev.daarkolabs.tandem.chat.ToolKind
@@ -66,6 +67,7 @@ import dev.daarkolabs.tandem.ui.dev.RecompositionCounter
 import dev.daarkolabs.tandem.ui.dev.RenderingSpike
 import dev.daarkolabs.tandem.ui.rows.NoticeItem
 import dev.daarkolabs.tandem.ui.rows.ReplyHost
+import dev.daarkolabs.tandem.ui.rows.ShellRowItem
 import dev.daarkolabs.tandem.ui.rows.TextRowItem
 import dev.daarkolabs.tandem.ui.rows.ThinkingRowItem
 import dev.daarkolabs.tandem.ui.rows.ToolRowItem
@@ -100,7 +102,8 @@ private val AGENT_LIVE: Set<ToolState> = setOf(ToolState.RUNNING, ToolState.WAIT
  * thumb, Page Up, Home) pauses it, and while it follows, new rows, a growing last row and a change of the list's height keep the
  * bottom in view. A user scroll down that reaches the bottom, End, the `↓` button and a send resume it. The focused transcript
  * scrolls with Page Up, Page Down, Home and End; Esc there gives the composer the focus ([onFocusComposer]). With [reply], the ended
- * turns' replies get their hover rows (polish spec 2.6).
+ * turns' replies get their hover rows (polish spec 2.6). A local `/mcp` notice's link opens the MCP panel with [onOpenMcp]; a running
+ * shell escape's `Stop command` calls [onStop].
  */
 @Composable
 internal fun ChatPanel(
@@ -111,6 +114,8 @@ internal fun ChatPanel(
     lastFrameAt: StateFlow<Long>,
     onFocusComposer: () -> Unit,
     reply: ReplyHost? = null,
+    onOpenMcp: () -> Unit = {},
+    onStop: () -> Unit = {},
 ) {
     val chat by presenter.chat.collectAsState()
     val rows = chat.rows
@@ -221,7 +226,7 @@ internal fun ChatPanel(
                     },
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             ) {
-                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt, agentExpanded, reply) }
+                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt, agentExpanded, reply, onOpenMcp, onStop) }
             }
             val buttonText = ui.follow.value.buttonText
             if (buttonText != null && listState.canScrollForward) {
@@ -304,7 +309,7 @@ private fun JumpToBottom(text: String, modifier: Modifier, onClick: () -> Unit) 
 
 /**
  * One row of the list, by its kind. [lastFrameAt] and [agentExpanded] (a running Agent row is open) are for the working row only,
- * [reply] for a text row's hover row.
+ * [reply] for a text row's hover row, [onOpenMcp] for a notice's `Open the MCP panel` link, [onStop] for a shell row's `Stop command`.
  */
 @Composable
 internal fun RowItem(
@@ -313,13 +318,16 @@ internal fun RowItem(
     lastFrameAt: StateFlow<Long>,
     agentExpanded: Boolean = false,
     reply: ReplyHost? = null,
+    onOpenMcp: () -> Unit = {},
+    onStop: () -> Unit = {},
 ) {
     if (RenderingSpike.enabled) SideEffect { RecompositionCounter.hit(rendered.row.key) }
     when (val row = rendered.row) {
         is UserRow -> UserBubble(rendered)
+        is ShellRow -> ShellRowItem(row, ui, onStop)
         is TextRow -> TextRowItem(rendered, reply)
         is ToolRow -> ToolRowItem(rendered, ui)
-        is NoticeRow -> NoticeItem(row)
+        is NoticeRow -> NoticeItem(row, onOpenMcp)
         is TurnEndRow -> TurnEndItem(row)
         is ThinkingRow -> ThinkingRowItem(row, ui)
         is WorkingRow -> WorkingRowItem(row, lastFrameAt, agentExpanded)

@@ -1,23 +1,35 @@
 # CLI stream-json protocol reference
 
-How Tandem talks to the user's `claude` binary (Claude Code 2.1.x) over stdin/stdout NDJSON.
+How Tandem talks to the user's `claude` binary (Claude Code; recorded with CLI 2.1.300 to 2.1.308) over stdin/stdout
+NDJSON. Every claim names the fixture line that shows it and the CLI version it was recorded on, or the source it rests
+on (below); the traps that cost the most time are collected in section 9 (Gotchas): read it first. It keeps its number
+because it cites sections 1 to 8, and the code cites all of them by these numbers.
 
 Sources, in order of authority:
-1. Recorded transcripts in `src/test/resources/fixtures/`: `plain-reply`, `permission`, `interrupt`, `model-switch`
-   (CLI 2.1.300); `history-reply`, `history-permission`, `history-interrupt`, `permission-mode`, `fork` (CLI 2.1.301).
-   The `history-*` and `fork` recordings come with the CLI's own on-disk transcript of the same session in
-   `fixtures/transcripts/` (section 11). Re-record with `scripts/record-fixture.sh` (one-shot prompt) or
-   `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too. The 29 probe recordings of
-   2026-10-18 (CLI 2.1.302: `ask-*`, `plan-*`, `think-*`, `tools-*`, `agent-*`, `misc-*`, each with its transcript) are
-   written up in `docs/superpowers/research/2026-10-18-protocol-probes.md`; this document cites them as
-   `<name>.ndjson:<line>`. Their host-to-CLI frames are not in the fixtures; the probes doc quotes them.
-   `ask-two` (CLI 2.1.306) is a `scripts/record-scenario.sh ask-two` scenario recording, not one of the 29 probes: one
-   `AskUserQuestion` call with two questions, a one-answer and a multi-select, answered together; it comes with its
-   transcript.
-   `effort-switch` and `permission-mode-auto` (CLI 2.1.306, `scripts/record-scenario.sh`, each with its transcript) record a
-   live effort change (4.4) and the `auto` permission mode (8). `user-image` (CLI 2.1.306, `scripts/record-scenario.sh`,
-   with its transcript) records a user message of a text block then a base64 PNG block (section 3); the transcript's user
-   line keeps both blocks, the image's `data` verbatim.
+1. Recorded transcripts in `src/test/resources/fixtures/`, cited as `<name>.ndjson:<line>` (also `<name>:<line>`, and
+   `:<line>` for another line of the fixture just named). A `.ndjson` file is the CLI's stdout only: where a claim rests on
+   what the host sent, this document quotes or describes that frame. `fixtures/transcripts/<name>.jsonl` is the CLI's own
+   on-disk transcript of the same session (section 11), where the recording has one. By CLI version:
+   - 2.1.300: `plain-reply`, `permission`, `interrupt`, `model-switch` (no transcripts).
+   - 2.1.301: `history-reply`, `history-permission`, `history-interrupt` and `fork`, each with its transcript (`fork-origin`
+     is the transcript of the session `fork` forks, with no stream twin); `permission-mode` (no transcript).
+   - 2.1.302: 29 probe recordings made on 2026-10-18, each with its transcript: `ask-*` (`AskUserQuestion` answered in
+     each way a host can), `plan-*` (`ExitPlanMode`), `think-*` (the thinking displays), `tools-*` (Read, Glob, Grep,
+     Edit, Write, Bash, and a call to a tool missing from the session's tool set), `agent-*` (subagents, Bash tasks and
+     the task-list tools), `misc-*` (an image, the web tools, the session-state lines). Also `invalid-model` (a
+     `--model` that does not exist) and `permission-mode-rejected`, each with its transcript.
+   - 2.1.306, each with its transcript: `ask-two` (one `AskUserQuestion` call with two questions, a one-answer and a
+     multi-select, answered together), `effort-switch` (a live effort change, 4.4), `permission-mode-auto` (the `auto` mode,
+     8), `user-image` (a text block then a base64 PNG block, section 3; the transcript's user line keeps both blocks, the
+     image's `data` verbatim), `bash-mode` and `bash-mode-respond` (shell escapes, section 3;
+     `transcripts/bash-mode-interactive.jsonl` is the terminal's own `!`, with no stream twin), and the MCP recordings
+     `mcp-status`, `mcp-tool-call` and `mcp-slash` (how they were made: section 10).
+   - 2.1.308, with its transcript: `bash-mode-context` (a context-only shell escape as Tandem sends it, one quiet frame,
+     section 3; recorded with `--model claude-sonnet-5-5`).
+   `synthetic-long-reply` is generated from `plain-reply` by `scripts/make_long_reply.py`, the only fixture that was not
+   recorded; nothing here cites it. Re-record with `scripts/record-fixture.sh` (one-shot prompt) or
+   `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too and redact the recording in the
+   same run: paths read `<path>`, ids are numbered placeholders such as `<id-36>` or `<request_id-23>`.
 2. Measurements with CLI 2.1.301 where a section says so: headless runs in an empty scratch folder with the variables
    of section 1.2 removed. Most send only `initialize`, so no model is used; those that needed a prompt say so. The
    checks of `--session-id X` and `--resume X` on their own (1.1) ran signed in, with the usual config directory. Those
@@ -27,7 +39,8 @@ Sources, in order of authority:
    usually first writes a `system/ui_invalidate` line with the session id (1.1; three 2.1.302 probe recordings lack it,
    5.2, so it is no sign-in signal). The fork probe without sign-in forked a session that
    had no title line, so its missing `system/session_title_changed` (1.1) says nothing about sign-in.
-3. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads).
+3. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads);
+   0.3.306's `sdk.d.ts` for the MCP types of 4.4 and 4.5.
 4. `claude --help` output.
 
 Anything marked **(inferred)** is not directly shown by those sources. The CLI changes weekly: validate every field, and
@@ -45,7 +58,7 @@ The SDK's `ProcessTransport` always starts with:
 claude --output-format stream-json --verbose --input-format stream-json
 ```
 
-then appends optional flags in this order (only those Tandem cares about are listed):
+then appends optional flags in this order (SDK 0.3.300; only those Tandem cares about are listed):
 
 | Flag | When the SDK adds it | Tandem |
 |---|---|---|
@@ -58,7 +71,7 @@ then appends optional flags in this order (only those Tandem cares about are lis
 | `--permission-prompt-tool <mcp tool>` | `permissionPromptToolName` (mutually exclusive with the above) | no |
 | `--permission-prompts <host\|none>` | option | no (default `host`) |
 | `--continue` / `--resume <session-id>` | resume options | `--resume` for an existing session (section 8); no `--continue` |
-| `--allowedTools a,b` / `--disallowedTools a,b` | options | `--disallowedTools Edit,Write,MultiEdit,NotebookEdit` (hard rule 4). `MultiEdit` no longer exists in 2.1.302 (in no `system/init.tools`, `tools-edit.ndjson:6`); naming it is harmless |
+| `--allowedTools a,b` / `--disallowedTools a,b` | options | `--disallowedTools Edit,Write,MultiEdit,NotebookEdit` (Tandem applies edits itself, through the IDE). `MultiEdit` no longer exists in 2.1.302 (in no `system/init.tools`, `tools-edit.ndjson:6`); naming it is harmless |
 | `--tools a,b` / `--tools=default` | `tools` option | optional |
 | `--mcp-config <json>` | non-SDK MCP servers given | yes: our IDE MCP server (see 1.4) |
 | `--setting-sources user,project,local` | option | optional |
@@ -135,7 +148,7 @@ The SDK copies the host environment (or `options.env` if given) and then:
 | `DEBUG` | deleted (or `1` if `DEBUG_CLAUDE_AGENT_SDK`) | |
 | `TRACEPARENT`/`TRACESTATE` | set from the active OTel context | ignore |
 
-Never set or read API keys (hard rule 3); the CLI resolves auth itself.
+Never set or read API keys (Tandem never handles credentials); the CLI resolves auth itself.
 
 What Tandem passes (`cliEnvironment` in `session/CliEnvironment.kt`): the login shell's environment, as the platform
 loads it (`EnvironmentUtil.getEnvironmentMap()`, read off the EDT by `ide/ShellEnvironment.kt`), without the variables
@@ -164,7 +177,7 @@ an inherited id was not measured.
 
 - `cwd` = `options.cwd` (Tandem: project base path). The CLI reports it back in `system/init.cwd`.
 - `stdio: ["pipe","pipe","pipe"]`, `windowsHide: true`. stderr is buffered as a tail for error messages only, not parsed.
-- Binary: the SDK uses `pathToClaudeCodeExecutable` or its own bundled native package
+- Binary: the SDK (0.3.300) uses `pathToClaudeCodeExecutable` or its own bundled native package
   (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>[-musl]/claude[.exe]`). If the path ends in `.js/.mjs/.ts/...` it is run with node.
   Tandem has no bundled binary. It runs, in this order: the path in Settings | Tools | Tandem when it can run; each entry
   of the login shell's `PATH` (section 1.2); then the usual install locations `~/.local/bin` (the native installer),
@@ -182,7 +195,7 @@ spawn ──► write control_request{initialize} ──► read control_respons
       ──► write first user message ──► read system/init ... result
 ```
 
-The SDK queues user messages until the `initialize` request is written (`writeAfterInitialize`); it does not wait for the response before writing. Default init timeout in the SDK is 60 s.
+The SDK (0.3.300) queues user messages until the `initialize` request is written (`writeAfterInitialize`); it does not wait for the response before writing. Default init timeout in the SDK is 60 s. Tandem writes `initialize` first too (4.2).
 
 ---
 
@@ -221,11 +234,16 @@ One JSON object per line, UTF-8, `\n`-terminated. Blank lines and non-JSON lines
 
 Every stdout message except control frames and `keep_alive` carries `uuid` and `session_id`.
 
+The tables follow `sdk.d.ts` 0.3.300. Recorded on stdout with CLI 2.1.300 to 2.1.306: `system`, `assistant`, `user`,
+`stream_event`, `result`, `rate_limit_event`, `control_request`, `control_response`, and `command_lifecycle` and
+`autocompact_state`, which the SDK does not type, and `active_goal`, typed but outside the `SDKMessage` union
+(section 10). No fixture has the other types.
+
 ---
 
 ## 3. User messages (stdin)
 
-Exact line the SDK writes for a string prompt:
+Exact line the SDK (0.3.300) writes for a string prompt:
 
 ```json
 {"type":"user","session_id":"","message":{"role":"user","content":[{"type":"text","text":"ping"}]},"parent_tool_use_id":null}
@@ -256,8 +274,36 @@ Fixture `user-image` (CLI 2.1.306) sends exactly this with a 2 × 2 PNG. The tra
 image's `data` verbatim, under the uuid the host sent; the CLI adds an `isMeta` user line after it naming where it cached the
 image, which the reader skips as it skips every `isMeta` line (section 11).
 
-Slash commands are sent as plain text (`"/compact"`) unless `client_composed:true`.
+Slash commands are sent as plain text (`"/compact"`) unless `client_composed:true`. A built-in the CLI answers itself
+(`/mcp`, `/model`, `/help` in 2.1.306) runs no model turn: the reply is one synthetic `assistant` line (6.1,
+`mcp-slash.ndjson:5`), and the CLI does not echo the typed line. A project command (`/hello` from `.claude/commands/hello.md`)
+is a normal turn (`mcp-slash.ndjson:22-34`).
 Messages sent while a turn is running are queued and may be folded into the running turn; `result.user_message_uuids` lists which sends a turn consumed.
+
+**Shell escapes (`! command`, bash mode).** Tandem runs the command itself and sends what the terminal's own `!` sends: `content` is a
+string, not a block array, and every frame carries `client_composed:true` (`HostMessages.bashInput`, `bashOutput`, `bashContext`):
+
+```json
+{"type":"user","session_id":"","parent_tool_use_id":null,"uuid":"…","message":{"role":"user","content":"<bash-input>echo bash-mode-probe && printf err >&2</bash-input>"},"client_composed":true,"shouldQuery":false}
+{"type":"user","session_id":"","parent_tool_use_id":null,"uuid":"…","message":{"role":"user","content":"<bash-stdout>bash-mode-probe\nerr</bash-stdout><bash-stderr></bash-stderr>"},"client_composed":true}
+{"type":"user","session_id":"","parent_tool_use_id":null,"uuid":"…","message":{"role":"user","content":"<bash-input>CMD</bash-input>\n<bash-stdout>OUT</bash-stdout><bash-stderr></bash-stderr>"},"client_composed":true,"shouldQuery":false}
+```
+
+| Frame | When | Recorded |
+|---|---|---|
+| `bashInput` (`shouldQuery:false`) | the command, replies on | `bash-mode-respond.ndjson:3-7`: lifecycle, `init`, a zero-turn `result` (`num_turns:0`, `result:""`, `duration_api_ms:0`) naming its uuid (`:6`) |
+| `bashOutput` (no `shouldQuery`) | the output, replies on, sent only once that zero-turn result is in | `bash-mode-respond.ndjson:8-11`: a normal turn, `status requesting` naming its uuid (`:11`), its `result` (`:41`) |
+| `bashContext` (`shouldQuery:false`) | command and output, replies off | `bash-mode-context.ndjson:3-6` (2.1.308): lifecycle, `init`, a zero-turn `result` naming its uuid (`:6`); the transcript keeps the content as sent (`transcripts/bash-mode-context.jsonl:3`). It is the content the CLI writes when it merges two quiet frames sent back to back (`bash-mode.ndjson:3-8`, `transcripts/bash-mode.jsonl:5`, 2.1.306) |
+
+stderr is merged into stdout in order, so `<bash-stderr>` is empty, as in the 2.1.306 terminal; Tandem's note for a stopped or capped
+command (`Stopped after 3.0s`, `Killed after 10 minutes`) is the last line of `<bash-stdout>`. The CLI echoes none of these frames.
+The CLI batches the sends queued before it starts processing, so Tandem keeps the recorded order: the output frame waits for the
+command frame's zero-turn result (or after 5 s without it, when the CLI never answers the quiet frame), and an escape sent behind a
+prompt waits for that prompt's result. Two quiet frames can still go
+out back to back (a context-only escape and the escape held behind the same prompt), the recorded shape of `bash-mode.ndjson:3-8`.
+Nothing holds a prompt: one sent before a context-only escape's zero-turn result, or one queued behind an escape while the process
+starts, goes out right after the quiet frame, and what the CLI makes of that quiet + querying batch is **unrecorded**. A `result`
+whose `user_message_uuids` names only quiet sends ends no turn and draws no footer.
 
 ---
 
@@ -285,6 +331,11 @@ Response (exactly one per request, same `request_id`):
 | Duplicate delivery of an in-flight request id: skip | sdk.mjs |
 | Cancellation: `{"type":"control_cancel_request","request_id":"..."}`; receiver aborts its handler and sends nothing further | sdk.mjs |
 | Unknown inbound request subtype: reply `error` (never leave the CLI hanging) | inferred |
+
+The rules come from SDK 0.3.300. Both answers are recorded: a success from 2.1.300 on (`interrupt.ndjson:13`), an error with 2.1.302
+(`permission-mode-rejected`, section 8) and 2.1.306 (`mcp-status.ndjson:36-38`, 4.4). The `Unknown subtype` text above is an
+example: what a CLI that predates the `mcp_*` subtypes (4.4) answers to one is unrecorded, that error or nothing at all.
+Tandem shows the CLI's `error` text verbatim, or, when no answer comes, its own timeout (4.4, MCP requests).
 
 ### 4.2 `initialize` (host → CLI, first frame)
 
@@ -322,6 +373,14 @@ Success `response` payload (`SDKControlInitializeResponse`):
 | `fast_mode_state`, `fast_mode_disabled_reason` | optional |
 | `hooks_applied`, `plugins_applied`, `sdk_mcp_manifests_parked` | optional |
 
+`commands` is the slash-command catalogue (2.1.306, `mcp-slash.ndjson:1`: 73 entries): `{name, description, argumentHint,
+builtin?: true, aliases?: string[]}`, in the same order and with the same names as `init.slash_commands` (5.1). 55 of the 73
+are `builtin:true`, some with `aliases` (`clear: ["reset","new"]`, `usage: ["cost","stats"]`); a project command omits both
+and ends its description with ` (project)` (`{"name":"hello","description":"Says hello from a project command (project)","argumentHint":""}`).
+Tandem decodes it as `InitializeResponse` (`ControlPayloads.initialize`; an entry without a string `name` is skipped) and
+builds its `/` palette from it. The redactor empties the list in the other fixtures (`mcp-status.ndjson:1` has
+`"commands":[]`), so only `mcp-slash` shows real entries.
+
 The `control_response.response` object (sibling of `request_id`) on initialize also carries
 `pending_permission_requests: control_request[]` and `pending_user_dialog_requests` (always present from 2.1.268; absence means older CLI). Process them as if they had just arrived.
 
@@ -349,10 +408,17 @@ Enabled by `--permission-prompt-tool=stdio`. The CLI blocks the tool until answe
 | `matched_ask_rule` | `{source, tool_name, rule_content?}` |
 | `title`, `display_name`, `description` | UI strings |
 | `agent_id` | subagent origin: a prompt from inside an `Agent` subagent is a normal request plus `agent_id` = the task's `task_id` (`agent-sync.ndjson:43`; section 5.2) |
-| `mcp_server` | `{name, source}` for MCP tools |
+| `mcp_server` | `{name, source}` on an MCP tool's request, beside `server_policy_ask_only:true` (2.1.306, `mcp-tool-call.ndjson:35`: `{"name":"echo","source":"dynamic"}`) |
 
 Tandem decodes `requires_user_interaction` (absent or mistyped: `false`), `decision_reason_type` and `agent_id` on
 `CanUseTool`; `agent_id` gives the card its `From the agent "<description>"` line.
+
+An MCP tool's request (2.1.306, `mcp-tool-call.ndjson:35`, the same keys at `:60`) has exactly `subtype, tool_name,
+mcp_server, display_name, input, permission_suggestions, server_policy_ask_only, tool_use_id`: no `decision_reason_type`,
+`description`, `blocked_path` or `requires_user_interaction`, and its one suggestion allows the whole tool
+(`{"type":"addRules","rules":[{"toolName":"mcp__echo__echo"}],"behavior":"allow","destination":"localSettings"}`). Tandem
+decodes `InboundRequest.CanUseTool.mcpServer` (`McpServerRef{name, source}`; null without a string `name`) and
+`serverPolicyAskOnly` (absent: `false`).
 
 Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_use_id`):
 
@@ -380,7 +446,8 @@ Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_u
 - Read-only commands (e.g. `echo`) are auto-approved and never reach the host.
 - If the turn is interrupted while a prompt is open, the CLI sends `control_cancel_request` for it: close the dialog, send nothing.
 - Auto-denials without a prompt arrive as `system/permission_denied` (section 5).
-- `AskUserQuestion` (2.1.302, fixtures `ask-*`; probes doc 2.1): the request arrives in `default` mode too, with exactly
+- `AskUserQuestion` (2.1.302, fixtures `ask-single`, `ask-multi`, `ask-multi-array`, `ask-other`, `ask-response` and
+  `ask-deny`): the request arrives in `default` mode too, with exactly
   `subtype, tool_name, display_name, input, tool_use_id, requires_user_interaction` (`ask-single.ndjson:22`): it is how
   the CLI asks the host to render the question. `input.questions[]` is `{question, header, options[{label,
   description}], multiSelect}`; the `tool_use` block has the same input in another key order, so compare by value.
@@ -391,7 +458,8 @@ Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_u
   answered: ...", "The user answered: ...", "The user responded: ...") and `tool_use_result` is the `updatedInput` sent
   (`ask-single.ndjson:26`). `deny` with a `message` and no `interrupt` cancels the question only: an `is_error` result
   holding the message, and the turn goes on (`ask-deny.ndjson:24,36`); `result.permission_denials` lists the call.
-- `ExitPlanMode` (fixtures `plan-*`; probes doc 2.2): `input` is `{plan, planFilePath}` once the plan file was written
+- `ExitPlanMode` (2.1.302, fixtures `plan-approve`, `plan-deny` and `plan-disallowed`): `input` is `{plan, planFilePath}`
+  once the plan file was written
   (`plan-approve.ndjson:88`), `{}` when `Write` is disallowed, as under Tandem's argv (`plan-disallowed.ndjson:173`;
   the model's plan-file `Write` then fails with a `tool_use_error`, no prompt, `:103`). Never `permission_suggestions`,
   so the host builds the mode switch itself: `allow` with `updatedInput` = the input and
@@ -403,17 +471,20 @@ Response payload (`PermissionResult`; the SDK adds `toolUseID` = request `tool_u
 
 ### 4.4 Host → CLI requests
 
+Request fields follow `sdk.d.ts` 0.3.300. A row that names no fixture or measurement (`list_models`, `get_context_usage`,
+`rewind_files`, `stop_task`, `get_settings`) is from the SDK alone: Tandem does not send it and no recording has it.
+
 | subtype | Request fields | Success `response` |
 |---|---|---|
-| `interrupt` | `cancel_queued?: boolean` | `{still_queued: string[], cancelled?: string[]}` (empty `{}` on CLIs without `interrupt_receipt_v1`) |
-| `set_model` | `model?: string\|null` (`null`/`"default"` = session default) | none: the success frame has no `response` field (fixture). The CLI also emits a replayed `user` line (`isReplay:true`) with `<local-command-stdout>Set model to ...</local-command-stdout>`. An `error` answer is unrecorded; Tandem then puts back the previous pick and adds the notice `The CLI rejected the switch to model <m> (<error>); it stays on model <x>.` |
+| `interrupt` | `cancel_queued?: boolean` | `{still_queued: string[], cancelled?: string[]}` (empty `{}` on CLIs without `interrupt_receipt_v1`); recorded `{"still_queued":[]}` (`interrupt.ndjson:13`, 2.1.300) |
+| `set_model` | `model?: string\|null` (`null`/`"default"` = session default) | none: the success frame has no `response` field (`model-switch.ndjson:21`, 2.1.300), and just before it the CLI emits a replayed `user` line (`isReplay:true`) with `<local-command-stdout>Set model to ...</local-command-stdout>` (`:20`). An `error` answer is unrecorded; what Tandem does with one: section 8, Switch model mid-session |
 | `set_permission_mode` | `mode: "default"\|"acceptEdits"\|"bypassPermissions"\|"plan"\|"dontAsk"\|"auto"` | `{"mode": "<wire name>"}`, then a `system/status` line with `status: null` and the new `permissionMode`; the next `init` agrees (fixture `permission-mode`, 2.1.301) |
 | `rename_session` | `title: string`, `source: "host"` | none: no `response` field, like `set_model`. A `system/session_title_changed` line (`title`) comes just before it, and the CLI appends a `custom-title` line to the transcript (fixtures `fork`, `fork-origin`) |
 | `set_max_thinking_tokens` | `max_thinking_tokens?: number\|null`, `thinking_display?: "summarized"\|"omitted"\|"highlights"\|null` | none: the success frame has no `response` field (`think-summarized.ndjson:25`, 2.1.302). Takes effect on the next turn (below). Not sent by Tandem, which passes `--thinking-display summarized` at spawn (1.1) |
 | `list_models` | — | model catalog (`{models: ModelInfo[]}`, inferred shape) |
 | `get_context_usage` | `detail?: "summary"\|"full"` | categories `{name, tokens, kind:"used"\|"free"\|"buffer"\|"deferred"}` plus totals |
 | `rewind_files` | `user_message_id: string`, `dry_run?: boolean` | rewind result (needs file checkpointing env) |
-| `mcp_status`, `mcp_reconnect`, `mcp_toggle`, `mcp_set_servers` | per type | per type |
+| `mcp_status`, `mcp_toggle`, `mcp_reconnect`, `mcp_authenticate`, `mcp_set_servers` | see MCP requests, below (2.1.306) | see MCP requests, below |
 | `stop_task` | `task_id` | `{}` |
 | `apply_flag_settings` | `settings: object`, merged into the session's flag layer | none (no `response` field); `{"effortLevel": …}` changes the effort of the next turn (below) |
 | `update_settings` | `source: "localSettings"\|"userSettings"`, `settings: object` | writes a settings file; rejected without `source` (below). Tandem does not use it |
@@ -482,16 +553,51 @@ the footer's effort, which shows what Tandem passed or picked, can disagree with
 transcript's `assistant` lines should show the real level (their `effort` followed `apply_flag_settings` in the probe
 above); reading it from there is left for later.
 
+#### MCP requests
+
+Recorded with CLI 2.1.306 (fixture `mcp-status`, three local servers: section 10). The CLI manages its MCP servers on
+request and announces no change: no `system` line other than the next turn's `init` (5.1) reports a server's state, so a
+host learns of a new status from `mcp_status`, that `init` or the model's own text. The frames Tandem sends (`HostMessages.mcpStatus`,
+`mcpToggle`, `mcpReconnect`, `mcpAuthenticate`; the request ids here are examples):
+
+```json
+{"type":"control_request","request_id":"m1","request":{"subtype":"mcp_status"}}
+{"type":"control_request","request_id":"m2","request":{"subtype":"mcp_toggle","serverName":"echo","enabled":false}}
+{"type":"control_request","request_id":"m3","request":{"subtype":"mcp_reconnect","serverName":"broken"}}
+{"type":"control_request","request_id":"m4","request":{"subtype":"mcp_authenticate","serverName":"authy"}}
+```
+
+`serverName` is the name exactly as `mcp_status` reports it.
+
+| subtype | Answer |
+|---|---|
+| `mcp_status` | `{"mcpServers":[…]}` (`mcp-status.ndjson:18`). Per entry: `name`, `status`, `config` (`{type:"stdio", command, args}` or `{type:"http", url}`), `scope` and `source` always; `serverInfo{name, version}` and `tools[{name, annotations}]` only when `connected`; `error` only when `failed` (`"Connection closed"`). A `needs-auth` entry has neither `error` nor `tools`, and a tool's description is not forwarded. Sent right after `initialize`, before the first prompt, the two stdio servers are still `pending` (`:2`); the first `init` already has settled states (`:6`). Tandem decodes it with `ControlPayloads.mcpStatus` (`McpServerInfo`; an entry without a string `name` is skipped, an unknown status is kept as text) and never decodes `config.headers` or `config.env`, which can hold secrets |
+| `mcp_toggle {serverName, enabled}` | a bare success, no `response` field (`:19`). The next `mcp_status` shows the server `disabled`, without `serverInfo` or `tools` (`:20`), and the next turn's `init` agrees (`:23`) and no longer lists its tool in `init.tools`; `enabled:true` brings it back `connected` at once (`:34`, `:35`). An unknown name: `{"subtype":"error","error":"Server not found: nosuch"}` (`:38`). A toggle of a `failed` or `needs-auth` server is unrecorded |
+| `mcp_reconnect {serverName}` | an error with the connection error itself for a failed server, `Connection closed` (`:36`), and `Server status: needs-auth` for a server that needs a sign-in (`:37`): a reconnect starts no sign-in, and the status stays `needs-auth` (`:39`). The success of a reconnect that works is unrecorded |
+| `mcp_authenticate {serverName}` | at once, without waiting for the sign-in: `{authUrl, requiresUserAction, callbackExpected, redirectScheme, state, callbackPort}` (`:40`). `authUrl` is an OAuth authorization link with PKCE whose `redirect_uri` is `http://localhost:<callbackPort>/callback`. The CLI opens no browser and writes no `system` line (nothing between `:40` and `:41`), and `mcp_status` right after still says `needs-auth` (`:41`). The callback completing, and whether the status then turns `connected` by itself, are unrecorded (`authy`, section 10, never issues a token). Not in the SDK's typed request union |
+| `mcp_set_servers {servers}` | `{added, removed, errors}` (`:42`, `:44`). It replaces only the servers added this way: `{"servers":{}}` removed the added `echo2` and kept the `--mcp-config` servers (`:44`, `:45`), which report the same `source:"dynamic"`, so a host must remember what it added. Tandem decodes the answer (`ControlPayloads.mcpSetServers`) and does not send the request |
+
+Tandem waits 15 s for `mcp_status` and `mcp_toggle` and 30 s for `mcp_reconnect` and `mcp_authenticate`, then shows `The CLI
+did not answer within 15 s.` (or `30 s.`). Every `mcp_*` request in the fixture falls between turns: whether the CLI answers
+one while a turn runs, or holds it until the `result`, is unrecorded (it does answer `interrupt` mid-turn,
+`interrupt.ndjson:13`). For a sign-in Tandem opens `authUrl` in the system browser, only when it is an absolute `http` or
+`https` URL with a host (`ControlPayloads.browsableUrl`), then lists the servers every 2 s for up to 3 minutes, until the
+server leaves `needs-auth`. None of these requests reaches the on-disk transcript (`transcripts/mcp-status.jsonl` holds only
+the three turns). claude.ai connectors, which the documentation describes as servers with `source:"claudeai"` and
+`config.type:"claudeai-proxy"`, are in no recording yet.
+
 ### 4.5 Other CLI → host requests
 
 | subtype | When | Tandem |
 |---|---|---|
 | `hook_callback` | host-registered hooks in `initialize` | not used; reply `error` |
 | `mcp_message` | `sdkMcpServers` in-process servers | not used (our MCP server is a real socket server via `--mcp-config`) |
-| `elicitation` | MCP elicitation | reply `error` or render |
+| `elicitation` | an MCP server asks the user for input (`sdk.d.ts` 0.3.306, lines 3976-3999; no recording has one) | answered with the error `Unsupported request: elicitation`, and the chat shows the warning `An MCP server asked for input Tandem cannot show yet.` |
 | `request_user_dialog` | only for kinds we declared | declare none |
 
-The SDK leaves some subtypes unanswered on purpose (those "for the machine serving this session's tools"). Tandem: answer every unknown with `error`.
+The subtypes come from `sdk.d.ts` 0.3.300; only `can_use_tool` (4.3) is recorded. The SDK leaves some subtypes unanswered
+on purpose (those "for the machine serving this session's tools"). Tandem answers every one it does not handle with the
+error `Unsupported request: <subtype>`.
 
 ---
 
@@ -501,7 +607,7 @@ All carry `type:"system"`, `subtype`, `uuid`, `session_id`.
 
 ### 5.1 `init`
 
-Emitted **at the start of every turn** (not only once). Fixture line (truncated):
+Emitted **at the start of every turn** (not only once). Fixture line (`plain-reply.ndjson`, 2.1.300; truncated):
 
 ```json
 {"type":"system","subtype":"init","cwd":"<path>","session_id":"<sid>","tools":[],"mcp_servers":[],
@@ -513,11 +619,11 @@ Emitted **at the start of every turn** (not only once). Fixture line (truncated)
 
 | Field | Use |
 |---|---|
-| `model` | **compare with the user's pick every turn** (hard rule 5) |
+| `model` | **compare with the user's pick every turn** (a model change must never go unnoticed) |
 | `session_id` | persist for resume |
-| `cwd`, `tools`, `mcp_servers[{name,status,source?}]` | show MCP health; verify our `tandem` server is `connected` |
+| `cwd`, `tools`, `mcp_servers[{name,status,source?}]` | MCP servers: below |
 | `permissionMode` | sync UI |
-| `slash_commands`, `terminal_slash_commands`, `skills`, `agents`, `plugins`, `plugin_errors` | command palette |
+| `slash_commands`, `terminal_slash_commands`, `skills`, `agents`, `plugins`, `plugin_errors` | command palette: below |
 | `apiKeySource` | display only |
 | `claude_code_version` | version gating |
 | `capabilities` | feature detection; open set |
@@ -525,11 +631,25 @@ Emitted **at the start of every turn** (not only once). Fixture line (truncated)
 
 Extra fixture fields not in types: `product_feedback_disabled`, `analytics_disabled`, `scratchpad_path`, `messaging_socket_path`, `per_turn_effort_active`, `startup_timing{...}`. Ignore unknown fields.
 
-`effort` is typed in the SDK but missing from every recorded `init` (2.1.300 and 2.1.301), which carry only
-`per_turn_effort_active: true`. So Tandem shows the effort it passed with `--effort`, which for a session loaded from
+MCP servers and commands (2.1.306). `mcp_servers` is the thin list `[{name, status, source}]` (`mcp-status.ndjson:6`): no
+error, config or tools, which come from `mcp_status` (4.4). Recorded statuses: `connected`, `failed` and `needs-auth` (`:6`),
+`disabled` after a toggle (`:23`), and `pending` only in an `mcp_status` answer sent before the first turn (`:2`); the SDK
+(0.3.306) types the same five. Tandem keeps any other value as text (`McpStatus.OTHER`). It merges each `init`'s list into
+the servers it knows: a server whose status changed loses its error, tools and version until the next `mcp_status`, and a
+server the `init` leaves out is dropped, except a claude.ai connector (`source:"claudeai"`), which stays until the next
+`mcp_status`: whether `init` lists connectors is unrecorded. `slash_commands` lists the command names (73 in
+`mcp-slash.ndjson:4`, the names of the initialize `commands`, 4.2) and `terminal_slash_commands` the ones that need the
+terminal (`["doctor","color","focus","reload-plugins"]`, `:4`). In the other fixtures the redactor empties these lists.
+
+`effort` is typed in the SDK but missing from every recorded `init` (2.1.300 to 2.1.308, e.g. `plain-reply.ndjson:4`,
+`mcp-status.ndjson:6`, `bash-mode-context.ndjson:5`), which carry only `per_turn_effort_active: true`. So Tandem shows the effort it passed with `--effort`, which for a session loaded from
 disk is the last `assistant` line's `effort` in its transcript (section 11).
 
 ### 5.2 Other typed subtypes
+
+A row that cites a fixture was recorded (versions in Sources); the others come from `sdk.d.ts` 0.3.300 only, and no fixture
+has `compact_boundary`, `api_retry`, `model_refusal_fallback`, `model_refusal_no_fallback`, `permission_denied`,
+`notification`, `informational`, `local_command_output`, `hook_*`, `background_tasks_changed` or `commands_changed`.
 
 | subtype | Fields | Tandem action |
 |---|---|---|
@@ -542,7 +662,7 @@ disk is the last `assistant` line's `effort` in its transcript (section 11).
 | `notification` | `key, text, priority:"low"\|"medium"\|"high"\|"immediate", color?, timeout_ms?` | IDE notification/inline |
 | `informational` | `content, level:"info"\|"notice"\|"suggestion"\|"warning", tool_use_id?, prevent_continuation?` | inline note |
 | `session_state_changed` | `state:"idle"\|"running"\|"requires_action"`, `sdk_host_only?: true`. Only with `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1` (`misc-state-emit.ndjson:3,18`) or `CLAUDE_CODE_SDK_READS_SESSION_STATE=1`, which adds `sdk_host_only:true` (`misc-state-sdk.ndjson:3`); with neither, never (`misc-state-none`, 2.1.302). `running` before `system/init`; `requires_action` right before each `can_use_tool` and `running` right after the answer (`misc-state-action.ndjson:20,21,24`); `idle` after `result` and `command_lifecycle completed`, as the turn's last line | `idle` is the authoritative turn-over signal |
-| `local_command_output` | output of local slash commands | render as assistant text |
+| `local_command_output` | output of local slash commands (SDK only) | not used for `/mcp`, `/model` or `/help` in 2.1.306: their replies came as the `assistant` lines of 6.1 (`mcp-slash.ndjson:5`, `:11`, `:17`), and no fixture has this subtype. Not decoded: an unknown line |
 | `hook_started/progress/response` | hook lifecycle | ignore (or debug) |
 | `task_started` | `task_id, run_id, tool_use_id, description, is_backgrounded, task_type:"local_agent"\|"local_bash"`; a subagent adds `subagent_type, spawn_depth, prompt` (`agent-sync.ndjson:37`, 2.1.302). `task_id` is the `agent_id` of every subagent line and `tool_use_result.agentId`; `tool_use_id` is the `Agent` block's id (the block is named `Agent` while `init.tools` lists `Task`, `agent-sync.ndjson:35,6`). A plain foreground `Bash` is a task too: `task_type:"local_bash"`, `description` = the call's description, no `subagent_type` (`agent-bash-task.ndjson:21`, a 6 s command), so key subagent handling on `task_type` or `subagent_type` | task list |
 | `task_progress` | `task_id, run_id, tool_use_id, description:"Running <command>", subagent_type, usage{total_tokens, tool_uses, duration_ms}, last_tool_name`; once per subagent tool call, before that call's `assistant` line (`agent-sync.ndjson:41`); none for a Bash task | task list |
@@ -551,7 +671,7 @@ disk is the last `assistant` line's `effort` in its transcript (section 11).
 | `background_tasks_changed` | background tasks; not recorded | task list |
 | `thinking_tokens` | `estimated_tokens, estimated_tokens_delta, user_message_uuid` (`think-default.ndjson:11`): a running estimate while a thinking block streams, interleaved with its `thinking_delta` frames in the `updates` and `summarized` displays, none in `highlights` (section 6.3). It overshoots the final `message_delta.usage.output_tokens_details.thinking_tokens` | token counter |
 | `ui_invalidate` | `event:"ui.render"`; usually the first line of a signed-in run, before `init` (26 of the 29 probe recordings, e.g. `tools-bash.ndjson:1`; section 10). Absent from `think-default`, `think-adaptive` and `think-opus` (2.1.302), which start with the `initialize` response, so key nothing on it | ignore |
-| `commands_changed` | `commands` | refresh palette |
+| `commands_changed` | `commands` | not decoded (an unknown line); the palette keeps the initialize answer's `commands` |
 | `files_persisted`, `memory_recall`, `elicitation_complete`, `control_request_progress`, `plugin_install`, `mirror_error`, `worker_shutting_down` | | ignore or log type |
 
 Tandem decodes `thinking_tokens` (`ThinkingTokens{estimatedTokens, estimatedTokensDelta?, userMessageUuid?}`; a line
@@ -567,7 +687,8 @@ counts tokens from `thinking_tokens`; the `Agent` row's sub-line is `N tool uses
 
 ### 5.3 Model fallback signals (critical)
 
-There are three different ways the model can change under the user. Surface all of them.
+There are three different ways the model can change under the user. Surface all of them. No fixture has a refusal or an
+overload fallback: A to C come from `sdk.d.ts` 0.3.300; `model_not_found` is recorded (`invalid-model`, 2.1.302, section 7).
 
 **A. Refusal fallback** — `system/model_refusal_fallback`:
 
@@ -593,9 +714,12 @@ There are three different ways the model can change under the user. Surface all 
 Note `modelUsage` legitimately contains helper models (fixture: `claude-haiku-5-5` for internal calls), so only `init.model`/`assistant.message.model` mismatches count as a fallback.
 Also `assistant.error = "model_not_found"` means the CLI rejected the model.
 
-**D. Explicit switches** (`set_model`, `/model`, automatic changes) have no stdout message of their own. The only typed
-signal is the `PreModelSwitch`/`PostModelSwitch` hook input (`from_model`, `to_model`, `requested_model`,
-`source: "command"|"picker"|"sdk"|"auto"|"resume"`), which a host only sees if it registers hooks in `initialize`.
+**D. Explicit switches** (`set_model`, `/model`, automatic changes) have no typed stdout message: `set_model` leaves only
+the replayed user line `<local-command-stdout>Set model to …</local-command-stdout>` (`model-switch.ndjson:20`,
+2.1.300) and a bare `/model` only the local-command line of 6.1 (`mcp-slash.ndjson:11`, 2.1.306); neither is a reliable
+switch signal. The only typed signal is the `PreModelSwitch`/`PostModelSwitch` hook input (`from_model`, `to_model`,
+`requested_model`, `source: "command"|"picker"|"sdk"|"auto"|"resume"`), which a host only sees if it registers hooks in
+`initialize`.
 Tandem relies on comparing `init.model` and `assistant.message.model` against the requested model instead.
 
 ---
@@ -603,6 +727,8 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
 ## 6. Assistant, user, and stream events
 
 ### 6.1 `assistant`
+
+Shape (`plain-reply.ndjson:10`, 2.1.300; trimmed):
 
 ```json
 {"type":"assistant","message":{"model":"claude-sonnet-5-5","id":"msg_011C...","type":"message","role":"assistant",
@@ -627,6 +753,20 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
   `thinkingDurationMs`, `thinkingDisplay` and `timestamp` (section 11); `agentId`, `subagentType` and `taskDescription`
   are read as fallbacks too, though the main `<id>.jsonl` carries `agentId` only inside `toolUseResult`
   (`agent-sync.jsonl`, `agent-forwarded.jsonl`).
+- A local command's reply (2.1.306): when the CLI answers a typed `/mcp`, `/model` or `/help` itself (section 3), it writes
+  one `assistant` line with `message.model:"<synthetic>"`, zero usage and two of three top-level keys:
+  `local_command_run {command, args}` (`mcp-slash.ndjson:5`, `:11`) or `local_command_outcome {kind}` for a command it
+  cannot run headless (`{"kind":"unavailable_headless"}`, `/help`, `:17`), plus `local_command_source`, the text wrapped
+  in `<local-command-stdout>…</local-command-stdout>` (`:5`). No `system/status requesting`, no `stream_event`. Its `result`
+  carries `local_command:"mcp"` (none for `/help`, `:18`), `num_turns:0` and `duration_api_ms:0` (`:6`). Tandem shows a line
+  with any of the three keys as an INFO notice under the prompt, never as a reply, the text unwrapped, and that `result`
+  ends the turn without a `Worked for` footer (section 7). `/mcp`'s text ends with `` Use `/mcp` in the terminal for
+  details.``, which Tandem replaces with a link to its MCP panel.
+- `tool_use_meta` (2.1.306) on the line of an MCP tool call: `[{id, display_name, server_display_name, tool_name}]`
+  (`mcp-tool-call.ndjson:34`: `{"id":…,"display_name":"Echo","server_display_name":"echo","tool_name":"echo"}`). Decoded as
+  `Assistant.toolUseMeta` (an entry without a string `id` is skipped), not shown yet: the row names an
+  `mcp__<server>__<tool>` call `<server>: <tool>`. MCP tools are deferred: before the call the model runs `ToolSearch` with
+  `select:mcp__echo__echo` (`:22`).
 
 ### 6.2 `user` (tool results)
 
@@ -654,8 +794,9 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
 - Subagent lines, `user` and `assistant`, carry `parent_tool_use_id` (the `Agent` block's id), `agent_id` (the task's
   `task_id`, section 5.2), `subagent_type` and `task_description` (`agent-sync.ndjson:38,47`); the first is a `user`
   text line echoing the subagent's prompt (`:38`). No `stream_event` frames come from a subagent.
-- Per-tool `tool_use_result` on success (2.1.302), the shapes Tandem renders; the full table, with inputs and the
-  `tool_result.content` texts, is section 2.4 of `docs/superpowers/research/2026-10-18-protocol-probes.md`:
+- Per-tool `tool_use_result` on success, the shapes Tandem renders, recorded with 2.1.302 at the fixture lines of the last
+  column; each cited line also holds the call's `tool_result.content` text, and the `assistant` line with its `tool_use`
+  block, before it, the call's input:
 
 | Tool | `tool_use_result` | Fixture |
 |---|---|---|
@@ -667,6 +808,15 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
 | AskUserQuestion | `{questions, answers, response?}` (section 4.3) | `ask-single.ndjson:26` |
 | ExitPlanMode | `{plan, isAgent, filePath}`; `plan:null` when `Write` was disallowed | `plan-approve.ndjson:91`, `plan-disallowed.ndjson:178` |
 
+- An MCP tool's result (2.1.306, `mcp-tool-call.ndjson:39`): the `tool_result` block's `content` is what the server
+  returned, here the JSON string `{"result":"hello tandem"}` because the `echo` server (section 10) declares an output schema (a server
+  without one would return text blocks: unrecorded), and the line's `tool_use_result` is `{content, _meta,
+  structuredContent}`, with `_meta:{"io.modelcontextprotocol/serverInfo":{name, version}}` and `structuredContent` the
+  parsed object. A denied MCP call (`:62`) is a `tool_result` with `is_error:true` and the deny message as `content`,
+  `tool_use_result:"Error: <message>"`, and `tool_result_meta:[{id, non_execution_kind:"permission-rule",
+  permission_decision:{decision:"reject", source:"user_reject"}}]`; the turn's `result.permission_denials` lists the call
+  (`:73`). On disk `toolUseResult` is the content string only and the rest moves to `mcpMeta:{_meta, structuredContent}`
+  (`transcripts/mcp-tool-call.jsonl:32`).
 - `isSynthetic: true` for CLI-generated user messages; `isReplay: true` for echoes of our own sends (with `--replay-user-messages`).
 
 ### 6.3 `stream_event` (with `--include-partial-messages`)
@@ -688,7 +838,8 @@ Tandem relies on comparing `init.model` and `assistant.message.model` against th
 | `message_delta.usage` | the request's `output_tokens` and `output_tokens_details.thinking_tokens` (`plain-reply.ndjson:12`); Tandem decodes both, and the working row's ` · N tokens` adds up each request's `output_tokens` (plus the running `thinking_tokens` estimate until the request's `message_delta`) |
 | `thinking_display` | wrapper-level `"updates"\|"summarized"\|"highlights"` on `message_start`, the block's `content_block_start` and every `thinking_delta` frame (`think-default.ndjson:7,8,10`; `think-display-summarized.ndjson:8,11`), not on `signature_delta` or `content_block_stop` (`think-default.ndjson:15,17`; `think-display-highlights.ndjson:11`), so no decoder keys block membership on its presence; and on the `assistant` line that completes the block, with `thinking_duration_ms` (`think-default.ndjson:16`: 2143 ms). The SDK types it only on `set_max_thinking_tokens`; `"full"` never appears over stdio (section 4.4) |
 
-Thinking blocks (2.1.302, fixtures `think-*`; probes doc 2.3). In the default display, `updates`
+Thinking blocks (2.1.302, fixtures `think-default`, `think-adaptive`, `think-opus`, `think-display-summarized`,
+`think-display-highlights` and `think-summarized`). In the default display, `updates`
 (without `--thinking-display`; Opus the same, `think-opus`), every `thinking_delta` has `thinking:""` and a non-standard sibling `estimated_tokens`, an
 integer on the first deltas and `null` on the last one before `signature_delta` (`think-default.ndjson:10,12,13`); the
 completed block is `{type:"thinking", thinking:"", signature}` (`:16`), and the thinking shows only as
@@ -704,7 +855,7 @@ session recorded in `updates` has no summaries to load.
 
 ### 6.4 Correlating partial and complete messages
 
-Fixture order for one text block:
+Fixture order for one text block (`plain-reply.ndjson:7-15`, 2.1.300):
 
 ```
 stream_event message_start            (message.id = M)
@@ -735,7 +886,7 @@ Reconciliation rules for `session/`:
 
 ## 7. `result`
 
-Exactly one per turn, after that turn's `assistant`/`user`/`stream_event` lines; some `system` lines (e.g. `post_turn_summary`, `session_state_changed`) can still follow.
+Exactly one per turn, after that turn's `assistant`/`user`/`stream_event` lines; some `system` lines (e.g. `post_turn_summary`, `session_state_changed`) can still follow. Shape (as `plain-reply.ndjson:15`, 2.1.300; trimmed, values illustrative):
 
 ```json
 {"type":"result","subtype":"success","is_error":false,"result":"pong","num_turns":1,"duration_ms":1456,"duration_api_ms":1961,
@@ -768,6 +919,10 @@ API error (fixture `invalid-model`, 2.1.302, run with `--model claude-nonexisten
 The subtype says nothing here: Tandem names the failure by `terminal_reason`, and the rejected model by the model picked
 or reported, never `<synthetic>`.
 
+A local command's turn (6.1; 2.1.306) ends with a `result` that has `num_turns:0`, `duration_api_ms:0` and, for `/mcp` and
+`/model`, `local_command` (`mcp-slash.ndjson:6`, `:12`; none for `/help`, `:18`). Tandem ends a turn without a `Worked for`
+footer when its `result` has `local_command` or a local-command line (6.1) came during it, as for `/help`.
+
 Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session_state_changed{state:"idle"}` when available.
 
 ---
@@ -781,7 +936,7 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 | Continue latest in cwd | `--continue` (not used) |
 | Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, and no `system/init` reports it before the fork's first prompt (only undocumented lines do, section 1.1) |
 | Resume at a point | `--resume <id> --resume-session-at <message uuid>` (not used) |
-| Switch model mid-session | `control_request{set_model, model}`; next turn's `system/init.model` must equal it. `--model` on resume also works |
+| Switch model mid-session | `control_request{set_model, model}` (4.4; fixture `model-switch`, 2.1.300); next turn's `system/init.model` must equal it. `--model` on resume also works. Tandem shows the picked model at once. An `error` answer is unrecorded (no recording has one); Tandem then puts back what the footer showed before that pick, its own mismatch warning included, unless a later pick replaced it meanwhile, and adds the error notice `The CLI rejected the switch to model <m> (<error>); it stays on model <x>.`: `<x>` is the model the CLI still runs, an earlier accepted pick that still waits for its `system/init`, else the last `init`'s model, else the pick before; `the default model` stands for `model <m>` or `model <x>` when that is the default, and the parentheses are left out when the answer has no `error` text. The CLI takes the requests in the order they were sent, so a pick still waiting starts from the model the refused one left |
 | Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`). Tandem shows the new mode at once; an `error` response to that request (envelope 4.1; fixture `permission-mode-rejected`, 2.1.302: `bypassPermissions` to a process not launched with `--dangerously-skip-permissions` gets `{"subtype":"error","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions","error_code":"bypass_not_launched"}`, and the session goes on) puts back the mode shown before it, unless a later pick replaced it, with an error notice naming the rejected mode. `auto` (fixture `permission-mode-auto`, 2.1.306): `set_permission_mode auto` is acknowledged with `{"mode":"auto"}` and a `system/status` line in `auto`, and the next `init` reports `auto`; a process spawned with `--permission-mode auto` reports `auto` in its first `init` too (a probe, not committed), so Tandem offers `auto` and a respawn keeps it |
 | Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4; fixture `effort-switch` for the request, its success and its error shape): the next turn runs at the new level (the 2.1.301 probe of section 4.4; both of the fixture's turns ran at its default, `high`). Tandem sends it for an effort picked in the footer of a live session and shows the level at once; an `error` answer puts back the level shown before it, with the notice `Effort not changed: <error>`. A stopped session passes the pick with `--effort` at its next spawn |
 | Rename | a live process that has reported its first `system/init`: `control_request{rename_session}` (section 4.4); otherwise append a `custom-title` line (section 11.5) if the transcript exists. A live process that has not reported it yet also gets `rename_session` with that init, and so does the next process of a session renamed without a transcript or while an earlier title still waited for an init; only the last title is sent |
@@ -814,15 +969,21 @@ Fork title: the CLI writes no "(fork)" title. A fork's transcript only inherits 
 
 ## 9. Gotchas
 
+A row that cites a fixture was recorded (versions in Sources); the others come from SDK 0.3.300 or say **inferred**.
+
 | Topic | Detail |
 |---|---|
 | Version gating | Use `init.capabilities` first, `claude_code_version` second. `pending_permission_requests` on initialize from 2.1.268; `interrupt_receipt_v1` for `still_queued`; `scope` on refusal fallback is new (absent = `session`). Refuse to start below a minimum tested version and say so. |
 | Interrupt | Fixture `interrupt`: the receipt `{still_queued:[]}` arrives, then the partial `assistant`, a synthetic `user` text `[Request interrupted by user]`, the remaining stream frames, and `result{subtype:"error_during_execution", is_error:true, terminal_reason:"aborted_streaming", stop_reason:null}`. Treat that result as "stopped", not as a failure. Recorded again with 2.1.301 as `history-interrupt`, with its transcript (section 11): the same order; closing stdin afterwards ended the process with exit code 1. |
 | API error | Fixture `invalid-model`: a synthetic `assistant` line (`model:"<synthetic>"`, `error:"model_not_found"`, `api_error_status:404`), then `result{subtype:"success", is_error:true, terminal_reason:"api_error"}` (section 7). A failed turn, named by `terminal_reason`, not by the subtype. |
 | Undocumented stdout types | See section 10. The SDK passes them through untouched. |
-| Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init`. Do not assume `init` is first. |
+| Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init` (`plain-reply.ndjson:1,2,4`, 2.1.300). Do not assume `init` is first. |
+| Local commands | A typed local command (`/mcp`, `/model`, `/help`) runs no turn and is not echoed: the CLI answers with a synthetic `assistant` line carrying `local_command_*` and a zero-turn `result` (`mcp-slash.ndjson:5`-`:6`, `:17`-`:18`, 2.1.306). No model output follows; show the line as the reply (6.1, 7). |
+| Batched and merged sends | The CLI batches the user frames queued before it starts processing (`bash-mode.ndjson:3-6`: both queued, then both started) and merges quiet ones (`shouldQuery:false`) into one transcript line with `mergedSendUuids` (`transcripts/bash-mode.jsonl:5`), answered by one zero-turn `result` naming both (`bash-mode.ndjson:8`, 2.1.306). A `result` can end several sends: read `user_message_uuids` (section 3, 7). |
+| `mcp_status` before the first prompt | The stdio servers are still `pending` (`mcp-status.ndjson:2`, 2.1.306); the first `init` already has settled states (`:6`). Ask again later (4.4). |
+| `mcp_set_servers` | Replaces only the servers it added itself, though every server of `--mcp-config` reports `source:"dynamic"` too: `{}` removes `echo2` alone (`mcp-status.ndjson:44`) and `echo`, `broken`, `authy` stay (`:45`, 2.1.306). The source does not tell the two apart (4.4). |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
-| Ordering | complete `assistant` precedes `content_block_stop` (section 6.4). |
+| Ordering | complete `assistant` precedes `content_block_stop` (`plain-reply.ndjson:10,11`; section 6.4). |
 | stdin close | Closing stdin = end of input. The SDK only calls `endInput()` after the last result when no bidirectional needs (permissions, hooks, MCP) remain. **Keep stdin open for the whole session**; close it to shut down gracefully, then wait for exit. |
 | Shutdown | On dispose: close stdin, wait briefly, then SIGTERM, then SIGKILL (inferred timings). Writes after the child exits raise EPIPE: treat as session ended. |
 | Exit codes | `0` normal. Non-zero: SDK error text `Claude Code process exited with code N` + stderr tail. Killed by signal: report the signal. Startup failures may first write a zeroed `result{subtype:"error_during_execution", startup_failure_reason}`; show `errors[]`. |
@@ -838,7 +999,7 @@ Fork title: the CLI writes no "(fork)" title. A fork's transcript only inherits 
 
 ## 10. Fixture fields and types the SDK does not document
 
-Seen in the fixtures (`plain-reply.ndjson` and the others, CLI 2.1.300 and 2.1.301) but absent from `sdk.d.ts` 0.3.300,
+Seen in the fixtures (`plain-reply.ndjson` and the others; CLI 2.1.300 and 2.1.301 unless a row names another) but absent from `sdk.d.ts` 0.3.300,
 or typed differently there.
 Parse them leniently; any of them can change without notice.
 
@@ -859,6 +1020,32 @@ Parse them leniently; any of them can change without notice.
 | `assistant.wire_tool_inputs` | `{<tool_use id>: input}` | not in `sdk.d.ts` |
 | `user.tool_result_meta` | `[{id, permission_decision:{decision, source, reason_type?}, non_execution_kind?}]` | not in `sdk.d.ts`; typed, section 6.2 (`ToolResultMeta`; an entry without a string `id` is skipped; `reason_type`: `tools-read.ndjson:21`, 2.1.302) |
 | initialize `control_response` | `pid, current_permission_mode, session_state, feedback_mode, remote_control_*, user_output_styles_dir` | beyond `SDKControlInitializeResponse` |
+| assistant `local_command_run`, `local_command_outcome`, `local_command_source`; result `local_command` | a local command's reply (6.1, 7) | not in `sdk.d.ts` 0.3.300 (`mcp-slash.ndjson:5`, `:6`, `:17`, 2.1.306) |
+| assistant `tool_use_meta`, user `tool_use_result._meta` / `structuredContent`, `can_use_tool.server_policy_ask_only` | an MCP tool call's label, result and request (4.3, 6.1, 6.2) | not in `sdk.d.ts` 0.3.300 (`mcp-tool-call.ndjson:34`, `:35`, `:39`, 2.1.306) |
+| `mcp_authenticate` and its answer | 4.4, MCP requests | not in the typed request union of `sdk.d.ts` 0.3.306 (`mcp-status.ndjson:40`, 2.1.306) |
+
+The MCP fixtures (CLI 2.1.306, each with its transcript) were recorded by a one-off driver whose frames are now the
+`mcp-status`, `mcp-tool-call` and `mcp-slash` scenarios of `scripts/record-scenario.sh` (`scripts/drive_cli.py`; the nightly
+`cli-contract.yml` records `mcp-status`, `mcp-tool-call` and `mcp-slash` and `ContractTest` checks them), with `scripts/drive_cli.py`'s argv minus
+`--safe-mode` (which turns MCP servers off), plus `--mcp-config <cwd>/mcp.json --strict-mcp-config --setting-sources
+project,local`, against three local servers: `echo` (stdio, one tool `echo` with an output schema), `broken` (`/bin/false`,
+so it fails at once) and `authy` (local HTTP that always answers 401 with OAuth metadata and dynamic client registration,
+and never issues a token). `scripts/mcp_probe_servers.py` serves `echo` and `authy` with Python's standard library only; the
+one-off driver's `echo` used the Python MCP SDK. The redactor kept their `init` lists, which it empties elsewhere
+(`INIT_KEEP`, by fixture name). A re-recording shifts the line numbers that the tests and this document cite, so the
+committed MCP fixtures stay those of 2.1.306.
+
+| Fixture | Host frames (not in the file) | What it records |
+|---|---|---|
+| `mcp-status` | `initialize`; `mcp_status`; a turn; `mcp_status`; `mcp_toggle echo false`; `mcp_status`; a turn; `mcp_toggle echo true`; `mcp_status`; `mcp_reconnect broken`; `mcp_reconnect authy`; `mcp_toggle nosuch`; `mcp_status`; `mcp_authenticate authy`; `mcp_status`; `mcp_set_servers {echo2}`; `mcp_status`; `mcp_set_servers {}`; `mcp_status`; a turn | every answer of 4.4's MCP requests, `pending` before the first turn (`:2`), the thin `init` list (`:6`, `:23`, `:48`). In `:40` the OAuth nonces read the URL-safe `REDACTED_CODE_CHALLENGE` and `REDACTED_STATE` (in `authUrl`'s query and in `state`), so the link still parses as a URI: first replaced by hand, but today's `scripts/redact_fixture.py`, run over the run's raw output, gives the committed stream and transcript byte for byte (checked on 2026-10-22). Its transcript holds only the three turns |
+| `mcp-tool-call` | `initialize`; a prompt asking for `mcp__echo__echo` with `hello tandem`, allowed; a prompt asking again with `second`, denied with `The user denied this call.` | the deferred tool's `ToolSearch` (`:22`, `:24`), `tool_use_meta` (`:34`), `can_use_tool` with `mcp_server` and `server_policy_ask_only` (`:35`), the result's `structuredContent` and `_meta` (`:39`), the denial (`:62`, `:73`). Transcript: `mcpMeta` (`transcripts/mcp-tool-call.jsonl:32`), `toolDenialKind` (`:41`) |
+| `mcp-slash` | `initialize`; the prompts `/mcp`, `/model`, `/help`, then `/hello` (a project command, `.claude/commands/hello.md` in the working directory) | the initialize `commands` catalogue (`:1`), `init.slash_commands` and `terminal_slash_commands` (`:4`), three local commands answered without the model (`:5`-`:6`, `:11`-`:12`, `:17`-`:18`) and one project command that runs a turn (`:22`-`:34`). Transcript: the `local_command` lines of 11.2 (`transcripts/mcp-slash.jsonl:5`, `:10`, `:13`, `:14`); `:13`'s `submitUuid` reads `<leaked-1>`, the redactor's safety net (the redactor now replaces that key) |
+
+The shell-escape fixtures are `scripts/record-scenario.sh` scenarios too: `bash-mode` and `bash-mode-respond` (2.1.306)
+and `bash-mode-context` (2.1.308); the nightly records all three again. `transcripts/bash-mode.jsonl:5`'s `mergedSendUuids` read
+`<leaked-1>`, the redactor's safety net: it was replaced by hand with `<command_uuid-4>`, the first quiet frame's uuid (the
+line's own `uuid` is the second's, `<command_uuid-6>`, as `bash-mode.ndjson:3-4` queued them), and the redactor now replaces
+that key.
 
 ---
 
@@ -867,7 +1054,8 @@ Parse them leniently; any of them can change without notice.
 The CLI keeps each session as a JSONL file that it only ever appends to. Tandem has no session store of its own: the
 sidebar lists these files and a session's history loads from its file (`session/transcript/`), so sessions started in a
 terminal show up too. Sources: SDK 0.3.300 (`sdk.mjs` reads and writes the same files), the transcript fixtures in
-`src/test/resources/fixtures/transcripts/` (CLI 2.1.301), and measurements where noted.
+`src/test/resources/fixtures/transcripts/` (CLI 2.1.301 to 2.1.308, as Sources at the top lists them), and measurements
+where noted.
 
 ### 11.1 Where they are
 
@@ -915,19 +1103,30 @@ have `uuid` and `parentUuid` (11.3).
 | `ai-title` | `aiTitle` | a generated title |
 | `summary` | `summary` | a generated summary, a title like `ai-title` |
 | `last-prompt` | none | `lastPrompt`, `leafUuid`: not used |
-| `system` | `uuid`, `parentUuid`, `subtype` | links of the chain; `subtype: compact_boundary` marks a compaction (11.3) |
+| `system` | `uuid`, `parentUuid`, `subtype`; for `local_command`: `content`, `commandRun`, `commandOutcome`, `submitUuid` | links of the chain; `subtype: compact_boundary` marks a compaction (11.3); `subtype: local_command` is a local command (below) |
 | `attachment`, `queue-operation`, `cost-state`, `atis-latch`, `mode`, `agent-name`, `file-history-snapshot`, `progress`, any other type | `uuid`, `parentUuid` when present | skipped, except as links of the chain |
 
-The 2.1.301 fixtures show every type above except `summary`, `system`, `file-history-snapshot` and `progress`, which
-come from the SDK's reader. Also recorded: a prompt's `user` line has the `uuid` the host sent with the prompt
+The 2.1.301 fixtures show every type above except `summary`, `system`, `file-history-snapshot` and `progress`. `system`
+(`subtype: local_command`, and `turn_duration` in the terminal's own transcript) and `file-history-snapshot` are recorded
+with 2.1.306 (`transcripts/mcp-slash.jsonl`, `transcripts/bash-mode-interactive.jsonl`); `summary` and `progress` come
+from the SDK's reader only. Also recorded: a prompt's `user` line has the `uuid` the host sent with the prompt
 (`history-interrupt`); `assistant` lines also carry `requestedModel`, `perTurnEffort` and `requestId`; a reply cut off
 by an interrupt has `isAbortedMidStream: true` where its stdout line has `aborted: true`.
+
+A local command (2.1.306, `transcripts/mcp-slash.jsonl`; on stdout, 6.1) is written as an `isMeta` user line with a
+`<local-command-caveat>` (`:3`, skipped as every `isMeta` line is), the `<command-name>/mcp</command-name>` user line (`:4`,
+shown as `/mcp`, 11.4), then a `system` line with `subtype:"local_command"`, `level:"info"`, `content` wrapped in
+`<local-command-stdout>` and `commandRun:{command, args}` (`:5`, `/model` `:10`) or `commandOutcome:{kind:"unavailable_headless"}`
+(`:14`). Tandem reads that line as it reads the stream's local-command line: the same INFO notice with the same text. `/help`
+has no `<command-name>` line; a `local_command` line with the bare `content:"/help"` and a `submitUuid` (`:13`) holds the
+typed command instead, which Tandem shows as the user's `/help`. A `local_command` line wrapped in `<local-command-stderr>`
+is read the same way (unrecorded).
 
 ### 11.3 The current history
 
 A rewind or an edited prompt leaves the abandoned turns in the file, so the history is not simply every line. A first
-pass (`TranscriptChain`) works out which conversational lines (`user` or `assistant`, neither `isSidechain` nor
-`isMeta`) belong to it:
+pass (`TranscriptChain`) works out which conversational lines (`user` or `assistant`, and a local command's `system`
+line with `subtype: local_command`, neither `isSidechain` nor `isMeta`) belong to it:
 
 1. The current history is the `parentUuid` chain that ends at the last conversational line with a `uuid`. The chain runs through lines
    of any type (in the fixtures every `assistant` line's parent is an `attachment` line), so every line with a `uuid` is
@@ -964,14 +1163,16 @@ fixture has a rewind, a compaction or parallel tool calls yet; `TranscriptReader
 | `[Request interrupted` (`by user`, `by user for tool use`) | an interrupt | the interrupt notice, shown as `Interrupted · What should Claude do instead?`, as live |
 | `<command-name>` or `<command-message>`, with `<command-args>` | a slash command | `/name args`, never as the title |
 | `<local-command-stdout>`, `<local-command-stderr>` | a command's output | nothing |
-| `<bash-input>` | a `!command` shell escape | `!command` |
-| `<bash-stdout>`, `<bash-stderr>` | its output | nothing |
+| `<bash-input>` | a `! command` shell escape | the shell row `! command` (the title form too, as the CLI's own `last-prompt`); its output on the same line (`transcripts/bash-mode.jsonl:5`) is the row's output |
+| `<bash-stdout>`, `<bash-stderr>` | its output, on a line of its own (`transcripts/bash-mode-respond.jsonl:6`) | the row's output: stdout, then a non-empty stderr on a line of its own; skipped when no shell row before it is still without output |
 | `<task-notification>` | a background task | nothing |
 
-Only the interrupt line is recorded (`history-interrupt`, 2.1.301):
+Recorded: the interrupt line (`history-interrupt`, 2.1.301):
 `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"parentUuid":<the cut-off reply>,…}`,
-the shape the hand-written test uses. The others come from the CLI's binary and the SDK and are pinned with hand-written
-lines in `TranscriptReaderTest`.
+the shape the hand-written test uses; a slash command's line (`transcripts/mcp-slash.jsonl:4`, 2.1.306); the shell-escape
+lines (`transcripts/bash-mode.jsonl:5`, `transcripts/bash-mode-respond.jsonl:6`, 2.1.306). The others, a
+`<local-command-stdout>` or `<local-command-stderr>` user line and `<task-notification>`, come from the CLI's binary and the SDK and are pinned with
+hand-written lines in `TranscriptReaderTest`.
 
 A loaded chat is settled whatever the file ends with: not busy, no pending permission, no streaming entry.
 
@@ -981,15 +1182,16 @@ decoder reads the on-disk names (`toolUseResult`, `thinkingDurationMs`, `agentId
 
 | Row element | Live source | On disk (`fixtures/transcripts/*.jsonl`) | On reload |
 |---|---|---|---|
-| tool bodies, stats | `tool_use_result` | `toolUseResult` (`tools-edit.jsonl` has `structuredPatch`) | identical bodies |
-| `DONE` / `FAILED` / `DENIED` | `tool_result_meta` / `is_error` | `permissionDecision` + `toolDenialKind` (`ask-deny.jsonl:20`), `is_error` in the block | identical states |
-| thinking summary, duration | deltas, `thinking_duration_ms` | the block text as recorded, `thinkingDurationMs` (`think-default.jsonl`: 2143) | `Thought for 2s`; the summary only if the session ran summarized (`think-display-summarized.jsonl:18`) |
+| tool bodies, stats | `tool_use_result` | `toolUseResult` (`transcripts/tools-edit.jsonl` has `structuredPatch`) | identical bodies |
+| `DONE` / `FAILED` / `DENIED` | `tool_result_meta` / `is_error` | `permissionDecision` + `toolDenialKind` (`transcripts/ask-deny.jsonl:20`), `is_error` in the block | identical states |
+| thinking summary, duration | deltas, `thinking_duration_ms` | the block text as recorded, `thinkingDurationMs` (`transcripts/think-default.jsonl`: 2143) | `Thought for 2s`; the summary only if the session ran summarized (`transcripts/think-display-summarized.jsonl:18`) |
 | thinking tokens | `system/thinking_tokens` | not on disk | no ` · n tokens` (the row is complete anyway) |
 | `Worked for …` footer | `result` | no `result` lines | no footer; `Interrupted · …` from the marker notice only |
 | working row | `turn` | settled state | none; every call without a result is `INTERRUPTED` |
-| subagent children | sidechain lines with `parent_tool_use_id` | not in `<id>.jsonl` (they live in `<id>/subagents/agent-*.jsonl`, not read) | `Agent` row with `Done (…)` from `toolUseResult.totalToolUseCount/totalTokens/totalDurationMs` (`agent-sync.jsonl`) and no children; its body is the agent's final text |
+| subagent children | sidechain lines with `parent_tool_use_id` | not in `<id>.jsonl` (they live in `<id>/subagents/agent-*.jsonl`, not read) | `Agent` row with `Done (…)` from `toolUseResult.totalToolUseCount/totalTokens/totalDurationMs` (`transcripts/agent-sync.jsonl`) and no children; its body is the agent's final text |
 | user send time, elapsed | `sentAtMillis` | `timestamp` on the user line | unused on a settled state |
 | notices (retries, fallbacks) | `system/*` lines | not on disk | absent |
+| shell row status | the runner's end (`ShellEnded`: exit code, `Stopped after …`, `Killed after 10 minutes`) | not on disk: only the command and its output (`transcripts/bash-mode.jsonl:5`, `transcripts/bash-mode-respond.jsonl:3,6`) | no status line under the row |
 | `cwd` for relative names | `system/init.cwd` | every line's `cwd` | identical names |
 
 `cwd`: the first line's `cwd` (the first line of the current history that has one), so relative file names match the

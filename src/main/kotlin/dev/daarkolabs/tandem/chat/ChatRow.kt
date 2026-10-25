@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.chat
 
+import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.TurnEnd
 import kotlinx.collections.immutable.ImmutableList
@@ -36,6 +37,22 @@ data class UserRow(
     val mono: Boolean,
     override val gap: RowGap = RowGap.TURN,
     val images: ImmutableList<ImageRef> = persistentListOf(),
+) : ChatRow
+
+/**
+ * A shell escape (`! command`, MCP spec 12.1), `sh:<entry id>`, in place of a user bubble: its [command], its [output] with colour
+ * escapes stripped and cut like a tool body (at most 400 lines; [totalLines] counts them all), whether it still [running] (its Stop),
+ * and the line under it, when there is something to say: [status] (`exit 2`, `Stopped after 3.0s`, …), an error when [statusError].
+ */
+data class ShellRow(
+    override val key: String,
+    val command: String,
+    val output: ImmutableList<String>,
+    val totalLines: Int,
+    val running: Boolean,
+    val status: String?,
+    val statusError: Boolean,
+    override val gap: RowGap = RowGap.TURN,
 ) : ChatRow
 
 /** One image of a [UserRow]: the id of its [dev.daarkolabs.tandem.session.UserImage], its media type and its [index] in the message. */
@@ -98,8 +115,26 @@ data class ToolRow(
     override val gap: RowGap,
 ) : ChatRow
 
-/** A notice of the chat (retries, fallbacks, errors), `n:<entry id>`. */
-data class NoticeRow(override val key: String, val level: NoticeLevel, val text: String, override val gap: RowGap = RowGap.SECTION) : ChatRow
+/**
+ * A notice of the chat (retries, fallbacks, errors, a local command's output), `n:<entry id>`. On a [NoticeKind.LOCAL_COMMAND]
+ * notice, [command] is the command it answers (its accessibility name `Reply to /<command>`, `Command output` when null) and [link]
+ * the action that replaces the CLI's terminal hint (`/mcp`'s [MCP_TERMINAL_HINT], removed from [text]).
+ */
+data class NoticeRow(
+    override val key: String,
+    val level: NoticeLevel,
+    val text: String,
+    override val gap: RowGap = RowGap.SECTION,
+    val kind: NoticeKind = NoticeKind.GENERIC,
+    val command: String? = null,
+    val link: NoticeLink? = null,
+) : ChatRow
+
+/** An action at the end of a notice, with its label. */
+enum class NoticeLink(val label: String) { OPEN_MCP("Open the MCP panel") }
+
+/** The sentence `/mcp`'s local answer ends with (`mcp-slash:5`); a notice with [NoticeLink.OPEN_MCP] drops it, by exact match. */
+const val MCP_TERMINAL_HINT: String = " Use `/mcp` in the terminal for details."
 
 /** How the latest turn ended, `e:<entry id>` (or `e:<notice id>` for an interrupt marker without a result). */
 data class TurnEndRow(override val key: String, val end: TurnEnd, val text: String, override val gap: RowGap = RowGap.SECTION) : ChatRow

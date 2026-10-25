@@ -1,13 +1,23 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ControlPayloads
+import dev.daarkolabs.tandem.protocol.Fixtures
+import dev.daarkolabs.tandem.protocol.HostMessages
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.protocol.McpAuthStart
+import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -18,6 +28,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -28,12 +41,15 @@ import java.io.InputStream
 import java.nio.file.Path
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /** Runs [ClaudeSession] against a fake CLI (a shell script), so no real `claude` is needed. */
 class ClaudeSessionTest {
@@ -513,7 +529,7 @@ class ClaudeSessionTest {
     }
 
     /** A scope whose uncaught exceptions are kept in [uncaught], and a session in it whose process is [process]. */
-    private class CutOffSession(process: CutOffProcess, tmp: Path, sessionId: String) {
+    private class CutOffSession(process: Process, tmp: Path, sessionId: String) {
         val uncaught: MutableList<Throwable> = Collections.synchronizedList(ArrayList())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> uncaught.add(e) })
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = sessionId), ProcessLauncher { _, _ -> process })
@@ -618,5 +634,698 @@ class ClaudeSessionTest {
         }
     }
 
+    /**
+     * A session on a [ScriptedProcess]: the test writes the CLI's lines with [write], and every frame the host writes lands in
+     * [stdin]. Answers go through the session's own request path (spec 9.2). With [child], the real process first starts that shell
+     * command in the background and then becomes the `cat` itself: a process the CLI started, which outlives it.
+     */
+    private class ScriptedSession(
+        tmp: Path,
+        sessionId: String,
+        mcpMillisPerSecond: Long = 1_000L,
+        quietWaitMillis: Long = 5_000L,
+        child: String? = null,
+    ) {
+        val stdin: File = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", (child?.let { "$it & exec " } ?: "") + "cat > '${stdin.path}'").start())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(
+            scope,
+            SessionConfig("claude", tmp, sessionId = sessionId),
+            ProcessLauncher { _, _ -> process },
+            mcpMillisPerSecond = mcpMillisPerSecond,
+            quietWaitMillis = quietWaitMillis,
+        )
+
+        fun write(line: String) = process.script.println(line)
+
+        /**
+         * The CLI dies by itself, as in a crash or when something outside Tandem kills it. Unlike [Process.destroyForcibly], which
+         * also closes Tandem's ends of its pipes, nothing else changes: the pipes stay as they are, and its scripted output ends.
+         */
+        fun die() {
+            process.toHandle().destroyForcibly()
+            process.script.close()
+        }
+
+        /** A success answer to [requestId]; [payload] is its `response` object, none for a bare success (`mcp-status:19`). */
+        fun success(requestId: String, payload: String? = null) {
+            val response = payload?.let { ""","response":$it""" } ?: ""
+            write("""{"type":"control_response","response":{"subtype":"success","request_id":"$requestId"$response}}""")
+        }
+
+        /** An error answer to [requestId], in the envelope of docs/protocol.md 4.1. */
+        fun error(requestId: String, message: String) =
+            write("""{"type":"control_response","response":{"subtype":"error","request_id":"$requestId","error":"$message"}}""")
+
+        /** The frames the host wrote that contain [part], once there are [count]. */
+        suspend fun written(part: String, count: Int = 1): List<String> = withTimeout(10_000) {
+            var lines = stdin.readLines().filter { part in it }
+            while (lines.size < count) {
+                delay(20)
+                lines = stdin.readLines().filter { part in it }
+            }
+            lines
+        }
+
+        /** The host's [nth] `control_request` of [subtype], once it is written. */
+        suspend fun requestOf(subtype: String, nth: Int = 1): JsonObject =
+            Json.parseToJsonElement(written("\"subtype\":\"$subtype\"", nth)[nth - 1]).jsonObject
+
+        /** The request id of the host's [nth] `control_request` of [subtype], once it is written. */
+        suspend fun requestIdOf(subtype: String, nth: Int = 1): String = requestOf(subtype, nth).getValue("request_id").jsonPrimitive.content
+
+        /**
+         * The chat once every line written so far has been read: an answer nobody waits for goes last, and its notice says the reader
+         * got to it. Its own notice is left out.
+         */
+        suspend fun settled(): ChatState {
+            error("sentinel", "sentinel")
+            val state = withTimeout(10_000) { session.state.first { s -> s.entries.any { it is ChatEntry.Notice && it.text == SENTINEL } } }
+            return state.copy(entries = state.entries.filterNot { it is ChatEntry.Notice && it.text == SENTINEL }, entryIndex = emptyMap())
+        }
+
+        suspend fun close() = scope.coroutineContext.job.cancelAndJoin()
+
+        private companion object {
+            const val SENTINEL = "The CLI rejected a request: sentinel"
+        }
+    }
+
+    private fun ChatState.notices(level: NoticeLevel): List<String> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == level }.map { it.text }
+
+    private fun rejected(error: String): String = "The CLI rejected a request: $error"
+
+    @Test
+    fun `a request completes with the response that carries its id and the reducer never sees it`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val sent = CompletableDeferred<String>()
+        val reply = async { run.session.request(10_000) { sent.complete(it); HostMessages.mcpStatus(it) } }
+        val requestId = withTimeout(10_000) { sent.await() }
+        run.written("\"request_id\":\"$requestId\"")
+        run.error("someone-else", "not this one") // another id: the reducer's
+        run.error(requestId, "Server not found: nosuch")
+
+        val answered = assertIs<Reply.Answered>(withTimeout(10_000) { reply.await() })
+        assertEquals(requestId, answered.response.requestId)
+        assertEquals("Server not found: nosuch", answered.response.error)
+        assertEquals(listOf(rejected("not this one")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `an unregistered error response still reaches the chat`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.error("tandem-99", "Unknown subtype")
+        assertEquals(listOf(rejected("Unknown subtype")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `a request times out and a late answer goes to the reducer`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        var requestId = ""
+        val reply = withTimeout(10_000) { run.session.request(200) { requestId = it; HostMessages.mcpStatus(it) } }
+        assertEquals(Reply.TimedOut, reply)
+
+        run.error(requestId, "late")
+        assertEquals(listOf(rejected("late")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `an answer that races the timeout is returned, not lost`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val timeoutMillis = 60L
+        // Each answer comes at the deadline, a few milliseconds either side: either the caller gets it or the reducer does.
+        val outcomes = (0 until 30).map { i ->
+            val sent = CompletableDeferred<String>()
+            val writer = launch(Dispatchers.IO) {
+                val requestId = sent.await()
+                delay(timeoutMillis + i % 5 - 2)
+                run.error(requestId, "race-$i")
+            }
+            val reply = withTimeout(10_000) { run.session.request(timeoutMillis) { sent.complete(it); HostMessages.mcpStatus(it) } }
+            writer.join()
+            i to reply
+        }
+
+        val reduced = run.settled().notices(NoticeLevel.ERROR)
+        for ((i, reply) in outcomes) {
+            when (reply) {
+                is Reply.Answered -> {
+                    assertEquals("race-$i", reply.response.error)
+                    assertFalse(rejected("race-$i") in reduced, "race-$i went to both the caller and the reducer")
+                }
+                Reply.TimedOut -> assertTrue(rejected("race-$i") in reduced, "race-$i was lost")
+                Reply.Ended -> fail("the session did not end")
+            }
+        }
+        assertEquals(outcomes.count { it.second == Reply.TimedOut }, reduced.size, reduced.toString())
+        run.close()
+    }
+
+    /**
+     * Runs [test] with a caller thread that can be held: [hold] returns once that thread's one worker is busy, so a coroutine on it
+     * that waits stays suspended, its resumption queued, until [hold]'s release runs. The executor is not a scheduled one: a timeout
+     * on its dispatcher fires on another thread.
+     */
+    private fun <T> withHeldThread(test: suspend CoroutineScope.(thread: CoroutineDispatcher, hold: () -> (() -> Unit)) -> T): T {
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            return runBlocking {
+                test(executor.asCoroutineDispatcher()) {
+                    val held = CountDownLatch(1)
+                    val release = CountDownLatch(1)
+                    executor.execute { held.countDown(); release.await(10, TimeUnit.SECONDS) }
+                    assertTrue(held.await(10, TimeUnit.SECONDS), "the caller thread was never free")
+                    release::countDown
+                }
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `an answer that comes after the timeout fired, before the caller resumed, is the caller's`() = withHeldThread { thread, hold ->
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val sent = CompletableDeferred<String>()
+        val reply = async(thread) { run.session.request(300) { sent.complete(it); HostMessages.mcpStatus(it) } }
+        val requestId = withTimeout(10_000) { sent.await() }
+        val release = hold() // the caller now waits for its answer and cannot resume
+        // The timeout cancels the request's withTimeoutOrNull block, a child of the caller, while the caller cannot run.
+        withTimeout(10_000) { while (reply.children.none { it.isCancelled }) delay(5) }
+        run.error(requestId, "late but first")
+        assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "the reader handed the answer to the waiter")
+        release()
+
+        val answered = assertIs<Reply.Answered>(withTimeout(10_000) { reply.await() })
+        assertEquals("late but first", answered.response.error)
+        assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "the caller's answer went to the reducer too")
+        run.close()
+    }
+
+    @Test
+    fun `an answer to a caller cancelled before it resumed still reaches the chat`() = withHeldThread { thread, hold ->
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val sent = CompletableDeferred<String>()
+        val caller = launch(thread) { run.session.request(10_000) { sent.complete(it); HostMessages.mcpReconnect(it, "broken") } }
+        val requestId = withTimeout(10_000) { sent.await() }
+        val release = hold() // the caller now waits for its answer and cannot resume
+        run.error(requestId, "Connection closed")
+        assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "the reader handed the answer to the waiter")
+        caller.cancel() // a panel closed just as the answer came: the queued resumption throws instead (prompt cancellation)
+        release()
+        withTimeout(10_000) { caller.join() }
+
+        assertTrue(caller.isCancelled)
+        assertEquals(listOf(rejected("Connection closed")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `the mcp requests wait 15 s or 30 s and say which`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, mcpMillisPerSecond = 10) // a second is 10 ms here; nothing answers
+        run.session.start()
+
+        /** [request]'s result and how long it took, in milliseconds. */
+        suspend fun timed(request: suspend () -> McpResult<*>): Pair<McpResult<*>, Long> {
+            val started = System.nanoTime()
+            val result = withTimeout(10_000) { request() }
+            return result to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+        }
+
+        val waits = listOf(
+            15 to timed { run.session.mcpStatus() },
+            15 to timed { run.session.mcpToggle("echo", enabled = false) },
+            30 to timed { run.session.mcpReconnect("broken") },
+            30 to timed { run.session.mcpAuthenticate("authy") },
+        )
+        for ((seconds, outcome) in waits) {
+            val (result, millis) = outcome
+            assertEquals(McpResult.Failed(McpError.TimedOut(seconds)), result)
+            assertTrue(millis >= seconds * 10L, "waited $millis ms, not $seconds of its seconds")
+        }
+        assertEquals(McpState(), run.settled().mcp)
+        run.close()
+    }
+
+    @Test
+    fun `a cancelled request's error answer still reaches the chat`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val sent = CompletableDeferred<String>()
+        val caller = launch { run.session.request(10_000) { sent.complete(it); HostMessages.mcpReconnect(it, "broken") } }
+        val requestId = withTimeout(10_000) { sent.await() }
+        caller.cancelAndJoin() // a panel closed mid-reconnect
+
+        run.error(requestId, "Connection closed")
+        assertEquals(listOf(rejected("Connection closed")), run.settled().notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
+    @Test
+    fun `a process exit fails every waiting request with Ended`() = runBlocking {
+        // Reads initialize and both requests, then exits by itself: nothing closes the bare session.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("read a; read b; read c"))
+        session.start()
+        val replies = List(2) { async { session.request(10_000) { HostMessages.mcpStatus(it) } } }
+
+        assertEquals(listOf<Reply>(Reply.Ended, Reply.Ended), withTimeout(5_000) { replies.awaitAll() })
+        assertTrue(session.state.value.ended)
+        assertTrue(session.job.isActive, "the session was not closed: its process ended")
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `close while a request waits answers Ended`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > /dev/null"))
+        session.start()
+        val sent = CompletableDeferred<Unit>()
+        val reply = async { session.request(10_000) { sent.complete(Unit); HostMessages.mcpStatus(it) } }
+        withTimeout(10_000) { sent.await() }
+
+        session.close()
+        assertEquals(Reply.Ended, withTimeout(5_000) { reply.await() })
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `a failed launch answers Ended`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val asked = CountDownLatch(1)
+        // The launch fails only once the request waits, so the end has to answer it.
+        val launcher = ProcessLauncher { _, _ ->
+            asked.await(10, TimeUnit.SECONDS)
+            throw IOException("No such file or directory")
+        }
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
+        session.start()
+
+        val reply = withTimeout(10_000) { session.request(10_000) { asked.countDown(); HostMessages.mcpStatus(it) } }
+        assertEquals(Reply.Ended, reply)
+        assertTrue(session.state.value.ended)
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    /** The processes [ScriptedSession.process] started, once there is one: a test that kills its process kills these in the end. */
+    private suspend fun ScriptedSession.children(): List<ProcessHandle> = withTimeout(5_000) {
+        while (process.descendants().count() == 0L) delay(20)
+        process.descendants().toList()
+    }
+
+    /**
+     * Returns once the session's stderr reader waits in the pipe's read itself. A read that does not wait yet when the process exits
+     * finds the pipe drained and closed by the JDK; one that waits holds it until the last process that can write to it is gone.
+     */
+    private suspend fun ScriptedSession.stderrReadWaits() = withTimeout(5_000) {
+        val inRead = { frame: StackTraceElement? -> frame?.className == "java.io.FileInputStream" && frame.methodName == "readBytes" }
+        while (!inRead(process.stderrReader?.stackTrace?.firstOrNull())) delay(20)
+    }
+
+    @Test
+    fun `a child that keeps the CLI's stderr open holds back neither the end nor close`() = runBlocking {
+        // A tool's subprocess or an MCP server the CLI started can outlive it with its stderr: a read of that pipe never ends.
+        val run = ScriptedSession(tmp, newSessionId, child = "sleep 600 >&2")
+        val children = run.children()
+        try {
+            run.session.start()
+            val sent = CompletableDeferred<Unit>()
+            val waiting = async { run.session.request(60_000) { sent.complete(Unit); HostMessages.mcpStatus(it) } }
+            withTimeout(10_000) { sent.await() }
+            run.stderrReadWaits()
+
+            run.die()
+            val ended = withTimeout(5_000) { run.session.state.first { it.ended } }
+            assertEquals("The claude CLI exited with code 137.", (ended.entries.last() as ChatEntry.Notice).text)
+            assertEquals(Reply.Ended, withTimeout(1_000) { waiting.await() })
+            assertEquals(Reply.Ended, withTimeout(1_000) { run.session.request(60_000) { HostMessages.mcpStatus(it) } })
+            assertTrue(children.all { it.isAlive }, "the child still holds the stderr")
+            withTimeout(5_000) { run.close() }
+        } finally {
+            children.forEach { it.destroyForcibly() }
+        }
+    }
+
+    @Test
+    fun `the CLI's stdin is closed once it has exited, ahead of the end`() = runBlocking {
+        // The JDK closes it only once the waiting stderr read has returned, which this child holds back until its stdin ends. What the
+        // child writes to stderr then is in the exit notice.
+        val run = ScriptedSession(tmp, newSessionId, child = "exec 3<&0; { cat <&3 > /dev/null; echo 'stdin closed' >&2; }")
+        val children = run.children()
+        try {
+            run.session.start()
+            run.stderrReadWaits()
+            run.die()
+            val ended = withTimeout(5_000) { run.session.state.first { it.ended } }
+            assertEquals("The claude CLI exited with code 137.\nstdin closed", (ended.entries.last() as ChatEntry.Notice).text)
+            run.close()
+        } finally {
+            children.forEach { it.destroyForcibly() }
+        }
+    }
+
+    @Test
+    fun `an output that fails as the process is destroyed ends the session, not fails it`() = runBlocking {
+        // destroyForcibly closes the pipes at once, while isAlive turns false only once the JDK has seen the exit: a read that fails
+        // in between is the end of the output. Here the stderr fails a moment ahead of the kill, while the process still runs.
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "exec cat > /dev/null").start())
+        val run = CutOffSession(process, tmp, newSessionId)
+        try {
+            process.errorStream.close()
+            run.session.start()
+            withTimeout(5_000) { while (process.stderrFailure == null) delay(5) }
+            delay(100) // the session has taken the failure in by now, well within the grace it gives the process to end
+            process.destroyForcibly()
+            val ended = withTimeout(5_000) { run.session.state.first { it.ended } }
+            assertEquals(emptyList(), run.uncaught.map { it.stackTraceToString().take(1500) }, "the output ended with the process")
+            assertEquals("The claude CLI exited with code 137.", (ended.entries.last() as ChatEntry.Notice).text)
+        } finally {
+            process.destroyForcibly()
+            run.scope.coroutineContext.job.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun `a request after the end answers Ended at once`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("exit 0"))
+        session.start()
+        withTimeout(10_000) { session.state.first { it.ended } }
+        var built = 0
+
+        // The process is gone, the session still open: nothing is written and nothing waits.
+        assertEquals(Reply.Ended, withTimeout(1_000) { session.request(10_000) { built++; HostMessages.mcpStatus(it) } })
+        session.close()
+        assertEquals(Reply.Ended, withTimeout(1_000) { session.request(10_000) { built++; HostMessages.mcpStatus(it) } })
+        assertEquals(0, built, "a request after the end builds no frame")
+        scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    @Test
+    fun `an mcp_status success without mcpServers is Rejected`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val reply = async { run.session.mcpStatus() }
+        // Synthetic: a success whose payload has no mcpServers array.
+        run.success(run.requestIdOf("mcp_status"), """{"servers":[]}""")
+
+        assertEquals(McpResult.Failed(McpError.Rejected("the CLI's answer listed no servers")), withTimeout(10_000) { reply.await() })
+        assertEquals(McpState(), run.settled().mcp)
+        run.close()
+    }
+
+    @Test
+    fun `an mcp_authenticate bare success is Ok without a url`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val reply = async { run.session.mcpAuthenticate("echo") }
+        val frame = Json.parseToJsonElement(run.written("\"subtype\":\"mcp_authenticate\"").single()).jsonObject
+        assertEquals("echo", frame.getValue("request").jsonObject.getValue("serverName").jsonPrimitive.content)
+        run.success(frame.getValue("request_id").jsonPrimitive.content) // the bare success of mcp-status:19
+
+        assertEquals(McpResult.Ok(McpAuthStart(authUrl = null)), withTimeout(10_000) { reply.await() })
+        run.close()
+    }
+
+    @Test
+    fun `the typed mcp requests send the probe frames and map their answers`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        /** Line [n] of the mcp-status fixture, answering [requestId] in place of its recorded id. */
+        fun recorded(n: Int, requestId: String): String = Fixtures.lines("mcp-status")[n - 1].replace(Regex("<request_id-\\d+>"), requestId)
+
+        /** The payload of a recorded answer line. */
+        fun payload(line: String): JsonObject? = (Ndjson.decode(line) as CliMessage.ControlResponse).payload
+
+        val status = async { run.session.mcpStatus() }
+        val listed = recorded(18, run.requestIdOf("mcp_status"))
+        run.write(listed)
+        val servers = assertNotNull(ControlPayloads.mcpStatus(payload(listed))).servers
+        assertEquals(McpResult.Ok(servers), withTimeout(10_000) { status.await() })
+        assertEquals(listOf("echo", "broken", "authy"), servers.map { it.name })
+        assertEquals(McpState(servers, detailed = true), run.session.state.value.mcp)
+
+        val toggle = async { run.session.mcpToggle("echo", enabled = false) }
+        val toggleFrame = run.requestOf("mcp_toggle")
+        assertEquals(Json.parseToJsonElement("""{"subtype":"mcp_toggle","serverName":"echo","enabled":false}"""), toggleFrame.getValue("request"))
+        run.success(toggleFrame.getValue("request_id").jsonPrimitive.content)
+        assertEquals(McpResult.Ok(Unit), withTimeout(10_000) { toggle.await() })
+
+        val reconnect = async { run.session.mcpReconnect("broken") }
+        run.write(recorded(36, run.requestIdOf("mcp_reconnect")))
+        assertEquals(McpResult.Failed(McpError.Rejected("Connection closed")), withTimeout(10_000) { reconnect.await() })
+
+        // Synthetic: an error answer without its error text.
+        val textless = async { run.session.mcpReconnect("broken") }
+        run.write("""{"type":"control_response","response":{"subtype":"error","request_id":"${run.requestIdOf("mcp_reconnect", nth = 2)}"}}""")
+        assertEquals(McpResult.Failed(McpError.Rejected("unknown error")), withTimeout(10_000) { textless.await() })
+
+        val signIn = async { run.session.mcpAuthenticate("authy") }
+        val link = recorded(40, run.requestIdOf("mcp_authenticate"))
+        run.write(link)
+        val start = assertNotNull(ControlPayloads.mcpAuthenticate(payload(link)))
+        assertEquals(McpResult.Ok(start), withTimeout(10_000) { signIn.await() })
+        assertTrue(start.authUrl!!.startsWith("http://127.0.0.1:33041/authorize?"), start.authUrl)
+
+        // A link Tandem would not open is never handed on.
+        val local = async { run.session.mcpAuthenticate("authy") }
+        run.success(run.requestIdOf("mcp_authenticate", nth = 2), """{"authUrl":"file:///etc/passwd"}""")
+        assertEquals(
+            McpResult.Failed(McpError.Rejected("the sign-in link is not an http(s) URL", linkFailed = true)),
+            withTimeout(10_000) { local.await() },
+        )
+
+        assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "every answer was its caller's")
+        run.close()
+        assertEquals(McpResult.Failed(McpError.Ended), run.session.mcpToggle("echo", enabled = true))
+    }
+
+    @Test
+    fun `an elicitation request keeps the Unsupported request answer and adds a warning notice`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        // Not recorded: an elicitation request as sdk.d.ts 3976-3999 types it (URL mode), inline. No fixture file: hard rule 6
+        // keeps synthetic-long-reply the only unrecorded fixture.
+        run.write(
+            """{"type":"control_request","request_id":"elicit-1","request":{"subtype":"elicitation","mcp_server_name":"authy",""" +
+                """"message":"Sign in to authy","mode":"url","url":"https://example.test/authorize","elicitation_id":"el-1"}}""",
+        )
+
+        val answer = Json.parseToJsonElement(run.written("\"request_id\":\"elicit-1\"").single())
+        val unsupported = """{"type":"control_response","response":{"subtype":"error","request_id":"elicit-1","error":"Unsupported request: elicitation"}}"""
+        assertEquals(Json.parseToJsonElement(unsupported), answer)
+        val state = run.settled()
+        assertEquals(listOf("An MCP server asked for input Tandem cannot show yet."), state.notices(NoticeLevel.WARNING))
+        assertEquals(emptyList(), state.notices(NoticeLevel.ERROR))
+        run.close()
+    }
+
     private fun assertNull(value: Any?) = kotlin.test.assertNull(value)
+
+    /** The `user` frames the host wrote so far, parsed. */
+    private fun ScriptedSession.userFrames(): List<JsonObject> =
+        stdin.readLines().filter { "\"type\":\"user\"" in it }.map { Json.parseToJsonElement(it).jsonObject }
+
+    private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
+
+    /** Lines [from]..[to] (1-based) of fixture [name], with [edit] applied to each as a JSON object. */
+    private fun lines(name: String, from: Int, to: Int, edit: (Int, MutableMap<String, JsonElement>) -> Unit = { _, _ -> }): List<String> =
+        (from..to).map { n ->
+            val fields = Json.parseToJsonElement(Fixtures.lines(name)[n - 1]).jsonObject.toMutableMap()
+            edit(n, fields)
+            JsonObject(fields).toString()
+        }
+
+    @Test
+    fun `the output frame waits for the quiet result`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.written("\"type\":\"user\"")
+        delay(300)
+        val first = run.userFrames().single()
+        assertEquals("<bash-input>echo hi</bash-input>", first.content())
+        assertEquals(false, first["shouldQuery"]!!.jsonPrimitive.boolean)
+        val uuid = first["uuid"]!!.jsonPrimitive.content
+        assertEquals(setOf(uuid), run.session.state.value.quietSends)
+        assertTrue(run.session.state.value.busy)
+
+        lines("bash-mode-respond", 3, 7) { n, fields ->
+            if (n == 6) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$uuid\"]")
+        }.forEach(run::write)
+        val frames = withTimeout(2_000) {
+            while (run.userFrames().size < 2) delay(20)
+            run.userFrames()
+        }
+        val output = frames[1]
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", output.content())
+        assertFalse("shouldQuery" in output)
+        assertEquals(true, output["client_composed"]!!.jsonPrimitive.boolean)
+        val state = run.session.state.value
+        assertTrue(state.busy, "the reply's turn is still open")
+        assertTrue(state.quietSends.isEmpty())
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        run.close()
+    }
+
+    @Test
+    fun `the output frame goes out after the wait without a quiet result`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 200)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        val frames = withTimeout(2_000) {
+            while (run.userFrames().size < 2) delay(20)
+            run.userFrames()
+        }
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", frames[1].content())
+        run.close()
+    }
+
+    @Test
+    fun `interrupt drops a pending output frame`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        // The initialize request went out at the start: none may follow it.
+        val requests = { run.stdin.readLines().count { "\"type\":\"control_request\"" in it } }
+        run.written("\"type\":\"user\"")
+        val before = requests()
+        run.session.interrupt()
+        delay(1_000)
+        assertEquals(1, run.userFrames().size)
+        assertEquals(before, requests(), "no control_request after the interrupt")
+        assertTrue(run.stdin.readLines().none { "\"interrupt\"" in it }, "no model call runs: no interrupt request")
+        val state = run.session.state.value
+        assertFalse(state.busy)
+        assertNull(state.turn)
+        assertEquals("Stopped.", (state.entries.last() as ChatEntry.Notice).text)
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        run.close()
+    }
+
+    @Test
+    fun `Ended drops a pending output frame`() = runBlocking {
+        // A wait far longer than the test: only the drop on Ended can clear the pending frame, never the fallback.
+        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 60_000)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.written("\"type\":\"user\"")
+        run.process.destroyForcibly()
+        val ended = withTimeout(10_000) { run.session.state.first { it.ended } }
+        // A guard only: the destroyed process wrote the file, so a frame sent now could not land in it whatever happened.
+        assertEquals(1, run.userFrames().size)
+        val end = ended.entries.filterIsInstance<ChatEntry.TurnEnded>().single()
+        assertEquals(TurnEnd.FAILED, end.end)
+        // The check that the frame was dropped: an output frame still pending would make interrupt() drop it, with a "Stopped." notice
+        // dispatched before interrupt() returns.
+        val stopped = { run.session.state.value.entries.count { it is ChatEntry.Notice && it.text == "Stopped." } }
+        val before = stopped()
+        run.session.interrupt()
+        assertEquals(before, stopped(), "nothing was pending")
+        run.close()
+    }
+
+    @Test
+    fun `Ended drops a held shell escape and says its output was not sent`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendUserMessage("x")
+        run.session.sendShellEscape("shell-1", "echo hi\necho more", "hi\nmore\n", respond = true)
+        run.written("\"type\":\"user\"")
+        run.process.destroyForcibly()
+        val text = "The output of ! echo hi was not sent: the CLI ended first."
+        // The first ended chat has the notice already: it goes in with the end, so the handle never takes an ended chat without it.
+        val state = withTimeout(10_000) { run.session.state.first { it.ended } }
+        assertTrue(state.entries.any { it is ChatEntry.Notice && it.text == text }, "the notice is in the same step as the end")
+        assertEquals(1, run.userFrames().size, "only the prompt")
+        // After the prompt's failed turn and the exit's own notice, at the end of the chat.
+        val notice = state.entries.last() as ChatEntry.Notice
+        assertEquals(text, notice.text)
+        assertEquals(NoticeLevel.WARNING, notice.level)
+        assertEquals(TurnEnd.FAILED, state.entries.filterIsInstance<ChatEntry.TurnEnded>().single().end)
+        assertTrue(state.entries.indexOfFirst { it is ChatEntry.TurnEnded } < state.entries.lastIndex - 1)
+        run.close()
+    }
+
+    @Test
+    fun `letting the process go says a pending output frame was not sent`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 200)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.written("\"type\":\"user\"")
+        // The session's Stop: the handle lets the process go, then settles the chat, which ends the open turn without a word.
+        run.session.letGoShellFrames()
+        val notice = run.session.state.value.entries.last() as ChatEntry.Notice
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", notice.text)
+        assertEquals(NoticeLevel.WARNING, notice.level)
+        delay(500) // past the wait: a frame still pending would go out now
+        assertEquals(1, run.userFrames().size, "only the command frame")
+        run.close()
+    }
+
+    @Test
+    fun `a shell escape sent once the process is over sends nothing and says so`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.process.destroyForcibly()
+        withTimeout(10_000) { run.session.state.first { it.ended } }
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = false)
+        val state = run.session.state.value
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", (state.entries.last() as ChatEntry.Notice).text)
+        assertEquals(emptySet(), state.quietSends, "no frame was sent, so no quiet result is awaited")
+        assertEquals(0, run.userFrames().size)
+        run.close()
+    }
+
+    @Test
+    fun `a shell escape sent once the CLI's output has ended sends nothing and says so`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.written("\"subtype\":\"initialize\"")
+        // The CLI's stdout ends while the process lives on: waitFor still blocks, so only the end of the output can count.
+        run.process.script.close()
+        withTimeout(10_000) {
+            while (run.session.request(50) { HostMessages.interrupt(it) } != Reply.Ended) delay(20)
+        }
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = false)
+        val state = run.session.state.value
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", (state.entries.last() as ChatEntry.Notice).text)
+        assertEquals(emptySet(), state.quietSends, "no frame was sent, so no quiet result is awaited")
+        assertEquals(0, run.userFrames().size)
+        run.close()
+    }
+
+    @Test
+    fun `a shell escape after a prompt waits for the prompt's result`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendUserMessage("x")
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.written("\"type\":\"user\"")
+        delay(300)
+        assertEquals(1, run.userFrames().size, "only the prompt")
+        assertTrue(run.session.state.value.entries.none { it is ChatEntry.Shell && it.sent })
+
+        Fixtures.lines("plain-reply").forEach(run::write)
+        val frames = withTimeout(2_000) {
+            while (run.userFrames().size < 2) delay(20)
+            run.userFrames()
+        }
+        assertEquals("<bash-input>echo hi</bash-input>", frames[1].content())
+        val state = run.session.state.value
+        assertEquals(1, state.entries.count { it is ChatEntry.TurnEnded }, "the prompt's turn ended")
+        assertTrue(state.busy, "the shell escape's reply turn is open")
+        run.close()
+    }
 }

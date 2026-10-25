@@ -17,7 +17,7 @@ The existing options were studied in October 2026:
 | Typing/IME/selection bugs (#1854, #1465) | JCEF input handling | Jewel text fields |
 | Windows spawn errors, node pile-up, RAM (#1928, #953, #1324) | Node sidecar | No Node; spawn `claude` directly |
 | Missing models, broken `/compact`, "works in CLI" (#1517, #592) | Pinned SDK drifts from user's CLI | Use the user's own CLI, version-gated features |
-| Model switch silently ignored (#1462, #1741) | Model fixed at process start | `set_model` control request, verify via init/fallback events, show mismatch |
+| Model switch silently ignored (#1462, #1741) | Model fixed at process start | `set_model` control request, verify via init/fallback events, show mismatch and refusal |
 | IDE freezes waiting on bridge (#1859, #1801) | Blocking I/O on EDT | Coroutines only; EDT never waits |
 | History lost / not resumable in CLI (#1852, #1259) | Own session format | Use the CLI's own sessions (`--resume`) |
 | Wrong diffs, diff exceptions (#1891, #275) | Writes to disk, diffs afterwards | Edits applied through `Document` + native diff before apply |
@@ -25,20 +25,27 @@ The existing options were studied in October 2026:
 ## Architecture
 
 ```
- Jewel tool window (ui/)  session sidebar, header; the chat: a keyed list of rows (bubbles, Markdown, tool, thinking,
+ Jewel tool window (ui/)  session sidebar, header (with the MCP servers button and its connected/total badge); the
+        │                 chat: a keyed list of rows (bubbles, Markdown, tool, thinking, shell (`! command`), notice,
         │                 working and footer rows), a hover row under each reply (Copy, Fork from here, time), the
-        │                 permission / question / plan cards, the composer (the `+` attach button, the thumbnail strip,
-        │                 the text area) and its footer: the mode control, the model · effort control and the context ring
+        │                 permission / question / plan cards, the MCP servers sheet over the chat, the composer (the
+        │                 `+` attach button, the thumbnail strip, the text area with its `/` slash-command palette) and
+        │                 its footer: the mode control, the model · effort control and the context ring
         │  collects StateFlows, calls SessionManager
         ▼
  TandemSessions (ide/)  project service: owns the SessionManager in its coroutine scope, restores the open sessions
         │               from TandemWorkspaceState, reads TandemSettings (claude path, max live sessions, show thinking rows,
-        │               reduce motion; Settings | Tools | Tandem), runs SessionNotifier (IDE notifications)
+        │               reduce motion, whether Claude replies to `!` command output; Settings | Tools | Tandem), runs
+        │               SessionNotifier (IDE notifications), opens an MCP server's sign-in link in the system browser
+        │               (BrowserOpener)
         ▼
  SessionManager (session/)  the project's sessions: StateFlow<List<SessionHandle>> and the selection, the live cap,
         │                   create / open / fork / rename / delete / close, the resume-id mismatch rule. It raises the
         │                   attention of a session that is not selected when it waits for a permission or ends a turn;
-        │                   the sidebar draws that as the badge
+        │                   the sidebar draws that as the badge. McpControls: list, disable / enable, reconnect and sign
+        │                   in to a session's MCP servers (the CLI's `mcp_*` control requests) and the sign-in poll
+        ├─ ShellRunner  a `! command` in the user's login shell on Dispatchers.IO, never the EDT: stdin closed, stderr
+        │               merged, the output polled (never a blocking read) and capped, the process tree killed on Stop
         ├─ SessionHandle  one session's chat across processes: status, title, attention, prompt queue
         │    └─ ClaudeSession  one live `claude` process, while the session has one
         │         • spawns `claude --input-format stream-json --output-format stream-json --verbose --include-partial-messages
@@ -96,8 +103,25 @@ Key choices:
 
    **Phase 2a polish** (spec docs/superpowers/specs/2026-10-21-chat-polish-design.md): live tool states and Show more /
    Show less, the desktop-style composer and footer menus with the context ring, coloured Bash bodies and the inline code
-   pill, the hover action row, image attachments by paste, drop and the `+` menu. **Status: implemented on
-   feat/chat-redesign.**
+   pill, the hover action row, image attachments by paste, drop and the `+` menu. A model switch the CLI refuses puts
+   back the model shown before the pick and says so in the chat, naming the model the CLI stays on, as a refused
+   permission mode or effort does (`protocol.md` 8). **Status: implemented on feat/chat-redesign.**
+
+   **Phase 2c, MCP controls and bash mode** (spec docs/superpowers/specs/2026-10-21-mcp-controls-design.md). Phase 2b,
+   the chat redesign spec's deferred list (its section 2, the task-list widget among it), is not yet a milestone of its
+   own; the polish round and this phase took some of its items. The MCP servers panel, opened from the header's button
+   with its connected/total badge, lists the session's servers with their state and error and disables, enables,
+   reconnects or signs in to each. The sign-in is the CLI's own OAuth flow (`mcp_authenticate`): Tandem only opens the
+   link in the system browser and waits for the server to connect, and never sees a token (hard rule 3). A `/` in the
+   composer opens the slash-command palette, built from the CLI's own catalogue: `/mcp`, `/model`, `/permissions` and
+   `/mode` open Tandem's panel and menus, every other command goes to the CLI, and a command the CLI answers itself
+   (`/help`, or `/mcp` with arguments or from a session started in a terminal) shows as a notice, not a reply, with no
+   `Worked for` footer. Bash mode: a composer line starting with `!` runs in the user's login shell, its output shows
+   live in the chat as a shell row, and it reaches the CLI as the terminal's own shell escape, so Claude answers it (or,
+   with the setting off, keeps it as context only). Recorded with CLI 2.1.306 against local probe servers (`protocol.md`
+   3, 4.4, 6.1, 11.2); docs only until a recording on a machine with claude.ai connectors (spec 11 item 1): the
+   connectors themselves, the OAuth callback completing, and whether the CLI answers `mcp_*` requests while a turn runs.
+   **Status: implemented on feat/mcp-controls.**
 2. **IDE-native edits.** MCP edit tools, diff preview, undo.
 3. **Parity.** Slash commands, plan mode, AskUserQuestion, rewind, subagent status.
 4. **Hardening.** Windows/WSL, Remote Development, IDE matrix in CI, published benchmarks.

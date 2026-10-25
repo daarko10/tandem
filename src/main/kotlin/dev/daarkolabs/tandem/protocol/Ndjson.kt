@@ -55,6 +55,9 @@ object Ndjson {
                 claudeCodeVersion = o.string("claude_code_version"),
                 tools = o.strings("tools"),
                 capabilities = o.strings("capabilities"),
+                mcpServers = o.objects("mcp_servers").mapNotNull(::mcpServerSummary),
+                slashCommands = o.strings("slash_commands"),
+                terminalSlashCommands = o.strings("terminal_slash_commands"),
                 raw = o,
             )
         }
@@ -143,6 +146,8 @@ object Ndjson {
             subagentType = o.string("subagent_type") ?: o.string("subagentType"),
             taskDescription = o.string("task_description") ?: o.string("taskDescription"),
             timestampMillis = timestampMillis(o),
+            localCommand = localCommand(o),
+            toolUseMeta = toolUseMeta(o),
             raw = o,
         )
     }
@@ -190,18 +195,6 @@ object Ndjson {
         reasonType = decision?.let { it.string("reason_type") ?: it.string("reasonType") },
         nonExecutionKind = nonExecutionKind,
     )
-
-    /** The line's ISO-8601 `timestamp` in epoch milliseconds; null when absent or unreadable. */
-    private fun timestampMillis(o: JsonObject): Long? {
-        val text = o.string("timestamp") ?: return null
-        return try {
-            Instant.parse(text).toEpochMilli()
-        } catch (_: DateTimeException) {
-            null
-        } catch (_: ArithmeticException) { // an instant too far out for epoch milliseconds
-            null
-        }
-    }
 
     private fun decodeContent(content: JsonElement?): List<ContentBlock> = when (content) {
         is JsonPrimitive -> if (content.isString) listOf(ContentBlock.Text(content.content)) else emptyList()
@@ -306,6 +299,8 @@ object Ndjson {
             contextWindows = o.obj("modelUsage")?.mapNotNull { (model, usage) ->
                 usage.asObject()?.long("contextWindow")?.let { model to it }
             }?.toMap().orEmpty(),
+            localCommand = o.string("local_command"),
+            userMessageUuids = o.strings("user_message_uuids"),
             raw = o,
         )
     }
@@ -334,6 +329,8 @@ object Ndjson {
                     requiresUserInteraction = r.boolean("requires_user_interaction") == true,
                     decisionReasonType = r.string("decision_reason_type"),
                     agentId = r.string("agent_id"),
+                    mcpServer = mcpServerRef(r),
+                    serverPolicyAskOnly = r.boolean("server_policy_ask_only") == true,
                 )
             }
         }
@@ -350,5 +347,17 @@ object Ndjson {
             error = response.string("error"),
             raw = o,
         )
+    }
+}
+
+/** The line's ISO-8601 `timestamp` in epoch milliseconds; null when absent or unreadable. */
+internal fun timestampMillis(o: JsonObject): Long? {
+    val text = o.string("timestamp") ?: return null
+    return try {
+        Instant.parse(text).toEpochMilli()
+    } catch (_: DateTimeException) {
+        null
+    } catch (_: ArithmeticException) { // an instant too far out for epoch milliseconds
+        null
     }
 }

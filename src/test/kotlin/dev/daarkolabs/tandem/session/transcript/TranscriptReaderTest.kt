@@ -7,9 +7,13 @@ import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.NoticeKind
+import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.PendingPermission
 import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.UserImage
+import dev.daarkolabs.tandem.session.firstPrompt
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
 import kotlinx.coroutines.job
@@ -71,6 +75,7 @@ class TranscriptReaderTest {
             is ChatEntry.ToolResult -> "result: ${entry.text}" + if (entry.isError) " (error)" else ""
             is ChatEntry.Notice -> "${entry.level}: ${entry.text}"
             is ChatEntry.TurnEnded -> "end: ${entry.end}"
+            is ChatEntry.Shell -> "shell: !${entry.command} → ${entry.output}"
         }
     }
 
@@ -96,6 +101,110 @@ class TranscriptReaderTest {
         assertEquals("claude-sonnet-5-5", loaded.meta.lastModel)
         // history-reply was recorded with --effort high, which its assistant lines carry as "effort":"high".
         assertEquals("high", TranscriptReader.meta(Fixtures.transcript("history-reply")).lastEffort)
+
+        // The MCP fixtures: the same replies and tool results, and the same local-command notices by level and text. The stream's
+        // other notices (mcp-status's `The CLI rejected a request: …` for its error answers) have no line on disk, so they stay out
+        // of the comparison; `command` differs, since the stream is folded without the prompt the CLI does not echo.
+        for (name in listOf("mcp-status", "mcp-slash", "mcp-tool-call")) {
+            val stream = Fixtures.decode(name).fold(ChatState()) { s, m -> reduce(s, SessionEvent.Cli(m)) }
+            val disk = TranscriptReader.read(Fixtures.transcript(name)).state
+            assertEquals(
+                stream.entries.filterIsInstance<ChatEntry.Assistant>().map { it.blocks },
+                disk.entries.filterIsInstance<ChatEntry.Assistant>().map { it.blocks },
+                name,
+            )
+            assertEquals(
+                stream.entries.filterIsInstance<ChatEntry.ToolResult>().map { it.text to it.isError },
+                disk.entries.filterIsInstance<ChatEntry.ToolResult>().map { it.text to it.isError },
+                name,
+            )
+            assertEquals(stream.localNotices(), disk.localNotices(), name)
+        }
+        assertEquals(3, TranscriptReader.read(Fixtures.transcript("mcp-slash")).state.localNotices().size)
+    }
+
+    private fun ChatState.localNotices(): List<Pair<NoticeLevel, String>> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.kind == NoticeKind.LOCAL_COMMAND }.map { it.level to it.text }
+
+    @Test
+    fun `a local command on disk is the same notice as its stream`() = runBlocking<Unit> {
+        val loaded = TranscriptReader.read(Fixtures.transcript("mcp-slash")).state
+        val notices = loaded.entries.filterIsInstance<ChatEntry.Notice>()
+        assertEquals(
+            listOf(
+                "user: /mcp", "INFO: ${notices[0].text}", "user: /model", "INFO: ${notices[1].text}",
+                "user: /help", "INFO: /help isn't available in this environment.", "user: /hello", "assistant: hello from the hello command",
+            ),
+            loaded.shape(),
+        )
+        assertTrue(notices.all { it.kind == NoticeKind.LOCAL_COMMAND })
+        assertEquals(listOf("mcp", "model", "help"), notices.map { it.command })
+        assertEquals(listOf("mcp", "model", null), notices.map { it.runCommand })
+        // transcripts/mcp-slash.jsonl:13, the typed /help, which has no <command-name> line.
+        assertEquals("<uuid-50>", loaded.entries.filterIsInstance<ChatEntry.User>()[2].id)
+
+        // The stream's notices, with the prompts the CLI does not echo: the same but for their ids.
+        val lines = Fixtures.decode("mcp-slash")
+        fun streamed(prompt: String, from: Int, to: Int): ChatEntry.Notice =
+            lines.subList(from - 1, to).fold(reduce(ChatState(), SessionEvent.UserSent("u1", prompt))) { s, m -> reduce(s, SessionEvent.Cli(m)) }
+                .entries.filterIsInstance<ChatEntry.Notice>().single()
+        assertEquals(streamed("/mcp", 2, 6).copy(id = "n"), notices[0].copy(id = "n"))
+        assertEquals(streamed("/help", 14, 18).copy(id = "n"), notices[2].copy(id = "n"))
+    }
+
+    @Test
+    fun `local command lines load by their shape and other system lines are skipped`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("31313131-3131-4131-8131-313131313131.jsonl")
+        f.writeLines(
+            // The typed command without a uuid, then its error output (unrecorded: no fixture has <local-command-stderr>).
+            """{"type":"system","subtype":"local_command","content":"/nope now","submitUuid":"s1","timestamp":"2026-10-21T10:23:55.130Z"}""",
+            """{"type":"system","subtype":"local_command","uuid":"o1","parentUuid":null,"content":"<local-command-stderr>Unknown command: /nope</local-command-stderr>"}""",
+            // Bare content without a submitUuid, a meta line and a line without content are no rows.
+            """{"type":"system","subtype":"local_command","uuid":"x1","parentUuid":"o1","content":"just text"}""",
+            """{"type":"system","subtype":"local_command","uuid":"x2","parentUuid":"x1","isMeta":true,"content":"<local-command-stdout>hidden</local-command-stdout>"}""",
+            """{"type":"system","subtype":"local_command","uuid":"x3","parentUuid":"x2","commandRun":{"command":"mcp"}}""",
+            """{"type":"system","subtype":"informational","uuid":"x4","parentUuid":"x3","content":"<local-command-stdout>other</local-command-stdout>"}""",
+            // Output with a run and no wrapper is still the command's.
+            """{"type":"system","subtype":"local_command","uuid":"o2","parentUuid":"x4","content":"plain","commandRun":{"command":"cost","args":""}}""",
+        )
+        val loaded = TranscriptReader.read(f).state
+        assertEquals(listOf("user: /nope now", "INFO: Unknown command: /nope", "INFO: plain"), loaded.shape())
+        val user = loaded.entries.first() as ChatEntry.User
+        assertEquals("line-1", user.id)
+        assertEquals(Instant.parse("2026-10-21T10:23:55.130Z").toEpochMilli(), user.sentAtMillis)
+        val notices = loaded.entries.filterIsInstance<ChatEntry.Notice>()
+        assertEquals(listOf("nope", "nope"), notices.map { it.command })
+        assertEquals(listOf(null, "cost"), notices.map { it.runCommand })
+        assertFalse(loaded.busy)
+    }
+
+    @Test
+    fun `a local command on a rewound branch is left out and one at the end of the file is kept`(@TempDir dir: Path) = runBlocking<Unit> {
+        val f = dir.resolve("32323232-3232-4232-8232-323232323232.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"one"}]}}""",
+            // The abandoned branch, in the recorded shapes of transcripts/mcp-slash.jsonl:4-5 and :13-14: /mcp with its output,
+            // then a typed /help (no <command-name> line) with its output.
+            """{"type":"user","uuid":"c1","parentUuid":"a1","message":{"role":"user","content":"<command-name>/mcp</command-name>\n            <command-message>mcp</command-message>\n            <command-args></command-args>"}}""",
+            """{"type":"system","subtype":"local_command","uuid":"o1","parentUuid":"c1","isMeta":false,"content":"<local-command-stdout>old servers</local-command-stdout>","commandRun":{"command":"mcp","args":""}}""",
+            """{"type":"system","subtype":"local_command","uuid":"h1","parentUuid":"o1","isMeta":false,"content":"/help","submitUuid":"s1"}""",
+            """{"type":"system","subtype":"local_command","uuid":"h2","parentUuid":"h1","isMeta":false,"content":"<local-command-stdout>old help</local-command-stdout>","commandOutcome":{"kind":"unavailable_headless"}}""",
+            // Rewound to a1 in the terminal: the next prompt continues from there, and the four lines above stay in the file.
+            """{"type":"user","uuid":"u2","parentUuid":"a1","message":{"role":"user","content":"second"}}""",
+            """{"type":"assistant","uuid":"a2","parentUuid":"u2","message":{"id":"msg_2","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"two"}]}}""",
+        )
+        assertEquals(listOf("user: first", "assistant: one", "user: second", "assistant: two"), TranscriptReader.read(f).state.shape())
+
+        // A file whose last lines are a typed /help and its output: they end the current history, so they load.
+        val g = dir.resolve("33333333-3333-4333-8333-333333333333.jsonl")
+        g.writeLines(
+            """{"type":"user","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"first"}}""",
+            """{"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"msg_1","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"one"}]}}""",
+            """{"type":"system","subtype":"local_command","uuid":"h1","parentUuid":"a1","isMeta":false,"content":"/help","submitUuid":"s1"}""",
+            """{"type":"system","subtype":"local_command","uuid":"h2","parentUuid":"h1","isMeta":false,"content":"<local-command-stdout>help text</local-command-stdout>","commandOutcome":{"kind":"unavailable_headless"}}""",
+        )
+        assertEquals(listOf("user: first", "assistant: one", "user: /help", "INFO: help text"), TranscriptReader.read(g).state.shape())
     }
 
     @Test
@@ -533,7 +642,7 @@ class TranscriptReaderTest {
     }
 
     @Test
-    fun `a shell escape loads as its command, and output and notifications are skipped`(@TempDir dir: Path) = runBlocking<Unit> {
+    fun `a shell escape loads with its output, and a stray stderr line and notifications are skipped`(@TempDir dir: Path) = runBlocking<Unit> {
         val f = dir.resolve("19191919-1919-4191-8191-191919191919.jsonl")
         f.writeLines(
             """{"type":"user","uuid":"b1","parentUuid":null,"message":{"role":"user","content":"<bash-input>ls -la</bash-input>"}}""",
@@ -543,8 +652,79 @@ class TranscriptReaderTest {
             """{"type":"user","uuid":"n1","parentUuid":"c1","message":{"role":"user","content":"<task-notification>\n<task-id>bg-1</task-id>\n<status>completed</status>\n</task-notification>"}}""",
         )
         val loaded = TranscriptReader.read(f)
-        assertEquals(listOf("user: !ls -la"), loaded.state.shape())
-        assertEquals("!ls -la", loaded.meta.firstPrompt)
+        assertEquals(listOf("shell: !ls -la → notes.txt"), loaded.state.shape())
+        assertEquals("! ls -la", loaded.meta.firstPrompt)
+        assertEquals("! ls -la", loaded.state.firstPrompt())
+    }
+
+    private fun ChatState.shells(): List<ChatEntry.Shell> = entries.filterIsInstance<ChatEntry.Shell>()
+
+    @Test
+    fun `a merged shell escape line loads as the command and its output`() = runBlocking<Unit> {
+        val state = TranscriptReader.read(Fixtures.transcript("bash-mode")).state
+        val shell = state.entries.first() as ChatEntry.Shell
+        assertEquals("echo bash-mode-probe && printf err >&2", shell.command)
+        assertEquals("bash-mode-probe\nerr", shell.output)
+        assertFalse(shell.running)
+        assertNull(shell.end)
+        assertEquals(1, state.shells().size)
+        assertEquals(listOf("Reply with only the text the command printed to stdout"), state.userTexts())
+        assertTrue(state.entries.indexOfFirst { it is ChatEntry.User } > 0, "the prompt comes after the shell escape")
+        assertEquals(listOf("bash-mode-probe"), state.assistantTexts())
+    }
+
+    @Test
+    fun `a shell escape on two lines loads the same`() = runBlocking<Unit> {
+        val state = TranscriptReader.read(Fixtures.transcript("bash-mode-respond")).state
+        val shell = state.shells().single()
+        assertEquals("echo bash-mode-probe && printf err >&2", shell.command)
+        assertEquals("bash-mode-probe\nerr", shell.output)
+        assertEquals(shell, state.entries.first())
+        assertTrue(state.userTexts().isEmpty())
+        assertTrue(state.assistantTexts().single().startsWith("The probe ran"))
+    }
+
+    @Test
+    fun `a shell escape reloads as the stream showed it`() = runBlocking<Unit> {
+        val sends = mapOf(
+            "bash-mode" to SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>", "<command_uuid-6>"), null, 0),
+            "bash-mode-respond" to SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), "<command_uuid-10>", 0),
+            "bash-mode-context" to SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), null, 0),
+        )
+        for ((name, sent) in sends) {
+            val shown = listOf(
+                SessionEvent.ShellStarted("shell-1", "echo bash-mode-probe && printf err >&2", 0),
+                SessionEvent.ShellOutput("shell-1", "bash-mode-probe\nerr"),
+                SessionEvent.ShellEnded("shell-1", ShellEnd.Exited(0), 12),
+                sent,
+            ).fold(ChatState(), ::reduce)
+            val streamed = Fixtures.decode(name).fold(shown) { s, m -> reduce(s, SessionEvent.Cli(m)) }
+            val loaded = TranscriptReader.read(Fixtures.transcript(name)).state
+            assertEquals(streamed.shells().map { it.command to it.output }, loaded.shells().map { it.command to it.output }, name)
+            // A thinking block's estimate and clock come from the stream's deltas and the host's time, which no line on disk keeps
+            // (docs/protocol.md 11.4): its text and duration are what both show.
+            fun ChatState.blocks() = entries.filterIsInstance<ChatEntry.Assistant>().map { entry ->
+                entry.blocks.map { if (it is AssistantBlock.Thinking) AssistantBlock.Thinking(it.text, durationMs = it.durationMs) else it }
+            }
+            assertEquals(streamed.blocks(), loaded.blocks(), name)
+        }
+    }
+
+    @Test
+    fun `the first prompt of a shell escape session is the command`(@TempDir dir: Path) = runBlocking<Unit> {
+        for (name in listOf("bash-mode", "bash-mode-respond", "bash-mode-context")) {
+            val prompt = "! echo bash-mode-probe && printf err >&2"
+            assertEquals(prompt, TranscriptReader.meta(Fixtures.transcript(name)).firstPrompt, name)
+            assertEquals(prompt, TranscriptReader.read(Fixtures.transcript(name)).meta.firstPrompt, name)
+        }
+        val f = dir.resolve("20202020-2020-4202-8202-202020202020.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"o1","parentUuid":null,"message":{"role":"user","content":"<bash-stdout>x</bash-stdout><bash-stderr></bash-stderr>"}}""",
+        )
+        assertNull(TranscriptReader.meta(f).firstPrompt)
+        val stray = TranscriptReader.read(f)
+        assertNull(stray.meta.firstPrompt)
+        assertTrue(stray.state.entries.isEmpty(), "an output line with no shell escape before it is skipped")
     }
 
     @Test

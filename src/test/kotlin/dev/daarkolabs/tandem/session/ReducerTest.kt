@@ -1,13 +1,17 @@
 package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.Delta
+import dev.daarkolabs.tandem.protocol.McpServerInfo
+import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -1172,6 +1176,442 @@ class ReducerTest {
     fun `an assistant line stamped 0 carries no time`() {
         val state = reduce(ChatState(), SessionEvent.Cli(Ndjson.decode(REPLY_LINE), atMillis = 0L))
         assertNull(state.assistants().single().atMillis)
+    }
+
+    @Test
+    fun `an mcp_status answer replaces the servers and marks them detailed`() {
+        val answer = Ndjson.decode(Fixtures.lines("mcp-status")[18 - 1]) as CliMessage.ControlResponse
+        val servers = assertNotNull(ControlPayloads.mcpStatus(answer.payload)).servers
+        // What an earlier answer or init left: a server no longer listed, and the inits counted so far.
+        val earlier = ChatState(mcp = McpState(servers = listOf(McpServerInfo("gone", McpStatus.FAILED, "failed")), initCount = 2))
+
+        val state = reduce(earlier, SessionEvent.McpServersListed(servers))
+        assertEquals(listOf("echo", "broken", "authy"), state.mcp.servers.map { it.name })
+        assertEquals(servers, state.mcp.servers)
+        assertTrue(state.mcp.detailed)
+        assertEquals(2, state.mcp.initCount)
+        assertEquals(earlier.entries, state.entries)
+    }
+
+    /** The lines [from]..[to] (1-based, inclusive) of fixture [name], folded into [state] in order. */
+    private fun fold(state: ChatState, name: String, from: Int, to: Int): ChatState =
+        (from..to).fold(state) { s, line -> reduce(s, SessionEvent.Cli(at(name, line))) }
+
+    /** The servers of the `mcp_status` answer at [line] of fixture [name]. */
+    private fun listedAt(name: String, line: Int): List<McpServerInfo> =
+        assertNotNull(ControlPayloads.mcpStatus((at(name, line) as CliMessage.ControlResponse).payload)).servers
+
+    private fun ChatState.localNotices(): List<ChatEntry.Notice> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.kind == NoticeKind.LOCAL_COMMAND }
+
+    private fun ChatState.server(name: String): McpServerInfo = mcp.servers.single { it.name == name }
+
+    @Test
+    fun `an init merges the thin list and counts inits`() {
+        val first = reduce(ChatState(), SessionEvent.Cli(at("mcp-status", 6)))
+        assertEquals(
+            listOf(
+                McpServerInfo("echo", McpStatus.CONNECTED, "connected", source = "dynamic"),
+                McpServerInfo("broken", McpStatus.FAILED, "failed", source = "dynamic"),
+                McpServerInfo("authy", McpStatus.NEEDS_AUTH, "needs-auth", source = "dynamic"),
+            ),
+            first.mcp.servers,
+        )
+        assertFalse(first.mcp.detailed)
+        assertEquals(1, first.mcp.initCount)
+
+        // An answer's details stay on a name whose status the next init repeats; the inits keep counting.
+        val detailed = reduce(first, SessionEvent.McpServersListed(listedAt("mcp-status", 18)))
+        val second = reduce(detailed, SessionEvent.Cli(at("mcp-status", 48)))
+        assertEquals(2, second.mcp.initCount)
+        assertTrue(second.mcp.detailed)
+        assertEquals(detailed.mcp.servers, second.mcp.servers)
+        assertNotNull(second.server("echo").config)
+
+        // The command names of init replace the ones before, empty lists included.
+        val init = at("mcp-slash", 4) as CliMessage.SystemInit
+        val named = reduce(second, SessionEvent.Cli(init))
+        assertEquals(73, named.slashCommandNames.size)
+        assertEquals(init.slashCommands, named.slashCommandNames)
+        assertEquals(setOf("doctor", "color", "focus", "reload-plugins"), named.terminalCommands)
+        assertEquals(3, named.mcp.initCount)
+        val emptied = reduce(named, SessionEvent.Cli(at("mcp-status", 23)))
+        assertEquals(emptyList(), emptied.slashCommandNames)
+        assertEquals(emptySet(), emptied.terminalCommands)
+    }
+
+    @Test
+    fun `a status change in init drops the stale error, tools and version`() {
+        val listed = reduce(ChatState(), SessionEvent.McpServersListed(listedAt("mcp-status", 18)))
+        assertNotNull(listed.server("echo").tools)
+        assertNotNull(listed.server("echo").serverInfo)
+        // :19 answers the toggle, :20 the refresh after it; reaching the reducer as lines, neither changes the servers.
+        val toggled = fold(listed, "mcp-status", 19, 20)
+        assertEquals(listed.mcp, toggled.mcp)
+
+        val state = reduce(toggled, SessionEvent.Cli(at("mcp-status", 23)))
+        val echo = state.server("echo")
+        assertEquals(McpStatus.DISABLED, echo.status)
+        assertEquals("disabled", echo.statusText)
+        assertNull(echo.tools)
+        assertNull(echo.serverInfo)
+        assertNull(echo.error)
+        assertEquals(listed.server("echo").config, echo.config)
+        // broken's status is unchanged, so its error stays until the next mcp_status.
+        assertEquals("Connection closed", state.server("broken").error)
+        assertEquals(listed.server("authy"), state.server("authy"))
+        assertTrue(state.mcp.detailed)
+    }
+
+    @Test
+    fun `the initialize answer fills the commands`() {
+        val state = reduce(ChatState(), SessionEvent.Cli(at("mcp-slash", 1)))
+        assertEquals(73, state.commands.size)
+        assertEquals(ControlPayloads.initialize((at("mcp-slash", 1) as CliMessage.ControlResponse).payload)?.commands, state.commands)
+        assertTrue(state.entries.isEmpty())
+        // mcp-status's answer lists no commands (the redactor emptied them) but still its models.
+        val emptied = reduce(state, SessionEvent.Cli(at("mcp-status", 1)))
+        assertEquals(emptyList(), emptied.commands)
+        assertTrue(emptied.models.isNotEmpty())
+        // A success without a commands array keeps them.
+        assertEquals(state.commands, reduce(state, SessionEvent.Cli(at("mcp-status", 19))).commands)
+    }
+
+    @Test
+    fun `an init without a connector keeps it until the next mcp_status`() {
+        // Synthetic, docs only (probes 2.5): a claude.ai connector that the init's thin list leaves out.
+        val connector = McpServerInfo("claude.ai Example", McpStatus.CONNECTED, "connected", source = "claudeai")
+        val before = reduce(ChatState(), SessionEvent.Cli(at("mcp-status", 6)))
+        val withConnector = before.copy(mcp = before.mcp.copy(servers = before.mcp.servers + connector))
+        // :23 without broken: a dynamic name missing from init is dropped.
+        val line = Json.parseToJsonElement(Fixtures.lines("mcp-status")[23 - 1]).jsonObject
+        val servers = JsonArray(line.getValue("mcp_servers").let { it as JsonArray }.filter { it.jsonObject["name"]?.jsonPrimitive?.content != "broken" })
+        val withoutBroken = JsonObject(line + ("mcp_servers" to servers))
+
+        val state = reduce(withConnector, SessionEvent.Cli(Ndjson.decode(withoutBroken.toString())))
+        assertEquals(listOf("echo", "authy", "claude.ai Example"), state.mcp.servers.map { it.name })
+        assertEquals(connector, state.server("claude.ai Example"))
+
+        val listed = reduce(state, SessionEvent.McpServersListed(listedAt("mcp-status", 18)))
+        assertEquals(listOf("echo", "broken", "authy"), listed.mcp.servers.map { it.name })
+    }
+
+    @Test
+    fun `a local command is a notice and its result ends the turn without a footer`() {
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "/mcp", atMillis = 1_000L))
+        val state = fold(sent, "mcp-slash", 2, 6)
+        assertEquals(listOf("/mcp"), state.entries.filterIsInstance<ChatEntry.User>().map { it.text })
+        val notice = state.localNotices().single()
+        assertEquals(NoticeLevel.INFO, notice.level)
+        assertEquals("mcp", notice.command)
+        assertEquals("mcp", notice.runCommand)
+        assertEquals((at("mcp-slash", 5) as CliMessage.Assistant).localCommand?.stdout, notice.text)
+        assertEquals(listOf("user", "notice"), state.entries.map { if (it is ChatEntry.User) "user" else if (it is ChatEntry.Notice) "notice" else "other" })
+        assertTrue(state.assistants().isEmpty())
+        assertTrue(state.turnEnds().isEmpty())
+        assertFalse(state.busy)
+        assertNull(state.turn)
+        assertEquals(0, state.turnsEnded)
+        assertNull(state.lastTurnEnd)
+        assertEquals("<session_id-4>", state.sessionId)
+
+        // While the turn runs, it is flagged local once the CLI's own line is in.
+        val answered = fold(sent, "mcp-slash", 2, 5)
+        assertEquals(true, answered.turn?.localCommand)
+        assertTrue(answered.busy)
+    }
+
+    @Test
+    fun `an unavailable command is an info notice named from the prompt`() {
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "/help"))
+        val state = fold(sent, "mcp-slash", 14, 18)
+        val notice = state.localNotices().single()
+        assertEquals(NoticeLevel.INFO, notice.level)
+        assertEquals("/help isn't available in this environment.", notice.text)
+        assertEquals("help", notice.command)
+        assertNull(notice.runCommand)
+        // Its result names no command: the turn's flag ends it the same way.
+        assertNull((at("mcp-slash", 18) as CliMessage.Result).localCommand)
+        assertTrue(state.turnEnds().isEmpty())
+        assertFalse(state.busy)
+        assertNull(state.turn)
+        assertEquals(0, state.turnsEnded)
+        assertEquals(1, state.entries.count { it is ChatEntry.Notice })
+    }
+
+    @Test
+    fun `a local command after a prompt that is not a command takes runCommand`() {
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "Reply with the single word: pong"))
+        val state = fold(sent, "mcp-slash", 2, 6)
+        val notice = state.localNotices().single()
+        assertEquals("mcp", notice.command)
+        assertEquals("mcp", notice.runCommand)
+        assertEquals((at("mcp-slash", 5) as CliMessage.Assistant).localCommand?.stdout, notice.text)
+
+        // No prompt at all (a stream folded without UserSent): runCommand too, and null when the line names none.
+        assertEquals("mcp", fold(ChatState(), "mcp-slash", 2, 6).localNotices().single().command)
+        assertNull(fold(ChatState(), "mcp-slash", 14, 18).localNotices().single().command)
+    }
+
+    @Test
+    fun `a local command without its output takes the text of its line`() {
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "/compact"))
+        val line = """{"type":"assistant","uuid":"l1","local_command_run":{"command":"compact","args":""},""" +
+            """"message":{"id":"l1","model":"<synthetic>","content":[{"type":"text","text":"one"},{"type":"text","text":"two"}]}}"""
+        val state = reduce(sent, cli(line))
+        val notice = state.localNotices().single()
+        assertEquals("one\ntwo", notice.text)
+        assertEquals("compact", notice.command)
+        assertTrue(state.assistants().isEmpty())
+        // A result that names the command ends the turn even when no line flagged it.
+        val other = reduce(ChatState(), SessionEvent.UserSent("u2", "/cost"))
+        val ended = reduce(other, cli("""{"type":"result","subtype":"success","is_error":false,"local_command":"cost","session_id":"s1"}"""))
+        assertTrue(ended.turnEnds().isEmpty())
+        assertNull(ended.turn)
+        assertEquals("s1", ended.sessionId)
+    }
+
+    @Test
+    fun `a project command is an ordinary turn`() {
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "/hello"))
+        val state = fold(sent, "mcp-slash", 20, 34)
+        assertEquals("hello from the hello command", state.text())
+        assertEquals(TurnEnd.COMPLETED, state.turnEnds().single().end)
+        assertTrue(state.localNotices().isEmpty())
+        assertEquals(1, state.turnsEnded)
+        assertFalse(state.busy)
+    }
+
+    @Test
+    fun `a command with arguments names the notice from its first token`() {
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "/mcp reconnect x"))
+        assertEquals("mcp", fold(sent, "mcp-slash", 2, 6).localNotices().single().command)
+        val tabbed = reduce(ChatState(), SessionEvent.UserSent("u1", "/help\tme\nnow"))
+        assertEquals("help", fold(tabbed, "mcp-slash", 14, 18).localNotices().single().command)
+    }
+
+    @Test
+    fun `local command output goes through the same rule as the stream`() {
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "/model"))
+        val state = reduce(sent, SessionEvent.LocalCommandOutput("Current model: x", runCommand = "model"))
+        val notice = state.localNotices().single()
+        assertEquals(ChatEntry.Notice("notice-0", NoticeLevel.INFO, "Current model: x", NoticeKind.LOCAL_COMMAND, "model", "model"), notice)
+        assertEquals(true, state.turn?.localCommand)
+        // Outside a turn there is nothing to flag.
+        val idle = reduce(ChatState(), SessionEvent.LocalCommandOutput("out", runCommand = null))
+        assertNull(idle.turn)
+        assertNull(idle.localNotices().single().command)
+    }
+
+    @Test
+    fun `a failed local command says so once, and not after Stop`() {
+        // Synthetic (no fixture has a failed local command): its result says so (hard rule 5), still without a footer.
+        val failure = """{"type":"result","subtype":"error_during_execution","is_error":true,"local_command":"x","result":"boom","session_id":"s1"}"""
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "/x"))
+        val failed = reduce(sent, cli(failure))
+        val errors = failed.entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == NoticeLevel.ERROR }
+        assertEquals(listOf("The turn failed (error_during_execution): boom"), errors.map { it.text })
+        assertTrue(failed.turnEnds().isEmpty())
+        assertEquals(0, failed.turnsEnded)
+        assertNull(failed.lastTurnEnd)
+        assertFalse(failed.busy)
+        assertNull(failed.turn)
+
+        // After Stop the interrupt already said "Stopped.": by the marker line, or by the result's terminal reason.
+        val marker = """{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"""
+        val stopped = reduce(reduce(sent, cli(marker)), cli(failure))
+        assertEquals(listOf(NoticeLevel.INFO to "Stopped."), stopped.entries.filterIsInstance<ChatEntry.Notice>().map { it.level to it.text })
+        assertFalse(stopped.turnInterrupted)
+        assertTrue(stopped.turnEnds().isEmpty())
+        assertEquals(0, stopped.turnsEnded)
+        val aborted = reduce(sent, cli(failure.replace("\"is_error\":true", "\"is_error\":true,\"terminal_reason\":\"aborted_streaming\"")))
+        assertTrue(aborted.entries.none { it is ChatEntry.Notice })
+        assertTrue(aborted.turnEnds().isEmpty())
+        assertFalse(aborted.busy)
+    }
+
+    @Test
+    fun `an init entry without a source keeps the stored connector source`() {
+        val connector = McpServerInfo("claude.ai Example", McpStatus.CONNECTED, "connected", source = "claudeai")
+        val stored = ChatState().let { it.copy(mcp = it.mcp.copy(servers = listOf(connector))) }
+        fun init(servers: String) = cli("""{"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5","mcp_servers":[$servers]}""")
+
+        // The same status without a source: the entry stays as it was.
+        val same = reduce(stored, init("""{"name":"claude.ai Example","status":"connected"}"""))
+        assertEquals(listOf(connector), same.mcp.servers)
+        // A new status without a source: the source stays too, so a later init that leaves it out still keeps it.
+        val failed = reduce(same, init("""{"name":"claude.ai Example","status":"failed"}"""))
+        assertEquals("claudeai", failed.server("claude.ai Example").source)
+        assertEquals(McpStatus.FAILED, failed.server("claude.ai Example").status)
+        val later = reduce(failed, init("""{"name":"echo","status":"connected","source":"dynamic"}"""))
+        assertEquals(listOf("echo", "claude.ai Example"), later.mcp.servers.map { it.name })
+        assertEquals("claudeai", later.server("claude.ai Example").source)
+        assertEquals(3, later.mcp.initCount)
+    }
+
+    /** Line [line] (1-based) of fixture [name] as a JSON object, edited by [edit], decoded. */
+    private fun edited(name: String, line: Int, edit: (MutableMap<String, JsonElement>) -> Unit): SessionEvent {
+        val fields = Json.parseToJsonElement(Fixtures.lines(name)[line - 1]).jsonObject.toMutableMap()
+        edit(fields)
+        return SessionEvent.Cli(Ndjson.decode(JsonObject(fields).toString()))
+    }
+
+    @Test
+    fun `a shell escape is one entry that runs, prints and ends`() {
+        val started = reduce(ChatState(), SessionEvent.ShellStarted("shell-1", "x", 0))
+        assertEquals("shell-1", started.runningShell)
+        val printed = listOf(SessionEvent.ShellOutput("shell-1", "a"), SessionEvent.ShellOutput("shell-1", "b")).fold(started, ::reduce)
+        assertEquals("shell-1", printed.runningShell)
+        val ended = reduce(printed, SessionEvent.ShellEnded("shell-1", ShellEnd.Exited(0), 5))
+        val shell = ended.entries.single() as ChatEntry.Shell
+        assertEquals("ab", shell.output)
+        assertFalse(shell.running)
+        assertEquals(ShellEnd.Exited(0), shell.end)
+        assertEquals(5L, shell.durationMs)
+        assertNull(ended.runningShell)
+        assertEquals(ended.positions(), ended.entryIndex)
+    }
+
+    @Test
+    fun `the quiet result of a shell send ends no turn`() {
+        var state = reduce(ChatState(), SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>", "<command_uuid-6>"), null, 0))
+        assertEquals(setOf("<command_uuid-4>", "<command_uuid-6>"), state.quietSends)
+        state = fold(state, "bash-mode", 3, 8)
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(state.busy)
+        assertTrue(state.quietSends.isEmpty())
+        assertEquals("<session_id-2>", state.sessionId)
+        assertEquals(0, state.turnsEnded)
+    }
+
+    @Test
+    fun `the one context frame's quiet result empties the quiet sends`() {
+        val sent = reduce(ChatState(), SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), null, 0))
+        val quiet = fold(sent, "bash-mode-context", 1, 6)
+        assertTrue(quiet.quietSends.isEmpty())
+        assertTrue(quiet.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(quiet.busy)
+        val prompted = reduce(quiet, SessionEvent.UserSent("<command_uuid-10>", "Reply with only the text the command printed to stdout", 0))
+        val answered = fold(prompted, "bash-mode-context", 7, 21)
+        assertTrue(answered.quietSends.isEmpty())
+        assertFalse(answered.busy)
+        assertEquals(1, answered.entries.count { it is ChatEntry.TurnEnded })
+    }
+
+    @Test
+    fun `a responding shell send opens a turn that its reply's result ends`() {
+        val sent = reduce(ChatState(), SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), "<command_uuid-10>", 0))
+        assertTrue(sent.busy)
+        val quiet = fold(sent, "bash-mode-respond", 3, 6)
+        assertTrue(quiet.busy, "the quiet result leaves the reply's turn open")
+        assertTrue(quiet.entries.none { it is ChatEntry.TurnEnded })
+        assertTrue(quiet.quietSends.isEmpty())
+        val answered = fold(quiet, "bash-mode-respond", 7, 42)
+        assertFalse(answered.busy)
+        assertEquals(1, answered.entries.count { it is ChatEntry.TurnEnded })
+        assertEquals(sent.turnsEnded + 1, answered.turnsEnded)
+    }
+
+    @Test
+    fun `a result that names a quiet send and a prompt is the prompt's`() {
+        val state = listOf(
+            SessionEvent.ShellSent("shell-1", listOf("a"), null, 0),
+            SessionEvent.UserSent("p", "x", 0),
+            edited("plain-reply", 15) { it["user_message_uuids"] = Json.parseToJsonElement("[\"a\",\"p\"]") },
+        ).fold(ChatState(), ::reduce)
+        assertEquals(1, state.entries.count { it is ChatEntry.TurnEnded })
+        assertTrue(state.quietSends.isEmpty())
+        assertFalse(state.busy)
+    }
+
+    @Test
+    fun `a process that ends before the quiet result leaves no quiet send`() {
+        val sent = reduce(ChatState(), SessionEvent.ShellSent("shell-1", listOf("a"), null, 0))
+        assertTrue(reduce(sent, SessionEvent.Ended("The claude CLI exited.", isError = false)).quietSends.isEmpty())
+        assertTrue(ChatState(quietSends = setOf("a")).settled().quietSends.isEmpty())
+    }
+
+    @Test
+    fun `a zero-turn result without uuids ends the quiet send without a footer`() {
+        val state = listOf(
+            SessionEvent.ShellSent("shell-1", listOf("a"), null, 0),
+            edited("bash-mode", 8) { it.remove("user_message_uuids") },
+        ).fold(ChatState(), ::reduce)
+        assertTrue(state.quietSends.isEmpty())
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(state.busy)
+        assertEquals("<session_id-2>", state.sessionId)
+    }
+
+    @Test
+    fun `an error result for a quiet send says the turn failed`() {
+        val state = listOf(
+            SessionEvent.ShellSent("shell-1", listOf("a"), null, 0),
+            edited("bash-mode", 8) {
+                it["user_message_uuids"] = Json.parseToJsonElement("[\"a\"]")
+                it["is_error"] = JsonPrimitive(true)
+                it["result"] = JsonPrimitive("boom")
+            },
+        ).fold(ChatState(), ::reduce)
+        assertTrue(state.quietSends.isEmpty())
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().single()
+        assertEquals(NoticeLevel.ERROR, notice.level)
+        assertTrue(notice.text.startsWith("The turn failed"), notice.text)
+        assertTrue("boom" in notice.text, notice.text)
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(state.busy)
+    }
+
+    @Test
+    fun `an error zero-turn result without uuids is a failed result`() {
+        val state = listOf(
+            SessionEvent.ShellSent("shell-1", listOf("a"), null, 0),
+            edited("bash-mode", 8) {
+                it.remove("user_message_uuids")
+                it["is_error"] = JsonPrimitive(true)
+                it["result"] = JsonPrimitive("boom")
+            },
+        ).fold(ChatState(), ::reduce)
+        assertTrue(state.quietSends.isEmpty())
+        assertEquals(TurnEnd.FAILED, state.entries.filterIsInstance<ChatEntry.TurnEnded>().single().end)
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().single()
+        assertEquals(NoticeLevel.ERROR, notice.level)
+        assertTrue(notice.text.startsWith("The turn failed") && "boom" in notice.text, notice.text)
+    }
+
+    @Test
+    fun `a dropped shell reply ends the turn without a footer`() {
+        val state = listOf(
+            SessionEvent.ShellStarted("shell-1", "echo hi", 0),
+            SessionEvent.ShellEnded("shell-1", ShellEnd.Exited(0), 3),
+            SessionEvent.ShellSent("shell-1", listOf("a"), "q", 0),
+            SessionEvent.ShellReplyDropped("shell-1"),
+        ).fold(ChatState(), ::reduce)
+        assertFalse(state.busy)
+        assertNull(state.turn)
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        val last = state.entries.last() as ChatEntry.Notice
+        assertEquals("Stopped.", last.text)
+        assertEquals(NoticeKind.INTERRUPTED, last.kind)
+        assertTrue((state.entries.first() as ChatEntry.Shell).sent)
+    }
+
+    @Test
+    fun `the first prompt of a shell escape session is the command`() {
+        val state = reduce(ChatState(), SessionEvent.ShellStarted("shell-1", "echo hi", 0))
+        assertEquals("! echo hi", state.firstPrompt())
+        assertEquals("! echo hi", reduce(state, SessionEvent.UserSent("u1", "later", 0)).firstPrompt())
+    }
+
+    @Test
+    fun `a loaded shell escape is a finished entry without an end`() {
+        val state = reduce(ChatState(), SessionEvent.ShellLoaded("line-1", "ls", "a.txt", 7))
+        val shell = state.entries.single() as ChatEntry.Shell
+        assertFalse(shell.running)
+        assertNull(shell.end)
+        assertEquals("a.txt", shell.output)
+        assertEquals(7L, shell.startedAtMillis)
+        assertNull(state.runningShell)
     }
 }
 

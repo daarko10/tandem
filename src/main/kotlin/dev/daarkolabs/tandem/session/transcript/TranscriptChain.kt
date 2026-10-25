@@ -10,8 +10,9 @@ import java.util.BitSet
 
 /**
  * The first pass over a transcript: for each line, only what places it in the conversation; then [abandoned] decides which
- * lines the second pass leaves out: conversational lines (`user` or `assistant` lines that are neither sidechain nor meta) off
- * the current history, and lines that were not a JSON object (such as a last line the CLI was still writing).
+ * lines the second pass leaves out: conversational lines (`user` or `assistant` lines, and a local command's `system` line of
+ * subtype `local_command`, that are neither sidechain nor meta) off the current history, and lines that were not a JSON object
+ * (such as a last line the CLI was still writing).
  *
  * A transcript is only ever appended to, so it keeps the turns a rewind abandoned. The current history is the `parentUuid`
  * chain that ends at the last conversational line with a `uuid`, passing through lines of any type. When that chain starts at
@@ -44,7 +45,10 @@ internal class TranscriptChain {
     fun add(raw: JsonObject?) {
         val index = lineCount
         val type = raw?.string("type")
-        val isConversational = raw != null && (type == "user" || type == "assistant") && !raw.isSet("isSidechain") && !raw.isSet("isMeta")
+        // A local command's line loads as a prompt or a notice, so a rewind abandons it too, and it can end the history (`/help`).
+        val isConversational = raw != null &&
+            (type == "user" || type == "assistant" || type == "system" && raw.string("subtype") == "local_command") &&
+            !raw.isSet("isSidechain") && !raw.isSet("isMeta")
         uuids += raw?.string("uuid")
         parents += raw?.string("parentUuid")
         messageIds += raw?.takeIf { isConversational && type == "assistant" }?.obj("message")?.string("id")

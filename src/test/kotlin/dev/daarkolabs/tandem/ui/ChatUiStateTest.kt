@@ -2,6 +2,8 @@
 
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.ui.text.TextRange
 import dev.daarkolabs.tandem.chat.ChatRow
 import dev.daarkolabs.tandem.chat.RowGap
 import dev.daarkolabs.tandem.chat.RowLabel
@@ -10,6 +12,7 @@ import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.chat.UserRow
+import dev.daarkolabs.tandem.chat.paletteFor
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.coroutines.CoroutineScope
@@ -21,6 +24,7 @@ import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -130,6 +134,102 @@ class ChatUiStateTest {
 
         assertFalse(change.pin)
         assertNull(change.appended)
+    }
+
+    @Test
+    fun `the panel state is kept per session key`() {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()))
+            presenters.ui("a").mcpPanelOpen.value = true
+
+            assertFalse(presenters.ui("b").mcpPanelOpen.value)
+            assertTrue(presenters.ui("a").mcpPanelOpen.value)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `only a panel a user action opened starts its session, and only once`() {
+        val ui = ChatUiState()
+        assertFalse(ui.takeMcpStartOnOpen(), "nothing opened it")
+
+        ui.openMcpPanel()
+        assertTrue(ui.mcpPanelOpen.value)
+        assertTrue(ui.takeMcpStartOnOpen())
+        assertFalse(ui.takeMcpStartOnOpen(), "the panel shown again when its session is selected again starts nothing")
+
+        ui.openMcpPanel() // `/mcp` while it is open: no new panel is built, so nothing is left to start a later one
+        assertFalse(ui.takeMcpStartOnOpen())
+        ui.mcpPanelOpen.value = false
+        ui.openMcpPanel()
+        assertTrue(ui.takeMcpStartOnOpen())
+    }
+
+    // spec: palette state is kept per session key
+    @Test
+    fun `palette state is kept per session key`() {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()))
+            presenters.ui("a").paletteSelection.value = "/m" to 2
+            presenters.ui("a").paletteDismissedFor.value = "/m"
+            presenters.ui("a").menuRequest.value = FooterMenu.MODEL
+
+            assertEquals("" to 0, presenters.ui("b").paletteSelection.value)
+            assertNull(presenters.ui("b").paletteDismissedFor.value)
+            assertNull(presenters.ui("b").menuRequest.value)
+            assertEquals("/m" to 2, presenters.ui("a").paletteSelection.value)
+            assertEquals("/m", presenters.ui("a").paletteDismissedFor.value)
+            assertEquals(FooterMenu.MODEL, presenters.ui("a").menuRequest.value)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    // spec: Esc keeps the palette closed until the draft changes
+    @Test
+    fun `Esc keeps the palette closed until the draft changes`() {
+        val ui = ChatUiState()
+        fun palette(draft: String) =
+            paletteFor(draft, focused = true, ui.paletteDismissedFor.value, ui.paletteSelection.value, emptyList(), emptyList(), emptySet())
+        assertNotNull(palette("/m"))
+
+        // Esc on "/m": PromptBar stores the draft it was pressed on.
+        ui.paletteDismissedFor.value = "/m"
+        assertNull(palette("/m"))
+        // A changed draft shows it again, whatever the stored one.
+        assertNotNull(palette("/mc"))
+        assertNotNull(palette("/"))
+    }
+
+    // spec: Esc keeps the palette closed until the draft changes
+    @Test
+    fun `a dismissal ends on another draft and survives a late notice of its own`() {
+        val ui = ChatUiState()
+        ui.paletteDismissedFor.value = "/m"
+
+        // The notice of the keystroke Esc was queued behind arrives after it: the same draft, the palette stays closed.
+        ui.draftChanged("/m")
+        assertEquals("/m", ui.paletteDismissedFor.value)
+        // A real change ends the dismissal, and going back to the dismissed draft does not restore it.
+        ui.draftChanged("/mc")
+        assertNull(ui.paletteDismissedFor.value)
+        ui.draftChanged("/m")
+        assertNull(ui.paletteDismissedFor.value)
+    }
+
+    @Test
+    fun `the Slash commands row puts a slash in an empty draft only`() {
+        val ui = ChatUiState()
+        ui.openPalette()
+        assertEquals("/", ui.draft.text.toString())
+        assertEquals(TextRange(1), ui.draft.selection)
+
+        ui.draft.setTextAndPlaceCursorAtEnd("hello")
+        ui.openPalette()
+        assertEquals("hello", ui.draft.text.toString())
     }
 
     @Test

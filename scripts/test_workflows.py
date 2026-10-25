@@ -771,13 +771,34 @@ class NightlyWorkflowTest(unittest.TestCase):
         drift = wf[True]["workflow_dispatch"]["inputs"]["drift"]
         self.assertEqual(("string", ""), (drift["type"], drift["default"]))
         names = [s.get("name") for s in steps(wf, "contract")]
-        self.assertEqual(names.index("Check --session-id with an inherited CLAUDE_CODE_SESSION_ID") + 1, names.index("Mutate the recording for a rehearsal"))
+        # Every file the fixer promotes (contract-hello and session-id) is recorded before any scenario, which may fail on
+        # its own, and the rehearsal mutates them only after the last scenario, right before the decode step.
+        recorded = [i for i, n in enumerate(names) if n and n.startswith("Record the ") and n.endswith(" scenario")]
+        self.assertTrue(recorded, "no scenario step")
+        self.assertLess(names.index("Check that the CLI authenticated and answered"), names.index("Check --session-id with an inherited CLAUDE_CODE_SESSION_ID"))
+        self.assertLess(names.index("Check --session-id with an inherited CLAUDE_CODE_SESSION_ID"), recorded[0])
+        self.assertLess(recorded[-1], names.index("Mutate the recording for a rehearsal"))
         self.assertEqual(names.index("Mutate the recording for a rehearsal") + 1, names.index("Decode with Tandem's protocol layer and load the transcripts with its reader"))
         mutate = step(wf, "contract", "Mutate the recording for a rehearsal")
         self.assertEqual("inputs.drift != ''", mutate["if"])
         self.assertEqual("${{ inputs.drift }}", mutate["env"]["DRIFT"])                # through env, never interpolated into the shell line
         self.assertIn('scripts/make_drift.py "$DRIFT" build/contract --from build/contract', mutate["run"])
         self.assertNotIn("${{", mutate["run"])
+
+    def test_every_step_that_starts_the_cli_has_a_fresh_identity_token_and_records_one_scenario(self):
+        # A GitHub OIDC token is single use and lives about five minutes: a step that starts the CLI comes right after
+        # the anthropic-token action, and a scenario step records one scenario, never a loop over several on one token.
+        contract = steps(load(NIGHTLY), "contract")
+        starts_cli = re.compile(r"record-scenario\.sh|record-fixture\.sh|(^|[\s(;&|])claude\s")
+        starts = [i for i, s in enumerate(contract) if starts_cli.search(s.get("run", "").replace("claude --version", ""))]
+        self.assertTrue(starts, "no step starts the CLI")
+        for i in starts:
+            self.assertEqual("./.github/actions/anthropic-token", contract[i - 1].get("uses"), contract[i].get("name"))
+        scenarios = [s["run"].strip() for s in contract if "record-scenario.sh" in s.get("run", "")]
+        for run in scenarios:
+            self.assertRegex(run, r"^\./scripts/record-scenario\.sh [a-z-]+ build/contract$")
+        self.assertEqual(["bash-mode", "bash-mode-context", "bash-mode-respond", "mcp-slash", "mcp-status", "mcp-tool-call"],
+                         sorted(run.split()[1] for run in scenarios))   # the scenarios ContractTest checks
 
     def test_the_nightly_keeps_its_name_schedule_and_no_interpolated_run_line(self):
         wf = load(NIGHTLY)

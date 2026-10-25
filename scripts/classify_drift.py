@@ -4,7 +4,8 @@
 Usage: classify_drift.py <recording-dir> <test-results-dir>
 
 <recording-dir> is the red run's contract-recording artifact (contract-hello.ndjson, transcripts/contract-hello.jsonl,
-transcripts/session-id.jsonl), or make_drift.py's output in a rehearsal. <test-results-dir> is Gradle's
+transcripts/session-id.jsonl, which the fixer promotes, beside the scenario recordings <scenario>.ndjson and
+transcripts/<scenario>.jsonl, which it does not), or make_drift.py's output in a rehearsal. <test-results-dir> is Gradle's
 build/test-results/test after `./gradlew test --tests '*ContractTest*' -Dtandem.contractDir=<recording-dir>`; it may
 not exist yet, which the first three rules do not need. Prints one JSON object and exits 0; exits 2 on a usage error.
 
@@ -14,7 +15,9 @@ assertion message(s)) and "files" (the recording's regular files, relative, sort
 - cli-did-not-answer: authentication, billing, an outage or a broken publish. Not code: reported, never fixed.
 - decoder: the decode test of ContractTest failed, or the reply came under a type the decoder does not know.
 - reader: the reader test of ContractTest failed (TranscriptReader found no user or no assistant entry).
-- unknown: nothing to fix from this recording.
+- unknown: nothing to fix from this recording. The decode and reader tests read only the three files the fixer promotes;
+  drift only a scenario recording shows fails ContractTest's scenario tests, which land here, so the fixer is never
+  handed drift its copies do not carry.
 
 The rules, in order:
 
@@ -26,7 +29,8 @@ The rules, in order:
 4. no test results: unknown.
 5. the decode test failed: decoder, with its message (and the reader test's, on a second line, when it failed too).
 6. the reader test failed: reader, with its message; unknown when the message is "no transcripts in ...".
-7. otherwise: unknown, "neither contract test failed".
+7. otherwise: unknown, "neither contract test failed", followed by one line per other failing ContractTest case
+   ("<test name>: <message>", the message cut to 400 characters), so the standing issue names the scenario check.
 
 Only test cases of ContractTest count: the results directory holds every test class's XML when the whole test task
 ran. A message is the assertion's own, without the exception class Gradle writes before it. Lines of the stream that
@@ -119,7 +123,8 @@ def classify(recording: str, results_dir: str) -> dict:
         return verdict("decoder", decode if reader is None else f"{decode}\n{reader}", cli_version)
     if reader is not None:
         return verdict("unknown" if reader.startswith("no transcripts in") else "reader", reader, cli_version)
-    return verdict("unknown", "neither contract test failed", cli_version)
+    others = [f"{name}: {message[:DETAIL_LIMIT]}" for name, message in sorted(failed.items())]
+    return verdict("unknown", "\n".join(["neither contract test failed"] + others), cli_version)
 
 
 def main(argv: list[str]) -> int:

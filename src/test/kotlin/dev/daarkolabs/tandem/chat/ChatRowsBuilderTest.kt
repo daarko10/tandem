@@ -12,6 +12,7 @@ import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
+import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.TurnEnd
 import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.reduce
@@ -1162,6 +1163,233 @@ class ChatRowsBuilderTest {
         assertEquals(ForkState.ENABLED, forkState("a", "a", false))
         assertEquals(ForkState.WAIT, forkState("a", "a", true))
         assertEquals(ForkState.NOT_LATEST, forkState("a", "b", false))
+    }
+
+    @Test
+    fun `mcp-slash golden`() {
+        // The /mcp block (mcp-slash:1-7) under the typed /mcp: the user bubble, then the CLI's own answer as a notice with the link.
+        val (state, rows) = replay("mcp-slash", prompt = "/mcp", lines = Fixtures.lines("mcp-slash").take(7))
+        assertNull(state.turn)
+        assertFalse(state.busy)
+        assertEquals(2, rows.rows.size, rows.rows.toString())
+        val user = assertIs<UserRow>(rows.rows[0])
+        assertEquals("/mcp", user.text)
+        assertTrue(user.mono)
+        val notice = assertIs<NoticeRow>(rows.rows[1])
+        assertEquals(NoticeLevel.INFO, notice.level)
+        assertEquals(NoticeKind.LOCAL_COMMAND, notice.kind)
+        assertEquals("mcp", notice.command)
+        assertEquals(NoticeLink.OPEN_MCP, notice.link)
+        assertEquals("Open the MCP panel", notice.link!!.label)
+        assertEquals("3 MCP server(s): 1 connected, 2 not connected, 0 disabled.", notice.text)
+
+        // The whole fixture under the sweep's prompt, which is not a command: each notice is named from the command the CLI ran
+        // (/help's outcome names none), and the only footer is the /hello turn's, a model turn.
+        val footers = ArrayList<Int>()
+        val (_, all) = replay("mcp-slash") { line, _, lineRows ->
+            if (lineRows.rows.any { it is TurnEndRow }) footers += line
+        }
+        val notices = all.rows.filterIsInstance<NoticeRow>()
+        assertEquals(listOf("mcp", "model", null), notices.map { it.command })
+        assertEquals(listOf(NoticeLink.OPEN_MCP, null, null), notices.map { it.link })
+        assertTrue(notices.all { it.kind == NoticeKind.LOCAL_COMMAND })
+        assertEquals("3 MCP server(s): 1 connected, 2 not connected, 0 disabled.", notices[0].text)
+        // The model notice keeps its text verbatim, backticks included.
+        assertTrue(notices[1].text.startsWith("Current model: `Fable 5.1 (default)`"), notices[1].text)
+        assertEquals("/help isn't available in this environment.", notices[2].text)
+        val footer = all.rows.filterIsInstance<TurnEndRow>().single()
+        assertEquals(TurnEnd.COMPLETED, footer.end)
+        val hello = all.rows.indexOfFirst { it is TextRow && it.markdown == "hello from the hello command" }
+        assertTrue(hello >= 0 && all.rows.indexOf(footer) > hello, all.rows.toString())
+        assertEquals(34, footers.first(), footers.toString())
+    }
+
+    @Test
+    fun `the terminal hint is removed by exact match only`() {
+        val wire = "3 MCP server(s): 1 connected, 2 not connected, 0 disabled. Use `/mcp` in the terminal for details."
+        val noBackticks = "3 MCP server(s): 1 connected, 2 not connected, 0 disabled. Use /mcp in the terminal for details."
+        assertEquals(" Use `/mcp` in the terminal for details.", MCP_TERMINAL_HINT)
+        fun row(text: String, runCommand: String?): NoticeRow {
+            val notice = ChatEntry.Notice("notice-0", NoticeLevel.INFO, text, NoticeKind.LOCAL_COMMAND, command = runCommand, runCommand = runCommand)
+            return ChatRowsBuilder(options).build(ChatState(entries = listOf(notice))).rows.filterIsInstance<NoticeRow>().single()
+        }
+        val linked = row(wire, "mcp")
+        assertEquals("3 MCP server(s): 1 connected, 2 not connected, 0 disabled.", linked.text)
+        assertEquals(NoticeLink.OPEN_MCP, linked.link)
+        val variant = row(noBackticks, "mcp")
+        assertEquals(noBackticks, variant.text)
+        assertEquals(NoticeLink.OPEN_MCP, variant.link)
+        // The hint inside the text, not at its end, stays.
+        assertEquals("$wire More.", row("$wire More.", "mcp").text)
+        // Another command keeps the sentence and gets no link: the rule keys on the command the CLI ran, not on the text.
+        val other = row(wire, "model")
+        assertEquals(wire, other.text)
+        assertNull(other.link)
+        assertEquals("model", other.command)
+        val unnamed = row(wire, null)
+        assertEquals(wire, unnamed.text)
+        assertNull(unnamed.link)
+        assertNull(unnamed.command)
+        // A generic notice keeps its kind and has neither command nor link.
+        val generic = ChatEntry.Notice("notice-1", NoticeLevel.WARNING, wire)
+        val plain = ChatRowsBuilder(options).build(ChatState(entries = listOf(generic))).rows.filterIsInstance<NoticeRow>().single()
+        assertEquals(NoticeRow("n:notice-1", NoticeLevel.WARNING, wire, RowGap.NONE), plain)
+        assertEquals(NoticeKind.GENERIC, plain.kind)
+    }
+
+    /** The one shell row [ChatRowsBuilder] makes of [entry] alone. */
+    private fun shellRow(entry: ChatEntry.Shell): ShellRow =
+        ChatRowsBuilder(options).build(ChatState(entries = listOf(entry))).rows.filterIsInstance<ShellRow>().single()
+
+    @Test
+    fun `a shell escape is a shell row with its output and status`() {
+        val running = shellRow(ChatEntry.Shell("shell-1", "sleep 1", "", running = true, startedAtMillis = 0))
+        assertEquals("sh:shell-1", running.key)
+        assertEquals("sleep 1", running.command)
+        assertTrue(running.running)
+        assertNull(running.status)
+        assertFalse(running.statusError)
+
+        fun ended(end: ShellEnd?, durationMs: Long? = null): ShellRow =
+            shellRow(ChatEntry.Shell("shell-1", "x", "out\n", running = false, end = end, durationMs = durationMs))
+        val failed = ended(ShellEnd.Exited(2), 10)
+        assertEquals("exit 2", failed.status)
+        assertTrue(failed.statusError)
+        assertFalse(failed.running)
+        assertEquals(listOf("out"), failed.output)
+        val ok = ended(ShellEnd.Exited(0), 10)
+        assertNull(ok.status)
+        assertFalse(ok.statusError)
+        assertEquals("Stopped after 3.0s", ended(ShellEnd.Stopped, 3_000).status)
+        assertTrue(ended(ShellEnd.Stopped, 3_000).statusError)
+        assertEquals("Killed after 10 minutes", ended(ShellEnd.TimedOut, 600_000).status)
+        assertEquals("Could not start /bin/zsh: boom", ended(ShellEnd.NotStarted("/bin/zsh", "boom"), 0).status)
+        assertEquals("Could not read the command's output: boom", ended(ShellEnd.Failed("boom"), 5).status)
+        // A reloaded escape: the transcript keeps no end, so nothing is said under it.
+        val reloaded = ended(null)
+        assertNull(reloaded.status)
+        assertFalse(reloaded.statusError)
+        assertFalse(reloaded.running)
+    }
+
+    @Test
+    fun `a shell row's output is cut like a body`() {
+        fun output(text: String): ShellRow = shellRow(ChatEntry.Shell("shell-1", "x", text, running = false, end = ShellEnd.Exited(0)))
+        val long = output((1..401).joinToString("\n") { "line $it" })
+        assertEquals(400, long.output.size)
+        assertEquals(401, long.totalLines)
+        assertEquals("line 1", long.output.first())
+        // A command that prints nothing draws no output.
+        val empty = output("")
+        assertEquals(emptyList(), empty.output)
+        assertEquals(0, empty.totalLines)
+        // Colour escapes are stripped from the row (the frames keep them).
+        assertEquals(listOf("red"), output("\u001b[31mred\u001b[0m").output)
+    }
+
+    @Test
+    fun `bash-mode-respond golden`() {
+        // The shell events as SessionManager and ClaudeSession dispatch them, then the CLI's lines :3-42, folded with reduce directly:
+        // replay() would send a UserSent before each init, adding User rows.
+        val builder = ChatRowsBuilder(options)
+        var state = ChatState()
+        state = reduce(state, SessionEvent.ShellStarted("shell-1", "echo bash-mode-probe && printf err >&2", 0))
+        state = reduce(state, SessionEvent.ShellOutput("shell-1", "bash-mode-probe\nerr"))
+        assertTrue(builder.build(state).rows.single().let { it is ShellRow && it.running })
+        state = reduce(state, SessionEvent.ShellEnded("shell-1", ShellEnd.Exited(0), 12))
+        val ended = builder.build(state).rows
+        assertTrue(ended.none { it is WorkingRow }, ended.toString())
+        assertEquals(listOf("bash-mode-probe", "err"), assertIs<ShellRow>(ended.single()).output)
+        state = reduce(state, SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), "<command_uuid-10>", 20))
+        assertIs<WorkingRow>(builder.build(state).rows.last())
+        var rows = builder.build(state)
+        Fixtures.lines("bash-mode-respond").subList(2, 42).forEachIndexed { i, line ->
+            val n = i + 3
+            state = reduce(state, SessionEvent.Cli(Ndjson.decode(line), atMillis = n * 100L))
+            rows = builder.build(state)
+            if (n < 41) {
+                assertIs<WorkingRow>(rows.rows.last(), "line $n: ${rows.rows}")
+                assertTrue(rows.rows.none { it is TurnEndRow }, "line $n: ${rows.rows}")
+            }
+            // The quiet result (:6) ends no turn: the turn the output frame asked for stays open.
+            if (n == 6) assertTrue(state.busy && state.turn != null, "line 6")
+        }
+        assertEquals(
+            listOf(ShellRow::class, ThinkingRow::class, TextRow::class, TurnEndRow::class),
+            rows.rows.map { it::class },
+            rows.rows.toString(),
+        )
+        val shell = assertIs<ShellRow>(rows.rows[0])
+        assertEquals("echo bash-mode-probe && printf err >&2", shell.command)
+        assertNull(shell.status)
+        assertTrue(assertIs<TextRow>(rows.rows[2]).markdown.startsWith("The probe ran"))
+        assertEquals(TurnEnd.COMPLETED, assertIs<TurnEndRow>(rows.rows[3]).end)
+        // The reply is the latest ended turn's, under its hover row.
+        assertNotNull(assertIs<TextRow>(rows.rows[2]).actions)
+        assertEquals(rows.latestReply, assertIs<TextRow>(rows.rows[2]).actions!!.entryId)
+    }
+
+    @Test
+    fun `a responding shell turn shows its running tool call as running`() {
+        val read = buildJsonObject { put("file_path", "/p/a.kt") }
+        var state = ChatState()
+        state = reduce(state, SessionEvent.ShellStarted("shell-1", "false", 0))
+        state = reduce(state, SessionEvent.ShellEnded("shell-1", ShellEnd.Exited(1), 5))
+        state = reduce(state, SessionEvent.ShellSent("shell-1", listOf("a"), "q", 10))
+        state = state.withEntry(assistant("a1", AssistantBlock.ToolUse("c1", "Read", read, "")))
+        val rows = ChatRowsBuilder(options).build(state).rows
+        assertEquals(ToolState.RUNNING, rows.toolRows().single().state, rows.toString())
+        assertIs<WorkingRow>(rows.last())
+        assertEquals(listOf(ShellRow::class, ToolRow::class, WorkingRow::class), rows.map { it::class })
+    }
+
+    @Test
+    fun `a shell row starts a turn`() {
+        // As with a User entry in the Shell entry's place: each of the three turns' replies carries its hover row, and the latest
+        // ended turn's reply is the last one.
+        fun entries(middle: ChatEntry): List<ChatEntry> = listOf(
+            ChatEntry.User("u1", "a"),
+            assistant("a1", AssistantBlock.Text("reply a")),
+            middle,
+            assistant("a2", AssistantBlock.Text("reply shell")),
+            ChatEntry.User("u2", "b"),
+            assistant("a3", AssistantBlock.Text("reply b")),
+        )
+        val shell = ChatRowsBuilder(options).build(ChatState(entries = entries(ChatEntry.Shell("s1", "ls", "out", running = false))))
+        val user = ChatRowsBuilder(options).build(ChatState(entries = entries(ChatEntry.User("s1", "!ls"))))
+        fun withActions(rows: ChatRows): List<String> = rows.rows.filterIsInstance<TextRow>().filter { it.actions != null }.map { it.key }
+        assertEquals(listOf("t:a1:0", "t:a2:0", "t:a3:0"), withActions(user))
+        assertEquals(withActions(user), withActions(shell))
+        assertEquals(user.latestReply, shell.latestReply)
+        assertEquals("a3", shell.latestReply)
+        assertEquals(
+            listOf(
+                "u:u1" to RowGap.NONE,
+                "t:a1:0" to RowGap.AFTER_BUBBLE,
+                "sh:s1" to RowGap.TURN,
+                "t:a2:0" to RowGap.SECTION,
+                "u:u2" to RowGap.TURN,
+                "t:a3:0" to RowGap.AFTER_BUBBLE,
+            ),
+            shell.rows.map { it.key to it.gap },
+        )
+        // While the shell's turn runs, the latest ended turn is the one before it.
+        val running = ChatState(entries = entries(ChatEntry.Shell("s1", "ls", "out", running = false)).take(4))
+            .let { reduce(it, SessionEvent.ShellSent("s1", listOf("x"), "q", 0)) }
+        assertEquals("a1", ChatRowsBuilder(options).build(running).latestReply)
+        // An ended turn's footer belongs to the latest turn: a shell escape after it, as a prompt after it, starts the next one.
+        fun footers(next: ChatEntry): List<ChatRow> = ChatRowsBuilder(options).build(
+            ChatState(
+                entries = listOf(
+                    ChatEntry.User("u1", "a"),
+                    assistant("a1", AssistantBlock.Text("reply a")),
+                    ChatEntry.TurnEnded("end-1", TurnEnd.COMPLETED, 1_000, 5, emptyList()),
+                    next,
+                ),
+            ),
+        ).rows.filter { it is TurnEndRow }
+        assertEquals(footers(ChatEntry.User("s1", "!ls")), footers(ChatEntry.Shell("s1", "ls", "", running = false)))
+        assertTrue(footers(ChatEntry.Shell("s1", "ls", "", running = false)).isEmpty())
     }
 
     private fun cliLine(json: String): SessionEvent = SessionEvent.Cli(Ndjson.decode(json))

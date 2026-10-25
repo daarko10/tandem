@@ -1,13 +1,18 @@
 package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
 import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.ImmutableSet
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.collections.immutable.toImmutableSet
 import java.util.Locale
 
 /** The `value` of the CLI's own entry for its default model in an `initialize` model list. */
@@ -17,7 +22,8 @@ internal const val DEFAULT_MODEL_ENTRY: String = "default"
  * What the composer and its footer show (spec 4.15, polish spec 2.3), taken from the state so that it changes only when one of its own
  * fields does, not on every streamed delta. [cardOpen]: a request waits for its answer. [defaultModel] is the model the CLI's `default`
  * entry resolves to; [effortLevels] and [autoSupported] are those of the shown model ([shownModel]); [modelSwitchPending] mirrors
- * [ChatState.modelSwitchPending].
+ * [ChatState.modelSwitchPending]. [commands], [slashCommandNames] and [terminalCommands] feed the slash palette ([slashPalette]).
+ * [shellRunning]: a shell escape runs (MCP spec 12.1); the composer is busy meanwhile, and Stop stops the command ([stopTarget]).
  */
 data class ComposerModel(
     val busy: Boolean,
@@ -34,14 +40,24 @@ data class ComposerModel(
     val effortLevels: ImmutableList<String> = persistentListOf(),
     val autoSupported: Boolean = false,
     val modelSwitchPending: Boolean = false,
+    val commands: ImmutableList<SlashCommand> = persistentListOf(),
+    val slashCommandNames: ImmutableList<String> = persistentListOf(),
+    val terminalCommands: ImmutableSet<String> = persistentSetOf(),
+    val shellRunning: Boolean = false,
 )
 
 /**
  * The composer's model of [state]. Its models are the session's own ([ChatState.models]), else, while its process has not listed
  * any (it has none, as a restored session before its first prompt), the [known] ones another process listed
  * ([dev.daarkolabs.tandem.session.SessionManager.models]), else, before any process has, the CLI's own aliases ([CLI_MODEL_ALIASES]).
+ * Its commands, and the terminal-only names the palette leaves out, are the session's own likewise, else those of [knownCommands]
+ * ([dev.daarkolabs.tandem.session.SessionManager.commands]); the session's own replace them once its process offers them.
  */
-fun composerModel(state: ChatState, known: List<ModelOption> = emptyList()): ComposerModel {
+fun composerModel(
+    state: ChatState,
+    known: List<ModelOption> = emptyList(),
+    knownCommands: CommandCatalogue = CommandCatalogue(),
+): ComposerModel {
     val models = state.models.ifEmpty { known }.ifEmpty { CLI_MODEL_ALIASES }
     val shown = shownModel(models, state.requestedModel, state.activeModel, state.modelSwitchPending)
     return ComposerModel(
@@ -59,8 +75,36 @@ fun composerModel(state: ChatState, known: List<ModelOption> = emptyList()): Com
         effortLevels = shown?.effortLevels.orEmpty().toImmutableList(),
         autoSupported = shown?.supportsAutoMode == true,
         modelSwitchPending = state.modelSwitchPending,
+        commands = state.commands.ifEmpty { knownCommands.commands }.toImmutableList(),
+        slashCommandNames = state.slashCommandNames.toImmutableList(),
+        terminalCommands = state.terminalCommands.ifEmpty { knownCommands.terminal }.toImmutableSet(),
+        shellRunning = state.runningShell != null,
     )
 }
+
+/** A draft that is a shell escape: `!` as its first non-blank character, then a command that is not blank. */
+private val SHELL_ESCAPE = Regex("^\\s*!\\s*\\S")
+
+/**
+ * The command of [draft] when it is a shell escape (MCP spec 12.1, `^\s*!\s*\S`): the text after its `!` with the whitespace around
+ * it removed and the newlines inside it kept; else null. A bare `!` is no shell escape: it goes to the CLI as text.
+ */
+fun shellCommand(draft: String): String? {
+    if (!SHELL_ESCAPE.containsMatchIn(draft)) return null
+    return draft.substringAfter('!').trim().ifEmpty { null }
+}
+
+/** What the composer's Stop (its button or Esc) stops (MCP spec 12.3). */
+enum class StopTarget {
+    /** The shell escape that runs. */
+    Shell,
+
+    /** The turn that runs, as before shell escapes. */
+    Turn,
+}
+
+/** [StopTarget.Shell] while a shell escape runs ([shellRunning]), else [StopTarget.Turn]. */
+fun stopTarget(shellRunning: Boolean): StopTarget = if (shellRunning) StopTarget.Shell else StopTarget.Turn
 
 /**
  * The entry of [models] that the footer shows, checks and takes the effort levels and `auto` support from (spec 2.3, `<Model>`):

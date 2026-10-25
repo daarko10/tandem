@@ -2,20 +2,25 @@ package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.Delta
+import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.PendingPermission
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.reduce
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -171,5 +176,77 @@ class ComposerModelTest {
             composerModel(state),
         )
         assertEquals(false, composerModel(ChatState()).cardOpen)
+    }
+
+    @Test
+    fun `commands and terminal names come from the state`() {
+        val empty = composerModel(ChatState())
+        assertEquals(persistentListOf(), empty.commands)
+        assertEquals(persistentListOf(), empty.slashCommandNames)
+        assertEquals(persistentSetOf(), empty.terminalCommands)
+
+        // mcp-slash: the initialize answer (:1) lists the commands, the init (:4) the names and the terminal ones.
+        val (state, _) = replay("mcp-slash", lines = Fixtures.lines("mcp-slash").take(4))
+        val composer = composerModel(state)
+        assertEquals(73, composer.commands.size)
+        assertEquals(state.commands, composer.commands)
+        assertEquals("actions", composer.commands.first().name)
+        assertEquals(state.slashCommandNames, composer.slashCommandNames)
+        assertEquals(73, composer.slashCommandNames.size)
+        assertEquals(setOf("doctor", "color", "focus", "reload-plugins"), composer.terminalCommands)
+
+        val synthetic = ChatState(
+            commands = listOf(SlashCommand("hello", "Hi (project)")),
+            slashCommandNames = listOf("hello", "mcp"),
+            terminalCommands = setOf("doctor"),
+        )
+        val model = composerModel(synthetic)
+        assertEquals(persistentListOf(SlashCommand("hello", "Hi (project)")), model.commands)
+        assertEquals(persistentListOf("hello", "mcp"), model.slashCommandNames)
+        assertEquals(persistentSetOf("doctor"), model.terminalCommands)
+    }
+
+    @Test
+    fun `a session without its own commands offers the known ones until its process offers its own`() {
+        val known = CommandCatalogue(listOf(SlashCommand("hello", "Hi (project)"), SlashCommand("doctor")), terminal = setOf("doctor"))
+        // A restored session: no process, so no initialize answer and no init of its own.
+        val restored = composerModel(ChatState(), knownCommands = known)
+        assertEquals(known.commands, restored.commands)
+        assertEquals(persistentSetOf("doctor"), restored.terminalCommands)
+        val palette = assertNotNull(slashPalette("/", restored.commands, restored.slashCommandNames, restored.terminalCommands))
+        assertTrue(palette.items.any { it.name == "hello" }, palette.toString())
+        assertFalse(palette.items.any { it.name == "doctor" }, "the known terminal-only names stay hidden")
+        assertNull(palette.footer, "a known catalogue is no loading one")
+
+        // Its process answers initialize: its own commands replace the known ones; its init's terminal names come later.
+        val own = listOf(SlashCommand("review", "Review the branch"))
+        val answered = composerModel(ChatState(commands = own), knownCommands = known)
+        assertEquals(own, answered.commands)
+        assertEquals(persistentSetOf("doctor"), answered.terminalCommands, "until its init names its own")
+        val initialized = composerModel(ChatState(commands = own, terminalCommands = setOf("color")), knownCommands = known)
+        assertEquals(persistentSetOf("color"), initialized.terminalCommands)
+    }
+
+    @Test
+    fun `a bang draft is a shell escape`() {
+        assertEquals("echo hi", shellCommand("! echo hi"))
+        assertEquals("ls", shellCommand("  !ls"))
+        // Shift+Enter writes a multi-line command: the newlines inside it are kept, the whitespace around it is not.
+        assertEquals("ls -la", shellCommand("!\n ls -la\n"))
+        assertEquals("a\nb", shellCommand("! a\nb"))
+        // A bare `!` goes to the CLI as text; `!` elsewhere, or a slash command, is no shell escape.
+        for (draft in listOf("!", "! ", "a!b", "/mcp", "")) assertNull(shellCommand(draft), "'$draft'")
+    }
+
+    @Test
+    fun `shellRunning follows the state`() {
+        assertTrue(composerModel(ChatState(runningShell = "shell-1")).shellRunning)
+        assertFalse(composerModel(ChatState(runningShell = null)).shellRunning)
+    }
+
+    @Test
+    fun `Stop stops the command while one runs, else the turn`() {
+        assertEquals(StopTarget.Shell, stopTarget(true))
+        assertEquals(StopTarget.Turn, stopTarget(false))
     }
 }

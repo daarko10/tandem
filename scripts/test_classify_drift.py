@@ -113,6 +113,23 @@ class ClassifyDriftTest(unittest.TestCase):
         out = classify_drift.classify(self.recording([INIT, REPLY, OK]), self.results({}))
         self.assertEqual(("unknown", "neither contract test failed"), (out["kind"], out["detail"]))
 
+    def test_a_failing_scenario_test_is_unknown_and_named(self):
+        # Drift only a scenario recording shows: the fixer copies contract-hello alone, so it must not be handed this.
+        message = "mcp-status.ndjson: [control_response]"
+        out = classify_drift.classify(self.recording([INIT, REPLY, OK]), self.results({
+            "scenario recordings decode with every core type recognised": "java.lang.AssertionError: " + message,
+            "mcp-slash - the slash catalogue and a local command decode": "x" * 500}))
+        self.assertEqual("unknown", out["kind"])
+        self.assertEqual("neither contract test failed\n"
+                         "mcp-slash - the slash catalogue and a local command decode: " + "x" * 400 + "\n"
+                         "scenario recordings decode with every core type recognised: " + message, out["detail"])
+
+    def test_a_shared_test_failure_beside_a_scenario_failure_is_still_drift(self):
+        out = classify_drift.classify(self.recording([INIT, REPLY, OK]), self.results({
+            classify_drift.READER_TEST: "session-id.jsonl: no user entry",
+            "scenario transcripts load with the reader": "bash-mode.jsonl: no shell entry"}))
+        self.assertEqual(("reader", "session-id.jsonl: no user entry"), (out["kind"], out["detail"]))
+
     def test_missing_test_results_are_unknown(self):
         out = classify_drift.classify(self.recording([INIT, REPLY, OK]), os.path.join(self.root, "no-results"))
         self.assertEqual("unknown", out["kind"])

@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -79,8 +80,8 @@ class SessionHandle internal constructor(
     internal val spawnLock: Mutex = Mutex()
 
     /**
-     * Guards [attachment], [mirror], [queued], [closed], [renameOnInit], [replaced] and what the [title] is worked out from, and
-     * makes each change of the chat ([publishLocked]) one step with them: a pick or a prompt is either in the state a process
+     * Guards [attachment], [mirror], [queued], [closed], [renameOnInit], [replaced], [shellJob] and what the [title] is worked out
+     * from, and makes each change of the chat ([publishLocked]) one step with them: a pick or a prompt is either in the state a process
      * starts from, or goes to that process. Only held for steps that never wait.
      */
     private val lock = Any()
@@ -91,9 +92,12 @@ class SessionHandle internal constructor(
     /** Copies the process's state into the chat, and waits for its first `system/init`. */
     private var mirror: Job? = null
 
-    /** Prompts sent while no process runs, in order: the next process gets them. */
-    private val queued = ArrayList<Prompt>()
+    /** Prompts and shell escapes sent while no process runs, in order: the next process gets them. */
+    private val queued = ArrayList<Outbound>()
     private var closed = false
+
+    /** The running shell escape's job ([startShell]); [close] cancels it. */
+    private var runningShellJob: Job? = null
 
     /**
      * A title the CLI is still to be told (`rename_session`) once a process reports its first `system/init`: a fork's, or one set
@@ -133,9 +137,12 @@ class SessionHandle internal constructor(
     /** The index's title for this session, from its last listing. */
     private var indexedTitle: String? = listing.value.titleOf(id)
 
-    /** The chat's first prompt, and its title: worked out again only when that prompt changes, not on every streamed word. */
-    private var firstUser: ChatEntry.User? = initialState.firstUser()
-    private var promptTitle: String? = firstUser?.asTitle()
+    /**
+     * The chat's first prompt (a prompt or a shell escape, as [firstPromptKey] tells it), and its title: worked out again only when
+     * that prompt changes, not on every streamed word or line of output.
+     */
+    private var firstPromptKey: Any? = initialState.firstPromptEntry()?.let(::firstPromptKey)
+    private var promptTitle: String? = initialState.firstPromptEntry()?.asTitle()
 
     private val mutableTitle = MutableStateFlow(titleOverride ?: indexedTitle ?: promptTitle ?: id)
 
@@ -164,6 +171,28 @@ class SessionHandle internal constructor(
      */
     val lastFrameAtMillis: StateFlow<Long> = mutableLastFrameAt.asStateFlow()
 
+    /** The session's MCP servers as the chat knows them ([ChatState.mcp]): every `system/init`'s list, then every `mcp_status` answer. */
+    val mcpServers: StateFlow<McpState> =
+        mutableState.map { it.mcp }.distinctUntilChanged().stateIn(scope, SharingStarted.Eagerly, initialState.mcp)
+
+    private val mutableMcpAuth = MutableStateFlow<Map<String, McpAuthWait>>(emptyMap())
+    private val mutableMcpLoginHinted = MutableStateFlow<Set<String>>(emptySet())
+
+    /** The running or just-ended sign-in waits ([SessionManager.startMcpAuth]), by server name: at most one per server. */
+    val mcpAuth: StateFlow<Map<String, McpAuthWait>> = mutableMcpAuth.asStateFlow()
+
+    /**
+     * The servers whose `mcp_authenticate` failed or timed out in this session, so that the panel keeps offering the terminal's
+     * sign-in hint, also when it is opened again.
+     */
+    val mcpLoginHinted: StateFlow<Set<String>> = mutableMcpLoginHinted.asStateFlow()
+
+    /**
+     * Held for exactly one MCP control request (status, toggle, reconnect or authenticate) at a time, never across a follow-up
+     * refresh: a kotlinx [Mutex] is not reentrant.
+     */
+    val mcpActions: Mutex = Mutex()
+
     init {
         // The index's listing comes from the manager's scope; its title counts from the next step on.
         scope.launch {
@@ -189,21 +218,44 @@ class SessionHandle internal constructor(
     internal val isClosed: Boolean
         get() = synchronized(lock) { closed }
 
+    /** The job of the shell escape that runs, or ran last ([startShell]); null before the first. */
+    internal val shellJob: Job?
+        get() = synchronized(lock) { runningShellJob }
+
+    /**
+     * Starts a shell escape: [launch] starts its job, in one step with the check that none runs, so that at most one command runs
+     * per session. False, and nothing is launched, when one runs or this session is closed.
+     */
+    internal fun startShell(launch: () -> Job): Boolean = synchronized(lock) {
+        if (closed || runningShellJob?.isActive == true) return false
+        runningShellJob = launch()
+        true
+    }
+
+    /**
+     * Shows a shell escape's [event] in the chat: through the running process, whose state the chat follows, or straight in the chat
+     * without one. The command runs in Tandem's own process, with or without the CLI's.
+     */
+    internal fun shellEvent(event: SessionEvent) {
+        pick(live = { it.event(event) }, stopped = event)
+    }
+
     /** The process's session while it runs or starts: attached, and not ended. */
     internal fun liveSession(): ClaudeSession? = synchronized(lock) { liveLocked() }
 
     /**
-     * Sends [prompt] to the running process; without one, queues it for the next, which [attach] hands it to. True when it was
-     * queued, so that a process has to be started. Either way prompts keep their order. Dropped after [close].
+     * Sends [outbound] (a prompt or a shell escape's frames) to the running process; without one, queues it for the next, which
+     * [attach] hands it to. True when it was queued, so that a process has to be started. Either way they keep their order. Dropped
+     * after [close].
      */
-    internal fun sendOrQueue(prompt: Prompt): Boolean = synchronized(lock) {
+    internal fun sendOrQueue(outbound: Outbound): Boolean = synchronized(lock) {
         if (closed) return false
         val live = liveLocked()
         if (live != null && queued.isEmpty()) {
-            live.sendUserMessage(prompt.text, prompt.images)
+            live.deliver(outbound)
             false
         } else {
-            queued.add(prompt)
+            queued.add(outbound)
             true
         }
     }
@@ -340,13 +392,17 @@ class SessionHandle internal constructor(
 
     /**
      * Shows in the chat why no process could start ([SessionEvent.Ended] with [detail]) and drops the queued prompts, which
-     * nothing can take now. Returns how many there were.
+     * nothing can take now, with a warning after it for each queued shell escape whose output is not sent (hard rule 5). Returns
+     * how many were dropped.
      */
     internal fun failToStart(detail: String): Int = synchronized(lock) {
         attachment?.let { releaseLocked(it.session) }
         val dropped = queued.size
+        val unsent = queued.filterIsInstance<Outbound.ShellEscape>()
+            .map { SessionEvent.HostNotice(NoticeLevel.WARNING, unsentShellText(it.command)) }
         queued.clear()
-        publishLocked(reduce(mutableState.value, SessionEvent.Ended(detail, isError = true)), attached = false)
+        val ended = reduce(mutableState.value, SessionEvent.Ended(detail, isError = true))
+        publishLocked(unsent.fold(ended) { acc, notice -> reduce(acc, notice) }, attached = false)
         dropped
     }
 
@@ -379,14 +435,49 @@ class SessionHandle internal constructor(
     /** Whether a process runs and nothing is in progress: no turn, no pending permission, no prompt waiting to be sent. */
     internal fun isIdle(): Boolean = synchronized(lock) { attachment?.session?.let(::idleLocked) ?: false }
 
-    /** Stops for good: queued prompts are dropped, no process starts again, and this session's coroutines end. */
+    /**
+     * Stops for good: queued prompts are dropped, a running shell escape is stopped (its entry ends Stopped, and nothing is sent), no
+     * process starts again, and this session's coroutines end.
+     */
     internal suspend fun close() {
-        synchronized(lock) {
+        val shell = synchronized(lock) {
             closed = true
             queued.clear()
+            runningShellJob
         }
+        shell?.cancelAndJoin() // ahead of the process: its end reaches the chat the process leaves
         stop()
         scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    /** Publishes [wait] as its server's sign-in wait, in place of any earlier one. */
+    internal fun putMcpAuth(wait: McpAuthWait) {
+        mutableMcpAuth.update { it + (wait.server to wait) }
+    }
+
+    /** Replaces [old] with [new] if [old] is still its server's wait; false when it was cancelled or replaced meanwhile. */
+    internal fun replaceMcpAuth(old: McpAuthWait, new: McpAuthWait): Boolean {
+        var replaced = false
+        mutableMcpAuth.update { waits ->
+            replaced = waits[old.server] === old
+            if (replaced) waits + (old.server to new) else waits
+        }
+        return replaced
+    }
+
+    /** Drops [server]'s sign-in wait, whichever it is. */
+    internal fun removeMcpAuth(server: String) {
+        mutableMcpAuth.update { it - server }
+    }
+
+    /** Drops [wait] if it is still its server's sign-in wait. */
+    internal fun removeMcpAuth(wait: McpAuthWait) {
+        mutableMcpAuth.update { waits -> if (waits[wait.server] === wait) waits - wait.server else waits }
+    }
+
+    /** Remembers that [server]'s `mcp_authenticate` failed or timed out ([mcpLoginHinted]). */
+    internal fun hintMcpLogin(server: String) {
+        mutableMcpLoginHinted.update { it + server }
     }
 
     internal fun raiseAttention() {
@@ -399,14 +490,18 @@ class SessionHandle internal constructor(
 
     private fun liveLocked(): ClaudeSession? = attachment?.session?.takeIf { !it.state.value.ended }
 
-    /** [isIdle] for [session], from its own state, which a prompt changes at once ([status] follows a step later). */
+    /**
+     * [isIdle] for [session], from its own state, which a prompt changes at once ([status] follows a step later). Not while a shell
+     * escape runs, nor while a quiet send waits for its result: the cap must not stop the CLI between a frame and its answer.
+     */
     private fun idleLocked(session: ClaudeSession): Boolean {
         val chat = session.state.value
-        return !chat.ended && !chat.busy && chat.pendingPermissions.isEmpty() && queued.isEmpty()
+        return !chat.ended && !chat.busy && chat.pendingPermissions.isEmpty() && queued.isEmpty() &&
+            runningShellJob?.isActive != true && chat.quietSends.isEmpty()
     }
 
     private fun flushLocked(live: ClaudeSession) {
-        queued.forEach { live.sendUserMessage(it.text, it.images) }
+        queued.forEach { live.deliver(it) }
         queued.clear()
     }
 
@@ -440,10 +535,14 @@ class SessionHandle internal constructor(
         synchronized(lock) { releaseLocked(ended, settle) }
     }
 
-    /** Lets [ended] go if it is still the attached process: its last state becomes the chat's, [settle]d if asked. */
+    /**
+     * Lets [ended] go if it is still the attached process: its last state becomes the chat's, [settle]d if asked. A shell escape it
+     * still held is dropped first, with a notice that its output was not sent (a [stop] during the turn it waited for).
+     */
     private fun releaseLocked(ended: ClaudeSession, settle: Boolean = false) {
         if (attachment?.session !== ended) return
         detachLocked()
+        ended.letGoShellFrames()
         val last = ended.state.value
         publishLocked(if (settle) last.settled() else last, attached = false)
     }
@@ -471,10 +570,11 @@ class SessionHandle internal constructor(
      */
     private fun publishLocked(chat: ChatState, attached: Boolean) {
         mutableState.value = chat
-        val user = chat.firstUser()
-        if (user != firstUser) {
-            firstUser = user
-            promptTitle = user?.asTitle()
+        val first = chat.firstPromptEntry()
+        val key = first?.let(::firstPromptKey)
+        if (key != firstPromptKey) {
+            firstPromptKey = key
+            promptTitle = first?.asTitle()
             updateTitleLocked()
         }
         snapshot.value = Snapshot(chat, attached)
@@ -482,17 +582,42 @@ class SessionHandle internal constructor(
 }
 
 /**
- * The first prompt of this chat as a title: its first line, trimmed and cut to 80 characters, or `[Image #1]` for one of images
- * only; null without one.
+ * The first prompt of this chat as a title: its first line, trimmed and cut to 80 characters, `[Image #1]` for one of images only,
+ * or `! <command>` for a shell escape; null without one.
  */
-internal fun ChatState.firstPrompt(): String? = firstUser()?.asTitle()
+internal fun ChatState.firstPrompt(): String? = firstPromptEntry()?.asTitle()
 
-private fun ChatState.firstUser(): ChatEntry.User? = entries.firstNotNullOfOrNull { it as? ChatEntry.User }
+/** The first prompt or shell escape of this chat, whichever comes first. */
+private fun ChatState.firstPromptEntry(): ChatEntry? = entries.firstOrNull { it is ChatEntry.User || it is ChatEntry.Shell }
 
-/** An images-only prompt is titled by its first image. */
-private fun ChatEntry.User.asTitle(): String? = promptTitle(text).ifEmpty { if (images.isNotEmpty()) "[Image #1]" else null }
+/** What a first prompt's title depends on: a prompt as it is, a shell escape by its id and command, not its output. */
+private fun firstPromptKey(entry: ChatEntry): Any = if (entry is ChatEntry.Shell) entry.id to entry.command else entry
 
-/** A prompt waiting for a process: [text] and the [images] attached to it. */
-internal data class Prompt(val text: String, val images: List<ImageBlock> = emptyList())
+/** An images-only prompt is titled by its first image; a shell escape as the terminal's own last prompt, `! <command>`. */
+private fun ChatEntry.asTitle(): String? = when (this) {
+    is ChatEntry.User -> promptTitle(text).ifEmpty { if (images.isNotEmpty()) "[Image #1]" else null }
+    is ChatEntry.Shell -> promptTitle("! $command")
+    else -> null
+}
+
+/** What waits for a process, in order: a prompt, or a shell escape's frames. */
+internal sealed interface Outbound {
+    /** A prompt: [text] and the [images] attached to it. */
+    data class Prompt(val text: String, val images: List<ImageBlock> = emptyList()) : Outbound
+
+    /**
+     * Shell escape [id]'s frames: its [command] and [output] (with Tandem's note for a stopped or capped one), and whether Claude
+     * replies.
+     */
+    data class ShellEscape(val id: String, val command: String, val output: String, val respond: Boolean) : Outbound
+}
+
+/** Hands [outbound] to this process: a prompt as a user message, a shell escape as its frames. */
+private fun ClaudeSession.deliver(outbound: Outbound) {
+    when (outbound) {
+        is Outbound.Prompt -> sendUserMessage(outbound.text, outbound.images)
+        is Outbound.ShellEscape -> sendShellEscape(outbound.id, outbound.command, outbound.output, outbound.respond)
+    }
+}
 
 private fun List<SessionSummary>.titleOf(id: SessionId): String? = firstOrNull { it.id == id }?.title

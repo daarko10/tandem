@@ -2,6 +2,7 @@ package dev.daarkolabs.tandem.ui
 
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -65,6 +66,56 @@ internal class ChatUiState {
     val composerNotice: MutableState<String?> = mutableStateOf(null)
 
     val listState: LazyListState = LazyListState()
+
+    /**
+     * Whether the session's MCP panel is open over its chat (MCP spec 3.2, 4.4): [openMcpPanel] opens it. It stays open while another
+     * session is selected, and shows again when this one is.
+     */
+    val mcpPanelOpen: MutableState<Boolean> = mutableStateOf(false)
+
+    // Whether the panel was opened by a user action and has not been built since: only such a panel starts a stopped session.
+    private var mcpStartOnOpen: Boolean = false
+
+    /**
+     * Opens the MCP panel on a user action (the header's button, `/mcp`, a notice's link): the panel built for it starts the session
+     * if it has no process ([takeMcpStartOnOpen]). Nothing if it is open already.
+     */
+    fun openMcpPanel() {
+        if (mcpPanelOpen.value) return
+        mcpStartOnOpen = true
+        mcpPanelOpen.value = true
+    }
+
+    /**
+     * Whether the panel being built now was opened by a user action ([openMcpPanel]); read once. A panel shown again because its
+     * session is selected again reads false, and starts nothing by itself (MCP spec 3.2).
+     */
+    fun takeMcpStartOnOpen(): Boolean = mcpStartOnOpen.also { mcpStartOnOpen = false }
+
+    /**
+     * The slash palette's selection (MCP spec 4.4): the committed draft it was made on and the row's index. It counts only while the
+     * draft is that one (`paletteFor` reads a mismatch as 0), so an Enter right after a keystroke never picks by a stale index.
+     */
+    val paletteSelection: MutableState<Pair<String, Int>> = mutableStateOf("" to 0)
+
+    /** The committed draft Esc closed the palette on: it stays closed until the draft changes (MCP spec 3.4, 4.4). */
+    val paletteDismissedFor: MutableState<String?> = mutableStateOf(null)
+
+    /**
+     * The committed draft is now [draft]: a dismissal made on another draft ends, so the palette shows again. One made on this very
+     * draft stays, so a late notice of the keystroke that an Esc already queued behind does not reopen it.
+     */
+    fun draftChanged(draft: String) {
+        if (draft != paletteDismissedFor.value) paletteDismissedFor.value = null
+    }
+
+    /** A footer menu that `/model`, `/permissions` or `/mode` asked to open; the control opens it and clears the request. */
+    val menuRequest: MutableState<FooterMenu?> = mutableStateOf(null)
+
+    /** The `+` menu's `Slash commands` (MCP spec 3.4): `/` in an empty draft, so the palette opens as typing it does; else nothing. */
+    fun openPalette() {
+        if (draft.text.isEmpty()) draft.setTextAndPlaceCursorAtEnd("/")
+    }
 
     // The row keys, the rows and the list's height at the list's last emission, and whether the list has had an emission since it
     // last showed this session. Kept here, not in the panel, so that rows added while another session is shown count when this one

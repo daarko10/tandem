@@ -22,6 +22,12 @@ sealed interface CliMessage {
         val claudeCodeVersion: String?,
         val tools: List<String>,
         val capabilities: List<String>,
+        /** `mcp_servers`: the thin list of the session's MCP servers; absent or `[]` both mean none. */
+        val mcpServers: List<McpServerSummary> = emptyList(),
+        /** `slash_commands`: the names of every command a prompt can start with, in the CLI's order. */
+        val slashCommands: List<String> = emptyList(),
+        /** `terminal_slash_commands`: the names of the commands that only work in the CLI's own terminal. */
+        val terminalSlashCommands: List<String> = emptyList(),
         override val raw: JsonObject,
     ) : CliMessage
 
@@ -116,6 +122,10 @@ sealed interface CliMessage {
         val taskDescription: String?,
         /** The line's ISO-8601 `timestamp`, in epoch milliseconds. */
         val timestampMillis: Long?,
+        /** Set when the CLI answered a prompt itself (a local command such as `/mcp`): the line is not the model's. */
+        val localCommand: LocalCommand? = null,
+        /** `tool_use_meta`: how the CLI names the line's MCP tool calls. */
+        val toolUseMeta: List<ToolUseMeta> = emptyList(),
         override val raw: JsonObject,
     ) : CliMessage
 
@@ -166,6 +176,10 @@ sealed interface CliMessage {
         val permissionDenials: List<PermissionDenial>,
         /** Each model's context window, from `modelUsage[model].contextWindow`; a model without one is left out, empty without any. */
         val contextWindows: Map<String, Long> = emptyMap(),
+        /** `local_command`: the local command the turn ran, e.g. `mcp`; null for a model turn or an unavailable command. */
+        val localCommand: String? = null,
+        /** `user_message_uuids`: the uuids of the user sends the turn consumed (`bash-mode:8` names two); empty when absent. */
+        val userMessageUuids: List<String> = emptyList(),
         override val raw: JsonObject,
     ) : CliMessage
 
@@ -269,6 +283,10 @@ sealed interface InboundRequest {
         val decisionReasonType: String?,
         /** Set when a subagent asks: its task id. */
         val agentId: String?,
+        /** `mcp_server`: the MCP server the tool belongs to. */
+        val mcpServer: McpServerRef? = null,
+        /** `server_policy_ask_only`, as the CLI sends it for an MCP tool (`mcp-tool-call:35`); false when absent. */
+        val serverPolicyAskOnly: Boolean = false,
     ) : InboundRequest {
         override val subtype: String get() = "can_use_tool"
     }

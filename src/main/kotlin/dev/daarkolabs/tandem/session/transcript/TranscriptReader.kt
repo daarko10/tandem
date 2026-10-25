@@ -2,11 +2,16 @@ package dev.daarkolabs.tandem.session.transcript
 
 import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
+import dev.daarkolabs.tandem.protocol.BashEscape
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ContentBlock
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.obj
 import dev.daarkolabs.tandem.protocol.string
+import dev.daarkolabs.tandem.protocol.timestampMillis
+import dev.daarkolabs.tandem.protocol.unwrapLocalCommandOutput
+import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.UserImage
@@ -41,7 +46,6 @@ private const val IMAGE_PROMPT_TITLE: String = "[Image #1]"
 // The CLI wraps the user lines it writes itself in these tags and, like Tandem, tells them apart by how the text starts.
 private const val COMMAND_NAME_TAG: String = "<command-name>"
 private const val COMMAND_MESSAGE_TAG: String = "<command-message>"
-private const val BASH_INPUT_TAG: String = "<bash-input>"
 
 /** Text the CLI or its harness writes in the user's place: command and shell output, background-task notifications. */
 private val GENERATED_TAGS: List<String> =
@@ -49,7 +53,6 @@ private val GENERATED_TAGS: List<String> =
 
 private val COMMAND_NAME: Regex = Regex("<command-name>([^<]*)</command-name>")
 private val COMMAND_ARGS: Regex = Regex("<command-args>(.*?)</command-args>", RegexOption.DOT_MATCHES_ALL)
-private val BASH_INPUT: Regex = Regex("<bash-input>(.*?)</bash-input>", RegexOption.DOT_MATCHES_ALL)
 
 /** What a transcript says about its session, short of the history itself. */
 data class TranscriptMeta(
@@ -100,12 +103,15 @@ data class LoadedTranscript(
  * what each line says about the meta until the first pass has placed it.
  *
  * Prompts (`user` text and images), tool results (`user` `tool_result` blocks) and `assistant` lines make the history: an interrupt
- * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape `!command`, and a line of images
- * only (or a generated tag with images) a prompt with no text. Each goes to the reducer stamped with its line's `timestamp` (0
- * when it has none), and [TranscriptMeta.cwd] becomes the state's `cwd`. `custom-title`, `ai-title` and `summary` lines make the
- * title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the output of commands and shell escapes,
- * background-task notifications and other generated tags unless they carry images, every other type, and lines that are not a
- * JSON object (such as a last line the CLI is still writing) are skipped. Bad input never throws.
+ * marker becomes the reducer's "Stopped." notice, a slash command `/name args`, a shell escape (`<bash-input>`) a shell entry with
+ * its output (`<bash-stdout>`, `<bash-stderr>`, on the same line or the next), and a line of images only (or a generated tag with
+ * images) a prompt with no text. A `system` `local_command` line is a local command's output, the
+ * notice the stream shows for it, or the command itself as typed (see [Scan]). Each goes to the reducer stamped with its line's
+ * `timestamp` (0 when it has none), and [TranscriptMeta.cwd] becomes the state's `cwd`. `custom-title`, `ai-title` and `summary`
+ * lines make the title, wherever they are. `isMeta`, `isSidechain` and `isCompactSummary` lines, the output of commands in user
+ * lines, a shell escape's output with no shell entry before it to belong to, background-task notifications and other generated tags
+ * unless they carry images, every other type, and
+ * lines that are not a JSON object (such as a last line the CLI is still writing) are skipped. Bad input never throws.
  */
 object TranscriptReader {
     /**
@@ -386,12 +392,31 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
             "assistant" -> if (!raw.isSet("isSidechain")) {
                 state = reduce(state, SessionEvent.Cli(message, atMillis = (message as? CliMessage.Assistant)?.timestampMillis ?: 0L))
             }
+            "system" -> if (raw.string("subtype") == "local_command" && !raw.isSet("isMeta") && !raw.isSet("isSidechain")) localCommand(raw)
+        }
+    }
+
+    /**
+     * A `local_command` line. Its output (`content` wrapped in `<local-command-stdout>` or `<local-command-stderr>`, or a line that
+     * names the command it ran, `commandRun`, or its outcome, `commandOutcome`) goes to the reducer as the stream's local-command
+     * line does, so the notice is the same. Bare `content` with a `submitUuid` is the command as typed (`/help`, which has no
+     * `<command-name>` line), a prompt. Any other, and one without a string `content`, is skipped.
+     */
+    private fun localCommand(raw: JsonObject) {
+        val content = raw.string("content") ?: return
+        val output = unwrapLocalCommandOutput(content)
+        val run = raw.obj("commandRun")
+        if (output != content || run != null || raw.obj("commandOutcome") != null) {
+            state = reduce(state, SessionEvent.LocalCommandOutput(output, run?.string("command")))
+        } else if (raw.string("submitUuid") != null) {
+            state = reduce(state, SessionEvent.UserSent(raw.string("uuid") ?: "line-$lineCount", content, timestampMillis(raw) ?: 0L))
         }
     }
 
     private fun userLine(message: CliMessage) {
         val user = message as? CliMessage.User ?: return
         val uuid = user.uuid ?: "line-$lineCount"
+        if (shellLine(user, uuid)) return
         val shown = userLineOf(user, uuid)
         // Tool results and an interrupt marker go through the reducer, as they do live; once per line, since it handles both.
         // The API puts a user message's tool_result blocks first and any text after them, so a prompt comes after its results.
@@ -401,6 +426,25 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
         // A line with images is a prompt even without typed text (images only), as it was when sent.
         if (shown.typed == null && shown.images.isEmpty()) return
         state = reduce(state, SessionEvent.UserSent(uuid, shown.typed?.text ?: "", atMillis, shown.images))
+    }
+
+    /**
+     * A shell escape's line, of text only: true when [user] is one, handled or skipped. `<bash-input>` (with its output on the same
+     * line, the merged form, or without) is a loaded shell entry with the command trimmed; `<bash-stdout>` or `<bash-stderr>` is the
+     * output of the shell entry just before it, if that has none yet, and is skipped otherwise (a stray line).
+     */
+    private fun shellLine(user: CliMessage.User, uuid: String): Boolean {
+        if (user.content.isEmpty() || user.content.any { it !is ContentBlock.Text } || user.isInterrupt()) return false
+        val text = user.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+        val line = BashEscape.parse(text) ?: return false
+        if (text.trimStart().startsWith(BashEscape.INPUT_OPEN)) {
+            val command = line.command?.trim()?.ifEmpty { null } ?: return true
+            state = reduce(state, SessionEvent.ShellLoaded(uuid, command, line.shown(), user.timestampMillis ?: 0L))
+        } else {
+            val shell = state.entries.lastOrNull() as? ChatEntry.Shell
+            if (shell != null && shell.output.isEmpty()) state = reduce(state, SessionEvent.ShellOutput(shell.id, line.shown()))
+        }
+        return true
     }
 }
 
@@ -413,7 +457,8 @@ private class Typed(val text: String, val isPrompt: Boolean)
 /**
  * What the user typed, from a user line's [text], told apart the way the CLI tells its own lines apart: by how the text starts.
  * A slash command (`<command-name>` or `<command-message>` first) shows as `/name args` but is not a prompt for the title; a
- * shell escape (`<bash-input>`) shows as `!command`. Their output, background-task notifications and blank text give null.
+ * shell escape (`<bash-input>`) is `! command`, the form of the CLI's own `last-prompt`, a prompt for the title. Their output,
+ * background-task notifications and blank text give null.
  * Any other text is a prompt as it stands, even one that quotes such a tag further on.
  */
 private fun typedText(text: String): Typed? {
@@ -422,8 +467,8 @@ private fun typedText(text: String): Typed? {
         start.isEmpty() || GENERATED_TAGS.any { start.startsWith(it) } -> null
         start.startsWith(COMMAND_NAME_TAG) || start.startsWith(COMMAND_MESSAGE_TAG) ->
             commandOf(start)?.let { Typed(it, isPrompt = false) }
-        start.startsWith(BASH_INPUT_TAG) ->
-            BASH_INPUT.find(start)?.groupValues?.get(1)?.trim()?.ifEmpty { null }?.let { Typed("!$it", isPrompt = true) }
+        start.startsWith(BashEscape.INPUT_OPEN) ->
+            BashEscape.parse(start)?.command?.trim()?.ifEmpty { null }?.let { Typed("! $it", isPrompt = true) }
         else -> Typed(text, isPrompt = true)
     }
 }

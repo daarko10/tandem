@@ -1,7 +1,9 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.PermissionDenial
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SlashCommand
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
@@ -83,7 +85,28 @@ data class ChatState(
      * and on a reloaded transcript, whose lines' usage is not decoded.
      */
     val context: ContextUsage? = null,
+    /** The session's MCP servers, as the latest `system/init` and `mcp_status` answer report them. */
+    val mcp: McpState = McpState(),
+    /** The slash commands the CLI offers, in its order, from the `commands` of its `initialize` answer; empty until it answers. */
+    val commands: List<SlashCommand> = emptyList(),
+    /** The command names of the latest `system/init` (`slash_commands`), for the palette while [commands] is empty. */
+    val slashCommandNames: List<String> = emptyList(),
+    /** The commands the latest `system/init` says work only in a terminal (`terminal_slash_commands`). */
+    val terminalCommands: Set<String> = emptySet(),
+    /** The id of the [ChatEntry.Shell] whose command runs now; null when none runs. */
+    val runningShell: String? = null,
+    /**
+     * The uuids of the frames sent with `shouldQuery: false` (a shell escape's) whose zero-turn `result` is still to come, in the order
+     * sent. Empty once the process that owed them ends, and once [settled].
+     */
+    val quietSends: Set<String> = emptySet(),
 )
+
+/**
+ * The session's MCP servers: [servers] in the CLI's order; [detailed] once an `mcp_status` answer gave them (errors, config, tools),
+ * not only `system/init`'s thin list; [initCount] counts the `system/init` lines seen.
+ */
+data class McpState(val servers: List<McpServerInfo> = emptyList(), val detailed: Boolean = false, val initCount: Int = 0)
 
 /**
  * How full the context window is: [tokens] is the input of the main thread's latest `message_start` (plain, cache-creation and
@@ -106,6 +129,8 @@ data class TurnProgress(
     val lastToolUseId: String?,
     val toolCount: Int,
     val lastError: String? = null,
+    /** The CLI answered the turn's prompt itself (a local command such as `/mcp`): its `result` ends it without a footer. */
+    val localCommand: Boolean = false,
 )
 
 /** A subagent the CLI runs for an `Agent` tool call ([toolUseId]), from its `task_*` lines: what it does now and its totals. */
@@ -229,8 +254,35 @@ sealed interface ChatEntry {
         val atMillis: Long? = null,
     ) : ChatEntry
 
-    /** Something the user must see that is not model output: retries, fallbacks, errors, stops. */
-    data class Notice(override val id: String, val level: NoticeLevel, val text: String, val kind: NoticeKind = NoticeKind.GENERIC) : ChatEntry
+    /**
+     * Something the user must see that is not model output: retries, fallbacks, errors, stops, and what a local command printed
+     * ([NoticeKind.LOCAL_COMMAND]). On a local command's notice, [command] is the command the user typed, from the prompt before it
+     * (else [runCommand]), and [runCommand] the command the CLI says it ran (`local_command_run.command`), which decides its link.
+     */
+    data class Notice(
+        override val id: String,
+        val level: NoticeLevel,
+        val text: String,
+        val kind: NoticeKind = NoticeKind.GENERIC,
+        val command: String? = null,
+        val runCommand: String? = null,
+    ) : ChatEntry
+
+    /**
+     * A shell escape (`! command`), in place of a prompt: the [command] as typed after `!`, its [output] so far (stdout and stderr
+     * merged), whether it still [running], how it ended ([end]; null while it runs and on a reloaded one, whose transcript keeps no
+     * end) and how long it ran. [sent]: its frames went to the CLI.
+     */
+    data class Shell(
+        override val id: String,
+        val command: String,
+        val output: String,
+        val running: Boolean,
+        val end: ShellEnd? = null,
+        val durationMs: Long? = null,
+        val startedAtMillis: Long? = null,
+        val sent: Boolean = false,
+    ) : ChatEntry
 
     /**
      * The end of a turn: how it ended, how long it took and its output tokens, and the calls denied in it. [error] is set on a
@@ -249,8 +301,11 @@ sealed interface ChatEntry {
 
 enum class NoticeLevel { INFO, WARNING, ERROR }
 
-/** What a notice stands for: [INTERRUPTED] is the "Stopped." of an interrupted turn, which the chat shows as the turn's end. */
-enum class NoticeKind { GENERIC, INTERRUPTED }
+/**
+ * What a notice stands for: [INTERRUPTED] is the "Stopped." of an interrupted turn, which the chat shows as the turn's end;
+ * [LOCAL_COMMAND] is the output of a command the CLI answered itself, such as `/mcp`, in place of a reply.
+ */
+enum class NoticeKind { GENERIC, INTERRUPTED, LOCAL_COMMAND }
 
 /** How a tool call's permission was decided ([decision], [source], [reasonType]), or why it did not run ([nonExecutionKind]). */
 data class PermissionDecision(val decision: String, val source: String?, val reasonType: String?, val nonExecutionKind: String?)
@@ -293,8 +348,9 @@ data class PendingPermission(
 )
 
 /**
- * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming.
- * A transcript loaded by `TranscriptReader` comes back settled.
+ * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming. No quiet send waits
+ * for its result either: the process that owed it is gone, and the next one starts from this. A shell escape stays as it is (a
+ * command runs on in Tandem's own process). A transcript loaded by `TranscriptReader` comes back settled.
  */
 internal fun ChatState.settled(): ChatState = copy(
     entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it },
@@ -306,4 +362,5 @@ internal fun ChatState.settled(): ChatState = copy(
     ended = false,
     turnInterrupted = false,
     turn = null,
+    quietSends = emptySet(),
 )

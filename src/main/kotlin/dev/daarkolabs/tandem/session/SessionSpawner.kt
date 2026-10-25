@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
@@ -15,8 +16,10 @@ import kotlinx.coroutines.withContext
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
-// The manager's log category: the spawn pipeline was part of it, and debug settings name it.
-private val LOG = logger<SessionManager>()
+// The manager's log category: the spawn pipeline was part of it, and debug settings name it. Looked up on every use, as
+// ShellRunner's is: a test's capturing factory must see every record of a shell escape's run.
+private val LOG: Logger
+    get() = logger<SessionManager>()
 
 /**
  * The permission modes Tandem offers, in the order its menus list them (`chat/Modes` labels them). A process never starts in another
@@ -28,6 +31,21 @@ internal val OFFERED_MODES: List<PermissionMode> =
 
 /** The chat's notice when a process starts although [SessionManager]'s cap is reached and no session is idle. */
 private const val CAP_EXCEEDED_TEXT: String = "Max live sessions exceeded"
+
+/** What [SessionSpawner.start] came to. */
+internal sealed interface SpawnOutcome {
+    /** A process runs for the session: one did already, or one started now, which may have ended since (its chat says why). */
+    data object Running : SpawnOutcome
+
+    /** Nothing was to start: the session is closed, or a start for prompts found none queued. */
+    data object Skipped : SpawnOutcome
+
+    /** The cap is reached, no other session is idle, and this start may not go over the cap. */
+    data object NoRoom : SpawnOutcome
+
+    /** No process could start, as the chat says: [reason]. */
+    data class Failed(val reason: String) : SpawnOutcome
+}
 
 /**
  * How [SessionManager] starts a session's process: under the session's spawn lock, after making room under the cap, with the
@@ -85,12 +103,13 @@ internal class SessionSpawner(
      * shows the install notice instead, and a fork that has no transcript of its own, and whose original's is not found, says
      * so in its chat ([SessionManager.FORK_ORIGINAL_GONE_TEXT]) rather than start a `--resume` the CLI would fail. Every process,
      * a respawn's and a fork's too, starts only once [makeRoom] has made room for it under the cap; if it could not, the process
-     * starts over the cap when [overCapAllowed], with a notice in the chat, and else not at all.
+     * starts over the cap when [overCapAllowed], with a notice in the chat, and else not at all. Returns what it came to.
      */
-    suspend fun start(handle: SessionHandle, forPrompts: Boolean, overCapAllowed: Boolean) {
+    suspend fun start(handle: SessionHandle, forPrompts: Boolean, overCapAllowed: Boolean): SpawnOutcome =
         handle.spawnLock.withLock {
-            if (handle.isClosed || handle.deliverQueued()) return
-            if (forPrompts && !handle.hasQueued()) return
+            if (handle.isClosed) return SpawnOutcome.Skipped
+            if (handle.deliverQueued()) return SpawnOutcome.Running
+            if (forPrompts && !handle.hasQueued()) return SpawnOutcome.Skipped
             val (path, hasTranscript, originalGone) = withContext(Dispatchers.IO) {
                 val path = binary()
                 val hasTranscript = path != null && index.transcript(handle.id) != null
@@ -100,19 +119,19 @@ internal class SessionSpawner(
             }
             if (path == null) {
                 val dropped = handle.failToStart(SessionManager.NO_CLI_TEXT)
-                LOG.info("session ${handle.id}: claude not found, $dropped prompt(s) not sent")
-                return
+                LOG.info("session ${handle.id}: claude not found, $dropped queued message(s) not sent")
+                return SpawnOutcome.Failed(SessionManager.NO_CLI_TEXT)
             }
             if (originalGone) {
                 val dropped = handle.failToStart(SessionManager.FORK_ORIGINAL_GONE_TEXT)
-                LOG.warn("session ${handle.id}: not started, the transcript of the session it forks was not found; $dropped prompt(s) not sent")
-                return
+                LOG.warn("session ${handle.id}: not started, the transcript of the session it forks was not found; $dropped queued message(s) not sent")
+                return SpawnOutcome.Failed(SessionManager.FORK_ORIGINAL_GONE_TEXT)
             }
             admission.withLock {
                 val overCap = !makeRoom(handle)
                 if (overCap && !overCapAllowed) {
                     LOG.info("session ${handle.id}: not started, the cap of ${maxLive()} live session(s) is reached and none is idle")
-                    return
+                    return SpawnOutcome.NoRoom
                 }
                 val kind = when {
                     hasTranscript -> "resume"
@@ -125,8 +144,9 @@ internal class SessionSpawner(
                     onFirstInit = { session, reported -> firstInit(handle, session, reported) },
                 )
             }
+            // A process that attached and ended at once (one that could not launch) is still this start's: its chat says why.
+            if (handle.isClosed) SpawnOutcome.Skipped else SpawnOutcome.Running
         }
-    }
 
     /**
      * Makes room for [starting]'s process under the cap: while [maxLive] other sessions run a process, the least recently used one
@@ -233,11 +253,12 @@ internal class SessionSpawner(
     }
 
     /**
-     * The process with [config], starting from the settled [chat], plus a notice if [config] replaced its permission mode and one
-     * if it starts [overCap]. A child of [scope], not of a session's scope, since it can move to another session ([takeOver]).
+     * The process with [config], starting from the settled [chat] without its MCP servers (they are an earlier process's: this one's
+     * come with its `system/init` or `mcp_status`), plus a notice if [config] replaced its permission mode and one if it starts
+     * [overCap]. A child of [scope], not of a session's scope, since it can move to another session ([takeOver]).
      */
     private fun newSession(config: SessionConfig, chat: ChatState, overCap: Boolean): ClaudeSession {
-        var initial = chat.settled()
+        var initial = chat.settled().copy(mcp = McpState())
         val recorded = chat.permissionMode
         if (recorded != null && recorded != config.permissionMode) {
             val notice = "Permission mode ${recorded.wire} is not supported yet; using default."

@@ -1,17 +1,26 @@
 package dev.daarkolabs.tandem.session
 
+import com.intellij.openapi.diagnostic.Logger
+import dev.daarkolabs.tandem.protocol.BashEscape
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.protocol.McpConfig
+import dev.daarkolabs.tandem.protocol.McpServerInfo
+import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.TranscriptFiles
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -31,12 +40,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
 import java.io.IOException
+import java.io.InputStream
 import java.io.StringReader
 import java.nio.file.AccessDeniedException
 import java.nio.file.InvalidPathException
@@ -61,6 +72,11 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlin.test.fail
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * [SessionManager] against the fake CLI (`src/test/resources/fake-claude.py`): every session runs a real child process that
@@ -112,6 +128,10 @@ class SessionManagerTest {
         maxLive: Int = 4,
         /** More variables for every process, such as `TANDEM_FAKE_SESSION_ID`. */
         environment: Map<String, String> = emptyMap(),
+        mcpAuthEvery: Duration = 2.seconds,
+        mcpAuthTimeout: Duration = 3.minutes,
+        respondToShell: () -> Boolean = { true },
+        shell: ShellRunner = ShellRunner(environment = { mapOf("SHELL" to "/bin/sh") }),
     ): SessionManager {
         val fake = buildMap {
             put("TANDEM_FAKE_LOG", log.toString())
@@ -132,6 +152,10 @@ class SessionManagerTest {
             readTranscript = read,
             appendTitle = appendTitle,
             deleteFiles = deleteFiles,
+            mcpAuthEvery = mcpAuthEvery,
+            mcpAuthTimeout = mcpAuthTimeout,
+            respondToShell = respondToShell,
+            shell = shell,
         )
     }
 
@@ -252,6 +276,36 @@ class SessionManagerTest {
 
         manager.seedModels(remembered)
         assertEquals(listed, manager.models.value, "a remembered list never replaces one a process gave")
+    }
+
+    @Test
+    fun `a session without a process offers the commands the last process offered, else the remembered ones`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "mcp-slash")
+        val remembered = CommandCatalogue(listOf(SlashCommand("hello", "Hi (project)")), terminal = setOf("doctor", "old"))
+        manager.seedCommands(remembered)
+        assertEquals(remembered, manager.commands.value, "until a process offers them, the catalogue an earlier IDE run remembered")
+
+        // Restored with the project: no process, so no initialize answer of its own.
+        val resumed = manager.open(seeded, spawn = false)
+        assertEquals(emptyList(), resumed.state.value.commands)
+
+        // Another session's process answers initialize (mcp-slash:1) without a prompt: its commands are every session's now.
+        val live = manager.create(NewSessionOptions())
+        val offered = live.state.first { it.commands.isNotEmpty() }.commands
+        assertEquals(73, offered.size)
+        assertEquals(CommandCatalogue(offered, remembered.terminal), manager.commands.first { it.commands == offered })
+        assertEquals(1, spawns().size, "no process was started to read them")
+
+        // Its first init (with its first prompt) names the terminal-only ones, which replace the remembered names.
+        manager.send(live.id, "/usage")
+        val terminal = live.state.first { it.terminalCommands.isNotEmpty() }.terminalCommands
+        assertEquals(setOf("doctor", "color", "focus", "reload-plugins"), terminal)
+        assertEquals(terminal, manager.commands.first { it.terminal == terminal }.terminal)
+        assertEquals(emptyList(), resumed.state.value.commands, "the resumed session's own catalogue stays its process's")
+
+        manager.seedCommands(remembered)
+        assertEquals(CommandCatalogue(offered, terminal), manager.commands.value, "a remembered catalogue never replaces one a process gave")
     }
 
     @Test
@@ -544,6 +598,21 @@ class SessionManagerTest {
         handle.state.first { s -> s.entries.count { it is ChatEntry.Notice } == 2 }
         assertEquals(emptyList(), handle.state.value.prompts())
         assertEquals(SessionStatus.STOPPED, handle.status.value)
+        assertFalse(log.exists(), "no process was started")
+    }
+
+    @Test
+    fun `a shell escape whose claude is not found says its output was not sent`() = test {
+        unix()
+        val manager = manager(lookup = { null })
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "echo hi")
+        val done = handle.state.first { s -> s.entries.lastOrNull().let { it is ChatEntry.Notice && it.level == NoticeLevel.WARNING } }
+        val (install, unsent) = done.entries.takeLast(2).map { it as ChatEntry.Notice }
+        assertEquals(NoticeLevel.ERROR, install.level)
+        assertTrue("not found" in install.text, install.text)
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", unsent.text)
+        assertEquals(ShellEnd.Exited(0), done.shell().end)
         assertFalse(log.exists(), "no process was started")
     }
 
@@ -1573,5 +1642,804 @@ class SessionManagerTest {
         val updated = response["updatedPermissions"]!!.jsonArray.map { it.jsonObject }
         assertEquals(listOf("addRules"), updated.map { it.string("type") })
         assertEquals("session", updated.single().string("destination"))
+    }
+
+    // MCP controls (docs/superpowers/specs/2026-10-21-mcp-controls-design.md 4.2, 9.2). The fake answers every mcp_* request
+    // inline; on `mcp-status` its first mcp_status gets the pending payload of `:2` (its rule (c)), which mcpSession() uses up.
+
+    /** The sign-in link of `mcp-status:40`. */
+    private val authUrl: String =
+        Json.parseToJsonElement(Fixtures.lines("mcp-status")[39]).jsonObject["response"]!!.jsonObject["response"]!!.jsonObject
+            .string("authUrl")!!
+
+    /** A new session of this manager, once its process is attached. */
+    private suspend fun SessionManager.started(): SessionHandle {
+        val handle = create(NewSessionOptions())
+        handle.status.first { it == SessionStatus.IDLE }
+        return handle
+    }
+
+    /**
+     * A manager on the `mcp-status` fixture and a session of it that has listed its servers once, which uses up the fake's
+     * pending answer (rule (c)).
+     */
+    private suspend fun mcpSession(
+        environment: Map<String, String> = emptyMap(),
+        every: Duration = 2.seconds,
+        timeout: Duration = 3.minutes,
+    ): Pair<SessionManager, SessionHandle> {
+        val manager = manager(fixtures = "mcp-status", environment = environment, mcpAuthEvery = every, mcpAuthTimeout = timeout)
+        val handle = manager.started()
+        manager.refreshMcp(handle.id).ok()
+        return manager to handle
+    }
+
+    private fun <T> McpResult<T>.ok(): T = when (this) {
+        is McpResult.Ok -> value
+        is McpResult.Failed -> fail("expected an answer, got $this")
+    }
+
+    /** The control requests of [subtype] the host wrote, in order. */
+    private fun requests(subtype: String): List<JsonObject> = frames().filter { it.type() == "control_request" && it.subtype() == subtype }
+
+    /** The frames the host wrote after its first control request of [subtype]. */
+    private fun framesAfter(subtype: String): List<JsonObject> = frames().dropWhile { it.subtype() != subtype }.drop(1)
+
+    private fun ChatState.notices(level: NoticeLevel): List<String> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == level }.map { it.text }
+
+    private suspend fun SessionHandle.awaitOutcome(server: String): McpAuthOutcome =
+        mcpAuth.first { it[server]?.outcome != null }[server]!!.outcome!!
+
+    @Test
+    fun `the MCP panel's start resumes a session without a process, sends no prompt, and its servers become the project's known ones`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "mcp-status")
+        val resumed = manager.open(seeded, spawn = false)
+        assertEquals(SessionStatus.STOPPED, resumed.status.value)
+        assertEquals(McpResult.Failed(McpError.NotRunning), manager.refreshMcp(seeded))
+        assertEquals(emptyList(), manager.knownMcpServers.value, "no process has listed any yet")
+
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = false))
+        val listed = manager.refreshMcp(seeded).ok()
+        assertEquals(listed, resumed.mcpServers.first { it.detailed }.servers)
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = false), "a running session is not started again")
+
+        val argv = spawns().single()
+        assertEquals(seeded, argv.valueOf("--resume"), "resumed with its usual arguments")
+        assertFalse("--session-id" in argv, argv.toString())
+        assertTrue(frames().none { it.type() == "user" }, "no prompt is sent")
+        assertEquals(listed.map { it.lastKnown() }, manager.knownMcpServers.value)
+        assertEquals(listed.map { it.name }, manager.knownMcpServers.value.map { it.name })
+    }
+
+    @Test
+    fun `the known servers keep only what the panel shows`() {
+        val server = McpServerInfo(
+            "remote",
+            McpStatus.CONNECTED,
+            "connected",
+            error = "boom",
+            config = McpConfig("http", command = "npx", args = listOf("--token", "s3cret"), url = "https://user:pw@mcp.example.com:8443/k3y?token=t"),
+        )
+        val known = server.lastKnown()
+        assertEquals(McpConfig("http", command = "npx", args = emptyList(), url = "https://mcp.example.com:8443"), known.config)
+        assertEquals(server.copy(config = known.config), known, "everything else as the panel shows it")
+        assertNull(McpServerInfo("bare", McpStatus.FAILED, "failed").lastKnown().config)
+    }
+
+    @Test
+    fun `the MCP panel's start stops an idle session to make room`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "mcp-status", maxLive = 1)
+        val idle = manager.started()
+        manager.open(seeded, spawn = false)
+
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = false))
+        idle.status.await(SessionStatus.STOPPED)
+        awaitLog { spawns().size == 2 }
+        assertEquals(seeded, spawns().last().valueOf("--resume"))
+    }
+
+    @Test
+    fun `the MCP panel's start never stops a session in a turn, and goes over the cap only when asked`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "permission,mcp-status", maxLive = 1)
+        val busy = manager.create(NewSessionOptions())
+        manager.send(busy.id, "Create the fixture file")
+        busy.awaitRequest("<request_id-26>")
+        val resumed = manager.open(seeded, spawn = false)
+
+        assertEquals(McpStart.NoRoom(1), manager.startForMcp(seeded, overCap = false))
+        assertEquals(1, spawns().size, "nothing started")
+        assertEquals(SessionStatus.STOPPED, resumed.status.value)
+        assertTrue(resumed.state.value.notices(NoticeLevel.INFO).isEmpty(), "nothing in the chat")
+
+        // Start session: the user asked for it, so it starts over the cap, as a prompt would, and the chat says so.
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = true))
+        awaitLog { spawns().size == 2 }
+        assertEquals(seeded, spawns().last().valueOf("--resume"))
+        assertEquals(listOf("Max live sessions exceeded"), resumed.state.value.notices(NoticeLevel.INFO))
+        assertEquals(SessionStatus.WAITING, busy.status.value, "the session in a turn runs on")
+        manager.refreshMcp(seeded).ok()
+    }
+
+    @Test
+    fun `the MCP panel's start says why no process could start`() = test {
+        seed(seeded)
+        val manager = manager(binary = null)
+        val resumed = manager.open(seeded, spawn = false)
+        assertEquals(McpStart.Failed(SessionManager.NO_CLI_TEXT), manager.startForMcp(seeded, overCap = false))
+        assertEquals(SessionStatus.STOPPED, resumed.status.value)
+        assertEquals(McpStart.Failed(SessionManager.CLOSED_TEXT), manager.startForMcp("not-open", overCap = false))
+    }
+
+    @Test
+    fun `a process that cannot launch ends the MCP panel's start with the chat's reason`() = test {
+        seed(seeded)
+        val manager = manager(binary = dir.resolve("no-such-claude").toString())
+        val resumed = manager.open(seeded, spawn = false)
+        // The launch fails in the process's own coroutine: the start attaches it, and its end follows.
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = false))
+        val ended = resumed.state.first { it.ended }
+        assertTrue(ended.notices(NoticeLevel.ERROR).single().startsWith("Could not start `"), ended.notices(NoticeLevel.ERROR).toString())
+        val listed = manager.refreshMcp(seeded)
+        assertTrue(listed == McpResult.Failed(McpError.NotRunning) || listed == McpResult.Failed(McpError.Ended), listed.toString())
+    }
+
+    @Test
+    fun `a new process starts without the servers of the one before`() = test {
+        val (manager, handle) = mcpSession()
+        assertTrue(handle.state.value.mcp.servers.isNotEmpty())
+        manager.stop(handle.id)
+        assertTrue(handle.state.value.mcp.servers.isNotEmpty(), "a stopped session keeps its last list, which the badge does not count")
+
+        assertEquals(McpStart.Running, manager.startForMcp(handle.id, overCap = false))
+        assertEquals(McpState(), handle.state.value.mcp, "its servers come with its own init or mcp_status")
+    }
+
+    @Test
+    fun `opening the servers sends mcp_status and the handle publishes the rows`() = test {
+        val manager = manager(fixtures = "mcp-status")
+        val handle = manager.started()
+
+        val listed = manager.refreshMcp(handle.id).ok()
+
+        assertEquals(listOf("echo", "broken", "authy"), listed.map { it.name })
+        assertEquals(1, requests("mcp_status").size)
+        assertEquals(emptyList(), prompts(), "the request goes out before any prompt")
+        val published = handle.mcpServers.first { it.detailed }
+        assertEquals(listOf("echo", "broken", "authy"), published.servers.map { it.name })
+    }
+
+    @Test
+    fun `toggle sends mcp_toggle and a following refreshMcp shows disabled`() = test {
+        val (manager, handle) = mcpSession()
+
+        assertEquals(McpResult.Ok(Unit), manager.toggleMcp(handle.id, "echo", enabled = false))
+
+        val toggle = requests("mcp_toggle").single()["request"]!!.jsonObject
+        assertEquals("echo", toggle.string("serverName"))
+        assertEquals(false, toggle["enabled"]!!.jsonPrimitive.boolean)
+        assertEquals(McpStatus.DISABLED, manager.refreshMcp(handle.id).ok().single { it.name == "echo" }.status)
+        handle.mcpServers.first { mcp -> mcp.servers.any { it.name == "echo" && it.status == McpStatus.DISABLED } }
+    }
+
+    @Test
+    fun `toggle of an unknown server returns Server not found`() = test {
+        val (manager, handle) = mcpSession()
+        assertEquals(McpResult.Failed(McpError.Rejected("Server not found: nosuch")), manager.toggleMcp(handle.id, "nosuch", enabled = false))
+    }
+
+    @Test
+    fun `reconnect of a failed server returns the CLI's error`() = test {
+        val (manager, handle) = mcpSession()
+        assertEquals(McpResult.Failed(McpError.Rejected("Connection closed")), manager.reconnectMcp(handle.id, "broken"))
+        assertEquals("broken", requests("mcp_reconnect").single()["request"]!!.jsonObject.string("serverName"))
+    }
+
+    // spec: reconnect of a needs-auth server returns Server status: needs-auth
+    @Test
+    fun `reconnect of a needs-auth server returns Server status - needs-auth`() = test {
+        val (manager, handle) = mcpSession()
+        assertEquals(McpResult.Failed(McpError.Rejected("Server status: needs-auth")), manager.reconnectMcp(handle.id, "authy"))
+    }
+
+    @Test
+    fun `startMcpAuth opens the auth url and the poll sees the server connect`() = test {
+        val (manager, handle) = mcpSession(environment = mapOf("TANDEM_FAKE_AUTH_DONE_MS" to "500"), every = 50.milliseconds)
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+
+        val start = manager.startMcpAuth(handle.id, "authy") { opened.add(it) }.ok()
+
+        assertEquals(authUrl, start.authUrl)
+        assertEquals(listOf(authUrl), opened.toList())
+        assertNotNull(handle.mcpAuth.value["authy"], "the wait is published as soon as the browser is asked")
+        assertEquals(McpAuthOutcome.Connected, handle.awaitOutcome("authy"))
+        val chat = handle.state.first { it.notices(NoticeLevel.INFO).isNotEmpty() }
+        assertEquals(listOf("Signed in to authy."), chat.notices(NoticeLevel.INFO))
+        assertEquals(listOf(authUrl), opened.toList(), "the browser opens once")
+        assertEquals(emptySet(), handle.mcpLoginHinted.value)
+    }
+
+    @Test
+    fun `a sign-in link that does not open posts the error without the terminal hint`() = test {
+        val (manager, handle) = mcpSession(every = 50.milliseconds)
+
+        val result = manager.startMcpAuth(handle.id, "authy") { throw java.io.IOException("no browser") }
+
+        assertEquals(McpResult.Failed(McpError.Rejected("no browser", linkFailed = true)), result)
+        val chat = handle.state.first { it.notices(NoticeLevel.ERROR).isNotEmpty() }
+        assertEquals(listOf("Sign-in to authy failed: no browser"), chat.notices(NoticeLevel.ERROR))
+        assertEquals(emptySet(), handle.mcpLoginHinted.value, "mcp_authenticate itself succeeded (spec 4.2)")
+        assertEquals(emptyMap(), handle.mcpAuth.value)
+    }
+
+    @Test
+    fun `the sign-in poll times out while the server still needs auth`() = test {
+        val (manager, handle) = mcpSession(every = 50.milliseconds, timeout = 300.milliseconds)
+
+        manager.startMcpAuth(handle.id, "authy") {}.ok()
+
+        assertEquals(McpAuthOutcome.StillNeedsAuth, handle.awaitOutcome("authy"))
+        val chat = handle.state.first { it.notices(NoticeLevel.WARNING).isNotEmpty() }
+        assertEquals(listOf("Sign-in to authy did not complete within 3 minutes."), chat.notices(NoticeLevel.WARNING))
+        assertTrue(framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } >= 2, "the poll asked more than once")
+    }
+
+    // MCP spec 3.3 steps 3 and 5: a pending server (reconnecting after the callback, unrecorded) keeps the wait going, and every
+    // outcome but Cancel and the session's end has a chat notice.
+    @Test
+    fun `a sign-in waits through pending and says when the server changed or went`() {
+        fun listed(status: McpStatus, error: String? = null) = listOf(McpServerInfo("authy", status, status.wire, error = error))
+        assertNull(signInOutcome(listed(McpStatus.NEEDS_AUTH), "authy"))
+        assertNull(signInOutcome(listed(McpStatus.PENDING), "authy"), "pending goes on waiting")
+        assertEquals(McpAuthOutcome.Connected, signInOutcome(listed(McpStatus.CONNECTED), "authy"), "then connected ends it")
+        assertEquals(McpAuthOutcome.Removed, signInOutcome(emptyList(), "authy"))
+        assertEquals(McpAuthOutcome.Changed(McpStatus.FAILED, "boom"), signInOutcome(listed(McpStatus.FAILED, "boom"), "authy"))
+
+        assertEquals(NoticeLevel.WARNING to "Sign-in to authy ended: authy is no longer configured.", signInNotice("authy", McpAuthOutcome.Removed))
+        assertEquals(
+            NoticeLevel.WARNING to "Sign-in to authy ended: the server is now disabled.",
+            signInNotice("authy", McpAuthOutcome.Changed(McpStatus.DISABLED, null)),
+        )
+        assertEquals(
+            NoticeLevel.WARNING to "Sign-in to authy ended: the server is now in an unknown state.",
+            signInNotice("authy", McpAuthOutcome.Changed(McpStatus.OTHER, null)),
+        )
+        assertEquals(NoticeLevel.ERROR to "Sign-in to authy failed: boom", signInNotice("authy", McpAuthOutcome.Changed(McpStatus.FAILED, "boom")))
+        assertNull(signInNotice("authy", McpAuthOutcome.Failed(McpError.Ended)), "the chat shows the session's end already")
+    }
+
+    @Test
+    fun `an mcp_status error answer is Rejected with the CLI's text`() = test {
+        val manager = manager(fixtures = "plain-reply")
+        val handle = manager.started()
+        assertEquals(McpResult.Failed(McpError.Rejected("Unknown subtype")), manager.refreshMcp(handle.id))
+    }
+
+    @Test
+    fun `startMcpAuth answered with Unknown subtype opens nothing and posts the error notice`() = test {
+        val manager = manager(fixtures = "plain-reply")
+        val handle = manager.started()
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+
+        val result = manager.startMcpAuth(handle.id, "authy") { opened.add(it) }
+
+        assertEquals(McpResult.Failed(McpError.Rejected("Unknown subtype")), result)
+        val chat = handle.state.first { it.notices(NoticeLevel.ERROR).isNotEmpty() }
+        assertEquals(listOf("Sign-in to authy failed: Unknown subtype"), chat.notices(NoticeLevel.ERROR))
+        assertEquals(setOf("authy"), handle.mcpLoginHinted.value)
+        assertEquals(emptyMap(), handle.mcpAuth.value)
+        assertEquals(emptyList(), opened.toList())
+    }
+
+    @Test
+    fun `toggle and reconnect answered with Unknown subtype are Rejected with the CLI's text`() = test {
+        val manager = manager(fixtures = "plain-reply")
+        val handle = manager.started()
+        val unknown = McpResult.Failed(McpError.Rejected("Unknown subtype"))
+        assertEquals(unknown, manager.toggleMcp(handle.id, "echo", enabled = false))
+        assertEquals(unknown, manager.reconnectMcp(handle.id, "echo"))
+    }
+
+    @Test
+    fun `startMcpAuth without an authUrl refreshes once`() = test {
+        val (manager, handle) = mcpSession(every = 50.milliseconds)
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+
+        val start = manager.startMcpAuth(handle.id, "echo") { opened.add(it) }.ok()
+
+        assertNull(start.authUrl)
+        assertEquals(McpAuthOutcome.Connected, handle.awaitOutcome("echo"))
+        val chat = handle.state.first { it.notices(NoticeLevel.INFO).isNotEmpty() }
+        assertEquals(listOf("Signed in to echo."), chat.notices(NoticeLevel.INFO))
+        delay(300) // a poll every 50 ms would have asked again by now
+        assertEquals(1, framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" })
+        assertEquals(emptyList(), opened.toList())
+    }
+
+    @Test
+    fun `the sign-in steps survive the caller's cancellation before and after the answer`() = test {
+        val environment = mapOf("TANDEM_FAKE_AUTH_DONE_MS" to "300", "TANDEM_FAKE_EXTRA_NEEDS_AUTH" to "authy2")
+        val (manager, handle) = mcpSession(environment = environment, every = 50.milliseconds)
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+
+        // Cancelled while mcp_authenticate is in flight.
+        val before = launch(start = CoroutineStart.UNDISPATCHED) { manager.startMcpAuth(handle.id, "authy") { opened.add(it) } }
+        before.cancel()
+        assertEquals(McpAuthOutcome.Connected, handle.awaitOutcome("authy"))
+        assertEquals(listOf(authUrl), opened.toList())
+
+        // Cancelled once the answer is in, while the browser is being asked.
+        val asked = CompletableDeferred<String>()
+        val browserDone = CompletableDeferred<Unit>()
+        val after = launch {
+            manager.startMcpAuth(handle.id, "authy2") { url ->
+                asked.complete(url)
+                browserDone.await()
+            }
+        }
+        assertEquals(authUrl, asked.await())
+        after.cancelAndJoin()
+        browserDone.complete(Unit)
+        assertEquals(McpAuthOutcome.Connected, handle.awaitOutcome("authy2"))
+        val chat = handle.state.first { it.notices(NoticeLevel.INFO).size == 2 }
+        assertEquals(listOf("Signed in to authy.", "Signed in to authy2."), chat.notices(NoticeLevel.INFO))
+    }
+
+    @Test
+    fun `two sign-in waits run side by side`() = test {
+        val environment = mapOf("TANDEM_FAKE_EXTRA_NEEDS_AUTH" to "authy2", "TANDEM_FAKE_AUTH_DONE_MS" to "500")
+        val (manager, handle) = mcpSession(environment = environment, every = 50.milliseconds)
+
+        manager.startMcpAuth(handle.id, "authy") {}.ok()
+        manager.startMcpAuth(handle.id, "authy2") {}.ok()
+
+        assertEquals(setOf("authy", "authy2"), handle.mcpAuth.value.keys)
+        val settled = handle.mcpAuth.first { waits -> waits.size == 2 && waits.values.all { it.outcome != null } }
+        assertEquals(mapOf("authy" to McpAuthOutcome.Connected, "authy2" to McpAuthOutcome.Connected), settled.mapValues { it.value.outcome })
+        val chat = handle.state.first { it.notices(NoticeLevel.INFO).size == 2 }
+        assertEquals(setOf("Signed in to authy.", "Signed in to authy2."), chat.notices(NoticeLevel.INFO).toSet())
+
+        // A second run: cancelling one wait leaves the other one running.
+        val second = manager.started()
+        manager.refreshMcp(second.id).ok()
+        manager.startMcpAuth(second.id, "authy") {}.ok()
+        manager.startMcpAuth(second.id, "authy2") {}.ok()
+        manager.cancelMcpAuth(second.id, "authy")
+        assertEquals(setOf("authy2"), second.mcpAuth.value.keys)
+        assertEquals(McpAuthOutcome.Connected, second.awaitOutcome("authy2"))
+        assertNull(second.mcpAuth.value["authy"])
+        val secondChat = second.state.first { it.notices(NoticeLevel.INFO).isNotEmpty() }
+        delay(200) // a cancelled wait would have ended by now too
+        assertEquals(listOf("Signed in to authy2."), second.state.value.notices(NoticeLevel.INFO), secondChat.toString())
+    }
+
+    @Test
+    fun `a stopped session answers NotRunning`() = test {
+        val manager = manager(fixtures = "mcp-status")
+        val handle = manager.started()
+        manager.stop(handle.id)
+        val errorsBefore = handle.state.value.notices(NoticeLevel.ERROR)
+        val opened = Collections.synchronizedList(mutableListOf<String>())
+        val notRunning = McpResult.Failed(McpError.NotRunning)
+
+        assertEquals(notRunning, manager.refreshMcp(handle.id))
+        assertEquals(notRunning, manager.toggleMcp(handle.id, "echo", enabled = false))
+        assertEquals(notRunning, manager.reconnectMcp(handle.id, "broken"))
+        assertEquals(notRunning, manager.startMcpAuth(handle.id, "authy") { opened.add(it) })
+        assertEquals(notRunning, manager.refreshMcp("no-such-session"))
+        manager.cancelMcpAuth(handle.id, "authy")
+        manager.cancelMcpAuth("no-such-session", "authy")
+
+        assertEquals(emptyList(), frames().filter { it.subtype()?.startsWith("mcp_") == true })
+        assertEquals(emptyList(), opened.toList())
+        assertEquals(emptyMap(), handle.mcpAuth.value)
+        assertEquals(emptySet(), handle.mcpLoginHinted.value)
+        assertEquals(errorsBefore, handle.state.value.notices(NoticeLevel.ERROR), "no notice for a session that is not running")
+    }
+
+    @Test
+    fun `two actions run one after the other`() = test {
+        // A process whose input the test reads, and whose answers the test writes.
+        val written = dir.resolve("host-frames.log")
+        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > '$written'").start())
+        val (manager, handle) = scripted(process)
+        fun mcpRequests(): List<JsonObject> =
+            if (!written.exists()) emptyList()
+            else written.readText().split('\n').dropLast(1).filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+                .filter { it.type() == "control_request" && it.subtype()?.startsWith("mcp_") == true }
+        fun JsonObject.requestId(): String = string("request_id")!!
+        try {
+            val toggle = async { manager.toggleMcp(handle.id, "echo", enabled = false) }
+            val reconnect = async { manager.reconnectMcp(handle.id, "broken") }
+            awaitLog { mcpRequests().isNotEmpty() }
+            delay(300)
+            val first = mcpRequests().single()
+            assertEquals("mcp_toggle", first.subtype(), "the second request waits for the first one's answer")
+
+            process.script.println("""{"type":"control_response","response":{"subtype":"success","request_id":"${first.requestId()}"}}""")
+            awaitLog { mcpRequests().size == 2 }
+            val second = mcpRequests()[1]
+            assertEquals("mcp_reconnect", second.subtype())
+            process.script.println(
+                """{"type":"control_response","response":{"subtype":"error","request_id":"${second.requestId()}","error":"Connection closed"}}""",
+            )
+
+            assertEquals(McpResult.Ok(Unit), toggle.await())
+            assertEquals(McpResult.Failed(McpError.Rejected("Connection closed")), reconnect.await())
+        } finally {
+            manager.close(handle.id)
+        }
+    }
+
+    @Test
+    fun `a toggle followed by its refresh completes while a poll runs`() = test {
+        val (manager, handle) = mcpSession(every = 50.milliseconds) // authy stays needs-auth: the poll goes on
+        manager.startMcpAuth(handle.id, "authy") {}.ok()
+        awaitLog { framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } >= 2 }
+
+        assertEquals(McpResult.Ok(Unit), manager.toggleMcp(handle.id, "echo", enabled = false))
+        assertEquals(McpStatus.DISABLED, manager.refreshMcp(handle.id).ok().single { it.name == "echo" }.status)
+
+        assertNull(handle.mcpAuth.value.getValue("authy").outcome, "the poll still runs")
+        manager.cancelMcpAuth(handle.id, "authy")
+        assertEquals(emptyMap(), handle.mcpAuth.value)
+    }
+
+    @Test
+    fun `three refreshes at once share one follow-up run`() = test {
+        val (manager, handle) = mcpSession()
+        val before = requests("mcp_status").size
+
+        val results = List(3) { async(start = CoroutineStart.UNDISPATCHED) { manager.refreshMcp(handle.id) } }.awaitAll()
+
+        results.forEach { assertEquals(listOf("echo", "broken", "authy"), it.ok().map { server -> server.name }) }
+        val sent = requests("mcp_status").size - before
+        assertTrue(sent in 1..2, "$sent mcp_status requests for three refreshes at once")
+    }
+
+    // Bash mode (spec 12.8): a real /bin/sh runs each command, the fake CLI takes the frames.
+
+    private fun unix() = assumeTrue(!System.getProperty("os.name").lowercase().contains("windows"))
+
+    /** The `user` frames the host wrote, in order. */
+    private fun userFrames(): List<JsonObject> = frames().filter { it.type() == "user" }
+
+    private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
+
+    private fun ChatState.shell(): ChatEntry.Shell = entries.filterIsInstance<ChatEntry.Shell>().single()
+
+    /** The `sleep` processes among this test JVM's descendants. */
+    private fun sleeps(): List<ProcessHandle> = ProcessHandle.current().descendants()
+        .filter { it.isAlive && it.info().command().orElse("").substringAfterLast('/') == "sleep" }.toList()
+
+    private val earlierSleeps: Set<Long> = sleeps().map { it.pid() }.toSet()
+
+    private fun ownSleeps(): List<Long> = sleeps().map { it.pid() }.filter { it !in earlierSleeps }
+
+    /** Waits for this test's `sleep`s to start, and returns them, for [assertGone]. */
+    private suspend fun awaitSleeps(): List<ProcessHandle> {
+        while (true) {
+            sleeps().filter { it.pid() !in earlierSleeps }.takeIf { it.isNotEmpty() }?.let { return it }
+            delay(20)
+        }
+    }
+
+    @Test
+    fun `a shell escape runs, shows its output and sends the two frames`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "echo hi")
+        // Before any index listing; awaited, since a process that attached first holds the title its mirror then copies.
+        withTimeout(2_000) { handle.title.first { it == "! echo hi" } }
+        val done = handle.state.first { it.turnsEnded == 1 && !it.busy }
+        val shell = done.shell()
+        assertEquals(ShellEnd.Exited(0), shell.end)
+        assertEquals("hi\n", shell.output)
+        assertTrue(shell.sent)
+        assertEquals(2, userFrames().size)
+        val (input, output) = userFrames()
+        assertEquals("<bash-input>echo hi</bash-input>", input.content())
+        assertEquals(true, input["client_composed"]!!.jsonPrimitive.boolean)
+        assertEquals(false, input["shouldQuery"]!!.jsonPrimitive.boolean)
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", output.content())
+        assertEquals(true, output["client_composed"]!!.jsonPrimitive.boolean)
+        assertFalse("shouldQuery" in output)
+        assertTrue(done.replyText().contains("The probe ran"))
+        assertEquals(1, done.entries.count { it is ChatEntry.TurnEnded })
+        // The quiet result left the quiet sends and ended no turn; that it named the first frame's uuid (the fake's rule (g)), rather
+        // than ending the oldest quiet send without uuids, is `the quiet result names the command frame (rule (g))`'s check.
+        assertTrue(done.quietSends.isEmpty())
+        assertEquals("! echo hi", handle.title.value)
+    }
+
+    @Test
+    fun `the quiet result names the command frame (rule (g))`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        while (handle.liveSession()?.process == null) delay(20)
+        // An older quiet send that no frame carries: a result without uuids would end it (the oldest), one that names the command
+        // frame's uuid ends that one and leaves this.
+        handle.liveSession()!!.event(SessionEvent.ShellSent("decoy", listOf("decoy"), query = null, atMillis = 0))
+        manager.runShell(handle.id, "echo hi")
+        val done = handle.state.first { it.turnsEnded == 1 && !it.busy }
+        assertEquals(setOf("decoy"), done.quietSends)
+        assertEquals(1, done.entries.count { it is ChatEntry.TurnEnded })
+        assertEquals(2, userFrames().size)
+    }
+
+    @Test
+    fun `a command that prints nothing sends empty stdout`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "true")
+        awaitLog { userFrames().size == 2 }
+        assertEquals("<bash-input>true</bash-input>", userFrames()[0].content())
+        assertEquals("<bash-stdout></bash-stdout><bash-stderr></bash-stderr>", userFrames()[1].content())
+        assertEquals("", handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.sent } }.shell().output)
+    }
+
+    @Test
+    fun `with replies off a shell escape sends one context frame`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-context", respondToShell = { false })
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "echo hi")
+        val quiet = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.sent } && s.quietSends.isEmpty() }
+        val frame = userFrames().single()
+        assertEquals(BashEscape.context("echo hi", "hi\n", ""), frame.content())
+        assertEquals(false, frame["shouldQuery"]!!.jsonPrimitive.boolean)
+        assertTrue(quiet.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(quiet.busy)
+
+        manager.send(handle.id, "Reply with only the text the command printed to stdout")
+        val replied = handle.state.first { it.turnsEnded == 1 && !it.busy }
+        assertEquals("bash-mode-probe", replied.replyText())
+    }
+
+    @Test
+    fun `stopShell kills the command and the frames say so`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "sleep 30 & wait")
+        handle.state.first { it.runningShell != null }
+        val sleeps = awaitSleeps()
+        val started = System.currentTimeMillis()
+        manager.stopShell(handle.id)
+        val stopped = withTimeout(2_000) { handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } } }
+        assertTrue(System.currentTimeMillis() - started < 2_000)
+        assertEquals(ShellEnd.Stopped, stopped.shell().end)
+        awaitLog { userFrames().size == 2 }
+        assertTrue(
+            Regex("^<bash-stdout>Stopped after \\d+\\.\\ds</bash-stdout><bash-stderr></bash-stderr>$").matches(userFrames()[1].content()),
+            userFrames()[1].content(),
+        )
+        assertGone(sleeps)
+    }
+
+    @Test
+    fun `a shell escape on a stopped session queues its frames and starts a process`() = test {
+        unix()
+        seed(seeded)
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.open(seeded, spawn = false)
+        assertNull(handle.liveSession())
+        manager.runShell(handle.id, "echo hi")
+        handle.state.first { s -> s.turnsEnded > 0 && !s.busy && s.entries.any { it is ChatEntry.Shell && it.sent } }
+        assertEquals(1, spawns().size)
+        val logged = frames()
+        assertEquals(listOf("__spawn__", "control_request", "user", "user"), logged.map { it.type() })
+        assertEquals("initialize", logged[1].subtype())
+        assertEquals("<bash-input>echo hi</bash-input>", logged[2].content())
+    }
+
+    @Test
+    fun `a shell escape that cannot start sends nothing`() = test {
+        unix()
+        val launcher = ShellLauncher { _, _, _ ->
+            throw IOException("Cannot run program", IOException("error=2, No such file or directory"))
+        }
+        val runner = ShellRunner(launcher, environment = { mapOf("SHELL" to "/opt/none/zsh") })
+        val manager = manager(fixtures = "bash-mode-respond", shell = runner)
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.runShell(handle.id, "echo hi")
+        val ended = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } }
+        assertEquals(ShellEnd.NotStarted("/opt/none/zsh", "No such file or directory"), ended.shell().end)
+        assertNull(ended.runningShell)
+        delay(300)
+        assertEquals(emptyList(), userFrames())
+    }
+
+    @Test
+    fun `a shell escape whose output cannot be read ends Failed and sends nothing`() = test {
+        unix()
+        val launcher = ShellLauncher { argv, directory, env ->
+            val real = ProcessBuilder(argv).directory(directory.toFile()).apply { environment().putAll(env) }.start()
+            object : Process() {
+                override fun getOutputStream() = real.outputStream
+                override fun getInputStream() = object : InputStream() {
+                    override fun read(): Int = throw IOException("boom")
+                    override fun available(): Int = throw IOException("boom")
+                }
+                override fun getErrorStream() = real.errorStream
+                override fun waitFor(): Int = real.waitFor()
+                override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = real.waitFor(timeout, unit)
+                override fun exitValue(): Int = real.exitValue()
+                override fun isAlive(): Boolean = real.isAlive
+                override fun pid(): Long = real.pid()
+                override fun toHandle(): ProcessHandle = real.toHandle()
+                override fun descendants() = real.descendants()
+                override fun destroy() = real.destroy()
+                override fun destroyForcibly(): Process = real.destroyForcibly()
+            }
+        }
+        val manager = manager(fixtures = "bash-mode-respond", shell = ShellRunner(launcher, environment = { mapOf("SHELL" to "/bin/sh") }))
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.runShell(handle.id, "sleep 1")
+        val ended = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } }
+        assertEquals(ShellEnd.Failed("boom"), ended.shell().end)
+        assertNull(ended.runningShell)
+        delay(300)
+        assertEquals(emptyList(), userFrames())
+    }
+
+    @Test
+    fun `a second shell escape while one runs is ignored`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "sleep 30")
+        manager.runShell(handle.id, "echo again")
+        handle.state.first { it.runningShell != null }
+        delay(200)
+        assertEquals(listOf("sleep 30"), handle.state.value.entries.filterIsInstance<ChatEntry.Shell>().map { it.command })
+        manager.stopShell(handle.id)
+        handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } }
+        assertEquals(1, handle.state.value.entries.count { it is ChatEntry.Shell })
+    }
+
+    @Test
+    fun `closing the session kills a running command`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.runShell(handle.id, "sleep 30 & wait")
+        val sleeps = awaitSleeps()
+        val started = System.currentTimeMillis()
+        manager.close(handle.id)
+        assertTrue(System.currentTimeMillis() - started < 2_000, "close returns at once")
+        assertEquals(ShellEnd.Stopped, handle.state.value.shell().end)
+        assertEquals(emptyList(), userFrames())
+        assertGone(sleeps)
+    }
+
+    @Test
+    fun `a project close sends no frame for a running command`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        while (handle.liveSession()?.process == null) delay(20)
+        manager.runShell(handle.id, "sleep 30 & wait")
+        val sleeps = awaitSleeps()
+        scope.coroutineContext.job.cancelAndJoin()
+        // The handle's mirror went with the scope: the process's own state has the end.
+        assertEquals(ShellEnd.Stopped, handle.liveSession()!!.state.value.shell().end)
+        // ShellSent is reduced as the escape is handed to the process, whether or not its bytes reach the CLI: the guard held.
+        assertFalse(handle.liveSession()!!.state.value.shell().sent)
+        delay(300)
+        assertEquals(emptyList(), userFrames())
+        assertGone(sleeps)
+    }
+
+    @Test
+    fun `stopping the session says a held shell escape's output was not sent`() = test {
+        unix()
+        // The prompt's reply streams for seconds, so the escape is held behind its turn when the session stops.
+        val manager = manager(environment = mapOf("TANDEM_FAKE_LINE_DELAY_MS" to "1000"))
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Reply with the single word: pong")
+        handle.state.first { it.busy }
+        manager.runShell(handle.id, "echo hi")
+        withTimeout(5_000) {
+            while (handle.shellJob == null) delay(20)
+            handle.shellJob!!.join() // its frames were handed to the process, which holds them behind the turn
+        }
+        assertTrue(handle.state.value.busy, "the prompt's turn is still in progress")
+        manager.stop(handle.id)
+        val state = handle.state.value
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", (state.entries.last() as ChatEntry.Notice).text)
+        assertFalse(state.shell().sent)
+        assertEquals(1, userFrames().size, "only the prompt")
+    }
+
+    @Test
+    fun `the timed-out command sends the kill note`() = test {
+        unix()
+        val manager = manager(
+            fixtures = "bash-mode-respond",
+            shell = ShellRunner(environment = { mapOf("SHELL" to "/bin/sh") }, timeoutMillis = 200),
+        )
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "sleep 5")
+        val ended = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } }
+        assertEquals(ShellEnd.TimedOut, ended.shell().end)
+        awaitLog { userFrames().size == 2 }
+        assertEquals("<bash-stdout>Killed after 10 minutes</bash-stdout><bash-stderr></bash-stderr>", userFrames()[1].content())
+    }
+
+    @Test
+    fun `the command and its output are never logged`() = test {
+        unix()
+        val records = Collections.synchronizedList(ArrayList<String>())
+        val previous = Logger.getFactory()
+        Logger.setFactory(Logger.Factory { category -> CapturingLogger(category, records) })
+        try {
+            val manager = manager(fixtures = "bash-mode-respond")
+            val handle = manager.create(NewSessionOptions())
+            manager.runShell(handle.id, "echo tandem-log-marker")
+            val done = handle.state.first { it.turnsEnded == 1 && !it.busy }
+            assertEquals("tandem-log-marker\n", done.shell().output)
+            manager.close(handle.id)
+        } finally {
+            Logger.setFactory(previous)
+        }
+        assertTrue(records.isNotEmpty(), "the capturing factory saw the session's records")
+        assertEquals(emptyList(), records.filter { "tandem-log-marker" in it })
+    }
+
+    /** Keeps every record's message and throwable text. */
+    private class CapturingLogger(private val category: String, private val records: MutableList<String>) : Logger() {
+        override fun isDebugEnabled(): Boolean = true
+        override fun debug(message: String?, t: Throwable?) = keep(message, t)
+        override fun info(message: String?, t: Throwable?) = keep(message, t)
+        override fun warn(message: String?, t: Throwable?) = keep(message, t)
+        override fun error(message: String?, t: Throwable?, vararg details: String?) = keep(message + details.joinToString(), t)
+
+        private fun keep(message: String?, t: Throwable?) {
+            records += "$category: $message ${t?.stackTraceToString().orEmpty()}"
+        }
+    }
+
+    @Test
+    fun `a command stopped at once still ends Stopped`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "sleep 30")
+        manager.stopShell(handle.id)
+        val ended = withTimeout(2_000) {
+            handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } && s.runningShell == null }
+        }
+        assertEquals(ShellEnd.Stopped, ended.shell().end)
+        assertNull(ended.runningShell)
+        assertFalse(handle.shellJob!!.isActive)
+        assertEquals(emptyList(), ownSleeps())
+    }
+
+    @Test
+    fun `killAllNow ends a running command Stopped and sends nothing`() = test {
+        unix()
+        val manager = manager(fixtures = "bash-mode-respond")
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.runShell(handle.id, "sleep 30 & wait")
+        val sleeps = awaitSleeps()
+        manager.killAllNow()
+        val ended = withTimeout(2_000) { handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.end != null } } }
+        assertEquals(ShellEnd.Stopped, ended.shell().end)
+        assertGone(sleeps)
+        delay(500) // a process started now would have logged its spawn by then
+        assertEquals(emptyList(), userFrames(), "no frame queued for a process")
+        assertEquals(1, spawns().size, "no claude started during the IDE's exit")
     }
 }

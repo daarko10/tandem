@@ -533,4 +533,269 @@ class FixtureDecodeTest {
 
         assertTrue(transcript("think-default").filterIsInstance<CliMessage.Assistant>().any { it.thinkingDurationMs == 2143L })
     }
+
+    private fun init(name: String, line: Int): CliMessage.SystemInit = assertIs<CliMessage.SystemInit>(at(name, line))
+
+    private fun response(name: String, line: Int): CliMessage.ControlResponse = assertIs<CliMessage.ControlResponse>(at(name, line))
+
+    private fun servers(name: String, line: Int): List<McpServerInfo> = assertNotNull(ControlPayloads.mcpStatus(response(name, line).payload)).servers
+
+    // spec: mcp-status: init carries the thin server list and redacted command lists
+    @Test
+    fun `mcp-status - init carries the thin server list and redacted command lists`() {
+        val init = init("mcp-status", 6)
+        assertEquals(
+            listOf(
+                McpServerSummary("echo", McpStatus.CONNECTED, "connected", "dynamic"),
+                McpServerSummary("broken", McpStatus.FAILED, "failed", "dynamic"),
+                McpServerSummary("authy", McpStatus.NEEDS_AUTH, "needs-auth", "dynamic"),
+            ),
+            init.mcpServers,
+        )
+        assertTrue(init.slashCommands.isEmpty())
+        assertTrue(init.terminalSlashCommands.isEmpty())
+    }
+
+    // spec: mcp-status: a disabled server leaves init.tools and comes back
+    @Test
+    fun `mcp-status - a disabled server leaves init dot tools and comes back`() {
+        assertTrue("mcp__echo__echo" in init("mcp-status", 6).tools)
+
+        val disabled = init("mcp-status", 23)
+        assertEquals(McpStatus.DISABLED, disabled.mcpServers.single { it.name == "echo" }.status)
+        assertTrue("mcp__echo__echo" !in disabled.tools)
+
+        val back = init("mcp-status", 48)
+        assertEquals(McpStatus.CONNECTED, back.mcpServers.single { it.name == "echo" }.status)
+        assertTrue("mcp__echo__echo" in back.tools)
+    }
+
+    // spec: mcp-status: mcp_status decodes every entry shape
+    @Test
+    fun `mcp-status - mcp_status decodes every entry shape`() {
+        val (echo, broken, authy) = servers("mcp-status", 18)
+        assertEquals("echo", echo.name)
+        assertEquals(McpStatus.CONNECTED, echo.status)
+        assertEquals("0.1.0", assertNotNull(echo.serverInfo).version)
+        val echoConfig = assertNotNull(echo.config)
+        assertEquals("stdio", echoConfig.type)
+        assertEquals("/usr/bin/python3", echoConfig.command)
+        assertEquals(2, echoConfig.args.size)
+        assertEquals(listOf(McpTool("echo")), echo.tools)
+        assertEquals("dynamic", echo.source)
+        assertEquals("dynamic", echo.scope)
+
+        assertEquals("broken", broken.name)
+        assertEquals("Connection closed", broken.error)
+        assertNull(broken.tools)
+
+        assertEquals("authy", authy.name)
+        val authyConfig = assertNotNull(authy.config)
+        assertEquals("http", authyConfig.type)
+        assertEquals("http://127.0.0.1:33041/mcp", authyConfig.url)
+        assertNull(authy.error)
+    }
+
+    // spec: mcp-status: pending before the first turn
+    @Test
+    fun `mcp-status - pending before the first turn`() {
+        assertEquals(
+            listOf("echo" to McpStatus.PENDING, "broken" to McpStatus.PENDING, "authy" to McpStatus.NEEDS_AUTH),
+            servers("mcp-status", 2).map { it.name to it.status },
+        )
+    }
+
+    // spec: mcp-status: a toggle success has no payload and a disabled entry has no tools
+    @Test
+    fun `mcp-status - a toggle success has no payload and a disabled entry has no tools`() {
+        val toggle = response("mcp-status", 19)
+        assertTrue(toggle.isSuccess && toggle.payload == null)
+
+        val echo = servers("mcp-status", 20).single { it.name == "echo" }
+        assertEquals(McpStatus.DISABLED, echo.status)
+        assertNull(echo.serverInfo)
+        assertNull(echo.tools)
+    }
+
+    // spec: mcp-status: reconnect and toggle errors carry the CLI's text
+    @Test
+    fun `mcp-status - reconnect and toggle errors carry the CLI's text`() {
+        val errors = listOf(36, 37, 38).map { response("mcp-status", it) }
+        assertTrue(errors.none { it.isSuccess })
+        assertEquals(listOf("Connection closed", "Server status: needs-auth", "Server not found: nosuch"), errors.map { it.error })
+    }
+
+    // spec: mcp-status: mcp_authenticate answers with an auth url and a callback port
+    @Test
+    fun `mcp-status - mcp_authenticate answers with an auth url and a callback port`() {
+        val start = assertNotNull(ControlPayloads.mcpAuthenticate(response("mcp-status", 40).payload))
+        val authUrl = assertNotNull(start.authUrl)
+        assertTrue(authUrl.startsWith("http://127.0.0.1:33041/authorize?"), authUrl)
+        assertEquals(authUrl, ControlPayloads.browsableUrl(authUrl))
+        assertEquals("REDACTED_STATE", start.state)
+        assertEquals(true, start.requiresUserAction)
+        assertEquals(true, start.callbackExpected)
+        assertEquals("localhost", start.redirectScheme)
+        assertEquals(53713, start.callbackPort)
+    }
+
+    // spec: mcp-status: a sign-in link that is not http is refused
+    @Test
+    fun `mcp-status - a sign-in link that is not http is refused`() {
+        val recorded = response("mcp-status", 40).payload!!
+        fun linkOf(authUrl: String): String? =
+            ControlPayloads.browsableUrl(ControlPayloads.mcpAuthenticate(JsonObject(recorded + ("authUrl" to JsonPrimitive(authUrl))))?.authUrl)
+
+        val rawLessThan = recorded.getValue("authUrl").jsonPrimitive.content.replace("REDACTED_STATE", "<state>")
+        for (refused in listOf("file:///etc/passwd", "vscode://x", "authorize?x=1", "http:///x", rawLessThan)) {
+            assertNull(linkOf(refused), refused)
+        }
+        assertEquals("HTTPS://example.test/a", linkOf("HTTPS://example.test/a"))
+        assertNull(ControlPayloads.browsableUrl(null))
+    }
+
+    // spec: mcp-status: mcp_set_servers reports added and removed
+    @Test
+    fun `mcp-status - mcp_set_servers reports added and removed`() {
+        val added = assertNotNull(ControlPayloads.mcpSetServers(response("mcp-status", 42).payload))
+        assertEquals(listOf("echo2"), added.added)
+        assertTrue(added.removed.isEmpty())
+
+        val removed = assertNotNull(ControlPayloads.mcpSetServers(response("mcp-status", 44).payload))
+        assertEquals(listOf("echo2"), removed.removed)
+        assertTrue(removed.added.isEmpty())
+        assertTrue(removed.errors.isEmpty())
+    }
+
+    // spec: mcp-status: the redacted initialize answer has no commands
+    @Test
+    fun `mcp-status - the redacted initialize answer has no commands`() {
+        assertTrue(assertNotNull(ControlPayloads.initialize(response("mcp-status", 1).payload)).commands.isEmpty())
+    }
+
+    // spec: mcp-slash: the initialize answer lists 73 commands with hints and aliases
+    @Test
+    fun `mcp-slash - the initialize answer lists 73 commands with hints and aliases`() {
+        val commands = assertNotNull(ControlPayloads.initialize(response("mcp-slash", 1).payload)).commands
+        assertEquals(73, commands.size)
+        assertEquals(55, commands.count { it.builtin })
+        val byName = commands.associateBy { it.name }
+        assertEquals("[reconnect|enable|disable [<server>|all]]", byName.getValue("mcp").argumentHint)
+        assertEquals("<model>", byName.getValue("model").argumentHint)
+        assertEquals(listOf("review"), byName.getValue("code-review").aliases)
+        val hello = byName.getValue("hello")
+        assertTrue(hello.description.endsWith(" (project)"), hello.description)
+        assertEquals(false, hello.builtin)
+        assertTrue(hello.aliases.isEmpty())
+    }
+
+    // spec: mcp-slash: init lists the command names and the terminal ones
+    @Test
+    fun `mcp-slash - init lists the command names and the terminal ones`() {
+        val init = init("mcp-slash", 4)
+        val catalogue = assertNotNull(ControlPayloads.initialize(response("mcp-slash", 1).payload)).commands.map { it.name }
+        assertEquals(73, init.slashCommands.size)
+        assertEquals(catalogue, init.slashCommands)
+        assertEquals(listOf("doctor", "color", "focus", "reload-plugins"), init.terminalSlashCommands)
+        assertTrue("permissions" !in init.slashCommands && "mode" !in init.slashCommands)
+        assertTrue("permissions" !in init.terminalSlashCommands && "mode" !in init.terminalSlashCommands)
+    }
+
+    // spec: mcp-slash: a local command is a synthetic assistant line
+    @Test
+    fun `mcp-slash - a local command is a synthetic assistant line`() {
+        val text = "3 MCP server(s): 1 connected, 2 not connected, 0 disabled. Use `/mcp` in the terminal for details."
+        val line = assertIs<CliMessage.Assistant>(at("mcp-slash", 5))
+        assertEquals("<synthetic>", line.model)
+        assertEquals(LocalCommand("mcp", "", null, text), line.localCommand)
+        assertEquals(listOf<ContentBlock>(ContentBlock.Text(text)), line.content)
+        assertTrue(line.localCommand!!.stdout!!.endsWith(dev.daarkolabs.tandem.chat.MCP_TERMINAL_HINT))
+
+        val result = assertIs<CliMessage.Result>(at("mcp-slash", 6))
+        assertEquals("mcp", result.localCommand)
+        assertEquals(0, result.numTurns)
+        assertEquals(0L, result.durationApiMs)
+    }
+
+    // spec: mcp-slash: an unavailable command carries an outcome kind
+    @Test
+    fun `mcp-slash - an unavailable command carries an outcome kind`() {
+        val local = assertNotNull(assertIs<CliMessage.Assistant>(at("mcp-slash", 17)).localCommand)
+        assertEquals("unavailable_headless", local.outcomeKind)
+        assertNull(local.command)
+        assertNull(local.args)
+        assertEquals("/help isn't available in this environment.", local.stdout)
+        assertNull(assertIs<CliMessage.Result>(at("mcp-slash", 18)).localCommand)
+    }
+
+    // spec: mcp-tool-call: the permission request names the server
+    @Test
+    fun `mcp-tool-call - the permission request names the server`() {
+        val ask = request("mcp-tool-call", 35)
+        assertEquals(McpServerRef("echo", "dynamic"), ask.mcpServer)
+        assertTrue(ask.serverPolicyAskOnly)
+        assertEquals("Echo", ask.displayName)
+    }
+
+    // spec: mcp-tool-call: the assistant line carries tool_use_meta
+    @Test
+    fun `mcp-tool-call - the assistant line carries tool_use_meta`() {
+        val line = assertIs<CliMessage.Assistant>(at("mcp-tool-call", 34))
+        val toolUse = line.content.filterIsInstance<ContentBlock.ToolUse>().single()
+        assertEquals(ToolUseMeta(toolUse.id, "Echo", "echo", "echo"), line.toolUseMeta.single())
+        assertNull(line.localCommand)
+    }
+
+    // spec: mcp-tool-call: the result keeps structuredContent reachable
+    @Test
+    fun `mcp-tool-call - the result keeps structuredContent reachable`() {
+        val result = assertIs<CliMessage.User>(at("mcp-tool-call", 39))
+        assertEquals("hello tandem", result.toolUseResult.field("structuredContent").field("result").jsonPrimitive.content)
+
+        val denied = assertIs<CliMessage.User>(at("mcp-tool-call", 62))
+        assertTrue(denied.content.filterIsInstance<ContentBlock.ToolResult>().single().isError)
+        assertEquals("permission-rule", denied.toolResultMeta[0].nonExecutionKind)
+    }
+
+    // spec: bash-mode: the quiet sends end in a zero-turn result naming both uuids
+    @Test
+    fun `bash-mode - the quiet sends end in a zero-turn result naming both uuids`() {
+        val quiet = assertIs<CliMessage.Result>(at("bash-mode", 8))
+        assertEquals(0, quiet.numTurns)
+        assertEquals(0L, quiet.durationApiMs)
+        assertEquals("", quiet.result)
+        assertEquals(2, quiet.userMessageUuids.size)
+        assertEquals(listOf("<command_uuid-4>", "<command_uuid-6>"), quiet.userMessageUuids)
+        val prompt = assertIs<CliMessage.Result>(at("bash-mode", 23))
+        assertEquals(1, prompt.numTurns)
+        assertEquals(1, prompt.userMessageUuids.size)
+    }
+
+    // spec: bash-mode-respond: the output send starts a normal turn
+    @Test
+    fun `bash-mode-respond - the output send starts a normal turn`() {
+        val quiet = assertIs<CliMessage.Result>(at("bash-mode-respond", 6))
+        assertEquals(0, quiet.numTurns)
+        assertEquals(listOf("<command_uuid-4>"), quiet.userMessageUuids)
+        assertEquals("requesting", assertIs<CliMessage.SystemStatus>(at("bash-mode-respond", 11)).status)
+        val reply = assertIs<CliMessage.Assistant>(at("bash-mode-respond", 36))
+        assertTrue(reply.content.filterIsInstance<ContentBlock.Text>().single().text.contains("merged"))
+        val ended = assertIs<CliMessage.Result>(at("bash-mode-respond", 41))
+        assertEquals(1, ended.numTurns)
+        assertEquals(listOf("<command_uuid-10>"), ended.userMessageUuids)
+    }
+
+    @Test
+    fun `bash-mode-context - the one context frame ends in a zero-turn result naming its uuid`() {
+        val quiet = assertIs<CliMessage.Result>(at("bash-mode-context", 6))
+        assertEquals(0, quiet.numTurns)
+        assertEquals(0L, quiet.durationApiMs)
+        assertEquals("", quiet.result)
+        assertEquals(false, quiet.isError)
+        assertEquals(listOf("<command_uuid-4>"), quiet.userMessageUuids)
+        val prompt = assertIs<CliMessage.Result>(at("bash-mode-context", 20))
+        assertEquals(1, prompt.numTurns)
+        assertEquals(listOf("<command_uuid-10>"), prompt.userMessageUuids)
+        assertEquals("bash-mode-probe", prompt.result)
+    }
 }

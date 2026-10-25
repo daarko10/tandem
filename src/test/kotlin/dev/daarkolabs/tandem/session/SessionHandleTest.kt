@@ -1,8 +1,10 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.Ndjson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -27,6 +29,7 @@ import java.util.concurrent.Executor
 import kotlin.io.path.createTempFile
 import kotlin.io.path.readLines
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** [SessionHandle] on its own, in a scope whose coroutines run only when the test lets them. */
@@ -116,6 +119,82 @@ class SessionHandleTest {
             processes.coroutineContext.job.cancelAndJoin()
             scope.cancel()
             runQueued()
+        }
+    }
+
+    /** A handle in a scope that runs its coroutines, for tests that close it or attach a process. */
+    private fun liveHandle(scope: CoroutineScope): SessionHandle =
+        SessionHandle("33333333-3333-4333-8333-333333333333", scope, ChatState(), MutableStateFlow(emptyList()), createdAt = 0)
+
+    /** Attaches a process to [handle] that reads its input and says nothing, started from the chat [create] is handed. */
+    private fun attachQuiet(
+        handle: SessionHandle,
+        processes: CoroutineScope,
+        start: (ChatState) -> ChatState = { it.settled() },
+    ): ClaudeSession {
+        var started: ClaudeSession? = null
+        handle.attach(
+            create = { chat ->
+                val process = ScriptedProcess.quiet()
+                val config = SessionConfig("claude", tmp, sessionId = handle.id)
+                ClaudeSession(processes, config, ProcessLauncher { _, _ -> process }, start(chat)).also { started = it }
+            },
+            onFirstInit = { _, _ -> },
+        )
+        return started!!
+    }
+
+    @Test
+    fun `close cancels the shell job`() = runBlocking<Unit> {
+        val handle = liveHandle(CoroutineScope(SupervisorJob() + Dispatchers.Default))
+        val job = Job()
+        assertTrue(handle.startShell { job })
+        assertFalse(handle.startShell { Job() }, "one command at a time")
+        handle.close()
+        assertTrue(handle.shellJob!!.isCancelled)
+        assertFalse(handle.startShell { Job() }, "a closed session runs nothing")
+    }
+
+    @Test
+    fun `a session is not idle while a command runs or a quiet send waits`() = runBlocking<Unit> {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val processes = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val handle = liveHandle(scope)
+            val session = attachQuiet(handle, processes)
+            assertTrue(handle.isIdle())
+            val job = Job()
+            assertTrue(handle.startShell { job })
+            assertFalse(handle.isIdle(), "a command runs")
+            job.cancel()
+            assertTrue(handle.isIdle())
+            session.event(SessionEvent.ShellSent("shell-1", listOf("a"), null, 0))
+            assertFalse(handle.isIdle(), "a quiet send waits for its result")
+            val result = """{"type":"result","subtype":"success","num_turns":0,"user_message_uuids":["a"]}"""
+            session.event(SessionEvent.Cli(Ndjson.decode(result)))
+            assertTrue(handle.isIdle())
+        } finally {
+            processes.coroutineContext.job.cancelAndJoin()
+            scope.coroutineContext.job.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun `a session whose process ended during a quiet send is idle on its next process`() = runBlocking<Unit> {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val processes = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val handle = liveHandle(scope)
+            val first = attachQuiet(handle, processes)
+            first.event(SessionEvent.ShellSent("shell-1", listOf("a"), null, 0))
+            assertFalse(handle.isIdle())
+            handle.stop() // the process goes before the quiet send's result
+            assertTrue(handle.state.value.quietSends.isEmpty())
+            attachQuiet(handle, processes) { it.settled() }
+            assertTrue(handle.isIdle())
+        } finally {
+            processes.coroutineContext.job.cancelAndJoin()
+            scope.coroutineContext.job.cancelAndJoin()
         }
     }
 }

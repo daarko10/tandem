@@ -49,6 +49,27 @@ object HostMessages {
         put("uuid", uuid)
     }
 
+    /**
+     * A shell escape's command, frame 1 of bash probes 1: content a string, `client_composed` (no `@path` expansion or slash
+     * dispatch) and `shouldQuery: false`, so it only appends; the CLI answers it with a zero-turn `result` naming [uuid].
+     */
+    fun bashInput(command: String, uuid: String): JsonObject = bashFrame(BashEscape.input(command), uuid, query = false)
+
+    /**
+     * A shell escape's output, frame 2 of bash probes 1: with [query], the key `shouldQuery` is left out and the send starts a turn
+     * that answers it (`bash-mode-respond`); without, `shouldQuery: false` only appends it.
+     */
+    fun bashOutput(stdout: String, stderr: String, uuid: String, query: Boolean): JsonObject =
+        bashFrame(BashEscape.output(stdout, stderr), uuid, query)
+
+    /**
+     * A shell escape for the context only, in one frame: the merged content of `transcripts/bash-mode.jsonl:5`, `shouldQuery: false`.
+     * Recorded as one host frame in `bash-mode-context` (2.1.308): a zero-turn `result` names its uuid (`bash-mode-context.ndjson:6`),
+     * and the transcript keeps the content as sent (`transcripts/bash-mode-context.jsonl:3`).
+     */
+    fun bashContext(command: String, stdout: String, stderr: String, uuid: String): JsonObject =
+        bashFrame(BashEscape.context(command, stdout, stderr), uuid, query = false)
+
     /** `forwardSubagentText` makes the CLI forward a subagent's text replies as assistant lines with an `agent_id`. */
     fun initialize(requestId: String): JsonObject = request(requestId, "initialize") {
         put("hooks", JsonNull)
@@ -77,6 +98,25 @@ object HostMessages {
         put("source", "host")
     }
 
+    /** Asks for every MCP server's state, config and tools (`mcp_status`). */
+    fun mcpStatus(requestId: String): JsonObject = request(requestId, "mcp_status") {}
+
+    /** Disables or enables the MCP server [serverName], named exactly as `mcp_status` reports it. The success has no `response`. */
+    fun mcpToggle(requestId: String, serverName: String, enabled: Boolean): JsonObject = request(requestId, "mcp_toggle") {
+        put("serverName", serverName)
+        put("enabled", enabled)
+    }
+
+    /** Reconnects the MCP server [serverName]; a failure answers with the CLI's error text. */
+    fun mcpReconnect(requestId: String, serverName: String): JsonObject = request(requestId, "mcp_reconnect") {
+        put("serverName", serverName)
+    }
+
+    /** Starts the MCP server [serverName]'s sign-in: the answer carries the `authUrl` the host opens itself. No `redirectUri`. */
+    fun mcpAuthenticate(requestId: String, serverName: String): JsonObject = request(requestId, "mcp_authenticate") {
+        put("serverName", serverName)
+    }
+
     /** Allows a `can_use_tool` request. Always echo the (possibly edited) input. */
     fun allow(requestId: String, toolUseId: String?, updatedInput: JsonObject, updatedPermissions: List<JsonObject> = emptyList()): JsonObject =
         success(requestId) {
@@ -102,6 +142,20 @@ object HostMessages {
             put("request_id", requestId)
             put("error", message)
         }
+    }
+
+    /** A `user` frame whose content is the string [content], in the keys' order of bash probes 1. */
+    private fun bashFrame(content: String, uuid: String, query: Boolean): JsonObject = buildJsonObject {
+        put("type", "user")
+        put("session_id", "")
+        put("parent_tool_use_id", JsonNull)
+        put("uuid", uuid)
+        putJsonObject("message") {
+            put("role", "user")
+            put("content", content)
+        }
+        put("client_composed", true)
+        if (!query) put("shouldQuery", false)
     }
 
     private fun request(requestId: String, subtype: String, fields: JsonObjectBuilder.() -> Unit): JsonObject = buildJsonObject {

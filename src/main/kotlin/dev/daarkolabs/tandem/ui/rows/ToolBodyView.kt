@@ -246,9 +246,10 @@ internal fun imageLine(image: ToolBody.Image): String {
  * ([ChatUiState.clampOpen]), which collapsing a row above resets. [total] beyond the lines kept ends the opened body with
  * `… N more lines`. Without [byLines] (a body that cannot be cut by line, such as Markdown, whose content ignores `shown`) only the
  * measured height decides, so a short rendering of many source lines is neither faded nor offered a `Show more` that reveals nothing.
+ * A shell escape's output is clamped by it too, as part `output` of its row (`sh:<id>`, MCP spec 12.1).
  */
 @Composable
-private fun Clamped(
+internal fun Clamped(
     owner: String,
     part: String,
     lineCount: Int,
@@ -315,7 +316,7 @@ private fun MonoBox(
  * spec 2.4); with [firstLineError] the first line is in the error colour.
  */
 @Composable
-private fun MonoLines(lines: List<String>, firstLineError: Boolean, color: Color = JewelTheme.globalColors.text.normal) {
+internal fun MonoLines(lines: List<String>, firstLineError: Boolean, color: Color = JewelTheme.globalColors.text.normal) {
     val colors = JewelTheme.globalColors.text
     val text = buildAnnotatedString {
         lines.forEachIndexed { index, line ->
