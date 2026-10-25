@@ -1,0 +1,67 @@
+site_name: Claude Code's CLI over stream-json
+site_url: https://daarko10.github.io/tandem/
+site_description: What Claude Code's CLI does over stream-json, from recorded sessions, per CLI version.
+site_author: Dago Kogos
+repo_url: https://github.com/daarko10/tandem
+repo_name: daarko10/tandem
+edit_uri: ""
+copyright: Written for Tandem, a JetBrains plugin for Claude Code. Not made by or affiliated with Anthropic.
+
+theme:
+  name: material
+  custom_dir: overrides
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/swap-horizontal-bold
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle: {icon: material/weather-night, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle: {icon: material/weather-sunny, name: Light mode}
+  features:
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - content.code.copy
+    - search.highlight
+
+extra:
+  version:
+    provider: mike
+    default: all
+    alias: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/daarko10/tandem
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - The gotchas: index.md
+  - Versions: versions.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
