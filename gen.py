@@ -29,8 +29,8 @@ def admonition(n, by_gotcha, view):
         links = ", ".join(f'<a href="{BLOB}{f}.ndjson"><code>{f}</code></a>' for f in seen[view])
         return f'<div class="vstate on"><span class="vchip on">{view}</span> Recorded on this version, in {links}</div>'
     others = "".join(f'<a class="vchip on" href="../{v}/#g{n}">{v}</a>' for v in sorted(seen, key=vkey))
-    return (f'<div class="vstate off"><span class="vchip off">{view}</span> Not seen in this version\'s recordings, '
-            f'which is not the same as fixed. Recorded on {others}</div>')
+    return (f'<div class="vstate off"><span class="vchip off">{view}</span> Not seen in this version\'s recordings (not the same as fixed). '
+            f'Seen on {others}</div>')
 
 def banner(view, by_gotcha, by_version):
     if view == "all":
