@@ -46,3 +46,5 @@
 .md-typeset .vchip.off { opacity: .6; border-style: dashed; }
 .md-typeset .yes { color: var(--tandem-on); }
 .md-typeset table:not([class]) td:not(:first-child), .md-typeset table:not([class]) th:not(:first-child) { text-align: center; }
+.md-banner--warning { background: color-mix(in srgb, var(--md-accent-fg-color) 18%, var(--md-default-bg-color)); color: var(--md-default-fg-color); }
+.md-banner--warning a { color: var(--md-typeset-a-color); }
