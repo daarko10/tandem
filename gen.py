@@ -72,7 +72,7 @@ def versions_page(src, by_gotcha, by_version, versions):
 
 Every view of this site is built from the same recordings. A version's view marks each gotcha
 as recorded or not recorded on that version; nothing is claimed for a version that no recording covers.
-A blank cell means no recording on that version ran a scenario that would show it, not that the version fixed it.
+A dot means no recording on that version ran a scenario that would show it, not that the version fixed it.
 
 {head}{rows}
 ## How a new version gets here
