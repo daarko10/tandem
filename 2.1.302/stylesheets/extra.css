@@ -5,6 +5,7 @@
   --md-accent-fg-color: #7c6cff;
   --tandem-on: #2e9e6b;
   --tandem-off: #9aa3b2;
+  --md-typeset-a-color: #5b4bea;
 }
 [data-md-color-scheme="slate"] {
   --md-hue: 225;
@@ -13,9 +14,10 @@
   --md-accent-fg-color: #a497ff;
   --tandem-on: #3fcf8e;
   --tandem-off: #5b6475;
+  --md-typeset-a-color: #a497ff;
 }
 .md-header { box-shadow: 0 1px 0 rgba(255,255,255,.06); }
-.md-typeset h1 { font-weight: 700; letter-spacing: -0.02em; }
+.md-typeset h1 { color: var(--md-default-fg-color); font-weight: 700; letter-spacing: -0.02em; }
 .md-typeset h3 { font-weight: 650; margin-top: 2.4em; }
 .md-typeset h3[id^="g"] { border-top: 1px solid var(--md-default-fg-color--lightest); padding-top: 1.2em; }
 
@@ -40,6 +42,6 @@
   background: color-mix(in srgb, var(--tandem-on) 12%, transparent);
 }
 .md-typeset a.vchip.on:hover { background: var(--tandem-on); color: #fff; }
-.md-typeset .vchip.off { opacity: .55; text-decoration: line-through; }
+.md-typeset .vchip.off { opacity: .6; border-style: dashed; }
 .md-typeset .yes { color: var(--tandem-on); }
 .md-typeset table:not([class]) td:not(:first-child), .md-typeset table:not([class]) th:not(:first-child) { text-align: center; }
