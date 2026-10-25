@@ -3,5 +3,10 @@
     "version": "all",
     "title": "All versions",
     "aliases": []
+  },
+  {
+    "version": "2.1.308",
+    "title": "CLI 2.1.308",
+    "aliases": []
   }
 ]
