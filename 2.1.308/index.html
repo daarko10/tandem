@@ -709,7 +709,7 @@
 <p>Each one is tagged: a <strong>protocol rule</strong> (how the stream is shaped), <strong>version-specific behaviour</strong> (may change), or an <strong>easy consumer mistake</strong>. Open "Evidence" under any of them for the recording and line numbers.</p>
 <h3 id="g1">1. The tool result is JSON, unless something went wrong<a class="headerlink" href="#g1" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-rule">Protocol rule</span></p>
-<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.300/#g1">2.1.300</a><a class="vchip on" href="../2.1.301/#g1">2.1.301</a><a class="vchip on" href="../2.1.302/#g1">2.1.302</a><a class="vchip on" href="../2.1.306/#g1">2.1.306</a></div>
+<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.300/#g1">2.1.300</a><a class="vchip on" href="../2.1.301/#g1">2.1.301</a><a class="vchip on" href="../2.1.302/#g1">2.1.302</a><a class="vchip on" href="../2.1.306/#g1">2.1.306</a></div>
 
 <p><strong>You'd expect</strong> one shape per tool. <strong>You get</strong> an object when the tool works and a plain string when it fails.</p>
 <div class="highlight"><pre><span></span><code><span class="nt">"tool_use_result"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"stdout"</span><span class="p">:</span><span class="s2">"out-line\nerr-line"</span><span class="p">,</span><span class="nt">"stderr"</span><span class="p">:</span><span class="s2">""</span><span class="p">,</span><span class="nt">"interrupted"</span><span class="p">:</span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">}</span>
@@ -723,7 +723,7 @@
 </details>
 <h3 id="g2">2. Press Stop, receive an error<a class="headerlink" href="#g2" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-version">Version-specific behaviour</span></p>
-<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.300/#g2">2.1.300</a><a class="vchip on" href="../2.1.301/#g2">2.1.301</a></div>
+<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.300/#g2">2.1.300</a><a class="vchip on" href="../2.1.301/#g2">2.1.301</a></div>
 
 <p><strong>You'd expect</strong> a polite "stopped". <strong>You get</strong> an error, plus a message from the user that the user never typed.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"user"</span><span class="p">,</span><span class="nt">"message"</span><span class="p">:{</span><span class="nt">"role"</span><span class="p">:</span><span class="s2">"user"</span><span class="p">,</span><span class="nt">"content"</span><span class="p">:[{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"text"</span><span class="p">,</span><span class="nt">"text"</span><span class="p">:</span><span class="s2">"[Request interrupted by user]"</span><span class="p">}]},</span><span class="w"> </span><span class="err">...</span><span class="p">}</span>
@@ -736,7 +736,7 @@
 </details>
 <h3 id="g3">3. The model did not exist, and the turn succeeded<a class="headerlink" href="#g3" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-version">Version-specific behaviour</span></p>
-<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.302/#g3">2.1.302</a></div>
+<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.302/#g3">2.1.302</a></div>
 
 <p>Start the CLI with <code>--model claude-nonexistent-0</code>. <strong>You'd expect</strong> an error result. <strong>You get</strong> <code>subtype: "success"</code>.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"result"</span><span class="p">,</span><span class="nt">"subtype"</span><span class="p">:</span><span class="s2">"success"</span><span class="p">,</span><span class="nt">"is_error"</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">"terminal_reason"</span><span class="p">:</span><span class="s2">"api_error"</span><span class="p">,</span><span class="nt">"api_error_status"</span><span class="p">:</span><span class="mi">404</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">}</span>
@@ -766,7 +766,7 @@ result
 </details>
 <h3 id="g5">5. May I? asked before the sentence ends<a class="headerlink" href="#g5" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-rule">Protocol rule</span></p>
-<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.300/#g5">2.1.300</a><a class="vchip on" href="../2.1.301/#g5">2.1.301</a><a class="vchip on" href="../2.1.302/#g5">2.1.302</a><a class="vchip on" href="../2.1.306/#g5">2.1.306</a></div>
+<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.300/#g5">2.1.300</a><a class="vchip on" href="../2.1.301/#g5">2.1.301</a><a class="vchip on" href="../2.1.302/#g5">2.1.302</a><a class="vchip on" href="../2.1.306/#g5">2.1.306</a></div>
 
 <p><strong>You'd expect</strong> the message to finish, then a permission prompt. <strong>You get</strong> the prompt while the message is still open.</p>
 <div class="highlight"><pre><span></span><code>assistant          [tool_use Bash]
@@ -783,7 +783,7 @@ message_stop
 </details>
 <h3 id="g6">6. Thinking, streamed in zero characters<a class="headerlink" href="#g6" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-version">Version-specific behaviour</span></p>
-<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.301/#g6">2.1.301</a><a class="vchip on" href="../2.1.302/#g6">2.1.302</a><a class="vchip on" href="../2.1.306/#g6">2.1.306</a></div>
+<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.301/#g6">2.1.301</a><a class="vchip on" href="../2.1.302/#g6">2.1.302</a><a class="vchip on" href="../2.1.306/#g6">2.1.306</a></div>
 
 <p><strong>You'd expect</strong> thinking deltas to carry text. <strong>You get</strong> empty strings, with a token estimate attached.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"thinking_delta"</span><span class="p">,</span><span class="nt">"thinking"</span><span class="p">:</span><span class="s2">""</span><span class="p">,</span><span class="nt">"estimated_tokens"</span><span class="p">:</span><span class="mi">50</span><span class="p">}</span>
@@ -796,7 +796,7 @@ message_stop
 </details>
 <h3 id="g7">7. A built-in slash command runs a turn with zero turns in it<a class="headerlink" href="#g7" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-version">Version-specific behaviour</span></p>
-<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.306/#g7">2.1.306</a></div>
+<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.306/#g7">2.1.306</a></div>
 
 <p>Send <code>/mcp</code> as a message. <strong>You'd expect</strong> an error or a model reply. <strong>You get</strong> an answer from the CLI itself, dressed up as a model reply, and a result that says nothing ran.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"assistant"</span><span class="p">,</span><span class="nt">"message"</span><span class="p">:{</span><span class="nt">"model"</span><span class="p">:</span><span class="s2">"&lt;synthetic&gt;"</span><span class="p">,</span><span class="nt">"content"</span><span class="p">:[{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"text"</span><span class="p">,</span><span class="nt">"text"</span><span class="p">:</span><span class="s2">"3 MCP server(s): 1 connected, ..."</span><span class="p">}],</span><span class="w"> </span><span class="err">...</span><span class="p">}}</span>
@@ -810,7 +810,7 @@ message_stop
 </details>
 <h3 id="g8">8. set_model says yes, and nothing else<a class="headerlink" href="#g8" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-rule">Protocol rule</span></p>
-<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.300/#g8">2.1.300</a></div>
+<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.300/#g8">2.1.300</a></div>
 
 <p><strong>You'd expect</strong> the switch to be confirmed with the new model's name. <strong>You get</strong> a bare "success" with nothing in it.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"control_response"</span><span class="p">,</span><span class="nt">"response"</span><span class="p">:{</span><span class="nt">"subtype"</span><span class="p">:</span><span class="s2">"success"</span><span class="p">,</span><span class="nt">"request_id"</span><span class="p">:</span><span class="s2">"&lt;request_id-25&gt;"</span><span class="p">}}</span>
@@ -825,7 +825,7 @@ message_stop
 </details>
 <h3 id="g9">9. The cost of this turn is the cost of every turn so far<a class="headerlink" href="#g9" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-mistake">Easy consumer mistake</span></p>
-<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.300/#g9">2.1.300</a><a class="vchip on" href="../2.1.301/#g9">2.1.301</a><a class="vchip on" href="../2.1.302/#g9">2.1.302</a><a class="vchip on" href="../2.1.306/#g9">2.1.306</a></div>
+<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.300/#g9">2.1.300</a><a class="vchip on" href="../2.1.301/#g9">2.1.301</a><a class="vchip on" href="../2.1.302/#g9">2.1.302</a><a class="vchip on" href="../2.1.306/#g9">2.1.306</a></div>
 
 <p><strong>You'd expect</strong> <code>total_cost_usd</code> to be what this turn cost. <strong>You get</strong> the running total for the session.</p>
 <div class="highlight"><pre><span></span><code>turn 1 result: "total_cost_usd": 0.0258
@@ -838,7 +838,7 @@ turn 2 result: "total_cost_usd": 0.0341
 </details>
 <h3 id="g10">10. The model calls the tool you took away<a class="headerlink" href="#g10" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-mistake">Easy consumer mistake</span></p>
-<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.302/#g10">2.1.302</a></div>
+<div class="vstate off"><span class="vchip off">2.1.308</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.302/#g10">2.1.302</a></div>
 
 <p>Take <code>Write</code> away with <code>--disallowedTools</code>. <strong>You'd expect</strong> it to be gone; it isn't in <code>init.tools</code>. <strong>You get</strong> the model calling it anyway, and the CLI answering with an error.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"tool_result"</span><span class="p">,</span><span class="nt">"is_error"</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">"content"</span><span class="p">:</span><span class="s2">"&lt;tool_use_error&gt;Error: No such tool available: Write. ...&lt;/tool_use_error&gt;"</span><span class="p">}</span>
