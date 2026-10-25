@@ -2,8 +2,8 @@
 
 How Tandem talks to the user's `claude` binary (Claude Code; recorded with CLI 2.1.300 to 2.1.308) over stdin/stdout
 NDJSON. Every claim names the fixture line that shows it and the CLI version it was recorded on, or the source it rests
-on (below); the traps that cost the most time are collected in section 9 (Gotchas): read it first. It keeps its number
-because it cites sections 1 to 8, and the code cites all of them by these numbers.
+on (below); the traps that cost the most time are collected in the Gotchas section right after this introduction: read
+it first. It is unnumbered, so sections 1 to 11 keep the numbers the code cites them by (section 9 points back to it).
 
 Sources, in order of authority:
 1. Recorded transcripts in `src/test/resources/fixtures/`, cited as `<name>.ndjson:<line>` (also `<name>:<line>`, and
@@ -45,6 +45,36 @@ Sources, in order of authority:
 
 Anything marked **(inferred)** is not directly shown by those sources. The CLI changes weekly: validate every field, and
 parse unknown `type`/`subtype` values to `Unknown(raw)` instead of throwing.
+
+---
+
+## Gotchas
+
+A row that cites a fixture was recorded (versions in Sources); the others come from SDK 0.3.300 or say **inferred**.
+
+| Topic | Detail |
+|---|---|
+| Version gating | Use `init.capabilities` first, `claude_code_version` second. `pending_permission_requests` on initialize from 2.1.268; `interrupt_receipt_v1` for `still_queued`; `scope` on refusal fallback is new (absent = `session`). Refuse to start below a minimum tested version and say so. |
+| Interrupt | Fixture `interrupt`: the receipt `{still_queued:[]}` arrives, then the partial `assistant`, a synthetic `user` text `[Request interrupted by user]`, the remaining stream frames, and `result{subtype:"error_during_execution", is_error:true, terminal_reason:"aborted_streaming", stop_reason:null}`. Treat that result as "stopped", not as a failure. Recorded again with 2.1.301 as `history-interrupt`, with its transcript (section 11): the same order; closing stdin afterwards ended the process with exit code 1. |
+| API error | Fixture `invalid-model`: a synthetic `assistant` line (`model:"<synthetic>"`, `error:"model_not_found"`, `api_error_status:404`), then `result{subtype:"success", is_error:true, terminal_reason:"api_error"}` (section 7). A failed turn, named by `terminal_reason`, not by the subtype. |
+| Undocumented stdout types | See section 10. The SDK passes them through untouched. |
+| Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init` (`plain-reply.ndjson:1,2,4`, 2.1.300). Do not assume `init` is first. |
+| Local commands | A typed local command (`/mcp`, `/model`, `/help`) runs no turn and is not echoed: the CLI answers with a synthetic `assistant` line carrying `local_command_*` and a zero-turn `result` (`mcp-slash.ndjson:5`-`:6`, `:17`-`:18`, 2.1.306). No model output follows; show the line as the reply (6.1, 7). |
+| Batched and merged sends | The CLI batches the user frames queued before it starts processing (`bash-mode.ndjson:3-6`: both queued, then both started) and merges quiet ones (`shouldQuery:false`) into one transcript line with `mergedSendUuids` (`transcripts/bash-mode.jsonl:5`), answered by one zero-turn `result` naming both (`bash-mode.ndjson:8`, 2.1.306). A `result` can end several sends: read `user_message_uuids` (section 3, 7). |
+| `mcp_status` before the first prompt | The stdio servers are still `pending` (`mcp-status.ndjson:2`, 2.1.306); the first `init` already has settled states (`:6`). Ask again later (4.4). |
+| `mcp_set_servers` | Replaces only the servers it added itself, though every server of `--mcp-config` reports `source:"dynamic"` too: `{}` removes `echo2` alone (`mcp-status.ndjson:44`) and `echo`, `broken`, `authy` stay (`:45`, 2.1.306). The source does not tell the two apart (4.4). |
+| Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
+| Ordering | complete `assistant` precedes `content_block_stop` (`plain-reply.ndjson:10,11`; section 6.4). |
+| stdin close | Closing stdin = end of input. The SDK only calls `endInput()` after the last result when no bidirectional needs (permissions, hooks, MCP) remain. **Keep stdin open for the whole session**; close it to shut down gracefully, then wait for exit. |
+| Shutdown | On dispose: close stdin, wait briefly, then SIGTERM, then SIGKILL (inferred timings). Writes after the child exits raise EPIPE: treat as session ended. |
+| Exit codes | `0` normal. Non-zero: SDK error text `Claude Code process exited with code N` + stderr tail. Killed by signal: report the signal. Startup failures may first write a zeroed `result{subtype:"error_during_execution", startup_failure_reason}`; show `errors[]`. |
+| Not logged in | surfaces as `assistant.error:"authentication_failed"` and/or error `result` (inferred). Tell the user to run `claude` in a terminal; never handle credentials. |
+| Non-JSON stdout | skip line, log length only. |
+| Large lines | single lines can be hundreds of KB (tool results, images). Use a streaming line reader without a small max line length. |
+| `--permission-prompt-tool` | `stdio` and an MCP tool name are mutually exclusive. |
+| `--fallback-model` | must differ from `--model` (SDK throws). |
+| Workspace trust | headless mode skips the trust dialog; Tandem should only start in trusted projects (IDE trust). |
+| Settings parse errors | invalid settings files are silently ignored in print mode; `get_settings` reports them. |
 
 ---
 
@@ -969,31 +999,7 @@ Fork title: the CLI writes no "(fork)" title. A fork's transcript only inherits 
 
 ## 9. Gotchas
 
-A row that cites a fixture was recorded (versions in Sources); the others come from SDK 0.3.300 or say **inferred**.
-
-| Topic | Detail |
-|---|---|
-| Version gating | Use `init.capabilities` first, `claude_code_version` second. `pending_permission_requests` on initialize from 2.1.268; `interrupt_receipt_v1` for `still_queued`; `scope` on refusal fallback is new (absent = `session`). Refuse to start below a minimum tested version and say so. |
-| Interrupt | Fixture `interrupt`: the receipt `{still_queued:[]}` arrives, then the partial `assistant`, a synthetic `user` text `[Request interrupted by user]`, the remaining stream frames, and `result{subtype:"error_during_execution", is_error:true, terminal_reason:"aborted_streaming", stop_reason:null}`. Treat that result as "stopped", not as a failure. Recorded again with 2.1.301 as `history-interrupt`, with its transcript (section 11): the same order; closing stdin afterwards ended the process with exit code 1. |
-| API error | Fixture `invalid-model`: a synthetic `assistant` line (`model:"<synthetic>"`, `error:"model_not_found"`, `api_error_status:404`), then `result{subtype:"success", is_error:true, terminal_reason:"api_error"}` (section 7). A failed turn, named by `terminal_reason`, not by the subtype. |
-| Undocumented stdout types | See section 10. The SDK passes them through untouched. |
-| Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init` (`plain-reply.ndjson:1,2,4`, 2.1.300). Do not assume `init` is first. |
-| Local commands | A typed local command (`/mcp`, `/model`, `/help`) runs no turn and is not echoed: the CLI answers with a synthetic `assistant` line carrying `local_command_*` and a zero-turn `result` (`mcp-slash.ndjson:5`-`:6`, `:17`-`:18`, 2.1.306). No model output follows; show the line as the reply (6.1, 7). |
-| Batched and merged sends | The CLI batches the user frames queued before it starts processing (`bash-mode.ndjson:3-6`: both queued, then both started) and merges quiet ones (`shouldQuery:false`) into one transcript line with `mergedSendUuids` (`transcripts/bash-mode.jsonl:5`), answered by one zero-turn `result` naming both (`bash-mode.ndjson:8`, 2.1.306). A `result` can end several sends: read `user_message_uuids` (section 3, 7). |
-| `mcp_status` before the first prompt | The stdio servers are still `pending` (`mcp-status.ndjson:2`, 2.1.306); the first `init` already has settled states (`:6`). Ask again later (4.4). |
-| `mcp_set_servers` | Replaces only the servers it added itself, though every server of `--mcp-config` reports `source:"dynamic"` too: `{}` removes `echo2` alone (`mcp-status.ndjson:44`) and `echo`, `broken`, `authy` stay (`:45`, 2.1.306). The source does not tell the two apart (4.4). |
-| Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
-| Ordering | complete `assistant` precedes `content_block_stop` (`plain-reply.ndjson:10,11`; section 6.4). |
-| stdin close | Closing stdin = end of input. The SDK only calls `endInput()` after the last result when no bidirectional needs (permissions, hooks, MCP) remain. **Keep stdin open for the whole session**; close it to shut down gracefully, then wait for exit. |
-| Shutdown | On dispose: close stdin, wait briefly, then SIGTERM, then SIGKILL (inferred timings). Writes after the child exits raise EPIPE: treat as session ended. |
-| Exit codes | `0` normal. Non-zero: SDK error text `Claude Code process exited with code N` + stderr tail. Killed by signal: report the signal. Startup failures may first write a zeroed `result{subtype:"error_during_execution", startup_failure_reason}`; show `errors[]`. |
-| Not logged in | surfaces as `assistant.error:"authentication_failed"` and/or error `result` (inferred). Tell the user to run `claude` in a terminal; never handle credentials. |
-| Non-JSON stdout | skip line, log length only. |
-| Large lines | single lines can be hundreds of KB (tool results, images). Use a streaming line reader without a small max line length. |
-| `--permission-prompt-tool` | `stdio` and an MCP tool name are mutually exclusive. |
-| `--fallback-model` | must differ from `--model` (SDK throws). |
-| Workspace trust | headless mode skips the trust dialog; Tandem should only start in trusted projects (IDE trust). |
-| Settings parse errors | invalid settings files are silently ignored in print mode; `get_settings` reports them. |
+Moved to the unnumbered [Gotchas](#gotchas) section at the top; this heading keeps the number 9 so citations stay valid.
 
 ---
 
@@ -1129,7 +1135,7 @@ pass (`TranscriptChain`) works out which conversational lines (`user` or `assist
 line with `subtype: local_command`, neither `isSidechain` nor `isMeta`) belong to it:
 
 1. The current history is the `parentUuid` chain that ends at the last conversational line with a `uuid`. The chain runs through lines
-   of any type (in the fixtures every `assistant` line's parent is an `attachment` line), so every line with a `uuid` is
+   of any type (in the fixtures 110 of the 136 `assistant` lines have an `attachment` line as parent), so every line with a `uuid` is
    indexed. A line whose parent is not in the file is a root.
 2. If that chain starts at a compaction root, a `user` line with `isCompactSummary` or a `system` line with
    `subtype: compact_boundary`, the chain before the compaction is kept as well, and so on back to the first compaction. A
