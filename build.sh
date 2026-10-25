@@ -10,4 +10,4 @@ for v in $versions; do
   python3 gen.py "$fixtures" "$v" > /dev/null
   mike deploy --branch pages --title "CLI $v" "$v"
 done
-mike set-default --branch pages all
+mike set-default --branch pages all || true  # fails with "nothing changed" once the default is set
