@@ -723,7 +723,7 @@
 </details>
 <h3 id="g2">2. Press Stop, receive an error<a class="headerlink" href="#g2" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-version">Version-specific behaviour</span></p>
-<div class="vstate off"><span class="vchip off">2.1.302</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.300/#g2">2.1.300</a><a class="vchip on" href="../2.1.301/#g2">2.1.301</a></div>
+<div class="vstate off"><span class="vchip off">2.1.302</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.300/#g2">2.1.300</a><a class="vchip on" href="../2.1.301/#g2">2.1.301</a></div>
 
 <p><strong>You'd expect</strong> a polite "stopped". <strong>You get</strong> an error, plus a message from the user that the user never typed.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"user"</span><span class="p">,</span><span class="nt">"message"</span><span class="p">:{</span><span class="nt">"role"</span><span class="p">:</span><span class="s2">"user"</span><span class="p">,</span><span class="nt">"content"</span><span class="p">:[{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"text"</span><span class="p">,</span><span class="nt">"text"</span><span class="p">:</span><span class="s2">"[Request interrupted by user]"</span><span class="p">}]},</span><span class="w"> </span><span class="err">...</span><span class="p">}</span>
@@ -796,7 +796,7 @@ message_stop
 </details>
 <h3 id="g7">7. A built-in slash command runs a turn with zero turns in it<a class="headerlink" href="#g7" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-version">Version-specific behaviour</span></p>
-<div class="vstate off"><span class="vchip off">2.1.302</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.306/#g7">2.1.306</a></div>
+<div class="vstate off"><span class="vchip off">2.1.302</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.306/#g7">2.1.306</a></div>
 
 <p>Send <code>/mcp</code> as a message. <strong>You'd expect</strong> an error or a model reply. <strong>You get</strong> an answer from the CLI itself, dressed up as a model reply, and a result that says nothing ran.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"assistant"</span><span class="p">,</span><span class="nt">"message"</span><span class="p">:{</span><span class="nt">"model"</span><span class="p">:</span><span class="s2">"&lt;synthetic&gt;"</span><span class="p">,</span><span class="nt">"content"</span><span class="p">:[{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"text"</span><span class="p">,</span><span class="nt">"text"</span><span class="p">:</span><span class="s2">"3 MCP server(s): 1 connected, ..."</span><span class="p">}],</span><span class="w"> </span><span class="err">...</span><span class="p">}}</span>
@@ -810,7 +810,7 @@ message_stop
 </details>
 <h3 id="g8">8. set_model says yes, and nothing else<a class="headerlink" href="#g8" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-rule">Protocol rule</span></p>
-<div class="vstate off"><span class="vchip off">2.1.302</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.300/#g8">2.1.300</a></div>
+<div class="vstate off"><span class="vchip off">2.1.302</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.300/#g8">2.1.300</a></div>
 
 <p><strong>You'd expect</strong> the switch to be confirmed with the new model's name. <strong>You get</strong> a bare "success" with nothing in it.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"control_response"</span><span class="p">,</span><span class="nt">"response"</span><span class="p">:{</span><span class="nt">"subtype"</span><span class="p">:</span><span class="s2">"success"</span><span class="p">,</span><span class="nt">"request_id"</span><span class="p">:</span><span class="s2">"&lt;request_id-25&gt;"</span><span class="p">}}</span>
