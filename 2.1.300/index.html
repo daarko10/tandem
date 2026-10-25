@@ -736,7 +736,7 @@
 </details>
 <h3 id="g3">3. The model did not exist, and the turn succeeded<a class="headerlink" href="#g3" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-version">Version-specific behaviour</span></p>
-<div class="vstate off"><span class="vchip off">2.1.300</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.302/#g3">2.1.302</a></div>
+<div class="vstate off"><span class="vchip off">2.1.300</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.302/#g3">2.1.302</a></div>
 
 <p>Start the CLI with <code>--model claude-nonexistent-0</code>. <strong>You'd expect</strong> an error result. <strong>You get</strong> <code>subtype: "success"</code>.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"result"</span><span class="p">,</span><span class="nt">"subtype"</span><span class="p">:</span><span class="s2">"success"</span><span class="p">,</span><span class="nt">"is_error"</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">"terminal_reason"</span><span class="p">:</span><span class="s2">"api_error"</span><span class="p">,</span><span class="nt">"api_error_status"</span><span class="p">:</span><span class="mi">404</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">}</span>
@@ -783,7 +783,7 @@ message_stop
 </details>
 <h3 id="g6">6. Thinking, streamed in zero characters<a class="headerlink" href="#g6" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-version">Version-specific behaviour</span></p>
-<div class="vstate off"><span class="vchip off">2.1.300</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.301/#g6">2.1.301</a><a class="vchip on" href="../2.1.302/#g6">2.1.302</a><a class="vchip on" href="../2.1.306/#g6">2.1.306</a></div>
+<div class="vstate off"><span class="vchip off">2.1.300</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.301/#g6">2.1.301</a><a class="vchip on" href="../2.1.302/#g6">2.1.302</a><a class="vchip on" href="../2.1.306/#g6">2.1.306</a></div>
 
 <p><strong>You'd expect</strong> thinking deltas to carry text. <strong>You get</strong> empty strings, with a token estimate attached.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"thinking_delta"</span><span class="p">,</span><span class="nt">"thinking"</span><span class="p">:</span><span class="s2">""</span><span class="p">,</span><span class="nt">"estimated_tokens"</span><span class="p">:</span><span class="mi">50</span><span class="p">}</span>
@@ -796,7 +796,7 @@ message_stop
 </details>
 <h3 id="g7">7. A built-in slash command runs a turn with zero turns in it<a class="headerlink" href="#g7" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-version">Version-specific behaviour</span></p>
-<div class="vstate off"><span class="vchip off">2.1.300</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.306/#g7">2.1.306</a></div>
+<div class="vstate off"><span class="vchip off">2.1.300</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.306/#g7">2.1.306</a></div>
 
 <p>Send <code>/mcp</code> as a message. <strong>You'd expect</strong> an error or a model reply. <strong>You get</strong> an answer from the CLI itself, dressed up as a model reply, and a result that says nothing ran.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"assistant"</span><span class="p">,</span><span class="nt">"message"</span><span class="p">:{</span><span class="nt">"model"</span><span class="p">:</span><span class="s2">"&lt;synthetic&gt;"</span><span class="p">,</span><span class="nt">"content"</span><span class="p">:[{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"text"</span><span class="p">,</span><span class="nt">"text"</span><span class="p">:</span><span class="s2">"3 MCP server(s): 1 connected, ..."</span><span class="p">}],</span><span class="w"> </span><span class="err">...</span><span class="p">}}</span>
@@ -838,7 +838,7 @@ turn 2 result: "total_cost_usd": 0.0341
 </details>
 <h3 id="g10">10. The model calls the tool you took away<a class="headerlink" href="#g10" title="Permanent link">&para;</a></h3>
 <p><span class="kind kind-mistake">Easy consumer mistake</span></p>
-<div class="vstate off"><span class="vchip off">2.1.300</span> Not seen in this version's recordings, which is not the same as fixed. Recorded on <a class="vchip on" href="../2.1.302/#g10">2.1.302</a></div>
+<div class="vstate off"><span class="vchip off">2.1.300</span> Not seen in this version's recordings (not the same as fixed). Seen on <a class="vchip on" href="../2.1.302/#g10">2.1.302</a></div>
 
 <p>Take <code>Write</code> away with <code>--disallowedTools</code>. <strong>You'd expect</strong> it to be gone; it isn't in <code>init.tools</code>. <strong>You get</strong> the model calling it anyway, and the CLI answering with an error.</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"tool_result"</span><span class="p">,</span><span class="nt">"is_error"</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">"content"</span><span class="p">:</span><span class="s2">"&lt;tool_use_error&gt;Error: No such tool available: Write. ...&lt;/tool_use_error&gt;"</span><span class="p">}</span>
