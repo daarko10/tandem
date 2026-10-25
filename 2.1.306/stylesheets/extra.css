@@ -5,10 +5,11 @@
   --md-accent-fg-color: #7c6cff;
   --tandem-on: #2e9e6b;
   --tandem-off: #9aa3b2;
-  --md-typeset-a-color: #5b4bea;
 }
+[data-md-color-scheme="default"] { --md-typeset-a-color: #5b4bea; }
 [data-md-color-scheme="slate"] {
   --md-hue: 225;
+  --md-typeset-a-color: #a497ff;
   --md-default-bg-color: #12151c;
   --md-primary-fg-color: #12151c;
   --md-accent-fg-color: #a497ff;
