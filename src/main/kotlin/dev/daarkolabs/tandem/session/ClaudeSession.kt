@@ -100,11 +100,19 @@ data class SessionConfig(
     val forkSession: Boolean = false,
     /** Folders the CLI may read and edit besides [workingDirectory]: one `--add-dir` each, last in the argv. */
     val additionalDirectories: List<String> = emptyList(),
+    /** With [forkSession]: the uuid of the message the fork ends at (`--resume-session-at`); later messages stay in the original only. */
+    val resumeSessionAt: String? = null,
 ) {
     init {
         require(!forkSession || resumeSessionId != null) { "A fork needs the resumeSessionId of the session it forks." }
         require((sessionId == null) != (resumeSessionId == null) || (sessionId != null && forkSession)) {
             "Pass sessionId for a new session or resumeSessionId for an existing one; both only for a fork, never neither."
+        }
+        require(resumeSessionAt == null || forkSession) {
+            "--resume-session-at only with --fork-session: without it the CLI branches the original's transcript."
+        }
+        require(resumeSessionAt == null || (resumeSessionAt.isNotBlank() && !resumeSessionAt.startsWith("-"))) {
+            "A fork point is a message uuid, never a flag."
         }
     }
 
@@ -125,6 +133,7 @@ data class SessionConfig(
             if (forkSession) add("--fork-session")
         }
         sessionId?.let { addAll(listOf("--session-id", it)) }
+        resumeSessionAt?.let { addAll(listOf("--resume-session-at", it)) }
         for (directory in additionalDirectories) addAll(listOf("--add-dir", directory))
     }
 }

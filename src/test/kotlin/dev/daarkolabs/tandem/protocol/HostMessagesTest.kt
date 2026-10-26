@@ -176,4 +176,24 @@ class HostMessagesTest {
         assertEquals(JsonPrimitive(false), context["shouldQuery"])
         assertEquals(JsonPrimitive("u3"), context["uuid"])
     }
+
+    @Test
+    fun `queue frames`() {
+        val plain = """{"type":"user","session_id":"","message":{"role":"user","content":[{"type":"text","text":"ping"}]},""" +
+            """"parent_tool_use_id":null,"uuid":"u-1"}"""
+        assertEquals(plain, wire(HostMessages.userMessage("ping", emptyList(), uuid = "u-1")))
+        assertEquals(
+            plain.dropLast(1) + ""","priority":"later"}""",
+            wire(HostMessages.userMessage("ping", emptyList(), uuid = "u-1", later = true)),
+        )
+        assertEquals("""{"type":"control_request","request_id":"a1","request":{"subtype":"interrupt"}}""", wire(HostMessages.interrupt("a1")))
+        assertEquals(
+            """{"type":"control_request","request_id":"a1","request":{"subtype":"interrupt","cancel_queued":true}}""",
+            wire(HostMessages.interrupt("a1", cancelQueued = true)),
+        )
+        assertEquals(
+            """{"type":"control_request","request_id":"c1","request":{"subtype":"cancel_async_message","message_uuid":"u-1"}}""",
+            wire(HostMessages.cancelAsyncMessage("c1", "u-1")),
+        )
+    }
 }

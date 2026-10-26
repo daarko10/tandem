@@ -370,6 +370,8 @@ class RobustnessTest {
                 val answer = Ndjson.decode(line) as? CliMessage.ControlResponse ?: continue
                 ControlPayloads.contextUsage(answer.payload)
                 ControlPayloads.usage(answer.payload)
+                interruptReceipt(answer.payload)
+                cancelAsyncAnswer(answer.payload)
                 answers++
             }
         }
@@ -391,5 +393,21 @@ class RobustnessTest {
         val breakdown = assertNotNull(ControlPayloads.contextUsage(context))
         assertEquals(listOf(AgentUsage("reviewer", "projectSettings", 919)), breakdown.agents)
         assertEquals(listOf(McpInstructionsUsage("echo", 26), McpInstructionsUsage("docs", 22)), breakdown.mcpInstructions)
+    }
+
+    @Test
+    fun `mutated queue shapes degrade, never throw`() {
+        val f = "<command_uuid-25>"
+        assertIs<CliMessage.Unknown>(Ndjson.decode(mutated("queue-fold", 19, "\"command_uuid\":\"$f\",", "")))
+        assertIs<CliMessage.Unknown>(Ndjson.decode(mutated("queue-fold", 19, "\"state\":\"queued\"", "\"state\":3")))
+        val paused = assertIs<CliMessage.CommandLifecycle>(Ndjson.decode(mutated("queue-fold", 19, "\"state\":\"queued\"", "\"state\":\"paused\"")))
+        assertEquals(f to "paused", paused.commandUuid to paused.state)
+        val receipt = payloadOf(Fixtures.lines("queue-cancel")[55])
+        assertTrue(interruptReceipt(with(receipt, "cancelled", "true")).cancelled.isEmpty())
+        assertTrue(interruptReceipt(with(receipt, "still_queued", "\"x\"")).stillQueued.isEmpty())
+        assertEquals(listOf("<command_uuid-68>"), interruptReceipt(with(receipt, "cancelled", "[1,\"<command_uuid-68>\"]")).cancelled)
+        assertNull(cancelAsyncAnswer(json("{\"cancelled\":\"yes\"}")))
+        assertNull(cancelAsyncAnswer(json("{}")))
+        assertEquals(InterruptReceipt(emptyList(), emptyList()), interruptReceipt(null))
     }
 }

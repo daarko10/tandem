@@ -318,6 +318,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         ).withUsage(message.usage)
     }
     is CliMessage.KeepAlive, is CliMessage.Unknown -> state
+    is CliMessage.CommandLifecycle -> state
 }
 
 /** The `source` of a claude.ai connector's entry, which a `system/init` may leave out (probes 2.5). */

@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.protocol
 
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -7,6 +8,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
@@ -214,7 +216,8 @@ class FixtureDecodeTest {
     fun `undocumented types the fixtures show decode to Unknown with their type`() {
         val unknownTypes = Fixtures.names().flatMap(Fixtures::decode).filterIsInstance<CliMessage.Unknown>().map { it.type }.toSet()
         assertTrue("autocompact_state" in unknownTypes)
-        assertTrue("command_lifecycle" in unknownTypes)
+        assertTrue("rate_limit_event" in unknownTypes)
+        assertTrue("command_lifecycle" !in unknownTypes)
     }
 
     /** Line [line] (1-based) of fixture [name], decoded. */
@@ -952,5 +955,131 @@ class FixtureDecodeTest {
         assertTrue("probe-kit:greet" in skills)
         assertTrue("probe-kit:hello" !in skills)
         assertEquals("actions", skills.first())
+    }
+
+    private fun lifecycle(name: String, line: Int): Pair<String, String> =
+        assertIs<CliMessage.CommandLifecycle>(at(name, line)).let { it.commandUuid to it.state }
+
+    private fun result(name: String, line: Int): CliMessage.Result = assertIs<CliMessage.Result>(at(name, line))
+
+    private fun JsonObject.rawString(key: String): String? = (this[key] as? JsonPrimitive)?.content
+
+    // spec: queue-fold: lifecycle lines decode with their states
+    @Test
+    fun `queue-fold - lifecycle lines decode with their states`() {
+        val p = "<command_uuid-4>"
+        val f = "<command_uuid-25>"
+        assertEquals(p to "queued", lifecycle("queue-fold", 3))
+        assertEquals(p to "started", lifecycle("queue-fold", 5))
+        assertEquals(f to "queued", lifecycle("queue-fold", 19))
+        assertEquals(f to "started", lifecycle("queue-fold", 22))
+        assertEquals(f to "completed", lifecycle("queue-fold", 52))
+        assertEquals(p to "completed", lifecycle("queue-fold", 54))
+    }
+
+    // spec: queue-fold: one result names the prompt and the folded message
+    @Test
+    fun `queue-fold - one result names the prompt and the folded message`() {
+        val p = "<command_uuid-4>"
+        val f = "<command_uuid-25>"
+        val status = assertIs<CliMessage.SystemStatus>(at("queue-fold", 23))
+        assertEquals(listOf(p, f), status.raw["user_message_uuids"]!!.jsonArray.map { it.jsonPrimitive.content })
+        val result = result("queue-fold", 53)
+        assertEquals(3, result.numTurns)
+        assertEquals(p, result.raw.rawString("user_message_uuid"))
+        assertEquals(listOf(p, f), result.userMessageUuids)
+        assertEquals(0, result.raw["queued_turn_count"]!!.jsonPrimitive.int)
+        val users = Fixtures.decode("queue-fold").filterIsInstance<CliMessage.User>()
+        assertTrue(users.isNotEmpty())
+        for (user in users) {
+            assertNotEquals(f, user.raw.rawString("uuid"))
+            assertTrue(user.content.none { it == ContentBlock.Text("Also say the word KIWI at the end.") })
+        }
+    }
+
+    // spec: queue-later: the later message runs as its own turn
+    @Test
+    fun `queue-later - the later message runs as its own turn`() {
+        val p = "<command_uuid-4>"
+        val f = "<command_uuid-25>"
+        assertEquals(f to "queued", lifecycle("queue-later", 19))
+        val first = result("queue-later", 51)
+        assertEquals(listOf(p), first.userMessageUuids)
+        assertEquals(0, first.raw["queued_turn_count"]!!.jsonPrimitive.int)
+        assertEquals(f to "started", lifecycle("queue-later", 53))
+        assertIs<CliMessage.SystemInit>(at("queue-later", 54))
+        val second = result("queue-later", 63)
+        assertEquals(f, second.raw.rawString("user_message_uuid"))
+        assertEquals(1, second.numTurns)
+    }
+
+    // spec: queue-cancel: cancel_async_message answers cancelled true
+    @Test
+    fun `queue-cancel - cancel_async_message answers cancelled true`() {
+        assertEquals("<command_uuid-29>" to "cancelled", lifecycle("queue-cancel", 24))
+        assertEquals(true, cancelAsyncAnswer(response("queue-cancel", 25).payload))
+        val result = result("queue-cancel", 36)
+        assertEquals("success", result.subtype)
+        assertEquals(listOf("<command_uuid-4>"), result.userMessageUuids)
+    }
+
+    // spec: queue-cancel: interrupt with cancel_queued lists the cancelled message
+    @Test
+    fun `queue-cancel - interrupt with cancel_queued lists the cancelled message`() {
+        val f2 = "<command_uuid-68>"
+        assertEquals(f2 to "cancelled", lifecycle("queue-cancel", 55))
+        assertEquals(InterruptReceipt(emptyList(), listOf(f2)), interruptReceipt(response("queue-cancel", 56).payload))
+        val result = result("queue-cancel", 60)
+        assertEquals("error_during_execution", result.subtype)
+        assertEquals("aborted_tools", result.terminalReason)
+        assertTrue(result.isError)
+        assertEquals("<command_uuid-47>" to "cancelled", lifecycle("queue-cancel", 61))
+    }
+
+    // spec: the init lists the queue capabilities
+    @Test
+    fun `the init lists the queue capabilities`() {
+        for ((name, line) in listOf("queue-fold" to 6, "queue-cancel" to 5, "plain-reply" to 4)) {
+            val capabilities = init(name, line).capabilities
+            assertTrue("msg_lifecycle_v1" in capabilities, "$name:$line")
+            assertTrue("interrupt_cancel_queued_v1" in capabilities, "$name:$line")
+        }
+    }
+
+    // spec: fork-at: a fork at the first reply knows only that turn
+    @Test
+    fun `fork-at - a fork at the first reply knows only that turn`() {
+        val a = "<session_id-2>"
+        val b = "<session_id-70>"
+        assertEquals(listOf(a, a, a, b), listOf(6, 19, 45, 60).map { init("fork-at", it).sessionId })
+        assertNotEquals(a, b)
+        val cut = assertIs<CliMessage.Assistant>(at("fork-at", 11))
+        assertEquals("<uuid-14>", cut.uuid)
+        assertNull(cut.parentToolUseId)
+        assertEquals(listOf<ContentBlock>(ContentBlock.Text("ALPHA")), assertIs<CliMessage.Assistant>(at("fork-at", 65)).content)
+        val result = result("fork-at", 70)
+        assertEquals("success", result.subtype)
+        assertEquals(1, result.numTurns)
+    }
+
+    // spec: fork-at transcripts: the fork copies the chain up to the cut and nothing after
+    @Test
+    fun `fork-at transcripts - the fork copies the chain up to the cut and nothing after`() {
+        fun lines(name: String): List<JsonObject> =
+            Fixtures.transcript(name).readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+        val fork = lines("fork-at")
+        val origin = lines("fork-at-origin")
+        assertEquals("assistant", fork[16].rawString("type"))
+        assertEquals("<uuid-14>", fork[16].rawString("uuid"))
+        assertEquals("user", fork[17].rawString("type"))
+        assertEquals("<uuid-14>", fork[17].rawString("parentUuid"))
+        val sessionIds = fork.mapNotNull { it.rawString("sessionId") }
+        assertEquals(fork.size, sessionIds.size)
+        assertTrue(sessionIds.all { it == "<session_id-70>" }, sessionIds.toSet().toString())
+        assertEquals("<uuid-14>", origin[19].rawString("uuid"))
+        assertEquals(assertIs<CliMessage.Assistant>(at("fork-at", 11)).uuid, origin[19].rawString("uuid"))
+        val later = origin.drop(20).filter { it.rawString("type") in setOf("user", "assistant") }.mapNotNull { it.rawString("uuid") }.toSet()
+        assertTrue(listOf(27, 35, 37).all { origin[it - 1].rawString("uuid") in later })
+        assertTrue(fork.none { it.rawString("uuid") in later })
     }
 }

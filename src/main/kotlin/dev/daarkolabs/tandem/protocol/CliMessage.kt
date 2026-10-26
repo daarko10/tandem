@@ -206,6 +206,12 @@ sealed interface CliMessage {
 
     data class KeepAlive(override val raw: JsonObject) : CliMessage
 
+    /**
+     * A queued message's progress (`command_lifecycle`, capability `msg_lifecycle_v1`): [commandUuid] is the uuid the host sent it
+     * with; [state] as sent, `queued`, `started`, `completed` or `cancelled`, any other text kept.
+     */
+    data class CommandLifecycle(val commandUuid: String, val state: String, override val raw: JsonObject) : CliMessage
+
     /** Anything else. [type] is the line's `type` when it had one. Never an error. */
     data class Unknown(val line: String, val type: String?, val subtype: String?, override val raw: JsonObject?) : CliMessage
 }

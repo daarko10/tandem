@@ -294,6 +294,35 @@ class ClaudeSessionTest {
         assertTrue("--add-dir" !in SessionConfig("claude", tmp, sessionId = "s1").argv())
     }
 
+    // spec: a fork at a reply ends with --resume-session-at
+    @Test
+    fun `a fork at a reply ends with --resume-session-at`() {
+        val base = listOf(
+            "claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
+            "--include-partial-messages", "--thinking-display", "summarized", "--permission-prompt-tool=stdio",
+        )
+        val disallowed = listOf("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit")
+        val fork = listOf("--resume", "A", "--fork-session", "--session-id", "B", "--resume-session-at", "X")
+        assertEquals(
+            base + disallowed + fork,
+            SessionConfig("claude", tmp, sessionId = "B", resumeSessionId = "A", forkSession = true, resumeSessionAt = "X").argv(),
+        )
+        assertEquals(
+            base + disallowed + fork + listOf("--add-dir", "/a"),
+            SessionConfig(
+                "claude", tmp, sessionId = "B", resumeSessionId = "A", forkSession = true, resumeSessionAt = "X",
+                additionalDirectories = listOf("/a"),
+            ).argv(),
+        )
+        // Without --fork-session the CLI would branch the original's own transcript.
+        assertFailsWith<IllegalArgumentException> { SessionConfig("claude", tmp, resumeSessionId = "A", resumeSessionAt = "X") }
+        for (bad in listOf("", " ", "-x")) {
+            assertFailsWith<IllegalArgumentException>(bad) {
+                SessionConfig("claude", tmp, sessionId = "B", resumeSessionId = "A", forkSession = true, resumeSessionAt = bad)
+            }
+        }
+    }
+
     @Test
     fun `keep_alive and unknown lines advance lastFrameAt without a state emission`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
