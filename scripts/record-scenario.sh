@@ -17,7 +17,7 @@
 # Like record-fixture.sh, this uses the local `claude` sign-in and never commits the raw transcripts.
 set -euo pipefail
 
-scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | permission-mode-rejected | fork | effort-switch | permission-mode-auto | user-image | ask-two | bash-mode | bash-mode-respond | bash-mode-respond-together | bash-mode-context | mcp-status | mcp-tool-call | mcp-slash | mcp-connectors | mcp-connectors-all (needs TANDEM_PROBE_CONNECTOR=\"claude.ai <Name>\"; the redactor renames the connector) | settings (a probe: give an out-dir outside the fixtures)}"
+scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | permission-mode-rejected | fork | effort-switch | permission-mode-auto | user-image | ask-two | fork-at | fork-at-live | fork-at-busy | queue-fold | queue-later | queue-cancel | queue-steer-text | queue-cancel-steer | queue-later-command | queue-during-card | parity-requests | bash-mode | bash-mode-respond | bash-mode-respond-together | bash-mode-context | mcp-status | mcp-tool-call | mcp-slash | mcp-connectors | mcp-connectors-all (needs TANDEM_PROBE_CONNECTOR=\"claude.ai <Name>\"; the redactor renames the connector) | settings (a probe: give an out-dir outside the fixtures)}"
 out_dir="${2:-src/test/resources/fixtures}"
 if [[ "$scenario" == settings ]]; then
   case "${2:-}" in

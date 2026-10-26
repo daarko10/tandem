@@ -6,10 +6,12 @@ import io
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest import mock
 
 import drive_cli
@@ -728,6 +730,377 @@ class ProbeScenarioTest(unittest.TestCase):
         self.assertEqual({"content": [{"type": "text", "text": "hello tandem"}],
                           "structuredContent": {"result": "hello tandem"}, "isError": False}, answers[2]["result"])
         self.assertEqual(-32601, answers[3]["error"]["code"])
+
+class StoryCli(drive_cli.Cli):
+    """A Cli whose process is replaced by `react(cli, frame) -> messages`: what the host sends is kept in `sent`, every
+    message the CLI emits is also a line in `lines`, and `events` (shared between the origin and a fork) orders them."""
+
+    def __init__(self, name, react, extra=(), events=None, first_id=0):
+        self.name = name
+        self.react = react
+        self.extra = list(extra)
+        self.events = events if events is not None else []
+        self.next_id = first_id
+        self.inbox = queue.Queue()
+        self.lines: list[str] = []
+        self.sent: list[dict] = []
+
+    def emit(self, *messages: dict) -> None:
+        for message in messages:
+            self.events.append(("emit", self.name, message.get("type")))
+            self.lines.append(json.dumps(message))
+            self.inbox.put(message)
+
+    def send(self, msg: dict) -> None:
+        self.sent.append(msg)
+        self.events.append(("send", self.name, msg))
+        self.emit(*self.react(self, msg))
+
+    def close(self) -> int:
+        self.events.append(("close", self.name))
+        return 0
+
+    def users(self) -> list[dict]:
+        return [m for m in self.sent if m["type"] == "user"]
+
+    def requests(self) -> list[dict]:
+        return [m["request"] for m in self.sent if m["type"] == "control_request"]
+
+
+def ok(msg: dict) -> list[dict]:
+    """The success answer to a control request, and nothing for any other frame."""
+    if msg["type"] != "control_request":
+        return []
+    return [{"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"],
+                                                       "response": {}}}]
+
+
+def text_of(msg: dict) -> str:
+    content = msg.get("message", {}).get("content")
+    return content if isinstance(content, str) else "".join(b.get("text", "") for b in content if b["type"] == "text")
+
+
+def assistant(uuid: str, text: str = "OK", parent=None, tool=False) -> dict:
+    block = ({"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}} if tool
+             else {"type": "text", "text": text})
+    return {"type": "assistant", "uuid": uuid, "parent_tool_use_id": parent,
+            "message": {"role": "assistant", "content": [block]}}
+
+
+TASK_STARTED = {"type": "system", "subtype": "task_started"}
+
+
+def positions(events: list[tuple], kind: str, name: str, test=lambda e: True) -> list[int]:
+    return [i for i, e in enumerate(events) if e[0] == kind and e[1] == name and test(e)]
+
+
+def frame_texts(cli: StoryCli) -> list[str]:
+    """The host's frames in order: a user frame's text, or the control request's subtype."""
+    return [text_of(m) if m["type"] == "user" else m["request"]["subtype"] for m in cli.sent]
+
+
+class QueueStoryTest(unittest.TestCase):
+    def test_user_later_puts_priority_after_uuid_and_returns_it(self):
+        cli = FakeCli(success)
+        later = cli.user_later("x")
+        plain = cli.user("x")
+        self.assertEqual(["type", "session_id", "parent_tool_use_id", "uuid", "priority", "message"],
+                         list(cli.sent[0]))
+        self.assertEqual("later", cli.sent[0]["priority"])
+        self.assertEqual(cli.sent[0]["uuid"], later)
+        self.assertNotIn("priority", cli.sent[1])
+        self.assertEqual(cli.sent[1]["uuid"], plain)
+        self.assertNotEqual(later, plain)
+
+    def test_reply_uuid_takes_the_last_main_thread_assistant_line(self):
+        lines = [json.dumps(assistant("a1")), json.dumps(assistant("s1", parent="toolu_1")),
+                 json.dumps({"type": "result"}), "not json"]
+        self.assertEqual("a1", drive_cli.reply_uuid(lines))
+        self.assertIsNone(drive_cli.reply_uuid([json.dumps({"type": "result"})]))
+
+    def test_fork_at_argv_ends_with_the_cut(self):
+        self.assertEqual(["--model", "m", "--resume", "A", "--fork-session", "--session-id", "B",
+                          "--resume-session-at", "X"], drive_cli.fork_at_argv(["--model", "m"], "A", "B", "X"))
+
+    # The origin of the fork stories: turn 1 answers with a reply a1 and a subagent line s1; the other turns reply.
+    @staticmethod
+    def origin(events, turn_one_tool=False, busy=False):
+        def react(cli, msg):
+            if msg["type"] != "user":
+                return ok(msg)
+            text = text_of(msg)
+            n = len(cli.users())
+            if n == 1:
+                first = assistant("t1", tool=True) if turn_one_tool else assistant("a1")
+                return [{"type": "system", "subtype": "init", "session_id": "s-1"}, first,
+                        assistant("s1", parent="toolu_1"), {"type": "result", "subtype": "success"}]
+            if busy and n == 2:
+                return [TASK_STARTED]
+            return [assistant(f"r{n}"), {"type": "result", "subtype": "success"}]
+        return StoryCli("origin", react, ["--model", "m"], events)
+
+    @staticmethod
+    def spawner(events, spawns, reply="ALPHA", on_spawn=None):
+        def spawn(argv, first_id):
+            def react(cli, msg):
+                if msg["type"] == "user":
+                    return [assistant("f1", reply), {"type": "result", "subtype": "success"}]
+                return ok(msg)
+            fork = StoryCli("fork", react, argv, events, first_id)
+            events.append(("spawn", argv))
+            spawns.append((argv, first_id, fork))
+            if on_spawn:
+                on_spawn()
+            return fork
+        return spawn
+
+    def test_the_fork_at_scenario_cuts_at_the_first_turns_reply(self):
+        events, spawns = [], []
+        cli = self.origin(events)
+        drive_cli.fork_at(cli, spawn=self.spawner(events, spawns))
+        argv, first_id, fork = spawns[0]
+        fork_id = argv[argv.index("--session-id") + 1]
+        self.assertEqual(drive_cli.fork_at_argv(["--model", "m"], "s-1", fork_id, "a1"), argv)
+        self.assertEqual(4, uuid.UUID(fork_id).version)
+        self.assertEqual(cli.next_id, first_id)
+        self.assertLess(positions(events, "close", "origin")[0], events.index(("spawn", argv)), "the origin ended first")
+        self.assertEqual(["Remember the word ALPHA. Reply with exactly one word: OK"], frame_texts(cli)[:1])
+        self.assertEqual("Which words did I ask you to remember? Answer with the words only, comma-separated, nothing else.",
+                         text_of(fork.users()[0]))
+        self.assertEqual(fork.lines, cli.lines[-len(fork.lines):], "the fork's lines follow the origin's")
+        for reply in ("ALPHA, BRAVO", "ALPHA, CHARLIE", "nothing"):
+            with self.assertRaises(RuntimeError, msg=reply):
+                drive_cli.fork_at(self.origin([]), spawn=self.spawner([], [], reply=reply))
+        with self.assertRaisesRegex(RuntimeError, "used a tool"):
+            drive_cli.fork_at(self.origin([], turn_one_tool=True), spawn=self.spawner([], []))
+
+    def test_the_fork_at_scenario_fails_without_a_reply_line(self):
+        def react(cli, msg):
+            if msg["type"] == "user":
+                return [{"type": "system", "subtype": "init", "session_id": "s-1"}, {"type": "result"}]
+            return ok(msg)
+        with self.assertRaisesRegex(RuntimeError, "no reply line"):
+            drive_cli.fork_at(StoryCli("origin", react), spawn=self.spawner([], []))
+
+    def test_the_live_fork_starts_before_the_origin_closes(self):
+        events, spawns = [], []
+        cli = self.origin(events)
+        drive_cli.fork_at_live(cli, spawn=self.spawner(events, spawns))
+        spawned = events.index(("spawn", spawns[0][0]))
+        closed = positions(events, "close", "origin")[0]
+        fork_result = positions(events, "emit", "fork", lambda e: e[2] == "result")[0]
+        self.assertLess(spawned, fork_result)
+        self.assertLess(fork_result, closed, "the origin closes after the fork's result")
+        self.assertLess(positions(events, "emit", "origin", lambda e: e[2] == "result")[-1], spawned,
+                        "the fork starts after the origin's third turn")
+        self.assertEqual(spawns[0][2].lines, cli.lines[-len(spawns[0][2].lines):])
+        with self.assertRaises(RuntimeError):
+            drive_cli.fork_at_live(self.origin([]), spawn=self.spawner([], [], reply="ALPHA BRAVO"))
+
+    def test_the_busy_fork_starts_during_the_origins_bash(self):
+        events, spawns = [], []
+        cli = self.origin(events, busy=True)
+        # The origin's second result comes once the fork exists: a scenario that waited for it first would hang.
+        spawn = self.spawner(events, spawns, on_spawn=lambda: cli.emit({"type": "result", "subtype": "success"}))
+        with mock.patch.object(drive_cli, "TIMEOUT_S", 2):
+            drive_cli.fork_at_busy(cli, spawn=spawn)
+        spawned = events.index(("spawn", spawns[0][0]))
+        started = positions(events, "emit", "origin", lambda e: e[2] == "system")[-1]
+        second_result = positions(events, "emit", "origin", lambda e: e[2] == "result")[-1]
+        self.assertLess(started, spawned)
+        self.assertLess(spawned, second_result)
+        self.assertEqual("sleep 8; echo hi" in text_of(cli.users()[1]), True)
+        self.assertGreater(positions(events, "close", "origin")[0], positions(events, "emit", "fork",
+                                                                              lambda e: e[2] == "result")[0])
+        self.assertLess(positions(events, "close", "origin")[0], positions(events, "close", "fork")[0])
+        self.assertEqual(spawns[0][2].lines, cli.lines[-len(spawns[0][2].lines):])
+        cli = self.origin([], busy=True)
+        bad = self.spawner([], [], reply="ALPHA BRAVO", on_spawn=lambda: cli.emit({"type": "result"}))
+        with self.assertRaises(RuntimeError):
+            drive_cli.fork_at_busy(cli, spawn=bad)
+
+    def test_the_busy_fork_fails_when_the_origins_turn_does_not_succeed(self):
+        cli = self.origin([], busy=True)
+        spawn = self.spawner([], [], on_spawn=lambda: cli.emit({"type": "result", "subtype": "error_during_execution"}))
+        with self.assertRaisesRegex(RuntimeError, "error_during_execution"):
+            drive_cli.fork_at_busy(cli, spawn=spawn)
+
+    @staticmethod
+    def story(reactions, extra_control=None):
+        """A StoryCli whose reply to a user frame is chosen by `reactions(cli, msg)`; control requests get a success
+        answer plus whatever `extra_control(cli, request)` adds."""
+        def react(cli, msg):
+            if msg["type"] == "control_request":
+                return ok(msg) + (extra_control(cli, msg["request"]) if extra_control else [])
+            if msg["type"] == "user":
+                return reactions(cli, msg)
+            return []
+        return StoryCli("cli", react)
+
+    def test_queue_fold_and_later_send_at_task_started(self):
+        def reactions(cli, msg):
+            if text_of(msg).startswith("Use the Bash"):
+                return [TASK_STARTED]
+            ids = [cli.users()[0]["uuid"], msg["uuid"]]
+            return [{"type": "result", "user_message_uuids": ids}] + (
+                [{"type": "result", "user_message_uuids": [msg["uuid"]]}] if msg.get("priority") else [])
+
+        fold = self.story(reactions)
+        drive_cli.queue_fold(fold)
+        later = self.story(reactions)
+        drive_cli.queue_later(later)
+        for cli, priority in ((fold, None), (later, "later")):
+            prompt, steer = cli.users()
+            self.assertEqual(priority, steer.get("priority"))
+            self.assertEqual("Also say the word KIWI at the end.", text_of(steer))
+            self.assertEqual(prompt["uuid"], cli.users()[0]["uuid"])
+            self.assertEqual(positions(cli.events, "emit", "cli", lambda e: e[2] == "system")[0] + 1,
+                             positions(cli.events, "send", "cli")[1], "the steer follows task_started")
+        self.assertEqual(2, sum(m["type"] == "result" for m in map(json.loads, later.lines)))
+
+    def test_queue_cancel_sends_its_frames_in_order(self):
+        def reactions(cli, msg):
+            return [TASK_STARTED] if msg.get("priority") is None else []
+
+        def extra(cli, request):
+            return [{"type": "result"}] if request["subtype"] in ("cancel_async_message", "interrupt") else []
+
+        cli = self.story(reactions, extra)
+        with mock.patch.object(drive_cli, "SETTLE_S", 0.05):
+            drive_cli.queue_cancel(cli)
+        users = cli.users()
+        self.assertEqual(["user", "user", "cancel_async_message", "user", "user", "interrupt"],
+                         [m["type"] if m["type"] == "user" else m["request"]["subtype"] for m in cli.sent])
+        p1, f1, p2, f2 = users
+        self.assertEqual([None, "later", None, "later"], [u.get("priority") for u in users])
+        self.assertIn("echo first", text_of(p1))
+        self.assertIn("echo second", text_of(p2))
+        self.assertEqual({"subtype": "cancel_async_message", "message_uuid": f1["uuid"]}, cli.requests()[0])
+        self.assertEqual({"subtype": "interrupt", "cancel_queued": True}, cli.requests()[1])
+        self.assertEqual("Reply with only the word MANGO.", text_of(f2))
+
+    def test_a_cancelled_message_that_starts_a_turn_fails_the_recording(self):
+        def extra(cli, request):
+            if request["subtype"] == "interrupt":
+                return [{"type": "result"}, {"type": "system", "subtype": "init", "session_id": "s"}]
+            return [{"type": "result"}] if request["subtype"] == "cancel_async_message" else []
+
+        cli = self.story(lambda c, m: [TASK_STARTED] if m.get("priority") is None else [], extra)
+        with mock.patch.object(drive_cli, "SETTLE_S", 5):
+            with self.assertRaisesRegex(RuntimeError, "started a turn"):
+                drive_cli.queue_cancel(cli)
+
+    def test_queue_cancel_steer_sends_its_frames_in_order(self):
+        def reactions(cli, msg):
+            return [TASK_STARTED] if text_of(msg).startswith("Use the Bash") else []
+
+        def extra(cli, request):
+            if request["subtype"] == "cancel_async_message":
+                return [TASK_STARTED]  # the second tool round
+            return [{"type": "result"}] if request["subtype"] == "interrupt" else []
+
+        cli = self.story(reactions, extra)
+        with mock.patch.object(drive_cli, "SETTLE_S", 0.05):
+            drive_cli.queue_cancel_steer(cli)
+        prompt, s1, s2 = cli.users()
+        self.assertEqual(["user", "user", "cancel_async_message", "user", "interrupt"],
+                         [m["type"] if m["type"] == "user" else m["request"]["subtype"] for m in cli.sent])
+        self.assertIsNone(s1.get("priority"))
+        self.assertIsNone(s2.get("priority"))
+        self.assertEqual({"subtype": "cancel_async_message", "message_uuid": s1["uuid"]}, cli.requests()[0])
+        self.assertEqual({"subtype": "interrupt", "cancel_queued": True}, cli.requests()[1])
+        self.assertIn("MANGO", text_of(s2))
+
+    def test_queue_steer_text_writes_its_steer_after_the_first_text_delta(self):
+        delta = {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta"}}}
+        thinking = {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta"}}}
+
+        def reactions(cli, msg):
+            if len(cli.users()) == 1:
+                return [thinking, delta]
+            return [{"type": "result", "user_message_uuids": ["other"]},
+                    {"type": "result", "user_message_uuids": [msg["uuid"]]}]
+
+        cli = self.story(reactions)
+        drive_cli.queue_steer_text(cli)
+        prompt, steer = cli.users()
+        self.assertEqual("Then say KIWI.", text_of(steer))
+        self.assertIsNone(steer.get("priority"))
+        self.assertEqual("content_block_delta", json.loads(cli.lines[1])["event"]["type"])
+        self.assertEqual(positions(cli.events, "emit", "cli")[1] + 1, positions(cli.events, "send", "cli")[1],
+                         "the steer follows the text delta, not the thinking one")
+
+    def test_queue_later_command_sends_the_command_then_the_image_message_later(self):
+        def reactions(cli, msg):
+            if text_of(msg).startswith("Use the Bash"):
+                return [TASK_STARTED]
+            if any(b["type"] == "image" for b in msg["message"]["content"]):
+                return [{"type": "result", "user_message_uuids": [msg["uuid"]]}]
+            return []
+
+        cli = self.story(reactions)
+        with mock.patch.object(drive_cli, "SETTLE_S", 0.05):
+            drive_cli.queue_later_command(cli)
+        prompt, command, image = cli.users()
+        self.assertEqual("/context", text_of(command))
+        self.assertEqual(["later", "later"], [command["priority"], image["priority"]])
+        self.assertEqual(["text", "image"], [b["type"] for b in image["message"]["content"]])
+        self.assertEqual(base64.b64encode(drive_cli.tiny_png()).decode(), image["message"]["content"][1]["source"]["data"])
+        self.assertIsNone(prompt.get("priority"))
+
+    def test_queue_later_command_records_an_image_message_that_never_runs(self):
+        cli = self.story(lambda c, m: [TASK_STARTED] if text_of(m).startswith("Use the Bash") else [])
+        err = io.StringIO()
+        with mock.patch.object(drive_cli, "SETTLE_S", 0.05), mock.patch.object(drive_cli, "LATE_S", 0.1), \
+                contextlib.redirect_stderr(err):
+            drive_cli.queue_later_command(cli)
+        self.assertEqual(3, len(cli.users()))
+        self.assertIn("did not run", err.getvalue())
+
+    def test_queue_during_card_queues_before_it_answers_the_card(self):
+        card = {"type": "control_request", "request_id": "cli-1",
+                "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "touch x"},
+                            "tool_use_id": "toolu_1"}}
+
+        def react(cli, msg):
+            if msg["type"] == "user" and len(cli.users()) == 1:
+                return [card]
+            if msg["type"] == "control_response":
+                return [{"type": "result", "user_message_uuids": [cli.users()[1]["uuid"]]}]
+            return ok(msg)
+
+        cli = StoryCli("cli", react)
+        with mock.patch.object(drive_cli, "SETTLE_S", 0.05):
+            drive_cli.queue_during_card(cli)
+        self.assertEqual(["user", "user", "control_response"], [m["type"] for m in cli.sent])
+        self.assertEqual("later", cli.sent[1]["priority"])
+        self.assertEqual("allow", cli.sent[2]["response"]["response"]["behavior"])
+        self.assertEqual("cli-1", cli.sent[2]["response"]["request_id"])
+
+    def test_every_queue_scenario_allows_a_permission_request(self):
+        card = {"type": "control_request", "request_id": "cli-1",
+                "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {}, "tool_use_id": "toolu_1"}}
+        cli = self.story(lambda c, m: [card, TASK_STARTED] if len(c.users()) == 1 else
+                         [{"type": "result", "user_message_uuids": [c.users()[0]["uuid"], m["uuid"]]}])
+        drive_cli.queue_fold(cli)
+        answers = [m for m in cli.sent if m["type"] == "control_response"]
+        self.assertEqual(["allow"], [m["response"]["response"]["behavior"] for m in answers])
+
+    def test_parity_requests_sends_its_requests_in_order(self):
+        cli = self.story(lambda c, m: [{"type": "result"}])
+        drive_cli.parity_requests(cli)
+        self.assertEqual(["Reply with the single word: one", "get_context_usage", "get_usage", "/usage"],
+                         frame_texts(cli))
+        self.assertEqual({"subtype": "get_usage", "skip_behaviors": True}, cli.requests()[1])
+
+    def test_every_scenario_is_listed(self):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "record-scenario.sh"), encoding="utf-8") as f:
+            usage = next(line for line in f if line.startswith("scenario="))
+        for name in drive_cli.SCENARIOS:
+            token = rf"(?<![\w-]){re.escape(name)}(?![\w-])"
+            self.assertRegex(usage, token, f"{name} in record-scenario.sh's usage line")
+            self.assertRegex(drive_cli.__doc__, rf"(?m)^  {re.escape(name)}(\s|$)", f"{name} in the docstring")
+
 
 if __name__ == "__main__":
     unittest.main()

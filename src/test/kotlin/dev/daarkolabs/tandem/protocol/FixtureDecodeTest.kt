@@ -192,6 +192,8 @@ class FixtureDecodeTest {
         val names = listOf(
             "history-reply", "history-permission", "history-interrupt", "fork", "fork-origin",
             "fork-at", "fork-at-origin", "queue-fold", "queue-later", "queue-cancel",
+            "queue-steer-text", "queue-cancel-steer", "fork-at-live", "fork-at-live-origin", "queue-later-command",
+            "queue-during-card", "fork-at-busy", "fork-at-busy-origin",
         )
         for (name in names) {
             val lines = Fixtures.transcript(name).readLines().filter { it.isNotBlank() }
