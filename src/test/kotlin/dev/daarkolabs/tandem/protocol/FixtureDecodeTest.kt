@@ -958,6 +958,51 @@ class FixtureDecodeTest {
         assertEquals("actions", skills.first())
     }
 
+    // spec: parity-add-dir-spawn: each init lists the spawn's folders and the resume keeps the id
+    @Test
+    fun `parity-add-dir-spawn - each init lists the spawn's folders and the resume keeps the id`() {
+        val first = init("parity-add-dir-spawn", 4)
+        assertEquals(1, first.additionalDirectories.size)
+        assertEquals(2, init("parity-add-dir-spawn", 19).additionalDirectories.size)
+        assertEquals(first.sessionId, init("parity-add-dir-spawn", 19).sessionId)
+        assertEquals(first.sessionId, init("parity-add-dir-spawn", 64).sessionId)
+        val messages = Fixtures.decode("parity-add-dir-spawn")
+        val results = messages.filterIsInstance<CliMessage.Result>()
+        assertEquals(5, results.size)
+        // An API error result also has subtype success: a refused turn would pass on the subtype alone.
+        assertTrue(results.all { it.subtype == "success" && !it.isError }, results.toString())
+        assertTrue(messages.filterIsInstance<CliMessage.Assistant>().all { it.error == null })
+    }
+
+    // spec: parity-add-dir-spawn: a fork with --add-dir lists its folder
+    @Test
+    fun `parity-add-dir-spawn - a fork with --add-dir lists its folder`() {
+        val fork = init("parity-add-dir-spawn", 49)
+        assertEquals(1, fork.additionalDirectories.size)
+        assertNotEquals(init("parity-add-dir-spawn", 4).sessionId, fork.sessionId)
+        val ids = Fixtures.transcript("parity-add-dir-spawn").readLines().filter { it.isNotBlank() }
+            .map { Json.parseToJsonElement(it).jsonObject["sessionId"]?.jsonPrimitive?.content }
+        assertTrue(ids.isNotEmpty())
+        assertTrue(ids.all { it == fork.sessionId }, "the fork's transcript is under the fork's id: $ids")
+        assertEquals(false, assertIs<CliMessage.Result>(at("parity-add-dir-spawn", 59)).isError)
+    }
+
+    // spec: parity-add-dir-spawn: a resume without a folder leaves it out
+    @Test
+    fun `parity-add-dir-spawn - a resume without a folder leaves it out`() {
+        assertEquals(1, init("parity-add-dir-spawn", 64).additionalDirectories.size)
+    }
+
+    // spec: parity-add-dir-spawn: a fork at a reply with --add-dir lists its folder
+    @Test
+    fun `parity-add-dir-spawn - a fork at a reply with --add-dir lists its folder`() {
+        val forkAt = init("parity-add-dir-spawn", 34)
+        assertEquals(1, forkAt.additionalDirectories.size)
+        assertNotEquals(init("parity-add-dir-spawn", 4).sessionId, forkAt.sessionId)
+        assertNotEquals(init("parity-add-dir-spawn", 49).sessionId, forkAt.sessionId)
+        assertEquals(false, assertIs<CliMessage.Result>(at("parity-add-dir-spawn", 44)).isError)
+    }
+
     private fun lifecycle(name: String, line: Int): Pair<String, String> =
         assertIs<CliMessage.CommandLifecycle>(at(name, line)).let { it.commandUuid to it.state }
 

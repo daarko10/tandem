@@ -4,7 +4,9 @@ import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.TurnEnd
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 
 /** The working row's text while a turn runs (spec 4.9) and the footer that replaces it when the turn ends (spec 4.10). */
 object WorkingIndicator {
@@ -90,13 +92,43 @@ object WorkingIndicator {
     /** How the working row looks: [RUNNING] with the step, [WAITING] for the user's answer, [NOT_RESPONDING] after a silence. */
     enum class Mode { RUNNING, WAITING, NOT_RESPONDING }
 
-    /** The working row as drawn: its [mode], whether its orbs move ([OrbIndicator]), its one line of [text] and what a screen reader says. */
-    data class View(val mode: Mode, val animated: Boolean, val text: String, val accessibleLabel: String)
+    /**
+     * The working row as drawn: its [mode], whether its orbs move ([OrbIndicator]), its one line of [text], what a screen reader says
+     * and how many of [text]'s characters the shimmer crosses ([shimmerEnd]: the step and its `…`, never the elapsed time or the
+     * tokens; 0, no shimmer, while waiting, not responding or under Reduce motion; spec 15.1).
+     */
+    data class View(val mode: Mode, val animated: Boolean, val text: String, val accessibleLabel: String, val shimmerEnd: Int = 0)
+
+    /** When the shimmer's first sweep starts after the row appears, how long a sweep lasts and how often one starts (spec 15.1). */
+    const val SHIMMER_START_MS: Long = 600L
+    const val SHIMMER_SWEEP_MS: Long = 900L
+    const val SHIMMER_PERIOD_MS: Long = 3_000L
+
+    /** The sweep's pause between frames: at most about 30 frames a second, as the orbs (spec 15.2). */
+    const val SHIMMER_FRAME_MS: Long = 33L
+
+    /**
+     * Where the shimmer's band is [elapsedMs] after the row appeared: null while it rests (before [SHIMMER_START_MS] and between
+     * sweeps); during a sweep the eased `(1 − cos πp) / 2` of its progress p, from 0 to almost 1.
+     */
+    fun shimmerProgress(elapsedMs: Long): Float? {
+        if (elapsedMs < SHIMMER_START_MS) return null
+        val inSweep = (elapsedMs - SHIMMER_START_MS) % SHIMMER_PERIOD_MS
+        if (inSweep >= SHIMMER_SWEEP_MS) return null
+        return ((1 - cos(PI * inSweep / SHIMMER_SWEEP_MS)) / 2).toFloat()
+    }
+
+    /** How long after [elapsedMs] the next sweep starts, at least 1 (1 during a sweep: it runs now). */
+    fun msToNextSweep(elapsedMs: Long): Long {
+        if (elapsedMs < SHIMMER_START_MS) return SHIMMER_START_MS - elapsedMs
+        val inSweep = (elapsedMs - SHIMMER_START_MS) % SHIMMER_PERIOD_MS
+        return if (inSweep < SHIMMER_SWEEP_MS) 1 else SHIMMER_PERIOD_MS - inSweep
+    }
 
     /**
      * The working [row] at [nowMillis]. The CLI is silent since the later of its last line ([lastFrameAtMillis]) and the send, so a
      * turn after a long idle never starts as not responding; from [notRespondingAfterMs] of silence it is not responding, until its
-     * next line. A pending card makes it wait for the user. Only a running row animates, and not under [reducedMotion].
+     * next line. A pending card makes it wait for the user. Only a running row animates and shimmers, and not under [reducedMotion].
      */
     fun view(row: WorkingRow, nowMillis: Long, lastFrameAtMillis: Long, reducedMotion: Boolean = false, notRespondingAfterMs: Long = 60_000): View {
         val elapsed = formatElapsed(nowMillis - row.startedAtMillis)
@@ -106,7 +138,8 @@ object WorkingIndicator {
             silence >= notRespondingAfterMs -> View(Mode.NOT_RESPONDING, animated = false, "Not responding · $elapsed", "Claude is not responding")
             else -> {
                 val tokens = if (row.outputTokens > 0) " · ${formatTokens(row.outputTokens.toLong())} tokens" else ""
-                View(Mode.RUNNING, animated = !reducedMotion, "${row.step}… · $elapsed$tokens", "Claude is working")
+                val step = "${row.step}…"
+                View(Mode.RUNNING, animated = !reducedMotion, "$step · $elapsed$tokens", "Claude is working", if (reducedMotion) 0 else step.length)
             }
         }
     }

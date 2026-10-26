@@ -261,6 +261,8 @@ class ToolWindowIdeTest {
             waitFor("working row with elapsed", 1.minutes) {
                 node("Claude is working") { "contains($it, ' · ') and substring($it, string-length($it)) = 's'" }.present()
             }
+            // The only real-IDE view of the composed row: the orbs and the step (runTandem's own screenshot comes after the row is gone).
+            takeScreenshot("working-row")
             // A lone running call opens on its command (polish spec 2.1) while its permission request is still held back.
             described("Creating empty fixture file").click(Point(10, 10))
             waitFor("a lone running call opens on its command", 30.seconds) {
@@ -833,16 +835,17 @@ class ToolWindowIdeTest {
             pressUntil("+ focused", { ui.keyboard { key(KeyEvent.VK_TAB) } }, max = 40) { focusedIconButton("Add").present() }
             ui.keyboard { enter() }
             waitFor("Enter opened page 1", 30.seconds) { plusItem("Plugins").present() }
-            // Page 1: exactly four rows, in the desktop's order (spec 3.3; Add folder joins in D6b).
-            assertEquals(4, ui.xx(MENU_ITEM).list().size, "page 1 has four rows")
+            // Page 1: exactly five rows, in the desktop's order (spec 3.3).
+            assertEquals(5, ui.xx(MENU_ITEM).list().size, "page 1 has five rows")
             assertTrue(
                 ui.x(
-                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Add folder").removePrefix("//")}" +
+                        "/following::${plusItemPath("Slash commands").removePrefix("//")}" +
                         "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
                 ).present(),
-                "Add files or photos, Slash commands, Connectors, Plugins in document order",
+                "Add files or photos, Add folder, Slash commands, Connectors, Plugins in document order",
             )
-            // Kept as a test artifact: page 1's four rows, each with its icon.
+            // Kept as a test artifact: page 1's five rows, each with its icon.
             takeScreenshot("plus-menu-main")
             // → is not bound in the + menu (deviation 23): still page 1.
             ui.keyboard { key(KeyEvent.VK_RIGHT) }
@@ -917,9 +920,132 @@ class ToolWindowIdeTest {
         }
     }
 
-    // spec: Connectors opens the MCP panel
+    // spec: Add folder respawns with --add-dir (IDE test 4)
     @Test
-    fun `Connectors opens the MCP panel`() {
+    fun `Add folder respawns with --add-dir`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // Outside the project; the chooser's property goes through the same posted event as the platform chooser, whose modal
+        // FolderChooserTest covers.
+        val folder = Files.createTempDirectory("tandem-add-folder").resolve("shared-lib").createDirectories()
+        val real = folder.toRealPath().toString()
+        val sent = runChat(
+            "add-folder",
+            fixtures = listOf("plain-reply", "plain-reply"),
+            sentLog = log,
+            systemProperties = mapOf("tandem.addFolder" to folder.toString()),
+        ) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            // Page 1: exactly five rows, in the desktop's order (spec 3.3).
+            assertEquals(5, ui.xx(MENU_ITEM).list().size, "page 1 has five rows")
+            assertTrue(
+                ui.x(
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Add folder").removePrefix("//")}" +
+                        "/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                        "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
+                ).present(),
+                "Add files or photos, Add folder, Slash commands, Connectors, Plugins in document order",
+            )
+            plusItem("Add folder").click(Point(10, 10))
+            waitFor("the folder's pill", 1.minutes) { described("Folder shared-lib").present() }
+            // The pill's × is a focus stop after the `+` and before the text area (spec 3.5), although the pill sits above them.
+            // Shift+Tab in the text area cycles the mode (spec 14.1), so Tab goes forward round the cycle to the `+`.
+            focusPromptBox()
+            pressUntil("+ focused", { ui.keyboard { key(KeyEvent.VK_TAB) } }, max = 40) { focusedIconButton("Add").present() }
+            ui.keyboard { key(KeyEvent.VK_TAB) }
+            waitFor("Tab from the + reaches the pill's ×", 30.seconds) { focusedIconButton("Remove folder shared-lib").present() }
+            ui.keyboard { key(KeyEvent.VK_TAB) }
+            waitFor("Tab from the × reaches the text area", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
+            enterPrompt("hi")
+            waitForTurnEnd()
+            // Kept as a test artifact: the pill at the top of the composer box.
+            takeScreenshot("folder-pill")
+        }
+        val spawns = sent.filter { it.type == "__spawn__" }.map { spawn -> spawn["argv"]!!.jsonArray.map { it.jsonPrimitive.content } }
+        assertEquals(2, spawns.size, spawns.toString())
+        assertFalse("--add-dir" in spawns[0], "the first spawn had no folder: ${spawns[0]}")
+        val second = spawns[1]
+        val at = second.indexOf("--add-dir")
+        assertTrue(at >= 0 && second.getOrNull(at + 1) == real, "the second spawn passes --add-dir $real: $second")
+    }
+
+    // spec: the plus menu shows where things come from (9.8 IDE test 1)
+    @Test
+    fun `the plus menu shows where things come from`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // Before any prompt: parity-add-dir's answers list mcpServers, so the fake serves mcp_status from its table (one dynamic
+        // server, no connector).
+        val sent = runChat("plus-menu-sources", fixtures = listOf("parity-add-dir"), sentLog = log, browserLog = true) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            widenToolWindow()
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            // Page 1: exactly five rows, in the desktop's order (spec 3.3).
+            assertEquals(5, ui.xx(MENU_ITEM).list().size, "page 1 has five rows")
+            assertTrue(
+                ui.x(
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Add folder").removePrefix("//")}" +
+                        "/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                        "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
+                ).present(),
+                "Add files or photos, Add folder, Slash commands, Connectors, Plugins in document order",
+            )
+            assertTrue(containing(ADD_FILES_SHORTCUT).present(), "the shortcut text on a wide menu (deviation 28)")
+            ui.keyboard { escape() }
+            waitFor("the menu closed", 30.seconds) { ui.xx(MENU_ITEM).list().isEmpty() }
+            // Kept as test artifacts: page 1 in a 350 px tool window, then in a 260 px one, where the shortcut leaves the row.
+            narrowToolWindow(350)
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu at 350 px", 30.seconds) { plusItem("Plugins").present() }
+            takeScreenshot("plus-menu-page-1")
+            ui.keyboard { escape() }
+            waitFor("the menu closed", 30.seconds) { ui.xx(MENU_ITEM).list().isEmpty() }
+            narrowToolWindow(260)
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu at 260 px", 30.seconds) { plusItem("Add files or photos").present() }
+            assertFalse(containing(ADD_FILES_SHORTCUT).present(), "no shortcut text on a narrow menu (spec 17.1)")
+            takeScreenshot("plus-menu-page-1-narrow")
+            ui.keyboard { escape() }
+            waitFor("the menu closed", 30.seconds) { ui.xx(MENU_ITEM).list().isEmpty() }
+            widenToolWindow()
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Connectors").present() }
+            plusItem("Connectors").click(Point(10, 10))
+            waitFor("the Connectors page", 30.seconds) {
+                plusItem("‹ Connectors").present() && plusItem("Browse connectors").present() && plusItem("Manage connectors").present()
+            }
+            waitForText("No claude.ai connectors in this session.")
+            takeScreenshot("connectors-page")
+            plusItem("Browse connectors").click(Point(10, 10))
+            waitFor("the menu closed", 30.seconds) { !plusItem("‹ Connectors").present() }
+            waitFor("the connectors page opened in the browser", 30.seconds) { "__browse__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            plusItem("Plugins").click(Point(10, 10))
+            waitFor("the catalogue's plugin row", 1.minutes) { described("probe-kit plugin").present() }
+            described("probe-kit plugin").click(Point(10, 10))
+            waitForText("Skills")
+            assertTrue(
+                ui.x(
+                    "//div[@class='ComposeNode' and @visible_text='Skills']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:greet']" +
+                        "/following::div[@class='ComposeNode' and @visible_text='Commands']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:hello']",
+                ).present(),
+                "Skills, /probe-kit:greet, Commands, /probe-kit:hello in document order",
+            )
+            ui.keyboard { escape() }
+        }
+        val browse = sent.filter { it.type == "__browse__" }
+        assertEquals(listOf("https://claude.ai/settings/connectors"), browse.map { it["url"]!!.jsonPrimitive.content })
+    }
+
+    // spec: Manage connectors opens the MCP panel (9.8 IDE test 2)
+    @Test
+    fun `Manage connectors opens the MCP panel`() {
         val log = Files.createTempFile("tandem-sent", ".ndjson")
         runChat("plus-menu-connectors", fixtures = listOf("mcp-status"), sentLog = log) {
             newSession()
@@ -927,7 +1053,11 @@ class ToolWindowIdeTest {
             iconButton("Add").click(Point(10, 10))
             waitFor("the + menu", 30.seconds) { plusItem("Connectors").present() }
             plusItem("Connectors").click(Point(10, 10))
+            // mcp-status's three servers are dynamic: no connector.
+            waitForText("No claude.ai connectors in this session.")
+            plusItem("Manage connectors").click(Point(10, 10))
             waitFor("the MCP panel", 1.minutes) { described("MCP servers panel").present() }
+            assertFalse(plusItem("‹ Connectors").present(), "the menu closed before the panel opened")
         }
     }
 
@@ -1628,7 +1758,8 @@ class ToolWindowIdeTest {
      * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists and sleeps
      * [lineDelayMs] before each stream line. The frames go to [sentLog] as the fake CLI reads them, so that [script] can wait for one.
      * [extraEnv] adds variables to the IDE's environment, which the fake CLI inherits; with [browserLog] a link the plugin opens in
-     * the browser is a `{"type":"__browse__","url":…}` line in [sentLog] instead (`tandem.browserOpener=log`).
+     * the browser is a `{"type":"__browse__","url":…}` line in [sentLog] instead (`tandem.browserOpener=log`). [systemProperties] are
+     * set in the IDE's JVM (`tandem.addFolder`, say).
      */
     private fun runChat(
         name: String,
@@ -1640,6 +1771,7 @@ class ToolWindowIdeTest {
         lineDelayMs: Int? = null,
         extraEnv: Map<String, String> = emptyMap(),
         browserLog: Boolean = false,
+        systemProperties: Map<String, String> = emptyMap(),
         script: Driver.() -> Unit,
     ): List<JsonObject> {
         ideContext(
@@ -1652,6 +1784,7 @@ class ToolWindowIdeTest {
             lineDelayMs,
             extraEnv = extraEnv,
             browserLog = browserLog,
+            systemProperties = systemProperties,
         ).runTandem(name, script)
         return if (sentLog.exists()) sentLog.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject } else emptyList()
     }
@@ -1667,6 +1800,7 @@ class ToolWindowIdeTest {
         lineDelayMs: Int? = null,
         extraEnv: Map<String, String> = emptyMap(),
         browserLog: Boolean = false,
+        systemProperties: Map<String, String> = emptyMap(),
     ): IDETestContext =
         Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
@@ -1682,6 +1816,7 @@ class ToolWindowIdeTest {
                 if (lineDelayMs != null) withEnv("TANDEM_FAKE_LINE_DELAY_MS", lineDelayMs.toString())
                 extraEnv.forEach { (key, value) -> withEnv(key, value) }
                 if (browserLog) addSystemProperty("tandem.browserOpener", "log")
+                systemProperties.forEach { (key, value) -> addSystemProperty(key, value) }
             }
         }
 
@@ -1985,6 +2120,9 @@ class ToolWindowIdeTest {
 
         /** Whether the IDE runs on macOS, where paste is Cmd+V. */
         val isMac: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
+
+        /** `Add files or photos`' shortcut as the IDE draws it (deviation 28). */
+        val ADD_FILES_SHORTCUT: String = if (isMac) "⌥⇧⌘O" else "Ctrl+Alt+Shift+O"
 
         /** The /usage card's description (desktop-parity spec 3.7). */
         const val USAGE_CARD = "Usage for this session"

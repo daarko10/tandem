@@ -51,6 +51,14 @@ internal class PagedMenuState {
         holding = true
     }
 
+    /**
+     * Keeps the menu open on its page through the next close request (a switch's click, spec 17.2): Jewel asks to close the menu
+     * after every item's click; the request after that one closes it as before.
+     */
+    fun hold() {
+        holding = true
+    }
+
     /** Turns the menu to [page] from a key: no click follows, so no close request is held back. */
     internal fun turnTo(page: Int) {
         pageState.intValue = page
@@ -180,5 +188,13 @@ internal fun plusMenuWidth(chatColumn: Dp): Pair<Dp, Dp> {
     return minOf(PLUS_MENU_MIN_WIDTH, max) to max
 }
 
+/**
+ * Whether the `+` menu's `Add files or photos` row draws its shortcut at its end (spec 17.1): only on a menu whose maximum width
+ * ([plusMenuWidth]'s second) is at least 300 dp, since Jewel never ellipsises that text and a narrower menu would leave the label no
+ * room; narrower, the shortcut goes in the row's tooltip.
+ */
+internal fun plusShortcutShown(maxWidth: Dp): Boolean = maxWidth >= PLUS_SHORTCUT_MIN_WIDTH
+
+private val PLUS_SHORTCUT_MIN_WIDTH = 300.dp
 private val PLUS_MENU_MAX_WIDTH = 360.dp
 private val PLUS_MENU_MIN_WIDTH = 240.dp

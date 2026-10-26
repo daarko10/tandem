@@ -38,8 +38,9 @@ class TandemSettings : SimplePersistentStateComponent<TandemSettings.State>(Tand
         var respondToShellOutput: Boolean by property(true)
 
         /**
-         * Whether the chat's working spark stands still (spec 4.9); open chats take it on [TandemSessions.settingsChanged]. Tandem's
-         * own: the IDE has no reduce-motion setting (`UISettings.animateWindows` is the tool windows' slide, off by default).
+         * Whether the chat's working orbs stand still and nothing shimmers (spec 4.9, desktop-parity 15); open chats take it on
+         * [TandemSessions.settingsChanged]. Tandem's own: the IDE has no reduce-motion setting (`UISettings.animateWindows` is the
+         * tool windows' slide, off by default).
          */
         var reduceMotion: Boolean by property(false)
     }

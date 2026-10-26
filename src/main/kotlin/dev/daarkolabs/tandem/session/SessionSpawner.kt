@@ -110,12 +110,14 @@ internal class SessionSpawner(
             if (handle.isClosed) return SpawnOutcome.Skipped
             if (handle.deliverQueued()) return SpawnOutcome.Running
             if (forPrompts && !handle.hasQueued()) return SpawnOutcome.Skipped
-            val (path, hasTranscript, originalGone) = withContext(Dispatchers.IO) {
+            val (path, hasTranscript, originalGone, folders) = withContext(Dispatchers.IO) {
                 val path = binary()
                 val hasTranscript = path != null && index.transcript(handle.id) != null
                 // A fork without a transcript of its own starts from its original's (configFor), which must still be there.
                 val originalGone = path != null && !hasTranscript && handle.forkOf?.let { index.transcript(it) == null } == true
-                Triple(path, hasTranscript, originalGone)
+                // The added folders that still exist, each an --add-dir (spec 3.4); none is checked for a start that fails here.
+                val folders = if (path != null && !originalGone) handle.foldersForSpawn() else emptyList()
+                SpawnInputs(path, hasTranscript, originalGone, folders)
             }
             if (path == null) {
                 val dropped = handle.failToStart(SessionManager.NO_CLI_TEXT)
@@ -138,9 +140,10 @@ internal class SessionSpawner(
                     handle.forkOf != null -> "fork"
                     else -> "new"
                 }
-                LOG.info("session ${handle.id}: starting claude ($kind${if (overCap) ", over the cap" else ""})")
+                val withFolders = if (folders.isEmpty()) "" else ", ${folders.size} added folder(s)"
+                LOG.info("session ${handle.id}: starting claude ($kind${if (overCap) ", over the cap" else ""}$withFolders)")
                 handle.attach(
-                    create = { chat -> newSession(configFor(handle, path, hasTranscript, chat), chat, overCap) },
+                    create = { chat -> newSession(configFor(handle, path, hasTranscript, chat, folders), chat, overCap) },
                     onFirstInit = { session, reported -> firstInit(handle, session, reported) },
                 )
             }
@@ -187,6 +190,7 @@ internal class SessionSpawner(
         val process = from.handOver(session) ?: return // stopped or ended meanwhile
         session.notice(NoticeLevel.WARNING, "Resumed as a new session $id")
         val handle = SessionHandle(id, scope, session.state.value, listing, clock())
+        handle.inheritFolders(from) // the process runs with from's --add-dir folders: the new row lists them and checks its inits
         // Nobody else knows the new handle yet, so it has no process of its own and takes this one.
         if (!handle.adopt(process) { adopted, reported -> firstInit(handle, adopted, reported) }) {
             // Cannot happen while the handle is new; should it, the process must not run on where no row shows it.
@@ -236,9 +240,16 @@ internal class SessionSpawner(
      *
      * The picks come from [chat]: `--model` is [ChatState.requestedModel] and `--effort` is [ChatState.effort]. `--permission-mode`
      * is [ChatState.permissionMode] when it is a mode Tandem offers ([OFFERED_MODES]: auto, default, acceptEdits, plan). Any other
-     * mode a transcript recorded (bypassPermissions, dontAsk) starts as default; [newSession] says so in the chat.
+     * mode a transcript recorded (bypassPermissions, dontAsk) starts as default; [newSession] says so in the chat. [folders] are the
+     * session's added folders ([SessionHandle.foldersForSpawn]), one `--add-dir` each after everything else (spec 3.4, 13.1).
      */
-    private fun configFor(handle: SessionHandle, binary: String, hasTranscript: Boolean, chat: ChatState): SessionConfig {
+    private fun configFor(
+        handle: SessionHandle,
+        binary: String,
+        hasTranscript: Boolean,
+        chat: ChatState,
+        folders: List<String>,
+    ): SessionConfig {
         val mode = chat.permissionMode
         val forkOf = handle.forkOf.takeUnless { hasTranscript }
         return SessionConfig(
@@ -251,6 +262,7 @@ internal class SessionSpawner(
             permissionMode = if (mode == null || mode in OFFERED_MODES) mode else PermissionMode.DEFAULT,
             forkSession = forkOf != null,
             resumeSessionAt = handle.forkAt.takeIf { forkOf != null },
+            additionalDirectories = folders,
         )
     }
 
@@ -273,3 +285,6 @@ internal class SessionSpawner(
         return session
     }
 }
+
+/** What [SessionSpawner.start] reads on IO before a process starts. */
+private data class SpawnInputs(val path: String?, val hasTranscript: Boolean, val originalGone: Boolean, val folders: List<String>)

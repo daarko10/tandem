@@ -22,8 +22,9 @@ private const val STREAMING_DESCRIPTION: String = "Claude, thinking"
 
 /**
  * A thinking block (spec 4.5), drawn like a tool row: one secondary line, `Thinking… · 50 tokens` while it streams and
- * `Thought for 2s` once done, with a chevron only once summary text has arrived. Opened ([ChatUiState.expanded], closed by default,
- * also while streaming), the summary shows below in the normal text colour, one paragraph per `\n\n`, as plain text: never Markdown.
+ * `Thought for 2s` once done, with a chevron only once summary text has arrived; while it streams a light band sweeps across the
+ * label ([thinkingShimmer]). Opened ([ChatUiState.expanded], closed by default, also while streaming), the summary shows below in
+ * the normal text colour, one paragraph per `\n\n`, as plain text: never Markdown.
  */
 @Composable
 internal fun ThinkingRowItem(row: ThinkingRow, ui: ChatUiState) {
@@ -41,6 +42,7 @@ internal fun ThinkingRowItem(row: ThinkingRow, ui: ChatUiState) {
             open = expanded && opens,
             minHeight = 24.dp,
             description = if (row.streaming) STREAMING_DESCRIPTION else row.label,
+            shimmer = thinkingShimmer(row),
         ) { expandedState.value = !expandedState.value }
         if (expanded && opens) {
             val paragraphs = remember(row.summary) { paragraphs(row.summary) }
@@ -56,6 +58,13 @@ internal fun ThinkingRowItem(row: ThinkingRow, ui: ChatUiState) {
         }
     }
 }
+
+/**
+ * Whether [row]'s label shimmers: while it streams (`Thinking… · 50 tokens`), across the whole label, and not under Tandem's
+ * `Reduce motion` ([reducedMotion]); a finished row (`Thought for 2s`) is static (spec 15.1, 15.2).
+ */
+@Composable
+internal fun thinkingShimmer(row: ThinkingRow): Boolean = row.streaming && !reducedMotion()
 
 /** [summary]'s paragraphs: split on blank lines, trimmed, the empty ones left out. */
 private fun paragraphs(summary: String): List<String> = summary.split("\n\n").map { it.trim() }.filter { it.isNotEmpty() }

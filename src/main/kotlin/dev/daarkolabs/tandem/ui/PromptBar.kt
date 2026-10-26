@@ -39,6 +39,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.MutableState
@@ -98,6 +99,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -105,6 +107,8 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.constrainWidth
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.coerceAtLeast
 import androidx.compose.ui.unit.dp
@@ -112,6 +116,7 @@ import com.intellij.ide.PasteProvider
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.PlatformDataKeys
+import com.intellij.openapi.components.service
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
@@ -128,6 +133,7 @@ import dev.daarkolabs.tandem.chat.StopTarget
 import dev.daarkolabs.tandem.chat.busyRefusal
 import dev.daarkolabs.tandem.chat.committedDraft
 import dev.daarkolabs.tandem.chat.composerPlaceholder
+import dev.daarkolabs.tandem.chat.displayPath
 import dev.daarkolabs.tandem.chat.intercepts
 import dev.daarkolabs.tandem.chat.isSlashCommand
 import dev.daarkolabs.tandem.chat.moved
@@ -139,7 +145,14 @@ import dev.daarkolabs.tandem.chat.shellCommand
 import dev.daarkolabs.tandem.chat.slashIntercept
 import dev.daarkolabs.tandem.chat.stopTarget
 import dev.daarkolabs.tandem.chat.withCommand
+import dev.daarkolabs.tandem.ide.CONNECTORS_URL
+import dev.daarkolabs.tandem.ide.FolderCheck
+import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
+import dev.daarkolabs.tandem.ide.checkFolder
+import dev.daarkolabs.tandem.ide.laterOnEdt
+import dev.daarkolabs.tandem.session.AddedFolder
+import dev.daarkolabs.tandem.session.FolderState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.collections.immutable.ImmutableList
@@ -149,6 +162,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -387,6 +401,55 @@ internal fun PromptBar(
     val attachFiles: (List<Path>) -> Unit = { paths ->
         if (paths.isNotEmpty()) scope.launch { ComposerImages.readFiles(paths).forEach { (name, bytes) -> attach(ui, name, bytes) } }
     }
+    // `Tandem.AddFilesOrPhotos` (spec 17.4): the `+` row's own path, offered to the chat pane while this bar is composed.
+    val currentAttachFiles by rememberUpdatedState(attachFiles)
+    DisposableEffect(handle.id) {
+        ui.attach = ComposerAttach { ComposerImages.chooseImagesLater(project, onChosen = { currentAttachFiles(it) }) }
+        onDispose { ui.attach = null }
+    }
+    // The `+` menu's Connectors page (spec 17.2): the MCP panel's controller, built as McpPanelHost builds it but started on open.
+    val sessions = remember(project) { project.service<TandemSessions>() }
+    val opener = sessions.browserOpener
+    // `Add folder` (spec 3.4): the chooser, modal, in an EDT event of its own after the menu's click, never in the click or in [scope];
+    // only the chosen path enters a coroutine, for the checks on IO and the add. [closed] runs once the chooser has closed, chosen or not.
+    val addFolder: (closed: () -> Unit) -> Unit = { closed ->
+        val later = laterOnEdt(project)
+        sessions.folderChooser.chooseLater(
+            project,
+            onChosen = { chosen ->
+                scope.launch {
+                    val check = withContext(Dispatchers.IO) {
+                        checkFolder(chosen, sessions.projectDirectory, handle.folders.value.map { folder -> folder.path })
+                    }
+                    when (check) {
+                        is FolderCheck.Refused -> ui.composerNotice.value = check.message
+                        is FolderCheck.Add -> manager.addFolder(handle.id, check.realPath)
+                    }
+                }
+            },
+            launcher = { task ->
+                later(
+                    Runnable {
+                        try {
+                            task.run()
+                        } finally {
+                            closed()
+                        }
+                    },
+                )
+            },
+        )
+    }
+    val connectorController: (CoroutineScope) -> McpPanelController = remember(handle, manager, opener) {
+        { pageScope ->
+            connectorPageController(
+                handle.id, handle.mcpServers, handle.mcpAuth, handle.mcpLoginHinted, handle.status, manager, opener, pageScope,
+                endReason = { endNotice(handle.state.value) },
+            )
+        }
+    }
+    // In the session's scope, which only its close cancels: the menu's own scope ends with the menu, before the page opens.
+    val browseConnectors: () -> Unit = remember(handle, opener) { { handle.scope.launch { opener.open(CONNECTORS_URL) } } }
     // The box and the footer share the chat column's width less 16 dp each side, so the footer measures from the box's edges.
     Column(Modifier.chatColumn().onSizeChanged { columnWidth.value = with(density) { it.width.toDp() } }.padding(horizontal = 16.dp)) {
         ui.composerNotice.value?.let { notice ->
@@ -416,7 +479,12 @@ internal fun PromptBar(
             pluginsKnown = composer.pluginsKnown,
             columnWidth = columnWidthOf,
             onAdd = { ComposerImages.chooseImagesLater(project, onChosen = attachFiles) },
+            onAddFolder = addFolder,
+            folders = handle.folders,
+            onRemoveFolder = { path -> manager.removeFolder(handle.id, path) },
             onDrop = attachFiles,
+            connectorController = connectorController,
+            onBrowseConnectors = browseConnectors,
             onAction = { action ->
                 when (action) {
                     ComposerAction.Send -> send(false)
@@ -481,7 +549,8 @@ internal fun PromptBar(
  * [shellOnly] (only a `!` runs), whether the slash palette is open ([palette], read at each key, so never a frame-old one) and whether the draft is one
  * of Tandem's own commands ([interceptable], which Enter runs even while busy), and Send is disabled
  * while [sending]; [onAction] does what they return. `+` opens the paged menu ([AddButton], [PlusMenu]): `Add files or photos` calls
- * [onAdd], `Slash commands` puts `/` in an empty draft and focuses the text area, `Connectors` opens the MCP panel, and the Plugins
+ * [onAdd], `Slash commands` puts `/` in an empty draft and focuses the text area, `Connectors` turns to its page, whose controller
+ * comes from [connectorController] and whose `Browse connectors` calls [onBrowseConnectors] (spec 17.2), and the Plugins
  * pages list [plugins] (whether the list is known yet is [pluginsKnown]); the menu's width comes from the chat column's width
  * ([columnWidth], [plusMenuWidth]) and its height from the room above the box. Files dropped on the box go to [onDrop], and the box draws
  * its focused border while a drag of files hovers it. With [focus] the text area takes the focus, and then [onFocused] is called;
@@ -510,8 +579,13 @@ private fun PromptBox(
     pluginsKnown: Boolean,
     columnWidth: () -> Dp?,
     onAdd: () -> Unit,
+    onAddFolder: (closed: () -> Unit) -> Unit,
+    folders: StateFlow<List<AddedFolder>>,
+    onRemoveFolder: (String) -> Unit,
     onDrop: (List<Path>) -> Unit,
     onAction: (ComposerAction) -> Unit,
+    connectorController: (CoroutineScope) -> McpPanelController,
+    onBrowseConnectors: () -> Unit,
 ) {
     val inputFocus = remember { FocusRequester() }
     val focused = inputFocused.value
@@ -524,6 +598,8 @@ private fun PromptBox(
     LaunchedEffect(refocus) { if (refocus > 0) inputFocus.requestFocus() }
     val currentOnDrop by rememberUpdatedState(onDrop)
     val currentOnAdd by rememberUpdatedState(onAdd)
+    val currentOnAddFolder by rememberUpdatedState(onAddFolder)
+    val currentOnBrowse by rememberUpdatedState(onBrowseConnectors)
     val currentOnAction by rememberUpdatedState(onAction)
     // Derived, so that the box recomposes when the hint comes or goes, not at every keystroke.
     val currentPalette by rememberUpdatedState(palette)
@@ -579,95 +655,114 @@ private fun PromptBox(
                 target = dropTarget,
             ),
     ) {
-        // The attached images, above the row, across the box's inner width (polish spec 2.7).
-        if (ui.attachments.isNotEmpty()) AttachmentStrip(ui.attachments)
-        Row(
-            // The text's ink starts about 42 dp inside the box (desktop-02): 8 dp, the 24 dp `+`, 5 dp, then the undecorated
-            // TextArea's own content padding (5 dp across, 4 dp down); 8 + 4 above and below the text, so 184 dp holds 8 lines of
-            // 20 dp. The `+` and the send glyph stay on the last line as the text grows.
-            Modifier.fillMaxWidth().heightIn(max = 184.dp).padding(start = 8.dp, end = 12.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            val density = LocalDensity.current
-            AddButton(
-                Modifier.padding(end = 5.dp, bottom = 10.dp),
-                ui.openMenus,
-                plugins,
-                pluginsKnown,
-                width = plusMenuWidth(columnWidth() ?: UNMEASURED_COLUMN),
-                // The room above the box, as the palette measures it (MCP spec 14); none before the box is placed.
-                maxHeight = with(density) { (boxTop - 8.dp.roundToPx()).takeIf { it > 0 }?.toDp() },
-                // Keyed on the state alone: [onAdd] is a new lambda at every recomposition of PromptBar, and is read when picked.
-                actions = remember(ui) {
-                    PlusMenuActions(
-                        onAddFiles = { currentOnAdd() },
-                        onSlashCommands = {
-                            ui.openPalette()
-                            refocus++
-                        },
-                        // Until the Connectors page (D15): the MCP panel, opened as a user action.
-                        onConnectors = { menu -> menu.openMcpFromMenu(ui) },
-                        onCommand = { command ->
-                            ui.draft.setTextAndPlaceCursorAtEnd(withCommand(ui.draft.text.toString(), command.command))
-                            refocus++
-                        },
-                    )
-                },
-            )
-            // The text area, and over it `Type to filter` after a lone `/` while the palette is open (MCP spec 14): its own
-            // placeholder shows only while it is empty.
-            Box(Modifier.weight(1f)) {
-                TextArea(
-                    ui.draft,
-                    Modifier.fillMaxWidth().heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
-                        .focusRequester(inputFocus)
-                        .onFocusChanged { inputFocused.value = it.hasFocus }
-                        // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it: while
-                        // the clipboard holds images, the focused composer's paste provider takes the paste from the Compose text paste
-                        // (polish spec 2.7). Asked for only by a paste, so the clipboard's flavours are not queried on every action
-                        // update.
-                        .provideData {
-                            lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
-                                imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
-                            }
-                            // Shift+Tab's mode cycle, only while no footer menu, popover or `+` menu is open (desktop-parity spec 7, 14.1).
-                            composerModesFor(modes, ui.openMenus.intValue)?.let { set(COMPOSER_MODES.name, it) }
-                        }
-                        .onPreviewKeyEvent { event ->
-                            composerKeyEvent(event, busy || sending, cardOpen, midTurn, shellOnly, ui, palette() != null, interceptable, onAction)
-                        },
-                    lineLimits = TextFieldLineLimits.MultiLine(1, 8),
-                    undecorated = true,
-                    placeholder = { Text(placeholder, color = colors.text.info) },
+        val density = LocalDensity.current
+        // The text's ink starts about 42 dp inside the box (desktop-02): 8 dp, the 24 dp `+`, 5 dp, then the undecorated TextArea's
+        // own content padding (5 dp across, 4 dp down); 8 + 4 above and below the text, so 184 dp holds 8 lines of 20 dp. The `+`
+        // and the send glyph stay on the last line as the text grows.
+        ComposerBoxLayout(
+            start = 8.dp,
+            add = {
+                AddButton(
+                    Modifier.padding(end = 5.dp, bottom = 10.dp),
+                    plugins,
+                    pluginsKnown,
+                    width = plusMenuWidth(columnWidth() ?: UNMEASURED_COLUMN),
+                    // The room above the box, as the palette measures it (MCP spec 14); none before the box is placed.
+                    maxHeight = with(density) { (boxTop - 8.dp.roundToPx()).takeIf { it > 0 }?.toDp() },
+                    // Keyed on the state alone: [onAdd] is a new lambda at every recomposition of PromptBar, and is read when picked.
+                    actions = remember(ui) {
+                        PlusMenuActions(
+                            onAddFiles = { currentOnAdd() },
+                            // The text area takes the focus once the chooser has closed (spec 3.5).
+                            onAddFolder = { currentOnAddFolder { refocus++ } },
+                            onSlashCommands = {
+                                ui.openPalette()
+                                refocus++
+                            },
+                            onBrowseConnectors = { currentOnBrowse() },
+                            // The MCP panel, opened as a user action, after the menu closed (spec 17.2).
+                            onManageConnectors = { menu -> menu.openMcpFromMenu(ui) },
+                            onCommand = { command ->
+                                ui.draft.setTextAndPlaceCursorAtEnd(withCommand(ui.draft.text.toString(), command.command))
+                                refocus++
+                            },
+                        )
+                    },
+                    openMenus = ui.openMenus,
+                    connectorController = connectorController,
                 )
-                if (filterHint) FilterHint(top = 8.dp)
-            }
-            // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
-            val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
-            if (busy) {
-                // Send now beside Stop while Claude works (desktop-parity spec 12.1), once the draft can be sent; a click acts as Enter.
-                if (midTurn && !cardOpen && sendable) {
-                    WithTooltip(sendNowTooltip(SystemInfo.isMac)) {
-                        IconButton(onClick = { onAction(ComposerAction.Send) }, modifier = buttonModifier.semantics { contentDescription = "Send" }) {
-                            Text("↵", style = JewelTheme.editorTextStyle, color = colors.text.info)
+            },
+            // The session's added folders, at the top of the box, above the images (spec 3.4), then the attached images,
+            // across the box's inner width (polish spec 2.7).
+            strips = {
+                Column(Modifier.fillMaxWidth()) {
+                    FolderStrip(folders, onRemoveFolder)
+                    if (ui.attachments.isNotEmpty()) AttachmentStrip(ui.attachments)
+                }
+            },
+            input = {
+                Row(Modifier.heightIn(max = 184.dp).padding(end = 12.dp), verticalAlignment = Alignment.Bottom) {
+                    // The text area, and over it `Type to filter` after a lone `/` while the palette is open (MCP spec 14): its own
+                    // placeholder shows only while it is empty.
+                    Box(Modifier.weight(1f)) {
+                        TextArea(
+                            ui.draft,
+                            Modifier.fillMaxWidth().heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
+                                .focusRequester(inputFocus)
+                                .onFocusChanged { inputFocused.value = it.hasFocus }
+                                // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it:
+                                // while the clipboard holds images, the focused composer's paste provider takes the paste from the
+                                // Compose text paste (polish spec 2.7). Asked for only by a paste, so the clipboard's flavours are not
+                                // queried on every action update.
+                                .provideData {
+                                    lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
+                                        imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
+                                    }
+                                    // Shift+Tab's mode cycle, only while no footer menu, popover or `+` menu is open (desktop-parity
+                                    // spec 7, 14.1).
+                                    composerModesFor(modes, ui.openMenus.intValue)?.let { set(COMPOSER_MODES.name, it) }
+                                }
+                                .onPreviewKeyEvent { event ->
+                                    composerKeyEvent(event, busy || sending, cardOpen, midTurn, shellOnly, ui, palette() != null, interceptable, onAction)
+                                },
+                            lineLimits = TextFieldLineLimits.MultiLine(1, 8),
+                            undecorated = true,
+                            placeholder = { Text(placeholder, color = colors.text.info) },
+                        )
+                        if (filterHint) FilterHint(top = 8.dp)
+                    }
+                    // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
+                    val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
+                    if (busy) {
+                        // Send now beside Stop while Claude works (desktop-parity spec 12.1), once the draft can be sent; a click acts
+                        // as Enter.
+                        if (midTurn && !cardOpen && sendable) {
+                            WithTooltip(sendNowTooltip(SystemInfo.isMac)) {
+                                IconButton(onClick = { onAction(ComposerAction.Send) }, modifier = buttonModifier.semantics { contentDescription = "Send" }) {
+                                    Text("↵", style = JewelTheme.editorTextStyle, color = colors.text.info)
+                                }
+                            }
+                        }
+                        IconButton(
+                            onClick = { onAction(ComposerAction.Stop) },
+                            modifier = buttonModifier.semantics { contentDescription = "Stop" },
+                        ) {
+                            Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
+                        }
+                    } else {
+                        // Disabled, and dimmed, while the last prompt is still being encoded: the composer counts as busy (polish
+                        // spec 2.7). sendDraft checks the sender's own flag again, so a click that races the encode still sends nothing.
+                        IconButton(
+                            onClick = { onAction(ComposerAction.Send) },
+                            enabled = !sending,
+                            modifier = buttonModifier.semantics { contentDescription = "Send" },
+                        ) {
+                            Text("↵", style = JewelTheme.editorTextStyle, color = if (sending) colors.text.disabled else colors.text.info)
                         }
                     }
                 }
-                IconButton(onClick = { onAction(ComposerAction.Stop) }, modifier = buttonModifier.semantics { contentDescription = "Stop" }) {
-                    Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
-                }
-            } else {
-                // Disabled, and dimmed, while the last prompt is still being encoded: the composer counts as busy (polish spec 2.7).
-                // sendDraft checks the sender's own flag again, so a click that races the encode still sends nothing.
-                IconButton(
-                    onClick = { onAction(ComposerAction.Send) },
-                    enabled = !sending,
-                    modifier = buttonModifier.semantics { contentDescription = "Send" },
-                ) {
-                    Text("↵", style = JewelTheme.editorTextStyle, color = if (sending) colors.text.disabled else colors.text.info)
-                }
-            }
-        }
+            },
+        )
         // Placed in the box, so that the popup is anchored to the box's own edges.
         val shown = palette()
         if (shown != null && boxWidth > 0) {
@@ -762,8 +857,9 @@ private fun composerKeyEvent(
  * the secondary tier, described as `Add`, whose paged menu ([PlusMenu]) opens above it, left-aligned, on a click, Enter or Space. A
  * click on the `+` while the menu is open closes it, as a footer control's does. The menu's keys beyond Jewel's own (← back one page)
  * come from AWT's key dispatch ([PagedMenuKeys], [plusMenuTurn]). A close by a key (Esc, or Enter on a row that does not hand the
- * focus on) gives the focus back to the `+`; `Slash commands`, a plugin's command and `Connectors` hand it to the text area or the
- * MCP panel instead. The menu is [width] wide at most and at least ([plusMenuWidth]) and at most [maxHeight] high.
+ * focus on) gives the focus back to the `+`; `Slash commands`, a plugin's command and `Manage connectors` hand it to the text area
+ * or the MCP panel instead. While open the menu counts in [openMenus]; on its Connectors page it holds one controller from
+ * [connectorController] ([rememberConnectorsPage]). The menu is [width] wide at most and at least ([plusMenuWidth]) and at most [maxHeight] high.
  *
  * [modifier] (the button's padding in the row) goes on an outer box; the menu is placed in the inner, unpadded one, so that
  * [AboveAnchor] measures from the button's own edges, as `FooterControl` places its menu.
@@ -771,16 +867,22 @@ private fun composerKeyEvent(
 @Composable
 private fun AddButton(
     modifier: Modifier,
-    openMenus: MutableIntState,
     plugins: ImmutableList<PluginEntry>,
     pluginsKnown: Boolean,
     width: Pair<Dp, Dp>,
     maxHeight: Dp?,
     actions: PlusMenuActions,
+    openMenus: MutableIntState,
+    connectorController: (CoroutineScope) -> McpPanelController,
 ) {
     val state = remember { PagedMenuState() }
-    // The open menu disables the mode cycle's action (desktop-parity spec 7, 14.1).
-    CountOpenMenu(state.open, openMenus)
+    // Counted among the composer's open menus while open, so the composer's action keys stand down (spec 7, 17.4).
+    val open = state.open
+    CountOpenMenu(open, openMenus)
+    // Read as the menu opens, so a rebinding shows at the next opening and an unbound action shows nothing (spec 17.4).
+    val addFilesShortcut = remember(open) { if (open) addFilesKeybinding() else null }
+    // One controller per open Connectors page, closed when the page leaves or the menu closes (spec 17.2).
+    val connectors = if (open && state.page == PLUS_CONNECTORS) rememberConnectorsPage(connectorController) else null
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
@@ -793,13 +895,18 @@ private fun AddButton(
     val handing = remember(actions) {
         PlusMenuActions(
             onAddFiles = actions.onAddFiles,
+            onAddFolder = {
+                handsFocus.value = true
+                actions.onAddFolder()
+            },
             onSlashCommands = {
                 handsFocus.value = true
                 actions.onSlashCommands()
             },
-            onConnectors = {
+            onBrowseConnectors = actions.onBrowseConnectors,
+            onManageConnectors = { menu ->
                 handsFocus.value = true
-                actions.onConnectors(state)
+                actions.onManageConnectors(menu)
             },
             onCommand = { command ->
                 handsFocus.value = true
@@ -854,6 +961,8 @@ private fun AddButton(
                         closed
                     },
                     actions = handing,
+                    connectors = connectors,
+                    addFilesShortcut = addFilesShortcut,
                 )
             }
         }
@@ -861,14 +970,17 @@ private fun AddButton(
 }
 
 /**
- * What the `+` menu's rows do: [onAddFiles] the image chooser (after the menu closed), [onSlashCommands] `/` and the palette,
- * [onConnectors] the MCP panel (until the Connectors page, D15, through [openMcpFromMenu]), and [onCommand] a plugin's command into
- * the draft.
+ * What the `+` menu's rows do: [onAddFiles] the image chooser (after the menu closed), [onAddFolder] the folder chooser (after the
+ * menu closed; the text area takes the focus once it has closed), [onSlashCommands] `/` and the palette,
+ * [onBrowseConnectors] claude.ai's connectors page in the browser (after the menu closed), [onManageConnectors] the MCP panel (through
+ * [openMcpFromMenu], which closes the menu first), and [onCommand] a plugin's command into the draft.
  */
 internal class PlusMenuActions(
     val onAddFiles: () -> Unit,
+    val onAddFolder: () -> Unit,
     val onSlashCommands: () -> Unit,
-    val onConnectors: (PagedMenuState) -> Unit,
+    val onBrowseConnectors: () -> Unit,
+    val onManageConnectors: (PagedMenuState) -> Unit,
     val onCommand: (PluginCommand) -> Unit,
 )
 
@@ -876,7 +988,8 @@ internal class PlusMenuActions(
  * The `+` menu (desktop-parity spec 3.3, 17.1, 17.3), [gapPx] above its anchor and left-aligned, on [state]'s page, every page
  * between [width]'s bounds and at most [maxHeight] high. Each page is one passive item ([pagedRows], spec open item 6): its `‹` row
  * and its closing line stay put while its rows scroll ([ScrolledRows]) under the cap, the keyboard's selection
- * brought into view. Page [PLUS_MAIN]: `Add files or photos`, `Slash commands`, `Connectors ›` and `Plugins ›`, each with its icon.
+ * brought into view. Page [PLUS_MAIN]: `Add files or photos` (with [addFilesShortcut], spec 17.1), `Add folder`, `Slash commands`, `Connectors ›`
+ * and `Plugins ›`, each with its icon. Page [PLUS_CONNECTORS]: [connectors] ([connectorsPage]).
  * Page [PLUS_PLUGINS]: `‹ Plugins`, one row per plugin of [plugins] (or the line that says why there is none, [pluginsKnown]), the
  * `/plugin` hint. Page [PLUS_FIRST_PLUGIN] + i: `‹ <label>`, then its skills and its commands under their headings; a pick closes the
  * menu and calls [PlusMenuActions.onCommand]. Names and descriptions are config text: plain [Text].
@@ -891,6 +1004,8 @@ internal fun PlusMenu(
     gapPx: Int,
     onDismissRequest: (InputMode) -> Boolean,
     actions: PlusMenuActions,
+    connectors: ConnectorsPage? = null,
+    addFilesShortcut: Set<String>? = null,
 ) {
     val palette = chatPalette()
     val small = smallTextStyle()
@@ -912,7 +1027,19 @@ internal fun PlusMenu(
             plugin != null -> pluginPage(state, page, pageCap, plugin, palette, small, actions)
             // A plugin's page whose plugin left the list (a new init) shows the Plugins page.
             page == PLUS_PLUGINS || page >= PLUS_FIRST_PLUGIN -> pluginsPage(state, page, pageCap, plugins, pluginsKnown, palette, small)
-            else -> mainPage(state, page, pageCap, palette, actions)
+            page == PLUS_CONNECTORS && connectors != null -> connectorsPage(
+                connectors.model,
+                pageCap,
+                connectors.noteError,
+                onBack = { state.show(PLUS_MAIN) },
+                onBrowse = {
+                    state.close()
+                    actions.onBrowseConnectors()
+                },
+                onManage = { actions.onManageConnectors(state) },
+                onToggle = { row -> onConnectorRow(row, state, connectors.run) },
+            )
+            else -> mainPage(state, page, pageCap, palette, actions, addFilesShortcut, plusShortcutShown(width.second))
         }
     }
 }
@@ -924,7 +1051,7 @@ internal fun PlusMenu(
  * Jewel's own menu items ([PageRow]), which the menu's Up and Down reach through the focus order, and the focused one is brought
  * into view inside the inner scroll. The scroll starts at the top of each [page].
  */
-private fun MenuScope.pagedRows(
+internal fun MenuScope.pagedRows(
     page: Int,
     cap: Dp?,
     header: (@Composable () -> Unit)? = null,
@@ -997,7 +1124,14 @@ private object ScrolledRowsPolicy : MeasurePolicy {
  * then asks the menu to close, as Jewel's items do, so a page turn's [PagedMenuState.show] holds it open as before.
  */
 @Composable
-private fun PageRow(onClick: () -> Unit, iconKey: IconKey? = null, content: @Composable () -> Unit) {
+internal fun PageRow(
+    onClick: () -> Unit,
+    iconKey: IconKey? = null,
+    enabled: Boolean = true,
+    keybinding: Set<String>? = null,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
     val style = JewelTheme.menuStyle
     val metrics = style.metrics.itemMetrics
     val colors = style.colors.itemColors
@@ -1009,15 +1143,17 @@ private fun PageRow(onClick: () -> Unit, iconKey: IconKey? = null, content: @Com
     val focused by source.collectIsFocusedAsState()
     val pressed by source.collectIsPressedAsState()
     LaunchedEffect(hovered) { if (hovered) focus.requestFocus() }
-    val state = MenuItemState.of(selected = false, enabled = true, focused = focused, hovered = hovered, pressed = pressed)
+    val state = MenuItemState.of(selected = false, enabled = enabled, focused = focused, hovered = hovered, pressed = pressed)
     val background by colors.backgroundFor(state)
     val contentColor by colors.contentFor(state)
+    val keybindingColor by colors.keybindingTintFor(state)
     Box(
         Modifier.focusRequester(focus)
-            .selectable(selected = false, interactionSource = source, indication = null) {
+            .selectable(selected = false, enabled = enabled, interactionSource = source, indication = null) {
                 onClick()
                 controller.closeAll(inputModes.inputMode, true)
             }
+            .then(modifier)
             .fillMaxWidth(),
     ) {
         CompositionLocalProvider(LocalContentColor provides contentColor, LocalTextStyle provides LocalTextStyle.current.copy(color = contentColor)) {
@@ -1041,6 +1177,15 @@ private fun PageRow(onClick: () -> Unit, iconKey: IconKey? = null, content: @Com
             ) {
                 if (iconKey != null) Icon(iconKey, contentDescription = null, modifier = Modifier.size(metrics.iconSize))
                 Box(Modifier.weight(1f)) { content() }
+                // Jewel's own item draws its shortcut so: after the content, never ellipsised, dim (spec 17.1).
+                if (!keybinding.isNullOrEmpty()) {
+                    Text(
+                        keybinding.joinToString(" "),
+                        color = keybindingColor,
+                        maxLines = 1,
+                        modifier = Modifier.padding(metrics.keybindingsPadding),
+                    )
+                }
             }
         }
     }
@@ -1048,7 +1193,7 @@ private fun PageRow(onClick: () -> Unit, iconKey: IconKey? = null, content: @Com
 
 /** A separator inside a [pagedRows] page, drawn as Jewel's menu separator is: its height, padding, thickness and colour. */
 @Composable
-private fun PageSeparator() {
+internal fun PageSeparator() {
     val style = JewelTheme.menuStyle
     val metrics = style.metrics.itemMetrics
     Box(Modifier.height(metrics.separatorHeight), contentAlignment = Alignment.Center) {
@@ -1061,18 +1206,40 @@ private fun PageSeparator() {
     }
 }
 
-/** The `+` menu's first page (spec 3.3, 17.1): four rows in the desktop's order, each with its icon. */
-private fun MenuScope.mainPage(state: PagedMenuState, page: Int, cap: Dp?, palette: ChatPalette, actions: PlusMenuActions) {
+/**
+ * The `+` menu's first page (spec 3.3, 17.1): five rows in the desktop's order, each with its icon. `Add files or photos` shows
+ * [shortcut] at its end when [shortcutShown] ([plusShortcutShown]), else in its tooltip; nothing when the action is unbound.
+ */
+private fun MenuScope.mainPage(
+    state: PagedMenuState,
+    page: Int,
+    cap: Dp?,
+    palette: ChatPalette,
+    actions: PlusMenuActions,
+    shortcut: Set<String>?,
+    shortcutShown: Boolean,
+) {
     pagedRows(page, cap) {
-        PageRow(iconKey = AllIconsKeys.Actions.Attach, onClick = {
+        PageRow(
+            iconKey = AllIconsKeys.Actions.Attach,
+            keybinding = shortcut.takeIf { shortcutShown },
+            onClick = {
+                state.close()
+                actions.onAddFiles()
+            },
+        ) {
+            val tip = shortcut?.takeUnless { shortcutShown }?.joinToString(" ")
+            if (tip != null) WithTooltip("Add files or photos ($tip)") { MenuLabel("Add files or photos") } else MenuLabel("Add files or photos")
+        }
+        PageRow(iconKey = AllIconsKeys.Nodes.Folder, onClick = {
             state.close()
-            actions.onAddFiles()
-        }) { MenuLabel("Add files or photos") }
+            actions.onAddFolder()
+        }) { MenuLabel("Add folder") }
         PageRow(iconKey = AllIconsKeys.Nodes.Console, onClick = {
             state.close()
             actions.onSlashCommands()
         }) { MenuLabel("Slash commands") }
-        PageRow(iconKey = AllIconsKeys.Webreferences.Server, onClick = { actions.onConnectors(state) }) {
+        PageRow(iconKey = AllIconsKeys.Webreferences.Server, onClick = { state.show(PLUS_CONNECTORS) }) {
             MenuLabel("Connectors") { Text("›", color = palette.dim) }
         }
         PageRow(iconKey = AllIconsKeys.Nodes.Plugin, onClick = { state.show(PLUS_PLUGINS) }) {
@@ -1164,7 +1331,7 @@ private fun CommandRow(command: PluginCommand, palette: ChatPalette, small: Text
 
 /** A page's first row, `‹ <title>`, above the page's scroll, which turns the menu back with [back]. */
 @Composable
-private fun BackRow(title: String, palette: ChatPalette, back: () -> Unit) {
+internal fun BackRow(title: String, palette: ChatPalette, back: () -> Unit) {
     PageRow(onClick = back) {
         Text(
             buildAnnotatedString {
@@ -1180,7 +1347,7 @@ private fun BackRow(title: String, palette: ChatPalette, back: () -> Unit) {
 
 /** A row's label, one line, ellipsised in the room [end] leaves at the row's end (spec 3.3, Size). */
 @Composable
-private fun MenuLabel(label: String, modifier: Modifier = Modifier, end: @Composable RowScope.() -> Unit = {}) {
+internal fun MenuLabel(label: String, modifier: Modifier = Modifier, end: @Composable RowScope.() -> Unit = {}) {
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(12.dp))
@@ -1192,6 +1359,105 @@ private fun MenuLabel(label: String, modifier: Modifier = Modifier, end: @Compos
 @Composable
 private fun DimLine(text: String, palette: ChatPalette, small: TextStyle) {
     Text(text, style = small, color = palette.dim, modifier = PASSIVE_INSET)
+}
+
+/**
+ * The composer box's content (spec 3.5): [strips] across the top, then [add] and [input] side by side along the bottom, [start] in
+ * from the box's edge, as a Row aligned to the bottom would place them, [input] taking the width [add] leaves. [add] is placed
+ * first and [strips] second: Compose's Tab order follows the order in which siblings are placed, so it runs `+`, the strips' `×`
+ * buttons, then the text area, although the strips sit above the `+`.
+ */
+@Composable
+private fun ComposerBoxLayout(start: Dp, add: @Composable () -> Unit, strips: @Composable () -> Unit, input: @Composable () -> Unit) {
+    Layout(contents = listOf(add, strips, input), modifier = Modifier.fillMaxWidth()) { (adds, stripRows, inputs), constraints ->
+        val left = start.roundToPx()
+        val width = constraints.maxWidth
+        val placedAdd = adds.map { it.measure(Constraints()) }
+        val addWidth = placedAdd.maxOfOrNull { it.width } ?: 0
+        val placedStrips = stripRows.map { it.measure(Constraints(maxWidth = width)) }
+        val stripsHeight = placedStrips.sumOf { it.height }
+        val inputWidth = (width - left - addWidth).coerceAtLeast(0)
+        val placedInput = inputs.map { it.measure(Constraints(minWidth = inputWidth, maxWidth = inputWidth)) }
+        val rowHeight = (placedAdd + placedInput).maxOfOrNull { it.height } ?: 0
+        val bottom = stripsHeight + rowHeight
+        layout(constraints.constrainWidth(width), constraints.constrainHeight(bottom)) {
+            placedAdd.forEach { it.place(left, bottom - it.height) }
+            var top = 0
+            placedStrips.forEach {
+                it.place(0, top)
+                top += it.height
+            }
+            placedInput.forEach { it.place(left + addWidth, bottom - it.height) }
+        }
+    }
+}
+
+/**
+ * The session's added folders (spec 3.4, 3.5, 3.7), collected from [folders], in a row that wraps: one pill per folder with a folder
+ * icon and its name, described as `Folder <name>` with its state as the state description, its full path (the home as `~`) and its
+ * state in the tooltip, in the error colour when the CLI did not add it; a 16 dp `×` (`Remove folder <name>`) calls [onRemove].
+ * Nothing while there is no folder.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FolderStrip(folders: StateFlow<List<AddedFolder>>, onRemove: (String) -> Unit) {
+    val added by folders.collectAsState()
+    if (added.isEmpty()) return
+    val home = remember { System.getProperty("user.home") }
+    val shape = RoundedCornerShape(6.dp)
+    val colors = JewelTheme.globalColors
+    FlowRow(
+        Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        added.forEach { folder ->
+            key(folder.path) {
+                val name = folderName(folder.path)
+                val state = folderStateText(folder.state)
+                val tint = if (folder.state == FolderState.MISSING) colors.text.error else colors.text.normal
+                Row(
+                    Modifier.border(1.dp, colors.borders.normal, shape).padding(start = 6.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    WithTooltip(tooltip = {
+                        Column {
+                            Text(displayPath(folder.path, home, null))
+                            Text(state)
+                        }
+                    }) {
+                        Row(
+                            Modifier.semantics(mergeDescendants = true) {
+                                contentDescription = "Folder $name"
+                                stateDescription = state
+                            },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(AllIconsKeys.Nodes.Folder, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(name, color = tint, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp))
+                        }
+                    }
+                    IconButton(
+                        onClick = { onRemove(folder.path) },
+                        modifier = Modifier.padding(start = 2.dp).size(16.dp).semantics { contentDescription = "Remove folder $name" },
+                    ) {
+                        Icon(AllIconsKeys.General.Close, contentDescription = null)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A folder's name: the last segment of its [path] (a root has none: the path itself). */
+private fun folderName(path: String): String = path.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\').ifEmpty { path }
+
+/** A folder pill's state line (spec 3.4). */
+private fun folderStateText(state: FolderState): String = when (state) {
+    FolderState.PENDING -> "Applies with the next prompt."
+    FolderState.ACTIVE -> "Added to this session."
+    FolderState.MISSING -> "The CLI did not add this folder."
 }
 
 /**

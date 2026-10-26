@@ -50,6 +50,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.StringReader
 import java.nio.file.AccessDeniedException
+import java.nio.file.Files
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.time.Instant
@@ -2833,5 +2834,252 @@ class SessionManagerTest {
 
         manager.close(second.id)
         assertEquals(0, second.selfEnds.value)
+    }
+
+    /** Folders made for the folder tests, outside the project (`dir`): removed after each test. */
+    private val outside = ArrayList<Path>()
+
+    @AfterEach
+    fun removeOutsideFolders() {
+        outside.forEach { it.toFile().deleteRecursively() }
+    }
+
+    /** A new empty folder outside the project, by its real path (macOS: `/private/var/...`). */
+    private fun outsideFolder(): String =
+        Files.createTempDirectory("tandem-folder-").toRealPath().also { outside.add(it) }.toString()
+
+    private fun ChatState.warnings(text: String): Int = notices(NoticeLevel.WARNING).count { it == text }
+
+    /** A new session of [this] whose process runs and is idle, before any prompt. */
+    private suspend fun SessionManager.idle(): SessionHandle {
+        val handle = create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        handle.status.await(SessionStatus.IDLE)
+        return handle
+    }
+
+    // spec: adding a folder stops an idle process and the next spawn carries it
+    @Test
+    fun `adding a folder stops an idle process and the next spawn carries it`() = test {
+        val extra = outsideFolder()
+        val manager = manager()
+        val handle = manager.idle()
+        manager.addFolder(handle.id, extra)
+        assertEquals(listOf(AddedFolder(extra, FolderState.PENDING)), handle.folders.value)
+        handle.status.await(SessionStatus.STOPPED)
+
+        manager.send(handle.id, "hi")
+        awaitLog { spawns().size == 2 }
+        assertEquals(listOf("--session-id", handle.id, "--add-dir", extra), spawns().last().takeLast(4))
+        handle.state.first { it.turnsEnded == 1 && !it.busy }
+        handle.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+    }
+
+    // spec: adding during a turn stops after the turn
+    @Test
+    fun `adding during a turn stops after the turn`() = test {
+        val extra = outsideFolder()
+        val manager = manager(environment = mapOf("TANDEM_FAKE_LINE_DELAY_MS" to "200"))
+        val handle = manager.idle()
+        manager.send(handle.id, "Reply with the single word: pong")
+        handle.status.await(SessionStatus.RUNNING)
+        manager.addFolder(handle.id, extra)
+        delay(300)
+        assertEquals(SessionStatus.RUNNING, handle.status.value, "no stop during the turn")
+        handle.state.first { it.turnsEnded == 1 }
+        handle.status.await(SessionStatus.STOPPED)
+        assertEquals(1, spawns().size)
+    }
+
+    // spec: a folder missing from init warns once
+    @Test
+    fun `a folder missing from init warns once`() = test {
+        val extra = outsideFolder()
+        // Two turns in one process: parity-context replays two inits.
+        val manager = manager(fixtures = "parity-context", environment = mapOf("TANDEM_FAKE_SKIP_ADD_DIR" to extra))
+        val handle = manager.idle()
+        manager.addFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "one")
+        handle.state.first { it.turnsEnded == 1 && !it.busy }
+        handle.folders.await(listOf(AddedFolder(extra, FolderState.MISSING)))
+        manager.send(handle.id, "two")
+        handle.state.first { it.mcp.initCount == 2 && !it.busy } // the second turn is a local command's
+        delay(500) // the second init's check runs on IO
+        assertEquals(listOf(AddedFolder(extra, FolderState.MISSING)), handle.folders.value)
+        assertEquals(1, handle.state.value.warnings("The CLI did not add the folder $extra."))
+        assertEquals(2, spawns().size)
+    }
+
+    // spec: a vanished folder is dropped with a notice
+    @Test
+    fun `a vanished folder is dropped with a notice`() = test {
+        val extra = outsideFolder()
+        val manager = manager()
+        val handle = manager.idle()
+        manager.addFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        Path.of(extra).toFile().deleteRecursively()
+
+        manager.send(handle.id, "hi")
+        awaitLog { spawns().size == 2 }
+        assertFalse("--add-dir" in spawns().last(), spawns().last().toString())
+        assertEquals(emptyList(), handle.folders.value)
+        assertEquals(1, handle.state.value.warnings("The folder $extra no longer exists, so it was not added."))
+    }
+
+    // spec: a fork copies the folders
+    @Test
+    fun `a fork copies the folders`() = test {
+        seed(seeded)
+        val extra = outsideFolder()
+        val manager = manager()
+        manager.open(seeded, spawn = false)
+        manager.addFolder(seeded, extra) // no process: nothing to stop
+        val fork = assertNotNull(manager.fork(seeded))
+        assertEquals(listOf(AddedFolder(extra, FolderState.PENDING)), fork.folders.value)
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", fork.id, "--add-dir", extra), forkTail(fork.id))
+        assertEquals(emptyList(), manager.create(NewSessionOptions()).folders.value, "a new session starts with none")
+    }
+
+    // spec: a fork at a reply passes its parent's folders after the fork tail
+    @Test
+    fun `a fork at a reply passes its parent's folders after the fork tail`() = test {
+        seed(seeded, fixture = "fork-at-origin")
+        val extra = outsideFolder()
+        val manager = manager()
+        manager.open(seeded, spawn = false)
+        manager.addFolder(seeded, extra)
+        val fork = assertNotNull(manager.fork(seeded, "<uuid-14>"))
+        assertEquals(listOf(AddedFolder(extra, FolderState.PENDING)), fork.folders.value)
+        assertEquals(listOf("--resume-session-at", "<uuid-14>", "--add-dir", extra), forkTail(fork.id).takeLast(4))
+    }
+
+    // spec: removing a folder respawns without it
+    @Test
+    fun `removing a folder respawns without it`() = test {
+        val extra = outsideFolder()
+        val manager = manager()
+        val handle = manager.idle()
+        manager.addFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "one")
+        handle.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        handle.status.await(SessionStatus.IDLE)
+
+        manager.removeFolder(handle.id, extra)
+        assertEquals(emptyList(), handle.folders.value)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "two")
+        awaitLog { spawns().size == 3 }
+        assertFalse("--add-dir" in spawns().last(), spawns().last().toString())
+        handle.state.first { it.turnsEnded == 2 && !it.busy }
+        delay(300)
+        assertTrue(handle.state.value.notices(NoticeLevel.WARNING).none { "removed folder" in it })
+    }
+
+    // spec: a removed folder the CLI still lists warns
+    @Test
+    fun `a removed folder the CLI still lists warns`() = test {
+        val extra = outsideFolder()
+        val kept = "The CLI still lists the removed folder $extra."
+        // The third process has two turns: parity-context replays two inits.
+        val manager = manager(
+            fixtures = "plain-reply,plain-reply,parity-context",
+            environment = mapOf("TANDEM_FAKE_KEEP_ADD_DIR" to extra),
+        )
+        val handle = manager.idle()
+        manager.send(handle.id, "one")
+        handle.state.first { it.turnsEnded == 1 && !it.busy && it.additionalDirectories == listOf(extra) }
+        delay(300)
+        assertEquals(0, handle.state.value.warnings(kept), "never added: no notice")
+
+        manager.addFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "two")
+        handle.state.first { it.turnsEnded == 2 && !it.busy }
+        handle.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        assertEquals(0, handle.state.value.warnings(kept))
+
+        manager.removeFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "three")
+        awaitLog { spawns().size == 3 }
+        assertFalse("--add-dir" in spawns().last(), spawns().last().toString())
+        handle.state.first { it.warnings(kept) == 1 }
+        handle.state.first { it.turnsEnded == 3 && !it.busy }
+        manager.send(handle.id, "four")
+        handle.state.first { it.mcp.initCount == 2 && !it.busy } // the second turn is a local command's
+        delay(500) // the second init's check runs on IO
+        assertEquals(1, handle.state.value.warnings(kept), "once per folder per spawn")
+        assertEquals(3, spawns().size)
+    }
+
+    // spec: removing a folder before the stop leaves the process running
+    @Test
+    fun `removing a folder before the stop leaves the process running`() = test {
+        val extra = outsideFolder()
+        val manager = manager(environment = mapOf("TANDEM_FAKE_LINE_DELAY_MS" to "200"))
+        val handle = manager.idle()
+        manager.send(handle.id, "Reply with the single word: pong")
+        handle.status.await(SessionStatus.RUNNING)
+        manager.addFolder(handle.id, extra)
+        manager.removeFolder(handle.id, extra)
+        handle.state.first { it.turnsEnded == 1 && !it.busy }
+        delay(500)
+        assertEquals(SessionStatus.IDLE, handle.status.value, "nothing differs, so nothing stops")
+        manager.send(handle.id, "again")
+        delay(300)
+        assertEquals(1, spawns().size, "the next send goes to the same process")
+    }
+
+    // review: a folder added while the session's spawn is under way still reaches the CLI
+    @Test
+    fun `a folder added while the spawn is under way reaches the CLI`() = test {
+        val extra = outsideFolder()
+        // At most one live session, and a stop that takes a second: the second session's spawn reads its folders, then waits
+        // for room while the first one's process exits.
+        val manager = manager(maxLive = 1, environment = mapOf("TANDEM_FAKE_EXIT_DELAY_MS" to "1000"))
+        val first = manager.idle()
+        val second = manager.create(NewSessionOptions())
+        first.status.await(SessionStatus.STOPPED) // let go to make room: the second spawn has read its folders already
+        manager.addFolder(second.id, extra)
+        assertEquals(1, spawns().size, "the second spawn still waits for room")
+
+        // That spawn goes on without the folder. Its process is stopped at once (it may be gone before it even logs its spawn),
+        // or, should the prompt reach it first, after its turn: either way the folder reaches the CLI.
+        withTimeout(10_000) {
+            manager.send(second.id, "one")
+            second.state.first { it.turnsEnded == 1 && !it.busy }
+            if ("--add-dir" !in spawns().last()) {
+                // The prompt reached the process spawned without the folder: it is stopped after its turn.
+                second.status.await(SessionStatus.STOPPED)
+                manager.send(second.id, "two")
+                second.state.first { it.turnsEnded == 2 && !it.busy }
+            }
+            assertEquals(listOf("--add-dir", extra), spawns().last().takeLast(2))
+            second.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        }
+    }
+
+    // review: a resume that comes back as another session takes its folders to the new row
+    @Test
+    fun `a session taken over keeps the folders its process runs with`() = test {
+        seed(seeded)
+        val extra = outsideFolder()
+        val manager = manager(environment = mapOf("TANDEM_FAKE_SESSION_ID" to other))
+        val resumed = manager.open(seeded, spawn = false)
+        manager.addFolder(seeded, extra)
+        manager.send(seeded, "Reply with the single word: pong")
+
+        val taken = manager.sessions.first { it.size == 2 }.last()
+        assertEquals(other, taken.id)
+        assertEquals(listOf("--add-dir", extra), spawns().single().takeLast(2))
+        taken.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        taken.status.await(SessionStatus.IDLE)
+        delay(300)
+        assertEquals(listOf(AddedFolder(extra, FolderState.ACTIVE)), taken.folders.value)
+        assertEquals(1, spawns().size, "the row that took the process over does not stop it for its folders")
+        assertEquals(listOf(extra), resumed.folders.value.map { it.path }, "the old row keeps its own")
     }
 }

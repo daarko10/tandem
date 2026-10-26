@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake `claude` for platform and IDE tests: replays a recorded fixture in step with the host.
 
-Reads --session-id <id>, --resume <id> and --fork-session from its arguments and ignores the rest. Environment:
+Reads --session-id <id>, --resume <id>, --fork-session and --add-dir <dir> from its arguments and ignores the rest. Environment:
   TANDEM_FAKE_FIXTURES    comma-separated fixture names in ./fixtures. Process number N (from 0) started against the same
                           TANDEM_FAKE_LOG replays name N; the last name is reused once the list runs out
   TANDEM_FAKE_FIXTURE     a single fixture name, used when TANDEM_FAKE_FIXTURES is unset (default: plain-reply)
@@ -28,6 +28,11 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
                           this long (unset or 0: no sleep), so that a test sees the message wait before its `started` comes
   TANDEM_FAKE_EXIT_AT_END  after the last replayed line, sleep this many ms, then exit 0 (unset: read stdin until the host
                           closes it, as below), so that a test sees a process end by itself
+  TANDEM_FAKE_SKIP_ADD_DIR  rule (l): this `--add-dir` directory is left out of every replayed init, as a CLI that did not add it
+  TANDEM_FAKE_KEEP_ADD_DIR  rule (l): this directory is listed in every replayed init, after the others and once, with or without
+                          `--add-dir`, as a CLI that keeps a folder a resume left out
+  TANDEM_FAKE_EXIT_DELAY_MS  once the host closes stdin, sleep this long before exiting (unset or 0: exit at once), so that a
+                          test can hold a stop (the host waits for the exit) while something else happens
 
 Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
 with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
@@ -84,7 +89,10 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
   (j) In a fixture whose name starts with `parity-`, every control_response line leaves the in-order replay (`initialize`
       is still answered by (a)): its answers were given to requests sent out of the recorded order. Any other host control
       request gets a bare success there, as in an MCP fixture (c).
-  (k) `--add-dir` arguments are logged with the rest of the argv in `__spawn__`, nothing more.
+  (k) `--add-dir` arguments are logged with the rest of the argv in `__spawn__`.
+  (l) With `--add-dir <dir>` (repeatable) in the argv, every replayed `system/init` gets `additional_directories` = those dirs
+      in order, less the one TANDEM_FAKE_SKIP_ADD_DIR names; TANDEM_FAKE_KEEP_ADD_DIR adds its dir to every replayed init, after
+      the others and once, with or without `--add-dir`; with neither the line replays as recorded.
   (m) In a fixture whose name starts with `queue-`, the `<command_uuid-N>` placeholders stand for the host's own `user` frames:
       a line naming one not yet bound (as `command_uuid`, or inside a `user_message_uuids` list) binds it to the oldest host
       `user` frame read and not yet bound, waiting for the next one when there is none, and every bound placeholder in the line
@@ -126,6 +134,10 @@ unbound_frames = []  # rule (m): the uuids of the host's user frames read and no
 bound = {}  # rule (m): placeholder -> the host frame's uuid
 bound_after_init = set()  # rule (m): the placeholders bound since the last init
 named_since_result = [False]  # rule (m): whether a line has named a bound placeholder since the last result
+add_dirs = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--add-dir"]  # rule (l)
+skip_add_dir = os.environ.get("TANDEM_FAKE_SKIP_ADD_DIR") or None
+keep_add_dir = os.environ.get("TANDEM_FAKE_KEEP_ADD_DIR") or None
+exit_delay_ms = int(os.environ.get("TANDEM_FAKE_EXIT_DELAY_MS") or 0)
 
 
 def option(name):
@@ -186,6 +198,8 @@ def read_host():
             read_user_uuids.append(frame["uuid"])
             unbound_frames.append(frame["uuid"])
         return frame
+    if exit_delay_ms:
+        time.sleep(exit_delay_ms / 1000)
     return None
 
 
@@ -466,6 +480,11 @@ for message in replay:
             bound_after_init.clear()
         if mcp_fixture:
             message["mcp_servers"] = thin_list()
+        if add_dirs or keep_add_dir:
+            listed = [d for d in add_dirs if d != skip_add_dir]
+            if keep_add_dir and keep_add_dir not in listed:
+                listed.append(keep_add_dir)
+            message["additional_directories"] = listed
     if queue_fixture:
         cancel_request_id = bind_queue_line(message) or cancel_request_id
     if kind == "control_response":

@@ -122,10 +122,17 @@ internal class ChatUiState {
     val menuRequest: MutableState<FooterMenu?> = mutableStateOf(null)
 
     /**
-     * How many of the mode, model and effort menus, the ring's popover and the `+` menu are open: each counts itself in while open
-     * ([CountOpenMenu]), and the composer offers the permission mode cycle only while none is (desktop-parity spec 7, 14.1).
+     * How many of the composer's menus are open (desktop-parity spec 7, 14.1, 14.3, 17.4): the mode, model and effort menus,
+     * the ring's popover and the `+` menu each count themselves in while open ([CountOpenMenu]). While any is, the composer
+     * offers neither the permission mode cycle nor any composer action's key.
      */
     val openMenus: MutableIntState = mutableIntStateOf(0)
+
+    /**
+     * The composer's `Add files or photos` (spec 17.4): set by the prompt bar while it is composed, null otherwise. The chat pane
+     * offers it to `Tandem.AddFilesOrPhotos` while no menu is open ([composerAttachFor]).
+     */
+    var attach: ComposerAttach? = null
 
     /** The `+` menu's `Slash commands` (MCP spec 3.4): `/` in an empty draft, so the palette opens as typing it does; else nothing. */
     fun openPalette() {

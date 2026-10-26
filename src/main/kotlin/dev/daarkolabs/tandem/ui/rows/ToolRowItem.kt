@@ -149,6 +149,7 @@ internal fun ToolRowItem(rendered: RenderedRow, ui: ChatUiState) {
  * the chevron, the chevron that turns when [open], in the label's colour (a failed row is red to its end, spec 4.2). The chevron is
  * drawn exactly when the line [opens], live or finished (polish spec 2.1), and the whole line is then the click target. Assistive
  * technology knows it as a button named by [description], its label unless the caller says otherwise (a streaming thinking row).
+ * With [shimmer] a light band sweeps across the label ([Modifier.shimmer]): a streaming thinking row's, never a tool's (spec 15.1).
  */
 @Composable
 internal fun ToolLine(
@@ -161,6 +162,7 @@ internal fun ToolLine(
     modifier: Modifier = Modifier,
     description: String = label.text,
     marker: Marker = Marker.NONE,
+    shimmer: Boolean = false,
     onClick: () -> Unit,
 ) {
     val colors = JewelTheme.globalColors.text
@@ -196,7 +198,16 @@ internal fun ToolLine(
             Marker.WAITING -> colors.warning
         }
         if (dot != null) Box(Modifier.padding(end = 8.dp).size(6.dp).background(dot, RoundedCornerShape(50)))
-        Text(text, color = tone, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        // The band on the label alone, never on the stats or the chevron; +∞ clamps to the label's width (spec 15.1).
+        val band = rememberShimmer(shimmer)
+        Text(
+            text,
+            color = tone,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false)
+                .shimmer(shimmer, { band.value }, { Float.POSITIVE_INFINITY }, colors.normal),
+        )
         stats?.let { DiffStatsText(it) }
         if (opens) {
             Icon(AllIconsKeys.General.ChevronRight, null, Modifier.padding(start = 8.dp).size(16.dp).rotate(angle), tint = tone)
