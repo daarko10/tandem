@@ -1184,4 +1184,102 @@ class FixtureDecodeTest {
         assertTrue(listOf(27, 35, 37).all { origin[it - 1].rawString("uuid") in later })
         assertTrue(fork.none { it.rawString("uuid") in later })
     }
+
+    private fun transcriptLines(name: String): List<JsonObject> =
+        Fixtures.transcript(name).readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+
+    /** The text of each text block of the assistant line [line] of fixture [name]. */
+    private fun replyText(name: String, line: Int): String =
+        assertIs<CliMessage.Assistant>(at(name, line)).content.filterIsInstance<ContentBlock.Text>().joinToString("") { it.text }
+
+    /**
+     * The twin [fork] of a fork at [cut] (0-based [cutAt] in it): its copied chain ends with the cut's assistant line, its new prompt's
+     * parentUuid is the cut, every line carries the fork's session id [b], and no user or assistant line of [origin] after the cut
+     * (0-based [originCutAt]) is in it.
+     */
+    private fun assertForkTwin(fork: List<JsonObject>, origin: List<JsonObject>, cut: String, cutAt: Int, originCutAt: Int, b: String) {
+        assertEquals("assistant", fork[cutAt].rawString("type"))
+        assertEquals(cut, fork[cutAt].rawString("uuid"))
+        assertEquals("user", fork[cutAt + 1].rawString("type"))
+        assertEquals(cut, fork[cutAt + 1].rawString("parentUuid"))
+        val sessionIds = fork.mapNotNull { it.rawString("sessionId") }
+        assertEquals(fork.size, sessionIds.size)
+        assertTrue(sessionIds.all { it == b }, sessionIds.toSet().toString())
+        assertEquals(cut, origin[originCutAt].rawString("uuid"))
+        val later = origin.drop(originCutAt + 1).filter { it.rawString("type") in setOf("user", "assistant") }
+            .mapNotNull { it.rawString("uuid") }.toSet()
+        assertTrue(later.isNotEmpty())
+        assertTrue(fork.none { it.rawString("uuid") in later })
+    }
+
+    // spec: fork-at-live: works (D8 probes 5): a fork while the origin's process is still open forks as fork-at does
+    @Test
+    fun `fork-at-live - a fork while the origin's process is open knows only the first turn`() {
+        val a = "<session_id-4>"
+        val b = "<session_id-71>"
+        assertEquals(listOf(a, a, a, b), listOf(5, 18, 44, 58).map { init("fork-at-live", it).sessionId })
+        assertNotEquals(a, b)
+        val cut = assertIs<CliMessage.Assistant>(at("fork-at-live", 10))
+        assertEquals("<uuid-13>", cut.uuid)
+        assertNull(cut.parentToolUseId)
+        // The origin's three turns end before the fork starts (its last result at :53, the fork's init at :58).
+        assertEquals(listOf("success", "success", "success"), listOf(14, 40, 53).map { result("fork-at-live", it).subtype })
+        val reply = replyText("fork-at-live", 63)
+        assertTrue("ALPHA" in reply, reply)
+        assertFalse("BRAVO" in reply || "CHARLIE" in reply, reply)
+        val result = result("fork-at-live", 68)
+        assertEquals("success", result.subtype)
+        assertFalse(result.isError)
+    }
+
+    // spec: fork-at-live transcripts: the fork copies the chain up to the cut and nothing after
+    @Test
+    fun `fork-at-live transcripts - the fork copies the chain up to the cut and nothing after`() {
+        val fork = transcriptLines("fork-at-live")
+        val origin = transcriptLines("fork-at-live-origin")
+        assertForkTwin(fork, origin, "<uuid-13>", cutAt = 16, originCutAt = 18, b = "<session_id-71>")
+        // The BRAVO and CHARLIE prompts (fork-at-live-origin.jsonl:26, :34) come after the cut.
+        assertTrue(listOf(26, 34).all { origin[it - 1].rawString("type") == "user" })
+        assertEquals("<uuid-79>", fork[24].rawString("uuid"))
+    }
+
+    // spec: fork-at-busy: matches (D8 probes 5): a fork made while the origin runs a turn forks as fork-at does
+    @Test
+    fun `fork-at-busy - a fork made during the origin's turn knows only the first turn`() {
+        val a = "<session_id-4>"
+        val b = "<session_id-60>"
+        assertEquals(listOf(a, a, b), listOf(5, 18, 49).map { init("fork-at-busy", it).sessionId })
+        assertEquals("<uuid-13>", assertIs<CliMessage.Assistant>(at("fork-at-busy", 10)).uuid)
+        val reply = replyText("fork-at-busy", 54)
+        assertTrue("ALPHA" in reply, reply)
+        assertFalse("BRAVO" in reply, reply)
+        assertEquals("success", result("fork-at-busy", 59).subtype)
+        // The origin's second turn, during which the fork ran, ends in a success all the same.
+        val origin = result("fork-at-busy", 44)
+        assertEquals("success", origin.subtype)
+        assertFalse(origin.isError)
+        assertEquals(2, origin.numTurns)
+    }
+
+    // spec: fork-at-busy transcripts: a fork made during the origin's turn copies the chain up to the cut, and the origin keeps its turn
+    @Test
+    fun `fork-at-busy transcripts - a fork made during the origin's turn copies the chain up to the cut`() {
+        val fork = transcriptLines("fork-at-busy")
+        val origin = transcriptLines("fork-at-busy-origin")
+        assertForkTwin(fork, origin, "<uuid-13>", cutAt = 16, originCutAt = 18, b = "<session_id-60>")
+        // fork-at-busy-origin.jsonl:26-31: BRAVO's prompt, its Bash call and result, and its reply, the turn whole.
+        val bravo = origin[25]
+        assertEquals("user", bravo.rawString("type"))
+        assertTrue("BRAVO" in bravo.toString())
+        val call = origin[27]
+        assertEquals("assistant", call.rawString("type"))
+        assertTrue("\"Bash\"" in call.toString())
+        val toolResult = origin[28]
+        assertEquals("user", toolResult.rawString("type"))
+        assertEquals(call.rawString("uuid"), toolResult.rawString("parentUuid"))
+        assertTrue("tool_result" in toolResult.toString())
+        val reply = origin[30]
+        assertEquals("assistant", reply.rawString("type"))
+        assertEquals(assertIs<CliMessage.Assistant>(at("fork-at-busy", 40)).uuid, reply.rawString("uuid"))
+    }
 }

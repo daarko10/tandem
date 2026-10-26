@@ -6,6 +6,7 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.text.StringUtil
+import dev.daarkolabs.tandem.session.ForkResult
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionId
@@ -69,15 +70,14 @@ internal class SessionActions(private val project: Project, private val manager:
     }
 
     /**
-     * Forks session [id]; the fork is selected. A session with no transcript yet (no prompt sent) has nothing to fork: its chat says
-     * so (polish spec 2.6).
+     * Forks session [id], whole or, with [at], at that reply line (desktop-parity spec 13.1); the fork is selected. When nothing forks,
+     * [id]'s chat says why (hard rule 5): no transcript yet (no prompt sent), a fork point not in its history, or a turn running.
      */
-    fun fork(id: SessionId) {
+    fun fork(id: SessionId, at: String? = null) {
         requested = null
         scope.launch {
-            if (manager.fork(id) == null) {
-                manager.sessions.value.firstOrNull { it.id == id }?.notice(NoticeLevel.WARNING, "This session has no transcript to fork yet")
-            }
+            val refusal = forkRefusal(manager.forkResult(id, at)) ?: return@launch
+            manager.sessions.value.firstOrNull { it.id == id }?.notice(NoticeLevel.WARNING, refusal)
         }
     }
 
@@ -116,4 +116,12 @@ internal class SessionActions(private val project: Project, private val manager:
             .createNotification(StringUtil.escapeXmlEntities(what), StringUtil.escapeXmlEntities(reason), NotificationType.ERROR)
             .notify(project)
     }
+}
+
+/** What the chat says when a fork did not start (desktop-parity spec 13.2, hard rule 5: the real reason); null when it started. */
+internal fun forkRefusal(result: ForkResult): String? = when (result) {
+    is ForkResult.Started -> null
+    ForkResult.Refused.NO_TRANSCRIPT -> "This session has no transcript to fork yet"
+    ForkResult.Refused.NOT_IN_HISTORY -> "This reply cannot be forked: the CLI sent no id for it"
+    ForkResult.Refused.BUSY -> "Wait for the reply to finish"
 }

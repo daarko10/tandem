@@ -1058,6 +1058,46 @@ class ToolWindowIdeTest {
     }
 
     @Test
+    fun `fork from here on an earlier reply`() {
+        val configDir = Files.createTempDirectory("tandem-config")
+        val project = newProject()
+        val seeded = "77777777-7777-4777-8777-777777777777"
+        // Three turns: "Reply 1." to "Reply 3.", whose lines are a1 to a3.
+        configDir.resolve("projects").resolve(TranscriptFolder.key(project.toRealPath().toString())).createDirectories()
+            .resolve("$seeded.jsonl").writeText(longTranscript(seeded, turns = 3))
+        val original = "$ROW[contains(@text, 'Seeded') and not(contains(@text, '(fork)'))]"
+        val sent = runChat("fork-at", fixtures = listOf("plain-reply"), configDir = configDir, project = project) {
+            openSidebar()
+            row("Seeded").click(Point(10, 10))
+            waitForText("Reply 3.")
+            // Each ended turn's reply has its own Fork from here (desktop-parity spec 13.1); the first in document order is Reply 1.'s.
+            text("Reply 1.").moveMouse(Point(10, 5))
+            val fork = ui.xx("//div[@class='ComposeNode' and @role='Button' and @contentdescription='Fork from here']").list()
+            assertEquals(3, fork.size, "one Fork from here per reply")
+            fork.first().click(Point(10, 10))
+            // The fork's chat, cut after the first turn, under its title in the header.
+            waitFor("the fork shown, cut after the first turn", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and @contentdescription='Seeded (fork)']").present() &&
+                    text("Reply 1.").present() &&
+                    !text("Prompt 2 of the seeded history").present() &&
+                    !text("Reply 3.").present()
+            }
+            takeScreenshot("fork-at")
+            openSidebar()
+            waitFor("the fork selected", 30.seconds) { ui.x("$ROW[@selected='true' and contains(@text, 'Seeded (fork)')]").present() }
+            // The original stays as it is.
+            ui.x(original).click(Point(10, 10))
+            waitForText("Reply 3.")
+        }
+        val spawns = sent.filter { it.type == "__spawn__" }.map { spawn -> spawn["argv"]!!.jsonArray.map { it.jsonPrimitive.content } }
+        val argv = spawns.last()
+        val order = listOf("--resume", seeded, "--fork-session", "--resume-session-at", "a1").map { argv.indexOf(it) }
+        assertTrue(order.all { it >= 0 } && order == order.sorted(), argv.toString())
+        assertEquals(argv.indexOf("--resume") + 1, argv.indexOf(seeded), argv.toString())
+        assertEquals(argv.indexOf("--resume-session-at") + 1, argv.indexOf("a1"), argv.toString())
+    }
+
+    @Test
     fun `a wide tool window docks the sidebar, which stays collapsed in the next IDE run`() {
         val configDir = Files.createTempDirectory("tandem-config")
         val project = newProject()

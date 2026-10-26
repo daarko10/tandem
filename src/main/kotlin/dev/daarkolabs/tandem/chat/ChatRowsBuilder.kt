@@ -25,12 +25,8 @@ import java.util.IdentityHashMap
 /** What the rows show beyond the state: [showThinking] is the `Show thinking rows` setting. */
 data class RowOptions(val showThinking: Boolean)
 
-/**
- * The chat list's rows, the pending request shown as a card, and how many more requests wait behind it. [latestReply] is the entry id
- * of the last ended turn's reply (polish spec 2.6): the one reply `Fork from here` can fork; null when that turn has no reply or no
- * turn has ended. While a turn runs it is the turn's before it, so its fork waits rather than being refused.
- */
-data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, val moreWaiting: Int, val latestReply: String? = null)
+/** The chat list's rows, the pending request shown as a card, and how many more requests wait behind it. */
+data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, val moreWaiting: Int)
 
 /**
  * Builds the chat rows from a [ChatState] (spec 5.3, 5.4): one row per user message, shell escape (MCP spec 12.1), text block,
@@ -40,7 +36,7 @@ data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, va
  * [WorkingRow] (spec 4.9); once the latest turn has ended its [TurnEndRow] stands where it ended (spec 4.10), and a failed turn's
  * `The turn failed` notice gives way to it when the footer states all the notice says (spec 4.10, 4.11). The oldest pending request
  * comes as the [ChatRows.card] ([Cards.pending]). Once a turn has ended, the last text block of its reply carries the hover row's
- * [MessageActions] (polish spec 2.6), and [ChatRows.latestReply] names the last ended turn's reply, from the entries on every build.
+ * [MessageActions] (polish spec 2.6), with the turn's fork point ([MessageActions.forkAt], desktop-parity spec 13.1).
  *
  * Rows are cached per turn (a turn runs from one user message or shell escape to the next): a closed turn is built once more when it
  * closes and then kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the
@@ -123,11 +119,12 @@ class ChatRowsBuilder(private val options: RowOptions) {
             val failureInFooter = end != null && end.end == TurnEnd.FAILED && !end.textStreamed && t == region.turns.lastIndex
             val context = TurnContext(turnOpen, failureInFooter, end)
             val rows = Rows(previous, grouped = true) { reuse(withUniqueKey(it, keys)) }
-            // The reply that gets the hover row, once the turn has ended (polish spec 2.6).
+            // The reply that gets the hover row, once the turn has ended (polish spec 2.6), and where a fork at it cuts (spec 13.1).
             val reply = if (turnOpen) -1 else turn.lastWhere(entries::isReply)
+            val forkAt = if (reply < 0) null else forkPoint(entries, turn)
             for (index in turn) {
                 if (index in region.childEntries) continue
-                entryRows(entries[index], context, region, nextBodies, rows, withActions = index == reply)
+                entryRows(entries[index], context, region, nextBodies, rows, withActions = index == reply, forkAt = forkAt)
             }
             rows.flush()
             previous = rows.previous
@@ -148,27 +145,18 @@ class ChatRowsBuilder(private val options: RowOptions) {
         freeze(region, turnRows)
         val (card, moreWaiting) = Cards.pending(state)
         lastCard = lastCard?.takeIf { it == card } ?: card
-        return ChatRows(all, lastCard, moreWaiting, latestReply(state))
+        return ChatRows(all, lastCard, moreWaiting)
     }
 
     /**
-     * The entry id of the last ended turn's reply (polish spec 2.6), from [state]'s entries, never from the cached turns: a backward
-     * scan that skips the running turn, back to and including its user message (or shell escape), then takes the last main-thread
-     * message with text before the user message before it. Null when that turn has none (an interrupt before any text) or no turn
-     * has ended.
+     * Where a fork at the reply of the turn [turn] cuts (desktop-parity spec 13.1): the [ChatEntry.Assistant.lastUuid] of the turn's
+     * last main-thread message that has one, scanning back; never a subagent's line. Null when none has (a reply drafted from deltas
+     * only, in a turn with no complete main-thread line).
      */
-    private fun latestReply(state: ChatState): String? {
-        val entries = state.entries
-        var i = entries.lastIndex
-        if (state.turn != null) {
-            while (i >= 0 && !entries[i].startsTurn()) i--
-            i--
-        }
-        while (i >= 0) {
-            val entry = entries[i]
-            if (entry.startsTurn()) return null
-            if (entries.isReply(i)) return entry.id
-            i--
+    private fun forkPoint(entries: List<ChatEntry>, turn: IntRange): String? {
+        for (index in turn.reversed()) {
+            val entry = entries[index]
+            if (entry is ChatEntry.Assistant && entry.parentToolUseId == null) entry.lastUuid?.let { return it }
         }
         return null
     }
@@ -443,6 +431,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
         nextBodies: Bodies,
         rows: Rows,
         withActions: Boolean,
+        forkAt: String?,
     ) {
         val turnOpen = context.turnOpen
         when (entry) {
@@ -458,7 +447,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
             }
             // Thinking rows are the main thread's; a subagent message of an unknown agent shows its text and calls only.
             is ChatEntry.Assistant ->
-                assistantRows(entry, turnOpen, region, nextBodies, rows, thinking = entry.parentToolUseId == null, withActions = withActions)
+                assistantRows(entry, turnOpen, region, nextBodies, rows, entry.parentToolUseId == null, withActions, forkAt)
             is ChatEntry.ToolResult -> if (entry.toolUseId !in region.calls) rows.add { orphan(entry, gap(Kind.TOOL, it)) }
             // The interrupt marker shows as the turn's end, not as a row; it still closes a group.
             is ChatEntry.Notice -> when {
@@ -475,7 +464,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
     /**
      * Adds the rows of an assistant message to [rows]: its non-blank text blocks, its thinking blocks (main thread only) and its
      * visible tool calls. A thinking block closes a group whether or not it is shown, so the setting never changes grouping. With
-     * [withActions] (the reply of an ended turn) its last text block carries the hover row's [MessageActions], once it no longer streams.
+     * [withActions] (the reply of an ended turn) its last text block carries the hover row's [MessageActions], once it no longer streams,
+     * with the turn's fork point [forkAt].
      */
     private fun assistantRows(
         entry: ChatEntry.Assistant,
@@ -485,12 +475,13 @@ class ChatRowsBuilder(private val options: RowOptions) {
         rows: Rows,
         thinking: Boolean,
         withActions: Boolean = false,
+        forkAt: String? = null,
     ) {
         val actionsAt = if (withActions && !entry.streaming) entry.blocks.indexOfLast { it.isText() } else -1
         entry.blocks.forEachIndexed { index, block ->
             when (block) {
                 is AssistantBlock.Text -> if (block.text.isNotBlank()) {
-                    val actions = if (index == actionsAt) MessageActions(entry.id, entry.markdown(), entry.atMillis) else null
+                    val actions = if (index == actionsAt) MessageActions(entry.id, entry.markdown(), entry.atMillis, forkAt) else null
                     rows.add { TextRow("t:${entry.id}:$index", block.text, entry.streaming && index >= entry.completedBlocks, gap(Kind.TEXT, it), actions) }
                 }
                 is AssistantBlock.Thinking -> rows.add { if (thinking) thinkingRow(entry, index, block, it) else null }

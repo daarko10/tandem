@@ -78,16 +78,12 @@ internal data class RenderedRow(
     val images: ImmutableMap<String, ImageBitmap> = persistentMapOf(),
 )
 
-/**
- * The chat list's rows, the pending request's card, how many more requests wait, a plan card's plan, parsed, and the entry id of the
- * last ended turn's reply ([ChatRows.latestReply]).
- */
+/** The chat list's rows, the pending request's card, how many more requests wait, and a plan card's plan, parsed. */
 internal data class RenderedChat(
     val rows: ImmutableList<RenderedRow>,
     val card: PendingCard?,
     val moreWaiting: Int,
     val planBlocks: ImmutableList<MarkdownBlock>?,
-    val latestReply: String? = null,
 )
 
 /**
@@ -150,13 +146,7 @@ internal class ChatPresenter(
     val context: StateFlow<ContextUsage?> = state.map { it.context }.distinctUntilChanged().flowOn(Dispatchers.Default)
         .stateIn(scope, SharingStarted.Eagerly, state.value.context)
 
-    /**
-     * The entry id of the last ended turn's reply, the one `Fork from here` forks (polish spec 2.6). Only the hover rows read it, so a
-     * turn's start or end recomposes them and never a text row.
-     */
-    val latestReply: StateFlow<String?> = chat.map { it.latestReply }.distinctUntilChanged().stateIn(scope, SharingStarted.Eagerly, null)
-
-    /** Whether a turn runs, for the hover rows' fork state (polish spec 2.6). */
+    /** Whether a turn runs, for the prompt bar. */
     val busy: StateFlow<Boolean> = composer.map { it.busy }.distinctUntilChanged().stateIn(scope, SharingStarted.Eagerly, composer.value.busy)
 
     // Touched by the rendering coroutine only.
@@ -307,7 +297,7 @@ internal class ChatPresenter(
             sinceFull = 0
         }
         goodRows = out
-        return RenderedChat(out, card, rows.moreWaiting, planBlocks, rows.latestReply)
+        return RenderedChat(out, card, rows.moreWaiting, planBlocks)
     }
 
     /**

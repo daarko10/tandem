@@ -14,6 +14,7 @@ import dev.daarkolabs.tandem.TandemProjectScope
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.session.ChatEntry
+import dev.daarkolabs.tandem.session.ForkResult
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
@@ -180,6 +181,49 @@ class SessionActionsTest {
             assertEquals(3, manager.sessions.value.size)
         }
         awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `fork at a reply calls the manager with the point, and each refusal gets its own notice`() = timeoutRunBlocking(30.seconds) {
+        val dir = tempDir.get().resolve("fork-at").createDirectories()
+        seed(dir)
+        openProjectAsync(dir).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            sessions.ensureStarted()
+            val manager = sessions.manager
+            val actions = SessionActions(project, manager, TandemProjectScope.get(project).scope)
+            assertNotNull(actions.show(SEEDED)).join()
+            val original = manager.sessions.value.single { it.id == SEEDED }
+            fun notices(): List<String> = original.state.value.entries.filterIsInstance<ChatEntry.Notice>().map { it.text }
+
+            // The reply's point reaches the manager: a fork at it starts, with no notice.
+            actions.fork(SEEDED, "<uuid-10>")
+            while (manager.sessions.value.size < 2) delay(20)
+            val fork = manager.sessions.value.single { it.forkOf == SEEDED }
+            assertEquals("<uuid-10>", fork.forkAt)
+            while (manager.selected.value != fork.id) delay(20)
+
+            // A point not in the history: nothing forks, and the original's chat says why.
+            actions.fork(SEEDED, "no-such-uuid")
+            while ("This reply cannot be forked: the CLI sent no id for it" !in notices()) delay(20)
+
+            // A session with no prompt yet: nothing to fork at any point.
+            val fresh = actions.create(NewSessionOptions())
+            actions.fork(fresh, "<uuid-10>")
+            val handle = manager.sessions.value.single { it.id == fresh }
+            fun freshNotices(): List<String> = handle.state.value.entries.filterIsInstance<ChatEntry.Notice>().map { it.text }
+            while ("This session has no transcript to fork yet" !in freshNotices()) delay(20)
+            assertEquals(3, manager.sessions.value.size)
+            assertEquals(listOf("This reply cannot be forked: the CLI sent no id for it"), notices())
+        }
+        awaitNoOwnFakeCli()
+    }
+
+    @Test
+    fun `each fork result has its own words`() {
+        assertEquals("This session has no transcript to fork yet", forkRefusal(ForkResult.Refused.NO_TRANSCRIPT))
+        assertEquals("This reply cannot be forked: the CLI sent no id for it", forkRefusal(ForkResult.Refused.NOT_IN_HISTORY))
+        assertEquals("Wait for the reply to finish", forkRefusal(ForkResult.Refused.BUSY))
     }
 
     /** Writes the `history-reply` transcript as session [SEEDED]'s, in the CLI's folder for the project in [dir]. */

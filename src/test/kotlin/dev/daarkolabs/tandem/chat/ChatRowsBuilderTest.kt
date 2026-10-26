@@ -39,6 +39,7 @@ import kotlin.system.measureTimeMillis
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
@@ -1144,31 +1145,94 @@ class ChatRowsBuilderTest {
         assertEquals("pong", assertNotNull(rows.rows.filterIsInstance<TextRow>().single().actions).markdown)
     }
 
-    @Test
-    fun `the latest reply is the last ended turn's, and none after a turn without text`() {
-        val seen = HashMap<Int, String?>()
-        val (state, rows) = replay("permission-mode") { line, _, rows -> seen[line] = rows.latestReply }
-        val (id1, id2, id3) = listOf("one", "two", "three").map { replyOf(state, it).id }
-        assertEquals(id1, seen[15], "after the first result")
-        // The second turn runs from the prompt sent before line 21 to its result at 38: not ended, so the latest is still the first.
-        for (line in 16..37) assertEquals(id1, seen[line], "line $line")
-        assertEquals(id2, seen[38], "after the second result")
-        for (line in 39..52) assertEquals(id2, seen[line], "line $line")
-        assertEquals(id3, rows.latestReply)
+    /** The reply TextRows of [rows] (those with the hover row's actions), by their reply's text. */
+    private fun replyRows(rows: ChatRows): Map<String, TextRow> =
+        rows.rows.filterIsInstance<TextRow>().filter { it.actions != null }.associateBy { it.markdown }
 
-        val again = reduce(state, SessionEvent.UserSent("u-x", "again"))
-        assertEquals(id3, ChatRowsBuilder(options).build(again).latestReply)
-        // interrupt:19, the error_during_execution result that ends a turn with no text.
-        val interrupted = reduce(again, SessionEvent.Cli(Fixtures.decode("interrupt").filterIsInstance<CliMessage.Result>().single()))
-        assertNull(interrupted.turn)
-        assertNull(ChatRowsBuilder(options).build(interrupted).latestReply)
+    /** The [ChatEntry.Assistant.lastUuid] of the last main-thread message, scanning back from the entry that holds [text]. */
+    private fun lastMainThreadUuid(state: ChatState, text: String): String? {
+        val reply = state.entries.indexOf(replyOf(state, text))
+        val start = (reply downTo 0).first { state.entries[it].startsTurn() }
+        val end = (reply + 1..state.entries.lastIndex).firstOrNull { state.entries[it].startsTurn() } ?: state.entries.size
+        return (end - 1 downTo start).map { state.entries[it] }
+            .firstNotNullOfOrNull { (it as? ChatEntry.Assistant)?.takeIf { a -> a.parentToolUseId == null }?.lastUuid }
     }
 
     @Test
-    fun `fork is enabled on the latest reply, waits while a turn runs, and is refused on earlier replies`() {
-        assertEquals(ForkState.ENABLED, forkState("a", "a", false))
-        assertEquals(ForkState.WAIT, forkState("a", "a", true))
-        assertEquals(ForkState.NOT_LATEST, forkState("a", "b", false))
+    fun `every ended turn's reply carries its fork point`() {
+        val (state, rows) = replay("permission-mode")
+        val replies = replyRows(rows)
+        val points = listOf("one", "two", "three").map { assertNotNull(replies[it]).actions!!.forkAt }
+        // permission-mode:11, :34 and :49, each turn's last main-thread line.
+        assertEquals(listOf("<uuid-14>", "<uuid-41>", "<uuid-58>"), points)
+        assertEquals(listOf("one", "two", "three").map { lastMainThreadUuid(state, it) }, points)
+        assertEquals(3, points.toSet().size)
+    }
+
+    @Test
+    fun `earlier replies keep forkAt and their row instances while a turn runs`() {
+        val builder = ChatRowsBuilder(options)
+        val (state, rows) = replay("permission-mode", builder = builder)
+        val before = replyRows(rows)
+        var running = reduce(state, SessionEvent.UserSent("u-4", "four"))
+        running = reduce(running, SessionEvent.Cli(fixtureLine("permission-mode", 44)))
+        assertNotNull(running.turn)
+        val during = replyRows(builder.build(running))
+        assertEquals(before.keys, during.keys)
+        for ((text, row) in before) {
+            assertSame(row, during[text], text)
+            assertEquals(row.actions!!.forkAt, during.getValue(text).actions!!.forkAt)
+        }
+    }
+
+    @Test
+    fun `a subagent line is not the fork point`() {
+        val (state, rows) = replay("agent-sync")
+        val reply = rows.rows.filterIsInstance<TextRow>().single { it.actions != null }
+        val point = reply.actions!!.forkAt
+        assertNotEquals("<uuid-50>", point, "agent-sync:42 is a subagent's line")
+        // agent-sync:61, the turn's last main-thread line.
+        assertEquals("<uuid-74>", point)
+        val text = state.entries.filterIsInstance<ChatEntry.Assistant>().single { it.lastUuid == "<uuid-74>" }
+            .blocks.filterIsInstance<AssistantBlock.Text>().first().text
+        assertEquals(lastMainThreadUuid(state, text), point)
+    }
+
+    @Test
+    fun `a stopped turn's reply with only a draft falls back to the turn's last saved line, or null`() {
+        val (state, rows) = replay("interrupt")
+        assertNull(state.turn)
+        val reply = rows.rows.filterIsInstance<TextRow>().single { it.actions != null }
+        val entry = state.entries.filterIsInstance<ChatEntry.Assistant>().single { e -> reply.key.startsWith("t:${e.id}:") }
+        // interrupt:14 is the turn's only complete main-thread line.
+        assertEquals("<uuid-17>", reply.actions!!.forkAt)
+        assertEquals(entry.lastUuid ?: lastSavedBefore(state, entry), reply.actions!!.forkAt)
+
+        // With no complete main-thread line in the turn, the reply has no fork point.
+        val drafted = state.copy(
+            entries = state.entries.map { if (it is ChatEntry.Assistant) it.copy(lastUuid = null) else it },
+        )
+        val none = ChatRowsBuilder(options).build(drafted).rows.filterIsInstance<TextRow>().single { it.actions != null }
+        assertNull(none.actions!!.forkAt)
+        assertEquals(ForkState.UNAVAILABLE, forkState(none.actions!!.forkAt))
+    }
+
+    /** The lastUuid of the last main-thread message before [entry] in its turn. */
+    private fun lastSavedBefore(state: ChatState, entry: ChatEntry.Assistant): String? {
+        val at = state.entries.indexOf(entry)
+        for (i in at - 1 downTo 0) {
+            val e = state.entries[i]
+            if (e.startsTurn()) return null
+            if (e is ChatEntry.Assistant && e.parentToolUseId == null) e.lastUuid?.let { return it }
+        }
+        return null
+    }
+
+    @Test
+    fun `forkState follows the fork point`() {
+        // D8's fork-at-busy matches fork-at: a fork while a later turn runs knows only the turns up to its cut, so busy holds nothing back.
+        assertEquals(ForkState.ENABLED, forkState("x"))
+        assertEquals(ForkState.UNAVAILABLE, forkState(null))
     }
 
     @Test
@@ -1330,9 +1394,10 @@ class ChatRowsBuilderTest {
         assertNull(shell.status)
         assertTrue(assertIs<TextRow>(rows.rows[2]).markdown.startsWith("The probe ran"))
         assertEquals(TurnEnd.COMPLETED, assertIs<TurnEndRow>(rows.rows[3]).end)
-        // The reply is the latest ended turn's, under its hover row.
-        assertNotNull(assertIs<TextRow>(rows.rows[2]).actions)
-        assertEquals(rows.latestReply, assertIs<TextRow>(rows.rows[2]).actions!!.entryId)
+        // The reply is the ended turn's, under its hover row, with the turn's fork point.
+        val actions = assertNotNull(assertIs<TextRow>(rows.rows[2]).actions)
+        assertEquals(state.entries.filterIsInstance<ChatEntry.Assistant>().last { it.parentToolUseId == null }.lastUuid, actions.forkAt)
+        assertNotNull(actions.forkAt)
     }
 
     @Test
@@ -1351,8 +1416,7 @@ class ChatRowsBuilderTest {
 
     @Test
     fun `a shell row starts a turn`() {
-        // As with a User entry in the Shell entry's place: each of the three turns' replies carries its hover row, and the latest
-        // ended turn's reply is the last one.
+        // As with a User entry in the Shell entry's place: each of the three turns' replies carries its hover row.
         fun entries(middle: ChatEntry): List<ChatEntry> = listOf(
             ChatEntry.User("u1", "a"),
             assistant("a1", AssistantBlock.Text("reply a")),
@@ -1366,8 +1430,6 @@ class ChatRowsBuilderTest {
         fun withActions(rows: ChatRows): List<String> = rows.rows.filterIsInstance<TextRow>().filter { it.actions != null }.map { it.key }
         assertEquals(listOf("t:a1:0", "t:a2:0", "t:a3:0"), withActions(user))
         assertEquals(withActions(user), withActions(shell))
-        assertEquals(user.latestReply, shell.latestReply)
-        assertEquals("a3", shell.latestReply)
         assertEquals(
             listOf(
                 "u:u1" to RowGap.NONE,
@@ -1379,10 +1441,10 @@ class ChatRowsBuilderTest {
             ),
             shell.rows.map { it.key to it.gap },
         )
-        // While the shell's turn runs, the latest ended turn is the one before it.
+        // While the shell's turn runs, the ended turn before it keeps its hover row and the running one has none.
         val running = ChatState(entries = entries(ChatEntry.Shell("s1", "ls", "out", running = false)).take(4))
             .let { reduce(it, SessionEvent.ShellSent("s1", listOf("x"), "q", 0)) }
-        assertEquals("a1", ChatRowsBuilder(options).build(running).latestReply)
+        assertEquals(listOf("t:a1:0"), withActions(ChatRowsBuilder(options).build(running)))
         // An ended turn's footer belongs to the latest turn: a shell escape after it, as a prompt after it, starts the next one.
         fun footers(next: ChatEntry): List<ChatRow> = ChatRowsBuilder(options).build(
             ChatState(

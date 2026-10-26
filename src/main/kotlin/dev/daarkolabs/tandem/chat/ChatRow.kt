@@ -90,29 +90,26 @@ data class TextRow(
 
 /**
  * What the hover row under a reply acts on (polish spec 2.6): the reply's entry ([entryId]), its [markdown] (the message's non-blank
- * text blocks joined by a blank line, the narration messages before it left out) for Copy, and when it came ([atMillis], null when
- * unknown) for its time.
+ * text blocks joined by a blank line, the narration messages before it left out) for Copy, when it came ([atMillis], null when
+ * unknown) for its time, and where `Fork from here` cuts ([forkAt], desktop-parity spec 13.1: the uuid of the latest complete line of
+ * its turn's last main-thread message that has one; null when none has, so the turn cannot be forked).
  */
-data class MessageActions(val entryId: String, val markdown: String, val atMillis: Long?)
+data class MessageActions(val entryId: String, val markdown: String, val atMillis: Long?, val forkAt: String? = null)
 
-/** Whether a reply's `Fork from here` can fork now (polish spec 2.6). */
+/**
+ * Whether a reply's `Fork from here` can fork (desktop-parity spec 13.1). A fork made while a later turn runs knows only the turns up
+ * to its cut (D8's `fork-at-busy`), so a running turn does not hold the button back.
+ */
 enum class ForkState {
-    /** The latest ended turn's reply, while no turn runs. */
+    /** The reply has a fork point: `Fork from here`. */
     ENABLED,
 
-    /** The latest ended turn's reply while a newer turn runs: `Wait for the reply to finish`. */
-    WAIT,
-
-    /** An earlier reply: `Only the latest reply can be forked`. */
-    NOT_LATEST,
+    /** The reply has no fork point: `This reply cannot be forked: the CLI sent no id for it`. */
+    UNAVAILABLE,
 }
 
-/** The fork state of reply [entryId] when [latestReply] is the latest ended turn's reply and [busy] says whether a turn runs. */
-fun forkState(entryId: String, latestReply: String?, busy: Boolean): ForkState = when {
-    entryId != latestReply -> ForkState.NOT_LATEST
-    busy -> ForkState.WAIT
-    else -> ForkState.ENABLED
-}
+/** The fork state of a reply whose fork point is [forkAt]. */
+fun forkState(forkAt: String?): ForkState = if (forkAt == null) ForkState.UNAVAILABLE else ForkState.ENABLED
 
 /** One thinking block of a main-thread reply, `th:<entry id>:<block index>`; it opens only when [summary] is not blank. */
 data class ThinkingRow(
