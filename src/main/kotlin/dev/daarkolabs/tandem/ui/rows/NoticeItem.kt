@@ -1,7 +1,11 @@
+@file:OptIn(ExperimentalJewelApi::class)
+
 package dev.daarkolabs.tandem.ui.rows
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -15,9 +19,14 @@ import dev.daarkolabs.tandem.chat.NoticeLink
 import dev.daarkolabs.tandem.chat.NoticeRow
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
+import dev.daarkolabs.tandem.ui.LocalUrlHandler
 import dev.daarkolabs.tandem.ui.chatColumn
+import kotlinx.collections.immutable.ImmutableList
+import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.modifier.thenIf
 import org.jetbrains.jewel.foundation.theme.JewelTheme
+import org.jetbrains.jewel.markdown.Markdown
+import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.jetbrains.jewel.ui.component.Icon
 import org.jetbrains.jewel.ui.component.Link
 import org.jetbrains.jewel.ui.component.Text
@@ -27,19 +36,24 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
  * A notice (spec 4.11): plain secondary text; a warning or an error has its icon and colour, so a failure is easy to find.
  *
  * A local command's output (MCP spec 3.5) is one node for assistive technology, `Reply to /<command>` (`Command output` when the
- * command is unknown); its text stays plain, never Markdown, so backticks show as typed. `/mcp`'s ends with the link
- * `Open the MCP panel` in place of the CLI's terminal hint, which calls [onOpenMcp].
+ * command is unknown); its text stays plain, never Markdown, so backticks show as typed, except `/context`'s report, whose [blocks]
+ * (parsed off the EDT, desktop-parity spec 3.1) draw as a reply's Markdown does, so its tables read as tables. `/mcp`'s ends with the
+ * link `Open the MCP panel` in place of the CLI's terminal hint, which calls [onOpenMcp].
  */
 @Composable
-internal fun NoticeItem(row: NoticeRow, onOpenMcp: () -> Unit = {}) {
+internal fun NoticeItem(row: NoticeRow, blocks: ImmutableList<MarkdownBlock>? = null, onOpenMcp: () -> Unit = {}) {
     val colors = JewelTheme.globalColors.text
-    Row(
-        Modifier.chatColumn().padding(top = row.gap.dp.dp)
-            .thenIf(row.kind == NoticeKind.LOCAL_COMMAND) {
-                semantics(mergeDescendants = true) { contentDescription = row.command?.let { "Reply to /$it" } ?: "Command output" }
-            },
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    val modifier = Modifier.chatColumn().padding(top = row.gap.dp.dp)
+        .thenIf(row.kind == NoticeKind.LOCAL_COMMAND) {
+            semantics(mergeDescendants = true) { contentDescription = row.command?.let { "Reply to /$it" } ?: "Command output" }
+        }
+    if (blocks != null) {
+        Column(modifier) {
+            Markdown(blocks, row.text, modifier = Modifier.fillMaxWidth(), selectable = true, onUrlClick = LocalUrlHandler.current)
+        }
+        return
+    }
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         // The text takes what the link leaves, so a long notice wraps instead of pushing the link out.
         val text = Modifier.weight(1f, fill = false)
         when (row.level) {

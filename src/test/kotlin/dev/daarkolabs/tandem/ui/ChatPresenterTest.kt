@@ -24,6 +24,7 @@ import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ModelOption
+import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.UserImage
@@ -130,6 +131,32 @@ class ChatPresenterTest {
             // The tool_result at line 91 leaves the request pending; only its answer, a cancel or the result drop it.
             state.value = reduce(state.value, SessionEvent.PermissionAnswered("<request_id-97>"))
             assertNull(withTimeout(TIMEOUT) { presenter.chat.first { it.card == null } }.planBlocks)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a context notice's markdown is parsed off the EDT`() = runBlocking {
+        val state = MutableStateFlow(ChatState())
+        val threads: MutableList<String> = Collections.synchronizedList(ArrayList())
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)), parse = { text ->
+                threads += Thread.currentThread().name
+                MarkdownProcessor().processMarkdownDocument(text).toImmutableList()
+            })
+            val context = ChatEntry.Notice(
+                "n1", NoticeLevel.INFO, "## Context Usage\n\n| Category | Tokens |\n|---|---|\n| Messages | 10 |",
+                kind = NoticeKind.LOCAL_COMMAND, command = "context", runCommand = "context",
+            )
+            val usage = ChatEntry.Notice("n2", NoticeLevel.INFO, "Total cost: $0.15", kind = NoticeKind.LOCAL_COMMAND, command = "usage", runCommand = "usage")
+            state.value = ChatState(entries = listOf(context, usage))
+            val chat = withTimeout(TIMEOUT) { presenter.chat.first { c -> c.rows.count { it.row is NoticeRow } == 2 } }
+            val rows = chat.rows.filter { it.row is NoticeRow }
+            assertTrue(assertNotNull(rows[0].blocks).isNotEmpty())
+            assertNull(rows[1].blocks)
+            assertTrue(threads.isNotEmpty() && threads.none { it.startsWith("AWT-EventQueue") }, threads.toString())
         } finally {
             scope.cancel()
         }

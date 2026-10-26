@@ -702,6 +702,71 @@ class ToolWindowIdeTest {
         listOf("/usage", "/context", "/help", "/hello").forEachIndexed { index, text -> assertTrue(text in prompts[index], prompts.toString()) }
     }
 
+    // spec: the context ring opens the breakdown
+    @Test
+    fun `the context ring opens the breakdown`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        runChat("context-popover", fixtures = listOf("parity-context"), sentLog = log) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            waitFor("the context ring", 1.minutes) { ui.x(RING).present() }
+            ui.x(RING).click(Point(10, 10))
+            waitFor("the breakdown's header", 30.seconds) { described("Context window categories").present() }
+            assertTrue(described("Context window breakdown").present(), "the popover is named for assistive technology")
+            assertFalse(ui.x(MESSAGES_ROW).present(), "the category list opens collapsed")
+            described("Context window categories").click(Point(10, 10))
+            waitFor("the category rows", 30.seconds) { ui.x(MESSAGES_ROW).present() }
+            // Kept as a test artifact: header, bar, eight rows, the two collapsed groups and the two buttons.
+            takeScreenshot("context-popover")
+            waitFor("get_context_usage reached the CLI", 30.seconds) { "\"subtype\":\"get_context_usage\"" in log.readText() }
+            ui.keyboard { escape() }
+            waitFor("Escape closed the popover", 30.seconds) { !described("Context window breakdown").present() }
+        }
+    }
+
+    // spec: the context popover works from the keyboard
+    @Test
+    fun `the context popover works from the keyboard`() {
+        runChat("context-popover-keys", fixtures = listOf("parity-context")) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            waitFor("the context ring", 1.minutes) { ui.x(RING).present() }
+            // Until the composer gives Tab to the focus (D13b), Tab types a tab character in the text area: Shift+Tab goes back round
+            // the panel's focus order to the footer's last control, the ring.
+            focusPromptBox()
+            pressUntil("the ring focused", { ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) } }) { ui.x("$RING[@focused='true']").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the popover", 30.seconds) { described("Context window breakdown").present() }
+            pressUntil("the header row selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { ui.x("$HEADER_ROW[@focused='true']").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the category list", 30.seconds) { ui.x(MESSAGES_ROW).present() }
+            assertTrue(described("Context window breakdown").present(), "the header's toggle keeps the popover open")
+            ui.keyboard { escape() }
+            waitFor("Escape closed the popover and the ring has the focus", 30.seconds) {
+                !described("Context window breakdown").present() && ui.x("$RING[@focused='true']").present()
+            }
+        }
+    }
+
+    // spec: the context popover shows the CLI's error
+    @Test
+    fun `the context popover shows the CLI's error`() {
+        runChat("context-popover-error", fixtures = listOf("plain-reply")) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            waitFor("the context ring", 1.minutes) { ui.x(RING).present() }
+            ui.x(RING).click(Point(10, 10))
+            waitFor("the CLI's error and Retry", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'Could not load the breakdown: Unsupported control request subtype')]")
+                    .present() && menuItem("Retry").present()
+            }
+            takeScreenshot("context-popover-error")
+        }
+    }
+
     @Test
     fun `a bang command runs locally and Claude replies`() {
         val log = Files.createTempFile("tandem-sent", ".ndjson")
@@ -1257,6 +1322,19 @@ class ToolWindowIdeTest {
     /** A `user` frame's `message.content`, a string in the shell escape frames. */
     private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
 
+    /** Presses [press] until [done], at most [MAX_PRESSES] times, and fails as [what] when it never is. */
+    private fun Driver.pressUntil(what: String, press: Driver.() -> Unit, done: Driver.() -> Boolean) {
+        repeat(MAX_PRESSES) { presses ->
+            if (done()) return
+            press()
+            if (runCatching { waitFor(what, 2.seconds) { done() } }.isSuccess) {
+                println("$what after ${presses + 1} presses")
+                return
+            }
+        }
+        waitFor(what, 5.seconds) { done() }
+    }
+
     private fun Driver.waitForText(text: String) {
         waitFor("'$text' rendered", 2.minutes) { ui.x("//div[@class='ComposeNode' and @visible_text='$text']").present() }
     }
@@ -1333,6 +1411,18 @@ class ToolWindowIdeTest {
 
         /** Whether the IDE runs on macOS, where paste is Cmd+V. */
         val isMac: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
+
+        /** The footer's context ring. */
+        const val RING = "//div[@class='ComposeNode' and @contentdescription='Context window']"
+
+        /** The context popover's header row, the category list's toggle. */
+        const val HEADER_ROW = "//div[@class='ComposeNode' and @contentdescription='Context window categories']"
+
+        /** The popover's Messages category row, shown only while the category list is open. */
+        const val MESSAGES_ROW = "//div[@class='ComposeNode' and starts-with(@contentdescription, 'Messages,')]"
+
+        /** The most key presses a test makes to move the focus or a menu's selection to a control. */
+        const val MAX_PRESSES = 40
 
         /** A turn's footer. */
         const val FOOTER = "//div[@class='ComposeNode' and starts-with(@visible_text, 'Worked for')]"

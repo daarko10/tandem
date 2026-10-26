@@ -8,9 +8,14 @@ import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.PermissionCard
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
@@ -67,7 +72,10 @@ internal fun ChatPane(
     val reply = remember(handle.id, actions, latestReply, busy) {
         ReplyHost(::copyToClipboard, { actions.fork(handle.id) }, latestReply, busy)
     }
-    Column(Modifier.fillMaxSize()) {
+    // The chat pane's height, which caps the context popover's (desktop-parity spec 3.1: 60 % of the tool window).
+    val density = LocalDensity.current
+    var paneHeight by remember { mutableStateOf<Dp?>(null) }
+    Column(Modifier.fillMaxSize().onSizeChanged { paneHeight = with(density) { it.height.toDp() } }) {
         Box(
             Modifier.weight(1f).fillMaxWidth()
                 // The dim of spec 4.12: a scrim drawn over the list, never an offscreen layer of it.
@@ -102,6 +110,7 @@ internal fun ChatPane(
                         ?.let { manager.answer(handle.id, card.requestId, it) }
                 }
             },
+            paneHeight = paneHeight,
         )
     }
 }

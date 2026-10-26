@@ -25,6 +25,7 @@ import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
@@ -66,6 +67,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.intellij.ide.PasteProvider
 import com.intellij.openapi.actionSystem.ActionUpdateThread
@@ -91,8 +93,14 @@ import dev.daarkolabs.tandem.chat.stopTarget
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.actionSystem.provideData
@@ -147,6 +155,7 @@ internal fun PromptBar(
     focus: Boolean = false,
     onFocused: () -> Unit = {},
     onCardEscape: () -> Unit = {},
+    paneHeight: Dp? = null,
 ) {
     val composer by presenter.composer.collectAsState()
     val sending by sender.sending.collectAsState()
@@ -233,11 +242,48 @@ internal fun PromptBar(
             execute(pick(shown.copy(selected = index), insert, busy = busy || sending, composer.models))
         }
     }
+    // The ring's popover (desktop-parity spec 3.1): one controller per open popover, over the session's flows mapped off the EDT, in
+    // the popover's own scope. Its two buttons send `/context` and `/usage` as prompts; the draft and the attachments stay as they are.
+    val openPopover = remember(handle, manager, presenter, project) {
+        { popoverScope: CoroutineScope ->
+            val background = popoverScope + Dispatchers.Default
+            ContextBreakdownController(
+                handle.id,
+                handle.state.map { it.contextBreakdown }.distinctUntilChanged()
+                    .stateIn(background, SharingStarted.Eagerly, handle.state.value.contextBreakdown),
+                presenter.context,
+                handle.state.map { it.turnsEnded }.distinctUntilChanged().stateIn(background, SharingStarted.Eagerly, handle.state.value.turnsEnded),
+                handle.status,
+                manager,
+                popoverScope,
+                System.getProperty("user.home"),
+                project.basePath,
+            )
+        }
+    }
+    val sendFromPopover = { text: String ->
+        manager.send(handle.id, text)
+        ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
+        scrollToEnd()
+    }
+    // At most 60 % of the tool window's height (spec 3.1); before the pane is measured, a height that fits any tool window.
+    val popoverMaxHeight = paneHeight?.let { it * POPOVER_HEIGHT_SHARE } ?: POPOVER_FALLBACK_HEIGHT
+    val popover = remember(openPopover, popoverMaxHeight) {
+        ContextPopoverHost(
+            open = openPopover,
+            busy = presenter.busy,
+            maxHeight = popoverMaxHeight,
+            onDetailed = { sendFromPopover("/context") },
+            onUsage = { sendFromPopover("/usage") },
+        )
+    }
+    val density = LocalDensity.current
+    var columnWidth by remember { mutableStateOf<Dp?>(null) }
     val attachFiles: (List<Path>) -> Unit = { paths ->
         if (paths.isNotEmpty()) scope.launch { ComposerImages.readFiles(paths).forEach { (name, bytes) -> attach(ui, name, bytes) } }
     }
     // The box and the footer share the chat column's width less 16 dp each side, so the footer measures from the box's edges.
-    Column(Modifier.chatColumn().padding(horizontal = 16.dp)) {
+    Column(Modifier.chatColumn().onSizeChanged { columnWidth = with(density) { it.width.toDp() } }.padding(horizontal = 16.dp)) {
         ui.composerNotice.value?.let { notice ->
             InlineWarningBanner(
                 text = notice,
@@ -305,7 +351,7 @@ internal fun PromptBar(
                     menuRequest = ui.menuRequest,
                 )
             }
-            ContextRing(presenter.context)
+            CompositionLocalProvider(LocalChatColumnWidth provides columnWidth) { ContextRing(presenter.context, popover) }
         }
     }
 }
@@ -704,3 +750,9 @@ private suspend fun attach(ui: ChatUiState, name: String, bytes: ByteArray?) {
  */
 private fun committedText(ui: ChatUiState): String =
     committedDraft(ui.draft.text.toString(), ui.draft.composition?.let { it.min until it.max })
+
+/** The popover's share of the chat pane's height (desktop-parity spec 3.1). */
+private const val POPOVER_HEIGHT_SHARE: Float = 0.6f
+
+/** The popover's height cap before the pane is measured. */
+private val POPOVER_FALLBACK_HEIGHT = 400.dp

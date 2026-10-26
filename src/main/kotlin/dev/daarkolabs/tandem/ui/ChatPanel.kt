@@ -327,7 +327,7 @@ internal fun RowItem(
         is ShellRow -> ShellRowItem(row, ui, onStop)
         is TextRow -> TextRowItem(rendered, reply)
         is ToolRow -> ToolRowItem(rendered, ui)
-        is NoticeRow -> NoticeItem(row, onOpenMcp)
+        is NoticeRow -> NoticeItem(row, rendered.blocks, onOpenMcp)
         is TurnEndRow -> TurnEndItem(row)
         is ThinkingRow -> ThinkingRowItem(row, ui)
         is WorkingRow -> WorkingRowItem(row, lastFrameAt, agentExpanded)

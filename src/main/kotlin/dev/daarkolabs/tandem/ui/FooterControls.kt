@@ -26,6 +26,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -46,6 +47,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -272,18 +274,19 @@ private fun Modifier.pillSurface(filled: Boolean, focused: Boolean): Modifier {
 /**
  * The footer's context ring (spec 2.3), the last control after a 5 dp gap: how full the context window is, as an accent arc over a
  * dim track, with the tooltip `Context <value>` ([ContextFormat.value]). A click, Enter or Space opens its popover above it,
- * right-aligned: `Context window` and the value. It composes nothing, gap included, while the tokens or the window are unknown
+ * right-aligned: with [popover], the context window's breakdown ([ContextPopover], desktop-parity spec 3.1), else `Context window`
+ * and the value. It composes nothing, gap included, while the tokens or the window are unknown
  * ([ContextFormat.fraction] is null: before the first `result`, and on a reloaded transcript). It alone collects [context], so a
  * `message_start` recomposes the ring and nothing else of the footer.
  */
 @Composable
-internal fun ContextRing(context: StateFlow<ContextUsage?>) {
+internal fun ContextRing(context: StateFlow<ContextUsage?>, popover: ContextPopoverHost? = null) {
     val usage by context.collectAsState()
     val current = usage ?: return
     val fraction = ContextFormat.fraction(current) ?: return
     val value = ContextFormat.value(current) ?: return
     Spacer(Modifier.width(5.dp))
-    WithTooltip("Context $value") { RingControl(fraction, value) }
+    WithTooltip("Context $value") { RingControl(fraction, value, popover) }
 }
 
 /**
@@ -292,12 +295,21 @@ internal fun ContextRing(context: StateFlow<ContextUsage?>) {
  * focus really leaves the tool window's panel ([focusLeftListener]), which it gets no click from.
  */
 @Composable
-private fun RingControl(fraction: Float, value: String) {
+private fun RingControl(fraction: Float, value: String, popover: ContextPopoverHost?) {
     val palette = chatPalette()
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
     val focused by source.collectIsFocusedAsState()
     var open by remember { mutableStateOf(false) }
+    // Esc closed the popover: the focus goes back to the ring (desktop-parity spec 3.5).
+    var refocus by remember { mutableStateOf(false) }
+    val ringFocus = remember { FocusRequester() }
+    LaunchedEffect(refocus) {
+        if (refocus) {
+            ringFocus.requestFocus()
+            refocus = false
+        }
+    }
     val panel = LocalComponent.current
     if (open) {
         DisposableEffect(panel) {
@@ -314,7 +326,9 @@ private fun RingControl(fraction: Float, value: String) {
             .semantics(mergeDescendants = true) {
                 role = Role.Button
                 contentDescription = "Context window"
+                stateDescription = value
             }
+            .focusRequester(ringFocus)
             .onPreviewKeyEvent { event ->
                 when {
                     !open && event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.Spacebar) -> {
@@ -341,7 +355,17 @@ private fun RingControl(fraction: Float, value: String) {
                 drawArc(palette.accent, startAngle = -90f, sweepAngle = 360f * fraction, useCenter = false, topLeft = inset, size = arc, style = stroke)
             }
         }
-        if (open) {
+        if (open && popover != null) {
+            // One controller per open popover: its requests stop when the popover closes (desktop-parity spec 3.1, 4.4).
+            val scope = rememberCoroutineScope()
+            val controller = remember(popover.open) { popover.open(scope) }
+            DisposableEffect(controller) { onDispose { controller.close() } }
+            val currentHovered by rememberUpdatedState(hovered)
+            ContextPopover(popover, controller, gap, anchorHovered = { currentHovered }) { byKeyboard ->
+                open = false
+                refocus = byKeyboard
+            }
+        } else if (open) {
             PopupMenu(
                 onDismissRequest = { mode ->
                     // A click on the ring itself closes the popover through the ring (its click toggles it).

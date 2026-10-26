@@ -317,6 +317,8 @@ internal class ChatPresenter(
         live += row.key
         return when (row) {
             is TextRow -> if (old != null && old.row == row) old else RenderedRow(row, blocks(row.key, row.markdown))
+            // `/context`'s report reads as Markdown (desktop-parity spec 3.1); every other notice stays plain text.
+            is NoticeRow -> if (old != null && old.row == row) old else RenderedRow(row, if (row.markdown) blocks(row.key, row.text) else null)
             is UserRow -> {
                 val images = thumbnailsOf(row, liveImages)
                 if (old != null && old.row == row && old.images == images) old else RenderedRow(row, null, images = images)
