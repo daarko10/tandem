@@ -1521,13 +1521,24 @@ class ChatRowsBuilderTest {
     @Test
     fun `a folded prompt has its caption and the turn one footer`() {
         val footers = HashSet<String>()
-        val (_, rows) = replayWithSends(
+        val earlyActions = ArrayList<String>()
+        val (state, rows) = replayWithSends(
             "queue-fold",
             mapOf(
                 1 to listOf(SessionEvent.UserSent(QP, "Run the two commands")),
                 19 to listOf(SessionEvent.UserSent(QF, KIWI, live = true)),
             ),
-        ) { _, _, lineRows -> lineRows.rows.filterIsInstance<TurnEndRow>().forEach { footers += it.key } }
+        ) { line, _, lineRows ->
+            lineRows.rows.filterIsInstance<TurnEndRow>().forEach { footers += it.key }
+            // From F's started (queue-fold:22) to the result (:53) the turn runs: a split turn would close P's part and give its reply
+            // the hover row.
+            if (line in 22 until 53) lineRows.rows.filterIsInstance<TextRow>().filter { it.actions != null }.forEach { earlyActions += "$line:${it.key}" }
+        }
+        // One CLI turn is one visual turn (Review Focus 7): the folded prompt does not start a turn.
+        assertFalse(state.entries.single { it.id == QF }.startsTurn())
+        assertTrue(earlyActions.isEmpty(), earlyActions.toString())
+        val texts = rows.rows.filterIsInstance<TextRow>()
+        assertEquals(listOf(texts.last().key), texts.filter { it.actions != null }.map { it.key }, "only the final reply has the hover row")
         val users = rows.rows.filterIsInstance<UserRow>()
         assertEquals(2, users.size, rows.rows.toString())
         val (prompt, folded) = users
@@ -1539,6 +1550,7 @@ class ChatRowsBuilderTest {
         val at = rows.rows.indexOf(folded)
         val bash = toolUseAt("queue-fold", 14).id
         assertEquals(listOf(bash), assertIs<ToolRow>(rows.rows[at - 1]).calls.map { it.id })
+        // Only the latest turn draws a footer, so these alone do not show the turn is unsplit: the assertions above do.
         assertEquals(1, footers.size, footers.toString())
         assertEquals(1, rows.rows.count { it is TurnEndRow })
         assertTrue(rows.rows.none { it is QueuedRow })

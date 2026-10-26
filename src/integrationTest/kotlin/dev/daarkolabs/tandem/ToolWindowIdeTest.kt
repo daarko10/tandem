@@ -965,6 +965,8 @@ class ToolWindowIdeTest {
             takeScreenshot("queued-steer")
             waitForTextContaining("Sent while Claude worked")
             waitForTurnEnd()
+            // Only the latest turn draws a footer, so this alone does not show the turn is unsplit: ChatRowsBuilderTest's folded
+            // prompt replay pins that.
             assertEquals(1, ui.xx(FOOTER).list().size, "one turn, one footer")
         }
         val users = sent.filter { it.type == "user" }

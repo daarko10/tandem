@@ -60,7 +60,7 @@ object WorkingIndicator {
         for (i in rows.indices.reversed()) {
             when (val row = rows[i]) {
                 // A prompt the CLI took into the turn (its caption) is inside the turn.
-                is UserRow -> if (row.caption == null) return false
+                is UserRow -> if (row.caption != FOLDED_CAPTION) return false
                 is ShellRow -> return false
                 is ToolRow -> if (row.calls.any { it.id == callId }) return true
                 else -> Unit
