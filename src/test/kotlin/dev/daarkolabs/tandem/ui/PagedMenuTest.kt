@@ -135,6 +135,29 @@ class PagedMenuTest {
         assertEquals(PLUS_FIRST_PLUGIN, state.page)
     }
 
+    // spec: a switch's click holds the menu open on its page (17.2)
+    @Test
+    fun `hold keeps the menu open through one dismiss`() {
+        val state = PagedMenuState()
+        state.openAt(PLUS_CONNECTORS)
+        state.hold()
+        assertFalse(state.dismiss(InputMode.Keyboard, anchorHovered = false), "the request after the switch's click is refused")
+        assertTrue(state.open)
+        assertEquals(PLUS_CONNECTORS, state.page)
+        assertTrue(state.dismiss(InputMode.Keyboard, anchorHovered = false), "the next one closes as before")
+        assertFalse(state.open)
+    }
+
+    // spec: the shortcut text shows only on a menu at least 300 dp wide (17.1)
+    @Test
+    fun `the shortcut text shows only on a menu at least 300 dp wide`() {
+        assertTrue(plusShortcutShown(360.dp))
+        assertTrue(plusShortcutShown(300.dp))
+        assertFalse(plusShortcutShown(284.dp))
+        assertTrue(plusShortcutShown(plusMenuWidth(600.dp).second))
+        assertFalse(plusShortcutShown(plusMenuWidth(300.dp).second))
+    }
+
     @Test
     fun `the footer menus' digits pick on the first page alone and close the menu`() {
         val panel = JPanel()
@@ -187,7 +210,7 @@ class PagedMenuTest {
     private fun scrollsToLast(plugins: ImmutableList<PluginEntry>, page: Int, last: String, back: String, closing: String?) =
         timeoutRunBlocking(kotlin.time.Duration.parse("60s")) {
             val state = PagedMenuState().apply { openAt(page) }
-            val actions = PlusMenuActions({}, {}, {}, {})
+            val actions = PlusMenuActions({}, {}, {}, {}, {})
             // Skia's reference cleaner and Java2D's disposer start with the first rendered scene and live as long as the JVM.
             ThreadLeakTracker.longRunningThreadCreated(ApplicationManager.getApplication(), "Reference Cleaner", "Java2D Disposer")
             withContext(Dispatchers.EDT) {

@@ -38,4 +38,13 @@
         <!-- Development-only: does nothing unless -Dtandem.spike or -Dtandem.autoPrompt is set. -->
         <postStartupActivity implementation="dev.daarkolabs.tandem.ui.dev.DevStartupActivity"/>
     </extensions>
+
+    <actions>
+        <action id="Tandem.AddFilesOrPhotos"
+                class="dev.daarkolabs.tandem.ui.AddFilesOrPhotosAction"
+                text="Add Files or Photos"
+                description="Attach images to the Tandem prompt">
+            <keyboard-shortcut keymap="$default" first-keystroke="control alt shift O"/>
+        </action>
+    </actions>
 </idea-plugin>

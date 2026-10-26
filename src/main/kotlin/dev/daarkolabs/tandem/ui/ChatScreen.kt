@@ -29,6 +29,7 @@ import dev.daarkolabs.tandem.ui.rows.ReplyHost
 import dev.daarkolabs.tandem.ui.rows.copyToClipboard
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import org.jetbrains.jewel.foundation.actionSystem.provideData
 import org.jetbrains.jewel.foundation.modifier.thenIf
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 
@@ -78,7 +79,11 @@ internal fun ChatPane(
     // Read only by the open popover (through the provider), so a resize recomposes neither the pane nor the prompt bar.
     val paneHeight = remember { mutableStateOf<Dp?>(null) }
     val paneHeightOf: () -> Dp? = remember(paneHeight) { { paneHeight.value } }
-    Column(Modifier.fillMaxSize().onSizeChanged { paneHeight.value = with(density) { it.height.toDp() } }) {
+    Column(
+        Modifier.fillMaxSize().onSizeChanged { paneHeight.value = with(density) { it.height.toDp() } }
+            // `Tandem.AddFilesOrPhotos` (spec 17.4): wherever the focus is in this pane, while none of the composer's menus is open.
+            .provideData { composerAttachFor(ui.attach, ui.openMenus.intValue)?.let { set(COMPOSER_ATTACH.name, it) } },
+    ) {
         Box(
             Modifier.weight(1f).fillMaxWidth()
                 // The dim of spec 4.12: a scrim drawn over the list, never an offscreen layer of it.

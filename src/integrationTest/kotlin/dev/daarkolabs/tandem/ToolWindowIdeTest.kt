@@ -877,9 +877,80 @@ class ToolWindowIdeTest {
         assertEquals(1, sent.count { it.type == "user" }, "only the first prompt went out: ${sent.map { it.type }}")
     }
 
-    // spec: Connectors opens the MCP panel
+    // spec: the plus menu shows where things come from (9.8 IDE test 1)
     @Test
-    fun `Connectors opens the MCP panel`() {
+    fun `the plus menu shows where things come from`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // Before any prompt: parity-add-dir's answers list mcpServers, so the fake serves mcp_status from its table (one dynamic
+        // server, no connector).
+        val sent = runChat("plus-menu-sources", fixtures = listOf("parity-add-dir"), sentLog = log, browserLog = true) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            widenToolWindow()
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            // Page 1: exactly four rows, in the desktop's order (Add folder joins in D6b).
+            assertEquals(4, ui.xx(MENU_ITEM).list().size, "page 1 has four rows")
+            assertTrue(
+                ui.x(
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                        "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
+                ).present(),
+                "Add files or photos, Slash commands, Connectors, Plugins in document order",
+            )
+            assertTrue(containing(ADD_FILES_SHORTCUT).present(), "the shortcut text on a wide menu (deviation 28)")
+            ui.keyboard { escape() }
+            waitFor("the menu closed", 30.seconds) { ui.xx(MENU_ITEM).list().isEmpty() }
+            // Kept as test artifacts: page 1 in a 350 px tool window, then in a 260 px one, where the shortcut leaves the row.
+            narrowToolWindow(350)
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu at 350 px", 30.seconds) { plusItem("Plugins").present() }
+            takeScreenshot("plus-menu-page-1")
+            ui.keyboard { escape() }
+            waitFor("the menu closed", 30.seconds) { ui.xx(MENU_ITEM).list().isEmpty() }
+            narrowToolWindow(260)
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu at 260 px", 30.seconds) { plusItem("Add files or photos").present() }
+            assertFalse(containing(ADD_FILES_SHORTCUT).present(), "no shortcut text on a narrow menu (spec 17.1)")
+            takeScreenshot("plus-menu-page-1-narrow")
+            ui.keyboard { escape() }
+            waitFor("the menu closed", 30.seconds) { ui.xx(MENU_ITEM).list().isEmpty() }
+            widenToolWindow()
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Connectors").present() }
+            plusItem("Connectors").click(Point(10, 10))
+            waitFor("the Connectors page", 30.seconds) {
+                plusItem("‹ Connectors").present() && plusItem("Browse connectors").present() && plusItem("Manage connectors").present()
+            }
+            waitForText("No claude.ai connectors in this session.")
+            takeScreenshot("connectors-page")
+            plusItem("Browse connectors").click(Point(10, 10))
+            waitFor("the menu closed", 30.seconds) { !plusItem("‹ Connectors").present() }
+            waitFor("the connectors page opened in the browser", 30.seconds) { "__browse__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            plusItem("Plugins").click(Point(10, 10))
+            waitFor("the catalogue's plugin row", 1.minutes) { described("probe-kit plugin").present() }
+            described("probe-kit plugin").click(Point(10, 10))
+            waitForText("Skills")
+            assertTrue(
+                ui.x(
+                    "//div[@class='ComposeNode' and @visible_text='Skills']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:greet']" +
+                        "/following::div[@class='ComposeNode' and @visible_text='Commands']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:hello']",
+                ).present(),
+                "Skills, /probe-kit:greet, Commands, /probe-kit:hello in document order",
+            )
+            ui.keyboard { escape() }
+        }
+        val browse = sent.filter { it.type == "__browse__" }
+        assertEquals(listOf("https://claude.ai/settings/connectors"), browse.map { it["url"]!!.jsonPrimitive.content })
+    }
+
+    // spec: Manage connectors opens the MCP panel (9.8 IDE test 2)
+    @Test
+    fun `Manage connectors opens the MCP panel`() {
         val log = Files.createTempFile("tandem-sent", ".ndjson")
         runChat("plus-menu-connectors", fixtures = listOf("mcp-status"), sentLog = log) {
             newSession()
@@ -887,7 +958,11 @@ class ToolWindowIdeTest {
             iconButton("Add").click(Point(10, 10))
             waitFor("the + menu", 30.seconds) { plusItem("Connectors").present() }
             plusItem("Connectors").click(Point(10, 10))
+            // mcp-status's three servers are dynamic: no connector.
+            waitForText("No claude.ai connectors in this session.")
+            plusItem("Manage connectors").click(Point(10, 10))
             waitFor("the MCP panel", 1.minutes) { described("MCP servers panel").present() }
+            assertFalse(plusItem("‹ Connectors").present(), "the menu closed before the panel opened")
         }
     }
 
@@ -1197,6 +1272,14 @@ class ToolWindowIdeTest {
             val window = service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")
             val width = window.getComponent().getWidth()
             if (width < WIDE) window.stretchWidth(WIDE - width)
+        }
+    }
+
+    /** Makes the tool window [width] px wide ([widenToolWindow]'s `stretchWidth`, by a negative difference when narrowing). */
+    private fun Driver.narrowToolWindow(width: Int) {
+        withContext(OnDispatcher.EDT) {
+            val window = service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")
+            window.stretchWidth(width - window.getComponent().getWidth())
         }
     }
 
@@ -1620,6 +1703,9 @@ class ToolWindowIdeTest {
 
         /** Whether the IDE runs on macOS, where paste is Cmd+V. */
         val isMac: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
+
+        /** `Add files or photos`' shortcut as the IDE draws it (deviation 28). */
+        val ADD_FILES_SHORTCUT: String = if (isMac) "⌥⇧⌘O" else "Ctrl+Alt+Shift+O"
 
         /** The /usage card's description (desktop-parity spec 3.7). */
         const val USAGE_CARD = "Usage for this session"

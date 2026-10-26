@@ -3,7 +3,9 @@ package dev.daarkolabs.tandem.ui
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshots.SnapshotStateList
@@ -111,6 +113,18 @@ internal class ChatUiState {
 
     /** A footer menu that `/model`, `/permissions` or `/mode` asked to open; the control opens it and clears the request. */
     val menuRequest: MutableState<FooterMenu?> = mutableStateOf(null)
+
+    /**
+     * How many of the composer's menus are open (desktop-parity spec 14.3, 17.4): the mode, model and effort menus, the ring's
+     * popover and the `+` menu each count themselves in while open. While any is, the chat pane offers no composer action's key.
+     */
+    val openMenus: MutableIntState = mutableIntStateOf(0)
+
+    /**
+     * The composer's `Add files or photos` (spec 17.4): set by the prompt bar while it is composed, null otherwise. The chat pane
+     * offers it to `Tandem.AddFilesOrPhotos` while no menu is open ([composerAttachFor]).
+     */
+    var attach: ComposerAttach? = null
 
     /** The `+` menu's `Slash commands` (MCP spec 3.4): `/` in an empty draft, so the palette opens as typing it does; else nothing. */
     fun openPalette() {

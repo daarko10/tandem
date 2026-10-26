@@ -45,6 +45,13 @@ private const val CONFIG_DIR_PROPERTY: String = "tandem.configDir"
 private const val AUTO_PROMPT_PROPERTY: String = "tandem.autoPrompt"
 
 /**
+ * The claude.ai page that lists the account's connectors, which the `+` menu's `Browse connectors` opens in the browser
+ * (docs/superpowers/specs/2026-10-22-desktop-parity-design.md 17.2). Unverified (spec 11 item 19): the desktop app opens a directory
+ * of its own, which has no address.
+ */
+const val CONNECTORS_URL: String = "https://claude.ai/settings/connectors"
+
+/**
  * The project's sessions: owns the [SessionManager], which runs every session's `claude` in this service's scope, so the platform
  * ends them all when the project closes. [ensureStarted] opens the sessions that were open last time, keeps the workspace file up to
  * date and starts the [SessionNotifier].

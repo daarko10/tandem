@@ -39,6 +39,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
@@ -109,6 +110,7 @@ import com.intellij.ide.PasteProvider
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.PlatformDataKeys
+import com.intellij.openapi.components.service
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.Attachments
@@ -129,6 +131,8 @@ import dev.daarkolabs.tandem.chat.shellCommand
 import dev.daarkolabs.tandem.chat.slashIntercept
 import dev.daarkolabs.tandem.chat.stopTarget
 import dev.daarkolabs.tandem.chat.withCommand
+import dev.daarkolabs.tandem.ide.CONNECTORS_URL
+import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
@@ -338,6 +342,24 @@ internal fun PromptBar(
     val attachFiles: (List<Path>) -> Unit = { paths ->
         if (paths.isNotEmpty()) scope.launch { ComposerImages.readFiles(paths).forEach { (name, bytes) -> attach(ui, name, bytes) } }
     }
+    // `Tandem.AddFilesOrPhotos` (spec 17.4): the `+` row's own path, offered to the chat pane while this bar is composed.
+    val currentAttachFiles by rememberUpdatedState(attachFiles)
+    DisposableEffect(handle.id) {
+        ui.attach = ComposerAttach { ComposerImages.chooseImagesLater(project, onChosen = { currentAttachFiles(it) }) }
+        onDispose { ui.attach = null }
+    }
+    // The `+` menu's Connectors page (spec 17.2): the MCP panel's controller, built as McpPanelHost builds it but started on open.
+    val opener = remember(project) { project.service<TandemSessions>().browserOpener }
+    val connectorController: (CoroutineScope) -> McpPanelController = remember(handle, manager, opener) {
+        { pageScope ->
+            connectorPageController(
+                handle.id, handle.mcpServers, handle.mcpAuth, handle.mcpLoginHinted, handle.status, manager, opener, pageScope,
+                endReason = { endNotice(handle.state.value) },
+            )
+        }
+    }
+    // In the session's scope, which only its close cancels: the menu's own scope ends with the menu, before the page opens.
+    val browseConnectors: () -> Unit = remember(handle, opener) { { handle.scope.launch { opener.open(CONNECTORS_URL) } } }
     // The box and the footer share the chat column's width less 16 dp each side, so the footer measures from the box's edges.
     Column(Modifier.chatColumn().onSizeChanged { columnWidth.value = with(density) { it.width.toDp() } }.padding(horizontal = 16.dp)) {
         ui.composerNotice.value?.let { notice ->
@@ -363,6 +385,8 @@ internal fun PromptBar(
             columnWidth = columnWidthOf,
             onAdd = { ComposerImages.chooseImagesLater(project, onChosen = attachFiles) },
             onDrop = attachFiles,
+            connectorController = connectorController,
+            onBrowseConnectors = browseConnectors,
             onAction = { action ->
                 when (action) {
                     ComposerAction.Send -> send()
@@ -421,7 +445,8 @@ internal fun PromptBar(
  * [cardOpen], whether the slash palette is open ([palette], read at each key, so never a frame-old one) and whether the draft is one
  * of Tandem's own commands ([interceptable], which Enter runs even while busy), and Send is disabled
  * while [sending]; [onAction] does what they return. `+` opens the paged menu ([AddButton], [PlusMenu]): `Add files or photos` calls
- * [onAdd], `Slash commands` puts `/` in an empty draft and focuses the text area, `Connectors` opens the MCP panel, and the Plugins
+ * [onAdd], `Slash commands` puts `/` in an empty draft and focuses the text area, `Connectors` turns to its page, whose controller
+ * comes from [connectorController] and whose `Browse connectors` calls [onBrowseConnectors] (spec 17.2), and the Plugins
  * pages list [plugins] (whether the list is known yet is [pluginsKnown]); the menu's width comes from the chat column's width
  * ([columnWidth], [plusMenuWidth]) and its height from the room above the box. Files dropped on the box go to [onDrop], and the box draws
  * its focused border while a drag of files hovers it. With [focus] the text area takes the focus, and then [onFocused] is called;
@@ -447,6 +472,8 @@ private fun PromptBox(
     onAdd: () -> Unit,
     onDrop: (List<Path>) -> Unit,
     onAction: (ComposerAction) -> Unit,
+    connectorController: (CoroutineScope) -> McpPanelController,
+    onBrowseConnectors: () -> Unit,
 ) {
     val inputFocus = remember { FocusRequester() }
     val focused = inputFocused.value
@@ -459,6 +486,7 @@ private fun PromptBox(
     LaunchedEffect(refocus) { if (refocus > 0) inputFocus.requestFocus() }
     val currentOnDrop by rememberUpdatedState(onDrop)
     val currentOnAdd by rememberUpdatedState(onAdd)
+    val currentOnBrowse by rememberUpdatedState(onBrowseConnectors)
     val currentOnAction by rememberUpdatedState(onAction)
     // Derived, so that the box recomposes when the hint comes or goes, not at every keystroke.
     val currentPalette by rememberUpdatedState(palette)
@@ -536,14 +564,17 @@ private fun PromptBox(
                             ui.openPalette()
                             refocus++
                         },
-                        // Until the Connectors page (D15): the MCP panel, opened as a user action.
-                        onConnectors = { menu -> menu.openMcpFromMenu(ui) },
+                        onBrowseConnectors = { currentOnBrowse() },
+                        // The MCP panel, opened as a user action, after the menu closed (spec 17.2).
+                        onManageConnectors = { menu -> menu.openMcpFromMenu(ui) },
                         onCommand = { command ->
                             ui.draft.setTextAndPlaceCursorAtEnd(withCommand(ui.draft.text.toString(), command.command))
                             refocus++
                         },
                     )
                 },
+                openMenus = ui.openMenus,
+                connectorController = connectorController,
             )
             // The text area, and over it `Type to filter` after a lone `/` while the palette is open (MCP spec 14): its own
             // placeholder shows only while it is empty.
@@ -679,8 +710,9 @@ private fun composerKeyEvent(
  * the secondary tier, described as `Add`, whose paged menu ([PlusMenu]) opens above it, left-aligned, on a click, Enter or Space. A
  * click on the `+` while the menu is open closes it, as a footer control's does. The menu's keys beyond Jewel's own (← back one page)
  * come from AWT's key dispatch ([PagedMenuKeys], [plusMenuTurn]). A close by a key (Esc, or Enter on a row that does not hand the
- * focus on) gives the focus back to the `+`; `Slash commands`, a plugin's command and `Connectors` hand it to the text area or the
- * MCP panel instead. The menu is [width] wide at most and at least ([plusMenuWidth]) and at most [maxHeight] high.
+ * focus on) gives the focus back to the `+`; `Slash commands`, a plugin's command and `Manage connectors` hand it to the text area
+ * or the MCP panel instead. While open the menu counts in [openMenus]; on its Connectors page it holds one controller from
+ * [connectorController] ([rememberConnectorsPage]). The menu is [width] wide at most and at least ([plusMenuWidth]) and at most [maxHeight] high.
  *
  * [modifier] (the button's padding in the row) goes on an outer box; the menu is placed in the inner, unpadded one, so that
  * [AboveAnchor] measures from the button's own edges, as `FooterControl` places its menu.
@@ -693,8 +725,20 @@ private fun AddButton(
     width: Pair<Dp, Dp>,
     maxHeight: Dp?,
     actions: PlusMenuActions,
+    openMenus: MutableIntState,
+    connectorController: (CoroutineScope) -> McpPanelController,
 ) {
     val state = remember { PagedMenuState() }
+    // Counted among the composer's open menus while open, so the composer's action keys stand down (spec 7, 17.4).
+    val open = state.open
+    DisposableEffect(open) {
+        if (open) openMenus.intValue++
+        onDispose { if (open) openMenus.intValue-- }
+    }
+    // Read as the menu opens, so a rebinding shows at the next opening and an unbound action shows nothing (spec 17.4).
+    val addFilesShortcut = remember(open) { if (open) addFilesKeybinding() else null }
+    // One controller per open Connectors page, closed when the page leaves or the menu closes (spec 17.2).
+    val connectors = if (open && state.page == PLUS_CONNECTORS) rememberConnectorsPage(connectorController) else null
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
@@ -711,9 +755,10 @@ private fun AddButton(
                 handsFocus.value = true
                 actions.onSlashCommands()
             },
-            onConnectors = {
+            onBrowseConnectors = actions.onBrowseConnectors,
+            onManageConnectors = { menu ->
                 handsFocus.value = true
-                actions.onConnectors(state)
+                actions.onManageConnectors(menu)
             },
             onCommand = { command ->
                 handsFocus.value = true
@@ -768,6 +813,8 @@ private fun AddButton(
                         closed
                     },
                     actions = handing,
+                    connectors = connectors,
+                    addFilesShortcut = addFilesShortcut,
                 )
             }
         }
@@ -776,13 +823,14 @@ private fun AddButton(
 
 /**
  * What the `+` menu's rows do: [onAddFiles] the image chooser (after the menu closed), [onSlashCommands] `/` and the palette,
- * [onConnectors] the MCP panel (until the Connectors page, D15, through [openMcpFromMenu]), and [onCommand] a plugin's command into
- * the draft.
+ * [onBrowseConnectors] claude.ai's connectors page in the browser (after the menu closed), [onManageConnectors] the MCP panel (through
+ * [openMcpFromMenu], which closes the menu first), and [onCommand] a plugin's command into the draft.
  */
 internal class PlusMenuActions(
     val onAddFiles: () -> Unit,
     val onSlashCommands: () -> Unit,
-    val onConnectors: (PagedMenuState) -> Unit,
+    val onBrowseConnectors: () -> Unit,
+    val onManageConnectors: (PagedMenuState) -> Unit,
     val onCommand: (PluginCommand) -> Unit,
 )
 
@@ -790,7 +838,8 @@ internal class PlusMenuActions(
  * The `+` menu (desktop-parity spec 3.3, 17.1, 17.3), [gapPx] above its anchor and left-aligned, on [state]'s page, every page
  * between [width]'s bounds and at most [maxHeight] high. Each page is one passive item ([pagedRows], spec open item 6): its `‹` row
  * and its closing line stay put while its rows scroll ([ScrolledRows]) under the cap, the keyboard's selection
- * brought into view. Page [PLUS_MAIN]: `Add files or photos`, `Slash commands`, `Connectors ›` and `Plugins ›`, each with its icon.
+ * brought into view. Page [PLUS_MAIN]: `Add files or photos` (with [addFilesShortcut], spec 17.1), `Slash commands`, `Connectors ›`
+ * and `Plugins ›`, each with its icon. Page [PLUS_CONNECTORS]: [connectors] ([connectorsPage]).
  * Page [PLUS_PLUGINS]: `‹ Plugins`, one row per plugin of [plugins] (or the line that says why there is none, [pluginsKnown]), the
  * `/plugin` hint. Page [PLUS_FIRST_PLUGIN] + i: `‹ <label>`, then its skills and its commands under their headings; a pick closes the
  * menu and calls [PlusMenuActions.onCommand]. Names and descriptions are config text: plain [Text].
@@ -805,6 +854,8 @@ internal fun PlusMenu(
     gapPx: Int,
     onDismissRequest: (InputMode) -> Boolean,
     actions: PlusMenuActions,
+    connectors: ConnectorsPage? = null,
+    addFilesShortcut: Set<String>? = null,
 ) {
     val palette = chatPalette()
     val small = smallTextStyle()
@@ -826,7 +877,19 @@ internal fun PlusMenu(
             plugin != null -> pluginPage(state, page, pageCap, plugin, palette, small, actions)
             // A plugin's page whose plugin left the list (a new init) shows the Plugins page.
             page == PLUS_PLUGINS || page >= PLUS_FIRST_PLUGIN -> pluginsPage(state, page, pageCap, plugins, pluginsKnown, palette, small)
-            else -> mainPage(state, page, pageCap, palette, actions)
+            page == PLUS_CONNECTORS && connectors != null -> connectorsPage(
+                connectors.model,
+                pageCap,
+                connectors.noteError,
+                onBack = { state.show(PLUS_MAIN) },
+                onBrowse = {
+                    state.close()
+                    actions.onBrowseConnectors()
+                },
+                onManage = { actions.onManageConnectors(state) },
+                onToggle = { row -> onConnectorRow(row, state, connectors.run) },
+            )
+            else -> mainPage(state, page, pageCap, palette, actions, addFilesShortcut, plusShortcutShown(width.second))
         }
     }
 }
@@ -838,7 +901,7 @@ internal fun PlusMenu(
  * Jewel's own menu items ([PageRow]), which the menu's Up and Down reach through the focus order, and the focused one is brought
  * into view inside the inner scroll. The scroll starts at the top of each [page].
  */
-private fun MenuScope.pagedRows(
+internal fun MenuScope.pagedRows(
     page: Int,
     cap: Dp?,
     header: (@Composable () -> Unit)? = null,
@@ -911,7 +974,14 @@ private object ScrolledRowsPolicy : MeasurePolicy {
  * then asks the menu to close, as Jewel's items do, so a page turn's [PagedMenuState.show] holds it open as before.
  */
 @Composable
-private fun PageRow(onClick: () -> Unit, iconKey: IconKey? = null, content: @Composable () -> Unit) {
+internal fun PageRow(
+    onClick: () -> Unit,
+    iconKey: IconKey? = null,
+    enabled: Boolean = true,
+    keybinding: Set<String>? = null,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
     val style = JewelTheme.menuStyle
     val metrics = style.metrics.itemMetrics
     val colors = style.colors.itemColors
@@ -923,15 +993,17 @@ private fun PageRow(onClick: () -> Unit, iconKey: IconKey? = null, content: @Com
     val focused by source.collectIsFocusedAsState()
     val pressed by source.collectIsPressedAsState()
     LaunchedEffect(hovered) { if (hovered) focus.requestFocus() }
-    val state = MenuItemState.of(selected = false, enabled = true, focused = focused, hovered = hovered, pressed = pressed)
+    val state = MenuItemState.of(selected = false, enabled = enabled, focused = focused, hovered = hovered, pressed = pressed)
     val background by colors.backgroundFor(state)
     val contentColor by colors.contentFor(state)
+    val keybindingColor by colors.keybindingTintFor(state)
     Box(
         Modifier.focusRequester(focus)
-            .selectable(selected = false, interactionSource = source, indication = null) {
+            .selectable(selected = false, enabled = enabled, interactionSource = source, indication = null) {
                 onClick()
                 controller.closeAll(inputModes.inputMode, true)
             }
+            .then(modifier)
             .fillMaxWidth(),
     ) {
         CompositionLocalProvider(LocalContentColor provides contentColor, LocalTextStyle provides LocalTextStyle.current.copy(color = contentColor)) {
@@ -955,6 +1027,15 @@ private fun PageRow(onClick: () -> Unit, iconKey: IconKey? = null, content: @Com
             ) {
                 if (iconKey != null) Icon(iconKey, contentDescription = null, modifier = Modifier.size(metrics.iconSize))
                 Box(Modifier.weight(1f)) { content() }
+                // Jewel's own item draws its shortcut so: after the content, never ellipsised, dim (spec 17.1).
+                if (!keybinding.isNullOrEmpty()) {
+                    Text(
+                        keybinding.joinToString(" "),
+                        color = keybindingColor,
+                        maxLines = 1,
+                        modifier = Modifier.padding(metrics.keybindingsPadding),
+                    )
+                }
             }
         }
     }
@@ -962,7 +1043,7 @@ private fun PageRow(onClick: () -> Unit, iconKey: IconKey? = null, content: @Com
 
 /** A separator inside a [pagedRows] page, drawn as Jewel's menu separator is: its height, padding, thickness and colour. */
 @Composable
-private fun PageSeparator() {
+internal fun PageSeparator() {
     val style = JewelTheme.menuStyle
     val metrics = style.metrics.itemMetrics
     Box(Modifier.height(metrics.separatorHeight), contentAlignment = Alignment.Center) {
@@ -975,18 +1056,36 @@ private fun PageSeparator() {
     }
 }
 
-/** The `+` menu's first page (spec 3.3, 17.1): four rows in the desktop's order, each with its icon. */
-private fun MenuScope.mainPage(state: PagedMenuState, page: Int, cap: Dp?, palette: ChatPalette, actions: PlusMenuActions) {
+/**
+ * The `+` menu's first page (spec 3.3, 17.1): four rows in the desktop's order, each with its icon. `Add files or photos` shows
+ * [shortcut] at its end when [shortcutShown] ([plusShortcutShown]), else in its tooltip; nothing when the action is unbound.
+ */
+private fun MenuScope.mainPage(
+    state: PagedMenuState,
+    page: Int,
+    cap: Dp?,
+    palette: ChatPalette,
+    actions: PlusMenuActions,
+    shortcut: Set<String>?,
+    shortcutShown: Boolean,
+) {
     pagedRows(page, cap) {
-        PageRow(iconKey = AllIconsKeys.Actions.Attach, onClick = {
-            state.close()
-            actions.onAddFiles()
-        }) { MenuLabel("Add files or photos") }
+        PageRow(
+            iconKey = AllIconsKeys.Actions.Attach,
+            keybinding = shortcut.takeIf { shortcutShown },
+            onClick = {
+                state.close()
+                actions.onAddFiles()
+            },
+        ) {
+            val tip = shortcut?.takeUnless { shortcutShown }?.joinToString(" ")
+            if (tip != null) WithTooltip("Add files or photos ($tip)") { MenuLabel("Add files or photos") } else MenuLabel("Add files or photos")
+        }
         PageRow(iconKey = AllIconsKeys.Nodes.Console, onClick = {
             state.close()
             actions.onSlashCommands()
         }) { MenuLabel("Slash commands") }
-        PageRow(iconKey = AllIconsKeys.Webreferences.Server, onClick = { actions.onConnectors(state) }) {
+        PageRow(iconKey = AllIconsKeys.Webreferences.Server, onClick = { state.show(PLUS_CONNECTORS) }) {
             MenuLabel("Connectors") { Text("›", color = palette.dim) }
         }
         PageRow(iconKey = AllIconsKeys.Nodes.Plugin, onClick = { state.show(PLUS_PLUGINS) }) {
@@ -1078,7 +1177,7 @@ private fun CommandRow(command: PluginCommand, palette: ChatPalette, small: Text
 
 /** A page's first row, `‹ <title>`, above the page's scroll, which turns the menu back with [back]. */
 @Composable
-private fun BackRow(title: String, palette: ChatPalette, back: () -> Unit) {
+internal fun BackRow(title: String, palette: ChatPalette, back: () -> Unit) {
     PageRow(onClick = back) {
         Text(
             buildAnnotatedString {
@@ -1094,7 +1193,7 @@ private fun BackRow(title: String, palette: ChatPalette, back: () -> Unit) {
 
 /** A row's label, one line, ellipsised in the room [end] leaves at the row's end (spec 3.3, Size). */
 @Composable
-private fun MenuLabel(label: String, modifier: Modifier = Modifier, end: @Composable RowScope.() -> Unit = {}) {
+internal fun MenuLabel(label: String, modifier: Modifier = Modifier, end: @Composable RowScope.() -> Unit = {}) {
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(12.dp))
