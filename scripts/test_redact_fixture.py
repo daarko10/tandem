@@ -238,6 +238,47 @@ class RedactTest(unittest.TestCase):
         self.assertNotIn("leaked", json.dumps(out))
         self.assertEqual("", err)
 
+    def test_context_category_ids_are_kept(self):
+        (out,), err = self.redact({"type": "control_response", "response": {"subtype": "success", "request_id": "r",
+            "response": {"categories": [{"id": "system_prompt", "name": "System prompt", "tokens": 5},
+                                        {"id": "free_space", "name": "Free", "tokens": 7}]}}})
+        self.assertEqual(["system_prompt", "free_space"],
+                         [c["id"] for c in out["response"]["response"]["categories"]])
+        self.assertEqual("", err)
+
+    def test_submit_uuid_is_an_id(self):
+        (out,), err = self.redact({"type": "system", "subtype": "local_command",
+                                   "submitUuid": "99999999-2222-4333-8444-555555555555"})
+        self.assertRegex(out["submitUuid"], r"^<submitUuid-\d+>$")
+        self.assertNotIn("leaked", json.dumps(out))
+        self.assertEqual("", err)
+
+    def test_usage_share_names_are_renamed(self):
+        def window(servers):
+            return {"mcp_servers": servers, "agents": [{"name": "general-purpose", "pct": 5},
+                                                       {"name": "my-agent", "pct": 3}],
+                    "skills": [{"name": "my-skill", "pct": 1}], "plugins": [{"name": "my-plugin", "pct": 1}]}
+
+        (out,), _ = self.redact({"type": "control_response", "response": {"subtype": "success", "request_id": "r",
+            "response": {"behaviors": {
+                "day": window([{"name": "corp-x", "pct": 2}, {"name": "corp-y", "pct": 1}]),
+                "week": window([{"name": "corp-x", "pct": 4}])}}}})
+        day = out["response"]["response"]["behaviors"]["day"]
+        week = out["response"]["response"]["behaviors"]["week"]
+        self.assertEqual(["server-a", "server-b"], [e["name"] for e in day["mcp_servers"]])
+        self.assertEqual(["server-a"], [e["name"] for e in week["mcp_servers"]])
+        self.assertEqual([2, 1], [e["pct"] for e in day["mcp_servers"]])
+        self.assertEqual(["general-purpose", "agent-a"], [e["name"] for e in day["agents"]])
+        self.assertEqual(["general-purpose", "agent-a"], [e["name"] for e in week["agents"]])
+        self.assertEqual(["skill-a"], [e["name"] for e in day["skills"]])
+        self.assertEqual(["plugin-a"], [e["name"] for e in day["plugins"]])
+
+    def test_path_stops_at_a_backtick_and_a_trailing_colon(self):
+        (out,), _ = self.redact({"type": "system", "subtype": "x", "note": "rule to `/home/u/.claude/CLAUDE.md`: when"})
+        self.assertEqual("rule to `<path>`: when", out["note"])
+        (out,), _ = self.redact({"type": "system", "subtype": "x", "note": "see /home/u/x.md: now"})
+        self.assertEqual("see <path>: now", out["note"])
+
     def test_merged_send_uuids_get_the_placeholders_of_their_sends(self):
         (stream, line), err = self.redact(
             {"type": "command_lifecycle", "command_uuid": "11111111-2222-4333-8444-555555555555", "state": "queued"},

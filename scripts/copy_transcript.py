@@ -4,8 +4,9 @@
 Usage: copy_transcript.py <work-dir> <raw-stream.ndjson> <out-dir> <name>
 
 The stream's system/init lines name the session. The transcript of the last session id they show is copied to
-<out-dir>/<name>.jsonl; when an earlier, different id shows up too (the fork scenario), that session's transcript is
-copied to <out-dir>/<name>-origin.jsonl. Transcripts are read from
+<out-dir>/<name>.jsonl; when an earlier, different id shows up too (the fork scenario), the first id's transcript is
+copied to <out-dir>/<name>-origin.jsonl; the ids between them (add-dir-spawn has two forks) are named on stderr and
+not copied. Transcripts are read from
 ${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<key>/<session id>.jsonl, where <key> is computed from <work-dir> (the
 directory `claude` ran in) as the plugin's TranscriptFolder.key does.
 
@@ -84,13 +85,13 @@ def main(work_dir: str, stream: str, out_dir: str, name: str) -> None:
     ids = session_ids(stream)
     if not ids:
         fail(f"no system/init line with a session_id in {stream}")
-    if len(ids) > 2:
-        fail(f"{stream} shows {len(ids)} sessions; expected one, or two for a fork")
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     folder = os.path.join(config_dir, "projects", folder_key(work_dir))
     copies = [(ids[-1], f"{name}.jsonl")]
-    if len(ids) == 2:
+    if len(ids) >= 2:
         copies.append((ids[0], f"{name}-origin.jsonl"))
+    for between in ids[1:-1]:  # more than two sessions (add-dir-spawn): the forks between the first and the last
+        print(f"{between} not copied: only the first and the last session's transcripts are", file=sys.stderr)
     for session_id, _ in copies:
         check(os.path.join(folder, f"{session_id}.jsonl"), session_id)
     os.makedirs(out_dir, exist_ok=True)

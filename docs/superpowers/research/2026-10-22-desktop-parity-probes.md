@@ -197,6 +197,31 @@ So a running stream-json session can only gain a subfolder of its cwd (or of a l
 
 "Add files or photos" is the composer's existing attachment action (images, polish round). "Slash commands" opens the palette and "Connectors" the connectors list, both from the MCP round (`2026-10-21-mcp-probes.md` 3.4, 3.5). Nothing new on the wire.
 
+### 2.6 --add-dir at spawn and on resume
+
+**Recorded** (`parity-add-dir-spawn`, claude 2.1.310, `scripts/record-scenario.sh add-dir-spawn scratch/rec-add-dir --model claude-sonnet-5-5`; every process without `--safe-mode`, with `--setting-sources project,local --strict-mcp-config`, from two empty directories A and B outside the working directory; the paths read `<path>` after the redactor, so the checks below were made on the raw stream before it). The stream holds the five processes' stdout in order; the `system/init` lines are `:4`, `:19`, `:34`, `:49`, `:64` and the `result` lines `:14`, `:29`, `:44`, `:59`, `:74`:
+
+| Process | Argv after the common flags | Init (line) | `additional_directories` | `session_id` |
+| --- | --- | --- | --- | --- |
+| 1 spawn | `--add-dir A` | `:4` | `[A]` | S |
+| 2 resume | `--resume S --add-dir A --add-dir B` | `:19` | `[A, B]` | S |
+| 3 fork at the first reply | `--resume S --fork-session --session-id G --resume-session-at <reply uuid> --add-dir A` | `:34` | `[A]` | G |
+| 4 plain fork | `--resume S --fork-session --session-id F --add-dir A` | `:49` | `[A]` | F |
+| 5 resume without A | `--resume S --add-dir B` | `:64` | `[B]` | S |
+
+- The scenario fails a run whose fork inits do not carry the `--session-id` passed (`add_dir_spawn`), and this run passed: G and F are the ids the forks were given, S is the id of processes 1, 2 and 5 (`<session_id-4>`, the forks' `<session_id-41>` and `<session_id-60>` after the redactor).
+- Every `result` is `subtype:"success"`, `is_error:false`; no assistant line has an `error` (0 of 5); every turn ran on `claude-sonnet-5-5`. The replies are `one`, `two`, `three`, `four`, `five`.
+- The resume keeps the transcript: `transcripts/parity-add-dir-spawn-origin.jsonl` holds turn one (`:3` user, `:19` assistant), turn two (`:27`, `:30`; the user line's `parentUuid` is the first turn's last attachment) and turn five (`:36`, `:39`; `parentUuid` is turn two's reply, `:30`) under one `sessionId`, `<session_id-4>`. The respawn with `--add-dir B` alone (process 5) continues the chain from turn two's reply, not from the fork.
+- The plain fork's transcript (`transcripts/parity-add-dir-spawn.jsonl`, the twin by name) copies the origin's whole chain (a plain fork cuts nothing) under its own `sessionId` (`<session_id-60>`): turn one (`:6`, `:18`), turn two (`:20`, `:23`), and the fork's prompt `four` (`:24`) with `parentUuid` the second reply (`<uuid-30>`, `:23`). The fork at the first reply (process 3) has no transcript copy (`copy_transcript.py` names it on stderr); its stream (`:34` to `:44`) is what D2b's test reads.
+- The removal: the fifth init lists exactly one directory, and the raw stream shows it is B (A left out of the resume's argv is not restored from the session).
+
+Branches this settles:
+
+- **Resume with a folder: A.** Each init lists the folders its spawn passed, the resume keeps the session id and the transcript (D2b and D6b as written).
+- **Fork with a folder: listed.** The fork's init lists A and its `session_id` is the one passed with `--session-id`, not the origin's (`fork()` copies the folders, D2b as written).
+- **Fork at a reply with a folder (spec 13): listed.** `--add-dir` beside `--resume-session-at` is accepted and the init lists A under G (D2b's tests marked (fork at) as written).
+- **Removal: dropped.** A folder passed before leaves with a `--resume` that omits it (`removeFolder` and the pill's `×` as written).
+
 ---
 
 ## 3. Implications
@@ -288,11 +313,11 @@ The "+" menu:
 - **/usage card**: two shapes are possible, both on recorded data. (a) Send `/usage` (and `/cost`, `/stats`) to the CLI as typed, so the transcript and the CLI's history keep it and a resumed session shows the text, and render that local-command row as a card filled from a `get_usage` answer requested at the same moment; when `get_usage` errors or is unsupported, the row stays the CLI's text. (b) Intercept the command and render the card from `get_usage` alone; nothing reaches the transcript and the card is gone on resume. (a) degrades better and matches the CLI; the spec decides. Either way, `skip_behaviors:true` first gives the session block at once, and the full request fills the limits section when the scan ends.
 - **"+" menu**: a popup with the five desktop items. Plugins and their skills come from state the session already has (init and initialize answer), refreshed on `reload_plugins` and `system/commands_changed`; picking a skill inserts `/<plugin>:<skill> ` in the composer, like a pick in the slash-command palette.
 
-### 3.5 Fixture tooling follow-ups (not done; tracked files untouched)
+### 3.5 Fixture tooling follow-ups (the redactor items done by D0; tracked files otherwise untouched)
 
-- `scripts/redact_fixture.py`: exempt `categories[].id` of `get_context_usage` from `ID_KEYS` (`id` is listed, so a re-run turns the 24 restored ids on `parity-context:2,17,18` back into `<id-N>`); add `submitUuid` to `ID_KEYS` (`transcripts/parity-add-dir.jsonl:3` reads `<leaked-1>`, as `mcp-slash` did); add a rule for the names in `get_usage.behaviors` (`agents`, `skills`, `plugins`, `mcp_servers`, recommendation details, fix messages), which were renamed by hand on `parity-usage:17`; stop `PATH_RE` swallowing a trailing backtick and colon (the day window's fix message on `parity-usage:17` reads ``Add a rule to `<path> when you run``).
+- `scripts/redact_fixture.py`: exempt `categories[].id` of `get_context_usage` from `ID_KEYS` (`id` is listed, so a re-run turns the 24 restored ids on `parity-context:2,17,18` back into `<id-N>`) (done: D0); add `submitUuid` to `ID_KEYS` (`transcripts/parity-add-dir.jsonl:3` reads `<leaked-1>`, as `mcp-slash` did) (done: main had added the key, D0 tests it); add a rule for the names in `get_usage.behaviors` (`agents`, `skills`, `plugins`, `mcp_servers`, recommendation details, fix messages), which were renamed by hand on `parity-usage:17` (done: D0); stop `PATH_RE` swallowing a trailing backtick and colon (the day window's fix message on `parity-usage:17` reads ``Add a rule to `<path> when you run``) (done: D0).
 - `docs/protocol.md` (read `docs/launch.md` first): 4.4 rows with the real shapes of `get_context_usage`, `get_usage`, `get_session_cost`, `reload_plugins`, `register_repo_root` (and its two limits) and `add_directory` (containers only); 5.1 `init.plugins`, `skills`, `agents`, `additional_directories`; 6.1 the assistant line's `context_usage`; 10 `rate_limit_event.unifiedWindows` already listed, plus `autocompactSource`, `first_request_input_tokens`; 11 the transcript's `contextUsage` and `cost-state`.
-- Recordings still to make: `--add-dir` at spawn, on a `--resume` respawn, on a fork and left out of a later resume (open question 4); a run with the default setting sources (user memory, user plugins, custom agents); a claude.ai-subscriber run on the owner's Mac for `usage_report`, `rate_limits` and the plan rows.
+- Recordings: `--add-dir` at spawn, on a `--resume` respawn, on a fork and left out of a later resume are recorded in 2.6 (done: D0). Still to make: a run with the default setting sources (user memory, user plugins, custom agents); a claude.ai-subscriber run on the owner's Mac for `usage_report`, `rate_limits` and the plan rows.
 
 ---
 
@@ -301,7 +326,7 @@ The "+" menu:
 1. **Cost and latency of `get_context_usage` `full`**: how long it takes on a long session, whether its token-count calls count against plan usage, and whether the CLI answers it while a turn runs.
 2. **The `get_usage` scan**: how long it takes on a machine with many sessions, and when `behaviors` is null (the types say non-subscribers; this non-subscriber got data).
 3. **Subscriber shapes**: `usage_report`, `get_usage.rate_limits`, `extra_usage`, the plan rows in the /usage text, and whether `/usage` then also emits `system/local_command_output`.
-4. **`--add-dir`**: whether init lists a spawn-time directory in `additional_directories`, what it loads, whether a `--resume` respawn with a new `--add-dir` keeps the transcript and session id, whether a fork in Tandem's argv (`--resume <id> --fork-session --session-id <new id> --add-dir <dir>`) lists the folder under the new id, and whether a `--resume` that leaves out a folder passed before drops it or restores it from the session (the parity spec's folder removal, 3.4).
+4. **`--add-dir`** (answered in 2.6): whether init lists a spawn-time directory in `additional_directories`, what it loads, whether a `--resume` respawn with a new `--add-dir` keeps the transcript and session id, whether a fork in Tandem's argv (`--resume <id> --fork-session --session-id <new id> --add-dir <dir>`) lists the folder under the new id, and whether a `--resume` that leaves out a folder passed before drops it or restores it from the session (the parity spec's folder removal, 3.4).
 5. **Desktop semantics**: what "See detailed breakdown" opens, what "Active" time measures, whether the model share is by cost or tokens, and what the "All" picker filters.
 6. **`reload_plugins`**: whether it connects or disconnects plugin MCP servers in a stream-json session, and whether `system/commands_changed` follows it.
 7. **Rows not exercised**: custom agents, MCP server instructions, `systemTools`, `systemPromptSections`, `deferredBuiltinTools`, `over_limit`, `rawMaxTokens` below `maxTokens`, `compact_buffer`.

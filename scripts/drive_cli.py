@@ -14,6 +14,11 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
                    --dangerously-skip-permissions rejects, a second turn
   fork             one turn and a rename_session, then a second process resumes that session with --fork-session
                    for one more turn; its lines follow the first process's in the output
+  add-dir-spawn    a spawn with --add-dir, a turn, a stop, a --resume respawn with that folder and a second, a turn, a fork at
+                   the first reply (--resume-session-at) with the first folder, a turn, a --fork-session --session-id fork
+                   with the first folder, a turn, a --resume with the second folder only, a turn; every process without
+                   --safe-mode and with --setting-sources project,local --strict-mcp-config; record it with
+                   --model claude-sonnet-5-5
   settings         a probe, not a fixture: one turn, then update_settings and apply_flag_settings asking for effort
                    high, then a second turn; the transcript's assistant lines show the effort each turn ran with
   effort-switch    one turn, apply_flag_settings effortLevel high, then an apply_flag_settings whose settings is a
@@ -86,6 +91,8 @@ import sys
 import threading
 import time
 import queue
+import shutil
+import tempfile
 import uuid
 import zlib
 
@@ -115,12 +122,15 @@ def child_environment() -> dict[str, str]:
 
 
 class Cli:
-    def __init__(self, extra: list[str], model: str | None = None, first_id: int = 0, drop: list[str] = ()):
+    def __init__(self, extra: list[str], model: str | None = None, first_id: int = 0, drop: list[str] = (),
+                 safe_mode: bool = True):
         argv = ["claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
                 "--include-partial-messages", "--permission-prompt-tool=stdio",
                 # No user hooks, plugins or MCP servers: keeps fixtures reproducible and free of local setup.
                 "--safe-mode"]
         argv = [arg for arg in argv if arg not in drop]  # a scenario that needs what --safe-mode turns off
+        if not safe_mode:
+            argv = [arg for arg in argv if arg != "--safe-mode"]
         if model:
             argv += ["--model", model]
         self.extra = extra
@@ -966,6 +976,69 @@ def parity_requests(cli: Cli) -> None:
     cli.until(is_result, allow)
 
 
+def add_dir_spawn(cli: Cli, dirs: list[str]) -> None:
+    """--add-dir at a spawn, on a resume, on a fork at a reply, on a plain fork, and left out of a later resume. `cli` was
+    started with the run's flags and then ["--add-dir", dirs[0]]; every later process is built from the flags before it."""
+    folder_a, folder_b = dirs
+    if cli.extra[-2:] != ["--add-dir", folder_a]:
+        raise RuntimeError("add-dir-spawn: the first process must end with --add-dir <first folder>")
+    base = cli.extra[:-2]
+
+    def run_turn(process: Cli, word: str) -> str:
+        """Initializes `process`, asks for `word`, waits for the result and returns the init's session id."""
+        process.call(INITIALIZE)
+        process.user(f"Reply with the single word: {word}")
+        session = process.until(is_init)["session_id"]
+        process.until(is_result)
+        return session
+
+    def respawn(extra: list[str], previous: Cli) -> Cli:
+        return Cli(extra, first_id=previous.next_id, safe_mode=False)
+
+    def finish(process: Cli, number: int) -> None:
+        print(f"add-dir-spawn: process {number} exit code {process.close()}", file=sys.stderr)
+        cli.lines.extend(process.lines)
+
+    # (1) the first turn, in the process main started
+    cli.user("Reply with the single word: one")
+    sid = cli.until(is_init)["session_id"]
+    cli.until(is_result)
+    print(f"add-dir-spawn: process 1 exit code {cli.close()}", file=sys.stderr)
+    first_lines = list(cli.lines)
+    previous = cli
+    # (2) a resume with both folders
+    second = respawn(base + ["--resume", sid, "--add-dir", folder_a, "--add-dir", folder_b], previous)
+    try:
+        run_turn(second, "two")
+    finally:
+        finish(second, 2)
+    # (3) a fork at the first reply (spec 13.1), with the first folder after the fork tail
+    cut = reply_uuid(first_lines)
+    if cut is None:
+        raise RuntimeError("add-dir-spawn: the first turn has no reply line to cut the fork at")
+    fork_at_id = str(uuid.uuid4())
+    third = respawn(fork_at_argv(base, sid, fork_at_id, cut) + ["--add-dir", folder_a], second)
+    try:
+        if run_turn(third, "three") != fork_at_id:
+            raise RuntimeError("add-dir-spawn: the fork at a reply did not take the --session-id it was given")
+    finally:
+        finish(third, 3)
+    # (4) a fork in Tandem's own argv
+    fork_id = str(uuid.uuid4())
+    fourth = respawn(base + ["--resume", sid, "--fork-session", "--session-id", fork_id, "--add-dir", folder_a], third)
+    try:
+        if run_turn(fourth, "four") != fork_id:
+            raise RuntimeError("add-dir-spawn: the fork did not take the --session-id it was given")
+    finally:
+        finish(fourth, 4)
+    # (5) the removal: a resume that leaves the first folder out
+    fifth = respawn(base + ["--resume", sid, "--add-dir", folder_b], fourth)
+    try:
+        run_turn(fifth, "five")
+    finally:
+        finish(fifth, 5)
+
+
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
              "permission-mode": permission_mode, "permission-mode-rejected": permission_mode_rejected, "fork": fork,
              "settings": settings, "effort-switch": effort_switch, "permission-mode-auto": permission_mode_auto,
@@ -978,7 +1051,7 @@ SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": m
              "queue-fold": queue_fold, "queue-later": queue_later, "queue-cancel": queue_cancel,
              "queue-steer-text": queue_steer_text, "queue-cancel-steer": queue_cancel_steer,
              "queue-later-command": queue_later_command, "queue-during-card": queue_during_card,
-             "parity-requests": parity_requests}
+             "parity-requests": parity_requests, "add-dir-spawn": add_dir_spawn}
 # Scenarios whose run also takes the connector's name (connector_name).
 CONNECTOR_SCENARIOS = {"mcp-connectors", "mcp-connectors-all"}
 
@@ -990,10 +1063,17 @@ SCENARIO_FLAGS = {"settings": ["--setting-sources", "project,local"],
                   "ask-two": ["--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"],
                   # No configured server but the account's claude.ai connectors (strict mode may drop those too: then
                   # record mcp-connectors-all). Never --setting-sources: it would hide what the user's settings enable.
-                  "mcp-connectors": ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']}
+                  "mcp-connectors": ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'],
+                  # The probes' own flags: no user setting, hook, plugin or MCP server of the recording machine.
+                  "add-dir-spawn": ["--setting-sources", "project,local", "--strict-mcp-config"]}
 # Base flags a scenario removes from Cli's argv: --safe-mode turns MCP servers off.
 SCENARIO_ARGV_DROPS = {"mcp-connectors": ["--safe-mode"], "mcp-connectors-all": ["--safe-mode"],
                        **{name: ["--safe-mode"] for name in PROBE_SCENARIOS}}
+
+
+def remove_dirs(dirs: list[str]) -> None:
+    for folder in dirs:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def main(scenario: str, out: str, extra: list[str]) -> None:
@@ -1012,12 +1092,23 @@ def main(scenario: str, out: str, extra: list[str]) -> None:
         except BaseException:
             servers.kill()
             raise
+    elif scenario == "add-dir-spawn":
+        # Two empty folders outside the run's cwd; the first Cli takes the first (A last, so the scenario can strip it).
+        dirs = [tempfile.mkdtemp(prefix="tandem-add-dir-"), tempfile.mkdtemp(prefix="tandem-add-dir-")]
+        args.append(dirs)
+        try:
+            cli = Cli(extra + SCENARIO_FLAGS[scenario] + ["--add-dir", dirs[0]], safe_mode=False)
+        except BaseException:
+            remove_dirs(dirs)
+            raise
     else:
         cli = Cli(extra + SCENARIO_FLAGS.get(scenario, []), model=FIRST_MODEL if scenario == "model-switch" else None)
     try:
         cli.call(INITIALIZE)
         run(cli, *args)
     finally:
+        if scenario == "add-dir-spawn":
+            remove_dirs(args[0])
         code = cli.close()
         if servers is not None:
             servers.kill()

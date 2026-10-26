@@ -83,8 +83,26 @@ class CopyTranscriptTest(unittest.TestCase):
     def test_a_stream_without_a_session_fails(self):
         self.assert_fails(self.stream(), "no system/init line with a session_id")
 
-    def test_a_stream_with_three_sessions_fails(self):
-        self.assert_fails(self.stream(FIRST, SECOND, "33333333-3333-4333-8333-333333333333"), "shows 3 sessions")
+    def test_a_run_with_two_forks_copies_the_first_and_the_last(self):
+        third = "33333333-3333-4333-8333-333333333333"
+        self.transcript(FIRST)
+        self.transcript(SECOND)
+        self.transcript(third)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            copy_transcript.main(self.work, self.stream(FIRST, SECOND, third), self.out, "name")
+        self.assertEqual(["name-origin.jsonl", "name.jsonl"], sorted(os.listdir(self.out)))
+        with open(os.path.join(self.out, "name.jsonl"), encoding="utf-8") as f:
+            self.assertIn(third, f.read())
+        with open(os.path.join(self.out, "name-origin.jsonl"), encoding="utf-8") as f:
+            self.assertIn(FIRST, f.read())
+        self.assertIn(f"{SECOND} not copied", err.getvalue())
+
+    def test_a_run_with_two_forks_whose_origin_is_missing_copies_nothing(self):
+        third = "33333333-3333-4333-8333-333333333333"
+        self.transcript(SECOND)
+        self.transcript(third)
+        self.assert_fails(self.stream(FIRST, SECOND, third), "no transcript at")
 
     def test_a_missing_transcript_fails(self):
         self.assert_fails(self.stream(FIRST), "no transcript at")

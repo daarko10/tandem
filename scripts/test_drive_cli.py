@@ -1169,6 +1169,90 @@ class QueueStoryTest(unittest.TestCase):
                          frame_texts(cli))
         self.assertEqual({"subtype": "get_usage", "skip_behaviors": True}, cli.requests()[1])
 
+    def test_safe_mode_false_leaves_the_flag_out(self):
+        argvs = []
+
+        class Popen:
+            def __init__(self, argv, **kwargs):
+                argvs.append(argv)
+                self.stdin, self.stdout = io.StringIO(), []
+
+        with mock.patch.object(drive_cli.subprocess, "Popen", Popen):
+            drive_cli.Cli([], safe_mode=False)
+            drive_cli.Cli([])
+        self.assertNotIn("--safe-mode", argvs[0])
+        self.assertIn("--safe-mode", argvs[1])
+
+
+class SpawnRecorder(drive_cli.Cli):
+    """A Cli that records the arguments it was built with and answers each user message with an init, a reply and a result."""
+    spawns: list[dict] = []
+
+    def __init__(self, extra, model=None, first_id=0, drop=(), safe_mode=True):
+        type(self).spawns.append({"extra": list(extra), "model": model, "first_id": first_id, "safe_mode": safe_mode})
+        self.extra = list(extra)
+        self.next_id = first_id
+        self.inbox = queue.Queue()
+        self.lines: list[str] = []
+        self.session_id = extra[extra.index("--session-id") + 1] if "--session-id" in extra else "s-1"
+
+    def send(self, msg: dict) -> None:
+        if msg.get("type") == "control_request":
+            self.inbox.put(success(msg["request_id"], msg["request"]))
+        elif msg.get("type") == "user":
+            for out in ({"type": "system", "subtype": "init", "session_id": self.session_id},
+                        {"type": "assistant", "uuid": "a-1", "parent_tool_use_id": None,
+                         "message": {"content": [{"type": "text", "text": "ok"}]}},
+                        {"type": "result", "subtype": "success", "is_error": False}):
+                self.lines.append(json.dumps(out))
+                self.inbox.put(out)
+
+    def close(self) -> int:
+        return 0
+
+
+class AddDirScenarioTest(unittest.TestCase):
+    def test_the_add_dir_scenario_resumes_forks_and_drops_a_folder(self):
+        SpawnRecorder.spawns = []
+        with tempfile.TemporaryDirectory() as work, contextlib.chdir(work):
+            out = os.path.join(work, "out.ndjson")
+            with mock.patch.object(drive_cli, "Cli", SpawnRecorder), contextlib.redirect_stderr(io.StringIO()):
+                drive_cli.main("add-dir-spawn", out, ["--model", "m"])
+            spawns = SpawnRecorder.spawns
+            self.assertEqual(5, len(spawns))
+            self.assertEqual([False] * 5, [s["safe_mode"] for s in spawns])
+            a, b = spawns[0]["extra"][-1], spawns[1]["extra"][-1]
+            self.assertNotEqual(a, b)
+            for folder in (a, b):
+                self.assertTrue(os.path.isabs(folder))
+                self.assertFalse(os.path.realpath(folder).startswith(os.path.realpath(work)), "outside the cwd")
+                self.assertFalse(os.path.exists(folder), "removed when main returns")
+            m = ["--model", "m", "--setting-sources", "project,local", "--strict-mcp-config"]
+            extras = [s["extra"] for s in spawns]
+            g, f = extras[2][-5], extras[3][-3]
+            self.assertEqual(m + ["--add-dir", a], extras[0])
+            self.assertEqual(m + ["--resume", "s-1", "--add-dir", a, "--add-dir", b], extras[1])
+            self.assertEqual(m + ["--resume", "s-1", "--fork-session", "--session-id", g,
+                                  "--resume-session-at", "a-1", "--add-dir", a], extras[2])
+            self.assertEqual(m + ["--resume", "s-1", "--fork-session", "--session-id", f, "--add-dir", a], extras[3])
+            self.assertEqual(m + ["--resume", "s-1", "--add-dir", b], extras[4])
+            self.assertEqual(4, uuid.UUID(g).version)
+            self.assertEqual(4, uuid.UUID(f).version)
+            self.assertNotEqual(g, f)
+            self.assertEqual(0, spawns[0]["first_id"])
+            self.assertTrue(all(later["first_id"] > 0 for later in spawns[1:]))
+            with open(out, encoding="utf-8") as fh:
+                lines = [json.loads(line) for line in fh if line.strip()]
+            self.assertEqual(["s-1", "s-1", g, f, "s-1"],
+                             [x["session_id"] for x in lines if x.get("subtype") == "init"])
+            self.assertEqual(15, len(lines))
+
+    def test_the_scenario_raises_when_the_first_spawn_does_not_end_in_its_folder(self):
+        cli = SpawnRecorder(["--model", "m"])
+        with self.assertRaisesRegex(RuntimeError, "--add-dir"):
+            drive_cli.add_dir_spawn(cli, ["/a", "/b"])
+
+
     def test_every_scenario_is_listed(self):
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "record-scenario.sh"), encoding="utf-8") as f:
             usage = next(line for line in f if line.startswith("scenario="))

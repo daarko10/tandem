@@ -22,6 +22,10 @@ Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
   record-scenario.sh also sets from --connector; without it a warning goes to stderr), and give every
   `authUrl` and `config.url` a placeholder host and path with REDACTED_<KEY> query values, `config.id` and every
   `config.args` element a REDACTED_ placeholder.
+- Keeps the `id` of a get_context_usage category (system_prompt, messages, ...: a protocol name), renames the entries
+  of a get_usage answer's behaviors.<window> agents, skills, plugins and mcp_servers to agent-a, skill-a, plugin-a,
+  server-a, ... per kind in order of first appearance (the agent types general-purpose and workflow-subagent stay), and
+  ends a path before a backtick and before a trailing colon.
 - Keeps every message type, field name and ordering, which is what the protocol tests care about.
 - Also redacts the CLI's on-disk transcripts (<session id>.jsonl), which hold one JSON object per line as well.
   Pass a stream and its transcripts in one call: they share the placeholders, so an id reads the same in all of them.
@@ -67,7 +71,8 @@ CONNECTOR_VARIABLE = "TANDEM_PROBE_CONNECTOR"  # the probe's connector, as drive
 URL_KEYS = ("code_challenge", "state", "config.id", "config.url", "authUrl")
 NONCE_KEYS = URL_KEYS[:2]
 REDACTED_RE = re.compile(r"REDACTED_[A-Z0-9_]+")
-PATH_RE = re.compile(r"(?:/(?:root|home|Users|tmp|private|var|opt)|[A-Za-z]:\\\\)[^\s\"']*")
+# A path ends before a quote or backtick and leaves a trailing colon out ("rule to `/home/u/CLAUDE.md`: when").
+PATH_RE = re.compile(r"(?:/(?:root|home|Users|tmp|private|var|opt)|[A-Za-z]:\\\\)(?:[^\s\"'`]*[^\s\"'`:])?")
 API_ID_RE = re.compile(r"^(?:toolu|srvtoolu|msg|req)_[A-Za-z0-9]+$")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PLACEHOLDER_RE = re.compile(r"<[A-Za-z_]\w*-\d+>")
@@ -76,7 +81,14 @@ BASE64_KEYS = {"data", "base64"}
 BASE64_MIN_LENGTH = 256
 BASE64_RE = re.compile(r"[A-Za-z0-9+/=]+")
 
+CATEGORY_ID_RE = re.compile(r"[a-z][a-z_]*")  # get_context_usage's categories[].id: a protocol name, not an identifier
+# get_usage.behaviors.<window>: the lists whose entries name something on the recording machine, and the name each gets.
+USAGE_SHARE_KINDS = {"agents": "agent", "skills": "skill", "plugins": "plugin", "mcp_servers": "server"}
+USAGE_KEPT_NAMES = {"agents": {"general-purpose", "workflow-subagent"}}
+USAGE_PLACEHOLDER_RE = re.compile(r"(?:agent|skill|plugin|server)-[a-z]{1,3}")
+
 ids: dict[str, str] = {}
+usage_names: dict[tuple[str, str], str] = {}  # (list, real name) -> "server-a", shared across a run's lines
 leaked: dict[str, str] = {}
 connectors: dict[str, str] = {}  # a connector's name -> "claude.ai Connector-N", shared by a stream and its transcripts
 hosts: dict[str, str] = {}  # a connector URL's host -> "connector-N.invalid"
@@ -90,11 +102,51 @@ def stable_id(value: str, key: str) -> str:
     return ids[value]
 
 
+def letters(n: int) -> str:
+    """a, b, ... z, aa, ab, ... for n = 0, 1, ..."""
+    out = ""
+    n += 1
+    while n:
+        n, r = divmod(n - 1, 26)
+        out = chr(ord("a") + r) + out
+    return out
+
+
+def usage_name(kind: str, name: str) -> str:
+    if name in USAGE_KEPT_NAMES.get(kind, ()) or USAGE_PLACEHOLDER_RE.fullmatch(name):
+        return name
+    if (kind, name) not in usage_names:
+        count = sum(1 for k, _ in usage_names if k == kind)
+        usage_names[(kind, name)] = f"{USAGE_SHARE_KINDS[kind]}-{letters(count)}"
+    return usage_names[(kind, name)]
+
+
+def rename_usage_shares(payload: dict) -> None:
+    """The `name`s of a get_usage answer's agents, skills, plugins and MCP servers, per window."""
+    behaviors = payload.get("behaviors")
+    for window in behaviors.values() if isinstance(behaviors, dict) else ():
+        if not isinstance(window, dict):
+            continue
+        for kind in USAGE_SHARE_KINDS:
+            for entry in window.get(kind) if isinstance(window.get(kind), list) else ():
+                if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                    entry["name"] = usage_name(kind, entry["name"])
+
+
+def scrub_category(node):
+    """A context category keeps its `id` when that is a protocol name such as system_prompt."""
+    if isinstance(node, dict) and isinstance(node.get("id"), str) and CATEGORY_ID_RE.fullmatch(node["id"]):
+        return {k: node[k] if k == "id" else scrub(v, k) for k, v in node.items()}
+    return scrub(node, "categories")
+
+
 def scrub(node, key=None):
     if isinstance(node, dict):
         # API ids can also appear as object keys (e.g. wire_tool_inputs).
         return {(stable_id(k, "id") if API_ID_RE.match(k) else k): scrub(v, k) for k, v in node.items()}
     if isinstance(node, list):
+        if key == "categories":
+            return [scrub_category(v) for v in node]
         return [scrub(v, key) for v in node]
     if isinstance(node, str):
         if (key in ID_KEYS or key in ID_LIST_KEYS) and node:
@@ -314,6 +366,8 @@ def redact(src: str, dst: str) -> None:
             strip_attachment(msg)
         if msg.get("type") == "control_response":
             payload = msg.get("response", {}).get("response")
+            if isinstance(payload, dict):
+                rename_usage_shares(payload)
             if isinstance(payload, dict) and "commands" in payload:  # initialize response
                 empty_lists(payload, keep)
                 if isinstance(payload.get("account"), dict):
