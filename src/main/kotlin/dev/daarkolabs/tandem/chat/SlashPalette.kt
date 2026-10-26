@@ -178,9 +178,10 @@ sealed interface PaletteOutcome {
 /**
  * Picks the selected row of [palette] (spec 4.3): with [insert] (Tab), `/<name> ` on any row, busy or not; else an intercepted row
  * acts at once, busy or not; a row waiting for its argument inserts `/<name> `, any other sends `/<name>` (the row's name, not the
- * typed prefix). With no row, Enter sends the draft as typed and Tab does nothing. While [busy], a pick that would send sends it
- * `later` when the process takes messages while it works ([midTurn]: D8's after-the-turn outcome for `queue-later-command`,
- * desktop-parity spec 12.1), else does nothing.
+ * typed prefix). With no row, Enter sends the draft as typed and Tab does nothing. While [busy], a row's send goes `later` when the
+ * process takes messages while it works ([midTurn]: D8's after-the-turn outcome for `queue-later-command`, desktop-parity spec
+ * 12.1), else does nothing; the draft with no row goes as a typed Enter would, the composer deciding whether it is a command (a
+ * one-word `/tmp/notes.txt` is a prompt and is sent now, spec 12.1).
  */
 fun pick(palette: SlashPalette, insert: Boolean, busy: Boolean, models: List<ModelOption>, midTurn: Boolean = false): PaletteOutcome {
     val item = palette.items.getOrNull(clamp(palette.selected, palette.items))
@@ -189,7 +190,7 @@ fun pick(palette: SlashPalette, insert: Boolean, busy: Boolean, models: List<Mod
         item != null && insert -> PaletteOutcome.Insert(item.insertion())
         item != null && item.intercepted -> PaletteOutcome.Intercept(slashIntercept("/${item.name}", models))
         busy && !midTurn -> PaletteOutcome.Ignored
-        item == null -> PaletteOutcome.Send(palette.query, later = busy)
+        item == null -> PaletteOutcome.Send(palette.query)
         !item.sendsAtOnce -> PaletteOutcome.Insert(item.insertion())
         else -> PaletteOutcome.Send("/${item.name}", later = busy)
     }

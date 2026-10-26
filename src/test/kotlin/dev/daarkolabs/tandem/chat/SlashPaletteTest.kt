@@ -198,9 +198,11 @@ class SlashPaletteTest {
         assertEquals(PaletteOutcome.Ignored, pick(palette("/usage"), insert = false, busy = true, models, midTurn = false))
         assertEquals(PaletteOutcome.Send("/usage", later = false), pick(palette("/usage"), insert = false, busy = false, models))
         assertEquals(PaletteOutcome.Send("/usage"), pick(palette("/usage"), insert = false, busy = false, models, midTurn = true))
-        // What an idle pick does otherwise: a row waiting for its argument inserts, the typed draft goes as typed, later.
+        // What an idle pick does otherwise: a row waiting for its argument inserts; the draft with no row goes as typed, not marked
+        // later, so the composer decides as for a typed Enter: a draft that only starts with `/` is a prompt and steers now (spec 12.1).
         assertEquals(PaletteOutcome.Insert("/compact "), pick(palette("/compact"), insert = false, busy = true, models, midTurn = true))
-        assertEquals(PaletteOutcome.Send("/nosuch", later = true), pick(palette("/nosuch"), insert = false, busy = true, models, midTurn = true))
+        assertEquals(PaletteOutcome.Send("/nosuch", later = false), pick(palette("/nosuch"), insert = false, busy = true, models, midTurn = true))
+        assertEquals(PaletteOutcome.Send("/tmp/notes.txt", later = false), pick(palette("/tmp/notes.txt"), insert = false, busy = true, models, midTurn = true))
         // Intercepted rows and Tab's insert are unchanged.
         assertEquals(PaletteOutcome.Intercept(SlashIntercept.OpenMcp), pick(palette("/mcp"), insert = false, busy = true, models, midTurn = true))
         assertEquals(PaletteOutcome.Insert("/usage "), pick(palette("/usage"), insert = true, busy = true, models, midTurn = true))
