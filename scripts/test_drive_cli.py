@@ -791,6 +791,15 @@ def assistant(uuid: str, text: str = "OK", parent=None, tool=False) -> dict:
 TASK_STARTED = {"type": "system", "subtype": "task_started"}
 
 
+def emit_later(cli: StoryCli, *messages: dict) -> list:
+    """A reaction that emits `messages` from a timer, after the frame that caused them has returned: a scenario that
+    writes its next frame without waiting for them writes it before the emit, and the position checks catch that."""
+    timer = threading.Timer(0.05, cli.emit, messages)
+    timer.daemon = True
+    timer.start()
+    return []
+
+
 def positions(events: list[tuple], kind: str, name: str, test=lambda e: True) -> list[int]:
     return [i for i, e in enumerate(events) if e[0] == kind and e[1] == name and test(e)]
 
@@ -836,7 +845,7 @@ class QueueStoryTest(unittest.TestCase):
                 return [{"type": "system", "subtype": "init", "session_id": "s-1"}, first,
                         assistant("s1", parent="toolu_1"), {"type": "result", "subtype": "success"}]
             if busy and n == 2:
-                return [TASK_STARTED]
+                return emit_later(cli, TASK_STARTED)
             return [assistant(f"r{n}"), {"type": "result", "subtype": "success"}]
         return StoryCli("origin", react, ["--model", "m"], events)
 
@@ -916,11 +925,13 @@ class QueueStoryTest(unittest.TestCase):
         with mock.patch.object(drive_cli, "TIMEOUT_S", 2):
             drive_cli.fork_at_busy(cli, spawn=spawn)
         spawned = events.index(("spawn", spawns[0][0]))
-        started = positions(events, "emit", "origin", lambda e: e[2] == "system")[-1]
+        system = positions(events, "emit", "origin", lambda e: e[2] == "system")
+        self.assertEqual(2, len(system), "turn 1's init and turn 2's task_started, which a timer emits")
+        started = system[-1]
         second_result = positions(events, "emit", "origin", lambda e: e[2] == "result")[-1]
-        self.assertLess(started, spawned)
+        self.assertLess(started, spawned, "the spawn follows the origin's task_started")
         self.assertLess(spawned, second_result)
-        self.assertEqual("sleep 8; echo hi" in text_of(cli.users()[1]), True)
+        self.assertIn("sleep 8; echo hi", text_of(cli.users()[1]))
         self.assertGreater(positions(events, "close", "origin")[0], positions(events, "emit", "fork",
                                                                               lambda e: e[2] == "result")[0])
         self.assertLess(positions(events, "close", "origin")[0], positions(events, "close", "fork")[0])
@@ -949,13 +960,11 @@ class QueueStoryTest(unittest.TestCase):
         return StoryCli("cli", react)
 
     def test_queue_scenarios_send_at_task_started(self):
-        """task_started comes from a timer, after the frame that starts the turn has returned: a scenario that sends its
-        queued frame without waiting for it writes that frame before the emit, and the position checks fail."""
+        """task_started comes from a timer (emit_later), after the frame that starts the turn has returned: a scenario
+        that sends its queued frame without waiting for it writes that frame before the emit, and the position checks
+        fail."""
         def started_later(cli):
-            timer = threading.Timer(0.05, cli.emit, (TASK_STARTED,))
-            timer.daemon = True
-            timer.start()
-            return []
+            return emit_later(cli, TASK_STARTED)
 
         def reactions(cli, msg):
             if text_of(msg).startswith("Use the Bash"):
@@ -1041,12 +1050,14 @@ class QueueStoryTest(unittest.TestCase):
                 drive_cli.queue_cancel(cli)
 
     def test_queue_cancel_steer_sends_its_frames_in_order(self):
+        """Both task_starteds come from timers (the second after the cancel's answer), so S1 and S2 land after them only
+        when the scenario waits for each."""
         def reactions(cli, msg):
-            return [TASK_STARTED] if text_of(msg).startswith("Use the Bash") else []
+            return emit_later(cli, TASK_STARTED) if text_of(msg).startswith("Use the Bash") else []
 
         def extra(cli, request):
             if request["subtype"] == "cancel_async_message":
-                return [TASK_STARTED]  # the second tool round
+                return emit_later(cli, TASK_STARTED)  # the second tool round
             return [{"type": "result"}] if request["subtype"] == "interrupt" else []
 
         cli = self.story(reactions, extra)
@@ -1055,6 +1066,13 @@ class QueueStoryTest(unittest.TestCase):
         prompt, s1, s2 = cli.users()
         self.assertEqual(["user", "user", "cancel_async_message", "user", "interrupt"],
                          [m["type"] if m["type"] == "user" else m["request"]["subtype"] for m in cli.sent])
+        started = positions(cli.events, "emit", "cli", lambda e: e[2] == "system")
+        sends = positions(cli.events, "send", "cli")
+        self.assertEqual(2, len(started))
+        self.assertLess(sends[0], started[0])
+        self.assertLess(started[0], sends[1], "S1 follows the first task_started")
+        self.assertLess(sends[2], started[1], "the second task_started follows the cancel")
+        self.assertLess(started[1], sends[3], "S2 follows the second task_started")
         self.assertIsNone(s1.get("priority"))
         self.assertIsNone(s2.get("priority"))
         self.assertEqual({"subtype": "cancel_async_message", "message_uuid": s1["uuid"]}, cli.requests()[0])
@@ -1067,7 +1085,7 @@ class QueueStoryTest(unittest.TestCase):
 
         def reactions(cli, msg):
             if len(cli.users()) == 1:
-                return [thinking, delta]
+                return emit_later(cli, thinking, delta)  # streamed after the prompt's frame has returned
             return [{"type": "result", "user_message_uuids": ["other"]},
                     {"type": "result", "user_message_uuids": [msg["uuid"]]}]
 
@@ -1076,9 +1094,11 @@ class QueueStoryTest(unittest.TestCase):
         prompt, steer = cli.users()
         self.assertEqual("Then say KIWI.", text_of(steer))
         self.assertIsNone(steer.get("priority"))
-        self.assertEqual("content_block_delta", json.loads(cli.lines[1])["event"]["type"])
-        self.assertEqual(positions(cli.events, "emit", "cli")[1] + 1, positions(cli.events, "send", "cli")[1],
+        deltas = positions(cli.events, "emit", "cli", lambda e: e[2] == "stream_event")
+        self.assertEqual(2, len(deltas), "the thinking and the text delta, which a timer emits")
+        self.assertEqual(deltas[1] + 1, positions(cli.events, "send", "cli")[1],
                          "the steer follows the text delta, not the thinking one")
+        self.assertEqual("content_block_delta", json.loads(cli.lines[1])["event"]["type"])
 
     def test_queue_later_command_sends_the_command_then_the_image_message_later(self):
         def reactions(cli, msg):
@@ -1114,7 +1134,7 @@ class QueueStoryTest(unittest.TestCase):
 
         def react(cli, msg):
             if msg["type"] == "user" and len(cli.users()) == 1:
-                return [card]
+                return emit_later(cli, card)  # the card comes after the prompt's frame has returned
             if msg["type"] == "control_response":
                 return [{"type": "result", "user_message_uuids": [cli.users()[1]["uuid"]]}]
             return ok(msg)
@@ -1126,6 +1146,10 @@ class QueueStoryTest(unittest.TestCase):
         self.assertEqual("later", cli.sent[1]["priority"])
         self.assertEqual("allow", cli.sent[2]["response"]["response"]["behavior"])
         self.assertEqual("cli-1", cli.sent[2]["response"]["request_id"])
+        carded = positions(cli.events, "emit", "cli", lambda e: e[2] == "control_request")[0]
+        sends = positions(cli.events, "send", "cli")
+        self.assertLess(carded, sends[1], "the queued message follows the can_use_tool")
+        self.assertLess(sends[1], sends[2], "and precedes the allow")
 
     def test_every_queue_scenario_allows_a_permission_request(self):
         card = {"type": "control_request", "request_id": "cli-1",

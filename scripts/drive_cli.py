@@ -957,12 +957,13 @@ def queue_during_card(cli: Cli) -> None:
 
 def parity_requests(cli: Cli) -> None:
     """The parity requests of the contract job: a context breakdown, usage without behaviours, and the /usage command."""
+    allow = allow_tools(cli)
     cli.user("Reply with the single word: one")
-    cli.until(is_result)
+    cli.until(is_result, allow)
     cli.call({"subtype": "get_context_usage"})
     cli.call({"subtype": "get_usage", "skip_behaviors": True})
     cli.user("/usage")
-    cli.until(is_result)
+    cli.until(is_result, allow)
 
 
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
