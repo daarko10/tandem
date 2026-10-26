@@ -17,6 +17,7 @@ import java.time.Instant
 import kotlin.io.path.readLines
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -1044,6 +1045,107 @@ class FixtureDecodeTest {
             assertTrue("msg_lifecycle_v1" in capabilities, "$name:$line")
             assertTrue("interrupt_cancel_queued_v1" in capabilities, "$name:$line")
         }
+    }
+
+    // D8's four queue recordings (Review Focus 12), each in the branch probes 5.1 settled, from the lines it wrote there.
+
+    /** The texts of every main-thread and subagent assistant line of fixture [name], lines [from] to [to]. */
+    private fun assistantTexts(name: String, from: Int = 1, to: Int = Fixtures.lines(name).size): List<String> =
+        (from..to).mapNotNull { at(name, it) as? CliMessage.Assistant }.flatMap { line ->
+            line.content.filterIsInstance<ContentBlock.Text>().map { it.text }
+        }
+
+    @Test
+    fun `queue-steer-text - a steer with no tool round left runs as the next turn`() {
+        // probes 5.1: next turn
+        val p = "<command_uuid-2>"
+        val s = "<command_uuid-13>"
+        assertEquals(s to "queued", lifecycle("queue-steer-text", 10))
+        val first = result("queue-steer-text", 54)
+        assertEquals(listOf(p), first.userMessageUuids)
+        assertEquals(p to "completed", lifecycle("queue-steer-text", 55))
+        assertEquals(s to "started", lifecycle("queue-steer-text", 56))
+        assertIs<CliMessage.SystemInit>(at("queue-steer-text", 57))
+        val second = result("queue-steer-text", 66)
+        assertEquals(s, second.raw.rawString("user_message_uuid"))
+        assertEquals(listOf(s), second.userMessageUuids)
+        assertTrue(assistantTexts("queue-steer-text", 57, 66).any { "KIWI" in it })
+        assertEquals(s to "completed", lifecycle("queue-steer-text", 67))
+    }
+
+    @Test
+    fun `queue-cancel-steer - a steer withdrawn before its tool round never runs`() {
+        // probes 5.1: withdrawable, and Stop withdraws a steer
+        val s1 = "<command_uuid-25>"
+        val s2 = "<command_uuid-47>"
+        assertIs<CliMessage.TaskStarted>(at("queue-cancel-steer", 18))
+        assertEquals(s1 to "queued", lifecycle("queue-cancel-steer", 19))
+        assertEquals(s1 to "cancelled", lifecycle("queue-cancel-steer", 20))
+        assertEquals(true, cancelAsyncAnswer(response("queue-cancel-steer", 21).payload))
+        assertEquals(s2 to "queued", lifecycle("queue-cancel-steer", 36))
+        assertEquals(s2 to "cancelled", lifecycle("queue-cancel-steer", 37))
+        val receipt = interruptReceipt(response("queue-cancel-steer", 38).payload)
+        assertEquals(listOf(s2), receipt.cancelled)
+        assertEquals(emptyList(), receipt.stillQueued)
+        val result = result("queue-cancel-steer", 42)
+        assertEquals("error_during_execution", result.subtype)
+        assertEquals(listOf("<command_uuid-4>"), result.userMessageUuids)
+        val texts = assistantTexts("queue-cancel-steer")
+        assertTrue(texts.none { "KIWI" in it || "MANGO" in it }, texts.toString())
+        val lines = Fixtures.lines("queue-cancel-steer")
+        assertTrue((43..lines.size).none { at("queue-cancel-steer", it) is CliMessage.SystemInit }, "no further turn")
+        assertTrue(lines.none { s1 in it && "\"started\"" in it } && lines.none { s2 in it && "\"started\"" in it })
+    }
+
+    @Test
+    fun `queue-later-command - a later command and image message run as recorded`() {
+        // probes 5.1: the command after the turn, the image message runs
+        val p = "<command_uuid-4>"
+        val c = "<command_uuid-29>"
+        val i = "<command_uuid-31>"
+        assertEquals(c to "queued", lifecycle("queue-later-command", 23))
+        assertEquals(i to "queued", lifecycle("queue-later-command", 24))
+        val running = result("queue-later-command", 35)
+        assertEquals(listOf(p), running.userMessageUuids)
+        assertNull(running.localCommand)
+        assertEquals(p to "completed", lifecycle("queue-later-command", 36))
+        assertEquals(c to "started", lifecycle("queue-later-command", 37))
+        // An init between the command's started and its local reply, as an idle /usage gets (parity-usage:21, probes 5.1).
+        assertIs<CliMessage.SystemInit>(at("queue-later-command", 38))
+        assertEquals("context", assertIs<CliMessage.Assistant>(at("queue-later-command", 39)).localCommand?.command)
+        val local = result("queue-later-command", 40)
+        assertEquals("context", local.localCommand)
+        assertEquals(0, local.numTurns)
+        assertEquals(listOf(c), local.userMessageUuids)
+        // The image message, in a turn of its own after the command's.
+        assertEquals(i to "started", lifecycle("queue-later-command", 42))
+        assertIs<CliMessage.SystemInit>(at("queue-later-command", 43))
+        val image = result("queue-later-command", 52)
+        assertFalse(image.isError)
+        assertEquals(listOf(i), image.userMessageUuids)
+        assertEquals(i, image.raw.rawString("user_message_uuid"))
+        assertTrue((43..52).mapNotNull { at("queue-later-command", it) as? CliMessage.Assistant }.none { it.error != null })
+        assertEquals(i to "completed", lifecycle("queue-later-command", 53))
+    }
+
+    @Test
+    fun `queue-during-card - a later message waits through the card and runs as its own turn`() {
+        // probes 5.1: waits
+        val p = "<command_uuid-4>"
+        val c = "<command_uuid-26>"
+        val request = assertIs<CliMessage.ControlRequest>(at("queue-during-card", 18))
+        assertIs<InboundRequest.CanUseTool>(request.request)
+        val lines = Fixtures.lines("queue-during-card")
+        val queued = (1..lines.size).first { (at("queue-during-card", it) as? CliMessage.CommandLifecycle)?.commandUuid == c }
+        val firstResult = (1..lines.size).first { at("queue-during-card", it) is CliMessage.Result }
+        assertEquals(21, queued)
+        assertEquals(31, firstResult)
+        assertTrue(18 < queued && queued < firstResult)
+        assertEquals(c to "queued", lifecycle("queue-during-card", 21))
+        assertEquals(listOf(p), result("queue-during-card", 31).userMessageUuids)
+        assertEquals(c to "started", lifecycle("queue-during-card", 33))
+        assertIs<CliMessage.SystemInit>(at("queue-during-card", 34))
+        assertEquals(c, result("queue-during-card", 43).raw.rawString("user_message_uuid"))
     }
 
     // spec: fork-at: a fork at the first reply knows only that turn

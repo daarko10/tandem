@@ -43,7 +43,8 @@ private val TANDEM_ROWS: List<PaletteItem> = listOf(
     "mode" to "Pick the permission mode",
 ).map { (name, description) -> PaletteItem(name, description, "", CommandScope.BUILTIN, via = null, intercepted = true) }
 
-private val TANDEM_NAMES: Set<String> = TANDEM_ROWS.mapTo(HashSet()) { it.name }
+/** The names of Tandem's own rows, which are slash commands whatever the catalogue holds. */
+internal val TANDEM_NAMES: Set<String> = TANDEM_ROWS.mapTo(HashSet()) { it.name }
 
 /** A catalogue row and the aliases it also matches by. */
 private class Entry(val item: PaletteItem, val aliases: List<String>)
@@ -167,7 +168,8 @@ sealed interface PaletteOutcome {
 
     data class Insert(val text: String) : PaletteOutcome
 
-    data class Send(val text: String) : PaletteOutcome
+    /** Sends [text]; [later] with `"priority":"later"` (a busy pick, desktop-parity spec 12.1). */
+    data class Send(val text: String, val later: Boolean = false) : PaletteOutcome
 
     /** Nothing happens (not `Nothing`, which would shadow `kotlin.Nothing`). */
     data object Ignored : PaletteOutcome
@@ -175,18 +177,21 @@ sealed interface PaletteOutcome {
 
 /**
  * Picks the selected row of [palette] (spec 4.3): with [insert] (Tab), `/<name> ` on any row, busy or not; else an intercepted row
- * acts at once, busy or not; otherwise nothing while [busy]; a row waiting for its argument inserts `/<name> `, any other sends
- * `/<name>` (the row's name, not the typed prefix). With no row, Enter sends the draft as typed and Tab does nothing.
+ * acts at once, busy or not; a row waiting for its argument inserts `/<name> `, any other sends `/<name>` (the row's name, not the
+ * typed prefix). With no row, Enter sends the draft as typed and Tab does nothing. While [busy], a pick that would send sends it
+ * `later` when the process takes messages while it works ([midTurn]: D8's after-the-turn outcome for `queue-later-command`,
+ * desktop-parity spec 12.1), else does nothing.
  */
-fun pick(palette: SlashPalette, insert: Boolean, busy: Boolean, models: List<ModelOption>): PaletteOutcome {
+fun pick(palette: SlashPalette, insert: Boolean, busy: Boolean, models: List<ModelOption>, midTurn: Boolean = false): PaletteOutcome {
     val item = palette.items.getOrNull(clamp(palette.selected, palette.items))
     return when {
-        item == null -> if (insert || busy) PaletteOutcome.Ignored else PaletteOutcome.Send(palette.query)
-        insert -> PaletteOutcome.Insert(item.insertion())
-        item.intercepted -> PaletteOutcome.Intercept(slashIntercept("/${item.name}", models))
-        busy -> PaletteOutcome.Ignored
+        item == null && insert -> PaletteOutcome.Ignored
+        item != null && insert -> PaletteOutcome.Insert(item.insertion())
+        item != null && item.intercepted -> PaletteOutcome.Intercept(slashIntercept("/${item.name}", models))
+        busy && !midTurn -> PaletteOutcome.Ignored
+        item == null -> PaletteOutcome.Send(palette.query, later = busy)
         !item.sendsAtOnce -> PaletteOutcome.Insert(item.insertion())
-        else -> PaletteOutcome.Send("/${item.name}")
+        else -> PaletteOutcome.Send("/${item.name}", later = busy)
     }
 }
 

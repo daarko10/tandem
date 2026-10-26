@@ -1944,6 +1944,70 @@ class ReducerTest {
         assertEquals(1, end.noticeTexts(NoticeLevel.INFO).count { it == notice })
     }
 
+    // D8's recordings replayed with the host's sends where the recordings wrote them (Review Focus 12; probes 5.1).
+
+    @Test
+    fun `queue-cancel-steer, replayed with the host's sends - the withdrawn steer leaves and Stop returns the second`() {
+        // withdrawable, and Stop withdraws a steer
+        val s1 = "<command_uuid-25>"
+        val s2 = "<command_uuid-47>"
+        val mango = "Also say the word MANGO at the end."
+        val notice = "Not sent: \"Also say the word MANGO at the end.\". It is back in the composer."
+        val states = hostReplay(
+            "queue-cancel-steer",
+            mapOf(
+                0 to listOf(SessionEvent.UserSent("<command_uuid-4>", "Run the two commands")),
+                18 to listOf(live(s1, KIWI), SessionEvent.WithdrawRequested(s1, restore = true)),
+                35 to listOf(live(s2, mango)),
+            ),
+        )
+        assertEquals(listOf(s1 to PendingStage.WITHDRAWING), states[18].stages())
+        val withdrawn = states[20]
+        assertTrue(withdrawn.pendingSends.none { it.uuid == s1 })
+        assertEquals(listOf(ReturnedSend(s1, KIWI, emptyList())), withdrawn.returnedSends)
+        assertEquals(emptyList(), withdrawn.noticeTexts(NoticeLevel.INFO))
+        assertEquals(listOf(s2 to PendingStage.QUEUED), states[35].stages())
+        val stopped = states[37]
+        assertEquals(listOf(ReturnedSend(s1, KIWI, emptyList()), ReturnedSend(s2, mango, emptyList())), stopped.returnedSends)
+        assertTrue(stopped.pendingSends.isEmpty())
+        assertEquals(listOf(notice), stopped.noticeTexts(NoticeLevel.INFO))
+        val end = states.last()
+        assertFalse(end.busy)
+        assertNull(end.turn)
+        assertEquals(1, end.turnsEnded, "no further turn")
+        assertEquals(1, end.entries.count { it is ChatEntry.User })
+        assertEquals(1, end.noticeTexts(NoticeLevel.INFO).count { it == notice })
+    }
+
+    @Test
+    fun `queue-during-card, replayed with the host's sends - the message waits through the card and opens its own turn`() {
+        // waits
+        val c = "<command_uuid-26>"
+        val kiwi = "Reply with only the word KIWI."
+        val states = hostReplay(
+            "queue-during-card",
+            mapOf(
+                0 to listOf(SessionEvent.UserSent("<command_uuid-4>", "Touch the file")),
+                18 to listOf(live(c, kiwi, later = true)),
+            ),
+        )
+        val carded = states[18]
+        assertTrue(carded.pendingPermissions.isNotEmpty(), "the permission card is in the state")
+        assertEquals(listOf(c to PendingStage.QUEUED), carded.stages())
+        assertEquals(listOf(c to PendingStage.QUEUED), states[21].stages())
+        val first = states[31]
+        assertEquals(1, first.turnsEnded)
+        assertEquals(listOf(c), first.pendingSends.map { it.uuid })
+        val started = states[33]
+        assertTrue(started.pendingSends.isEmpty())
+        assertTrue(started.busy)
+        val user = assertIs<ChatEntry.User>(started.entries.last())
+        assertEquals(c, user.id)
+        assertEquals(kiwi, user.text)
+        assertFalse(user.folded)
+        assertEquals(2, states[43].turnsEnded)
+    }
+
     @Test
     fun `the turn's own lifecycle lines change nothing`() {
         val state = reduce(ChatState(), live("<command_uuid-1>", "Count to a hundred"))

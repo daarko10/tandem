@@ -13,6 +13,9 @@ import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.PendingPermission
+import dev.daarkolabs.tandem.session.PendingSend
+import dev.daarkolabs.tandem.session.PendingStage
+import dev.daarkolabs.tandem.session.ReturnedSend
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.reduce
 import kotlinx.collections.immutable.persistentListOf
@@ -299,5 +302,45 @@ class ComposerModelTest {
         assertEquals(persistentSetOf("probe-kit"), composerModel(afterInit).pluginPrefixes)
         assertEquals(persistentSetOf("probe-kit"), composerModel(ChatState(), knownCommands = CommandCatalogue(pluginCatalogue)).pluginPrefixes)
         assertTrue(composerModel(ChatState()).pluginPrefixes.isEmpty())
+    }
+
+    /** Fixture [name]'s lines 1 to [through] reduced from an empty state, each line's `system/init` [patched] first. */
+    private fun through(name: String, through: Int, patched: (CliMessage) -> CliMessage = { it }): ChatState =
+        (1..through).fold(ChatState()) { state, line -> reduce(state, SessionEvent.Cli(patched(fixtureLine(name, line)))) }
+
+    @Test
+    fun `midTurnSends needs both capabilities and a live process`() {
+        // spec 12.1's gate, 12.2's two refusals (deviation 16)
+        val fold = composerModel(through("queue-fold", 6))
+        assertTrue(fold.midTurnSends)
+        assertTrue(fold.capabilitiesKnown)
+        assertTrue(composerModel(through("plain-reply", 4)).midTurnSends)
+
+        val withoutCancel = composerModel(
+            through("queue-fold", 6) { message ->
+                if (message is CliMessage.SystemInit) message.copy(capabilities = message.capabilities - "interrupt_cancel_queued_v1") else message
+            },
+        )
+        assertFalse(withoutCancel.midTurnSends)
+        assertTrue(withoutCancel.capabilitiesKnown)
+
+        val fresh = composerModel(ChatState())
+        assertFalse(fresh.midTurnSends)
+        assertFalse(fresh.capabilitiesKnown)
+
+        val ended = composerModel(reduce(through("queue-fold", 6), SessionEvent.Ended("exit 0", isError = false)))
+        assertFalse(ended.midTurnSends)
+    }
+
+    @Test
+    fun `busy counts waiting messages`() {
+        // spec 12.1: the composer stays busy through the gap between a turn's result and the queued turn's started (Review Focus 7)
+        val waiting = PendingSend("f", "Also say the word KIWI at the end.", emptyList(), 0L, later = true, stage = PendingStage.QUEUED)
+        val returned = ReturnedSend("r", "Not sent", emptyList())
+        val composer = composerModel(ChatState(busy = false, pendingSends = listOf(waiting), returnedSends = listOf(returned)))
+        assertTrue(composer.busy)
+        assertEquals(listOf(returned), composer.returned)
+        assertFalse(composerModel(ChatState(busy = false)).busy)
+        assertTrue(composerModel(ChatState(busy = true)).busy)
     }
 }

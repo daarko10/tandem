@@ -36,7 +36,7 @@ internal fun rememberChatPresenters(manager: SessionManager, open: List<SessionH
 /**
  * One [ChatPresenter], one [ComposerSender] and one [ChatUiState] per open session, by id (spec 5.6, polish spec 3.4): the presenter
  * is made the first time the session is shown and runs in a job of its own in [scope], so that it stops alone when its session closes
- * ([retain]); the sender, which hands prompts to [send], runs in the same job and stops with it; the UI state lives as long, so a
+ * ([retain]); the sender, which hands prompts to [send] with their `later` flag, runs in the same job and stops with it; the UI state lives as long, so a
  * session switched away from and back keeps its open rows and scroll position. Used on the EDT only.
  */
 internal class ChatPresenters(
@@ -44,7 +44,7 @@ internal class ChatPresenters(
     private val options: StateFlow<RowOptions>,
     /** The models another process listed, for a session whose own process has not ([ChatPresenter]): [SessionManager.models]. */
     private val models: StateFlow<List<ModelOption>>,
-    private val send: (SessionId, String, List<ImageBlock>) -> Unit = { _, _, _ -> },
+    private val send: (SessionId, String, List<ImageBlock>, Boolean) -> Unit = { _, _, _, _ -> },
     /** The commands another process offered, for a session whose own process has not: [SessionManager.commands]. */
     private val commands: StateFlow<CommandCatalogue> = MutableStateFlow(CommandCatalogue()),
 ) {
@@ -53,7 +53,7 @@ internal class ChatPresenters(
         val sender: ComposerSender by lazy(LazyThreadSafetyMode.NONE) {
             ComposerSender(
                 scope + job,
-                send = { text, images -> send(handle.id, text, images) },
+                send = { text, images, later -> send(handle.id, text, images, later) },
                 dropped = { handle.notice(NoticeLevel.WARNING, it) },
             )
         }

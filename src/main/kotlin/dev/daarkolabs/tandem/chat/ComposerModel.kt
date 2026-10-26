@@ -7,6 +7,7 @@ import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
+import dev.daarkolabs.tandem.session.ReturnedSend
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.ImmutableSet
 import kotlinx.collections.immutable.persistentListOf
@@ -26,6 +27,9 @@ internal const val DEFAULT_MODEL_ENTRY: String = "default"
  * [shellRunning]: a shell escape runs (MCP spec 12.1); the composer is busy meanwhile, and Stop stops the command ([stopTarget]).
  * [plugins] are the `+` menu's Plugins pages ([pluginMenu]); [pluginsKnown]: an init came, or the catalogue names a plugin's entry;
  * [skills] the latest init's skills, null before an init; [pluginPrefixes] the session's plugins for the palette ([pluginPrefixes]).
+ * [busy] counts a message waiting in the CLI's queue too (desktop-parity spec 12.1). [midTurnSends]: the live process takes messages
+ * while it works (its init listed both queue capabilities); [capabilitiesKnown]: an init of the live process came (deviation 16).
+ * [returned] are the messages that came back without running, for the composer to take back (spec 12.3, 12.5).
  */
 data class ComposerModel(
     val busy: Boolean,
@@ -50,7 +54,13 @@ data class ComposerModel(
     val pluginsKnown: Boolean = false,
     val skills: ImmutableList<String>? = null,
     val pluginPrefixes: ImmutableSet<String> = persistentSetOf(),
+    val midTurnSends: Boolean = false,
+    val capabilitiesKnown: Boolean = false,
+    val returned: ImmutableList<ReturnedSend> = persistentListOf(),
 )
+
+/** The `system/init` capabilities that let the composer send while Claude works (desktop-parity spec 12.1's gate). */
+private val MID_TURN_CAPABILITIES: List<String> = listOf("msg_lifecycle_v1", "interrupt_cancel_queued_v1")
 
 /**
  * The composer's model of [state]. Its models are the session's own ([ChatState.models]), else, while its process has not listed
@@ -73,7 +83,7 @@ fun composerModel(
     val skills = state.skills.takeIf { initSeen }
     val plugins = pluginMenu(initPlugins, commands, state.slashCommandNames, skills)
     return ComposerModel(
-        busy = state.busy,
+        busy = state.busy || state.pendingSends.isNotEmpty(),
         ended = state.ended,
         cardOpen = state.pendingPermissions.isNotEmpty(),
         models = models.toImmutableList(),
@@ -95,6 +105,9 @@ fun composerModel(
         pluginsKnown = initSeen || plugins.isNotEmpty(),
         skills = skills?.toImmutableList(),
         pluginPrefixes = pluginPrefixes(initPlugins, commands).toImmutableSet(),
+        midTurnSends = state.cliCapabilities?.containsAll(MID_TURN_CAPABILITIES) == true && !state.ended,
+        capabilitiesKnown = state.cliCapabilities != null,
+        returned = state.returnedSends.toImmutableList(),
     )
 }
 

@@ -5,11 +5,13 @@ import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ModelOption
+import dev.daarkolabs.tandem.session.PendingStage
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.TaskInfo
 import dev.daarkolabs.tandem.session.TurnEnd
+import dev.daarkolabs.tandem.session.UserImage
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.mutate
@@ -133,12 +135,15 @@ class ChatRowsBuilder(private val options: RowOptions) {
         }
         bodies = nextBodies.results
         pendingBodies = nextBodies.pending
-        live = turnRows.flatten().associateBy { it.key }
+        // Built against the previous build's rows, so an unchanged bubble keeps its instance.
+        val queued = queuedRows(state, keys)
+        live = turnRows.flatten().associateBy { it.key } + queued.associateBy { it.key }
         liveCalls = callsOf(live.values)
 
         val all = frozenRows.mutate { list ->
             turnRows.forEach(list::addAll)
             workingRow(state, list)?.let(list::add)
+            list.addAll(queued)
         }
         freeze(region, turnRows)
         val (card, moreWaiting) = Cards.pending(state)
@@ -190,8 +195,10 @@ class ChatRowsBuilder(private val options: RowOptions) {
         var marker: ChatEntry.Notice? = null
         var textStreamed = false
         for (i in entries.indices.reversed()) {
-            when (val entry = entries[i]) {
-                is ChatEntry.User, is ChatEntry.Shell -> break
+            val entry = entries[i]
+            if (entry.startsTurn()) break
+            when (entry) {
+                is ChatEntry.User, is ChatEntry.Shell -> Unit
                 is ChatEntry.TurnEnded -> if (ended == null) ended = entry
                 is ChatEntry.Notice -> if (marker == null && entry.kind == NoticeKind.INTERRUPTED) marker = entry
                 is ChatEntry.Assistant -> if (entry.parentToolUseId == null && entry.blocks.any { it is AssistantBlock.Text && it.text.isNotBlank() }) {
@@ -338,9 +345,26 @@ class ChatRowsBuilder(private val options: RowOptions) {
         return if (key == row.key) row else row.withKey(key)
     }
 
-    /** The images of [entry], by id, in the order sent (polish spec 2.7); the shared empty list for a prompt without any. */
-    private fun imageRefs(entry: ChatEntry.User): ImmutableList<ImageRef> =
-        if (entry.images.isEmpty()) persistentListOf() else entry.images.mapIndexed { i, image -> ImageRef(image.id, image.mediaType, i) }.toImmutableList()
+    /** [images] by id, in the order sent (polish spec 2.7); the shared empty list for a prompt without any. */
+    private fun imageRefs(images: List<UserImage>): ImmutableList<ImageRef> =
+        if (images.isEmpty()) persistentListOf() else images.mapIndexed { i, image -> ImageRef(image.id, image.mediaType, i) }.toImmutableList()
+
+    /**
+     * One [QueuedRow] per message waiting in [state] (desktop-parity spec 12.1), in send order, keyed `q:<uuid>`; each the previous
+     * build's instance when it is equal. Every waiting message can be withdrawn: D8's `queue-cancel-steer` recorded a steer withdrawn
+     * as a later message is (probes 5.1, spec 12.3).
+     */
+    private fun queuedRows(state: ChatState, keys: MutableSet<String>): List<QueuedRow> = state.pendingSends.map { send ->
+        val row = QueuedRow(
+            "q:${send.uuid}",
+            send.text,
+            imageRefs(send.images),
+            queuedCaption(send),
+            withdrawable = true,
+            withdrawing = send.stage == PendingStage.WITHDRAWING,
+        )
+        reuse(withUniqueKey(row, keys)) as QueuedRow
+    }
 
     /**
      * The row of notice [entry]. A local command's notice keeps its command; `/mcp`'s (the CLI ran `mcp`) gets the link to the panel in
@@ -428,7 +452,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
                     entry.text,
                     entry.text.startsWith("/") || entry.text.startsWith("!"),
                     gap(Kind.USER, it),
-                    imageRefs(entry),
+                    imageRefs(entry.images),
+                    caption = if (entry.folded) FOLDED_CAPTION else null,
                 )
             }
             // Thinking rows are the main thread's; a subagent message of an unknown agent shows its text and calls only.
@@ -754,9 +779,10 @@ private fun ChatEntry.Assistant.markdown(): String = blocks.filter { it.isText()
 
 /**
  * Whether this entry starts a turn (MCP spec 12.4): a user message, or a shell escape, which stands in its place. Every check of a
- * turn's bounds reads both.
+ * turn's bounds reads both. A prompt the CLI took into a running turn ([ChatEntry.User.folded]) starts none, so one CLI turn is one
+ * visual turn with one footer (desktop-parity spec 12.1).
  */
-internal fun ChatEntry.startsTurn(): Boolean = this is ChatEntry.User || this is ChatEntry.Shell
+internal fun ChatEntry.startsTurn(): Boolean = this is ChatEntry.User && !folded || this is ChatEntry.Shell
 
 /** The call a subagent's entry belongs to, if any. */
 private fun parentOf(entry: ChatEntry): String? = when (entry) {
@@ -775,4 +801,5 @@ private fun ChatRow.withKey(key: String): ChatRow = when (this) {
     is NoticeRow -> copy(key = key)
     is TurnEndRow -> copy(key = key)
     is WorkingRow -> copy(key = key)
+    is QueuedRow -> copy(key = key)
 }

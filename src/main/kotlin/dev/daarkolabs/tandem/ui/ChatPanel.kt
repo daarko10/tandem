@@ -57,6 +57,7 @@ import dev.daarkolabs.tandem.chat.ScrollEvent
 import dev.daarkolabs.tandem.chat.ShellRow
 import dev.daarkolabs.tandem.chat.TextRow
 import dev.daarkolabs.tandem.chat.ThinkingRow
+import dev.daarkolabs.tandem.chat.QueuedRow
 import dev.daarkolabs.tandem.chat.ToolKind
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
@@ -67,6 +68,7 @@ import dev.daarkolabs.tandem.session.UsagePart
 import dev.daarkolabs.tandem.ui.dev.RecompositionCounter
 import dev.daarkolabs.tandem.ui.dev.RenderingSpike
 import dev.daarkolabs.tandem.ui.rows.NoticeItem
+import dev.daarkolabs.tandem.ui.rows.QueuedRowItem
 import dev.daarkolabs.tandem.ui.rows.ReplyHost
 import dev.daarkolabs.tandem.ui.rows.ShellRowItem
 import dev.daarkolabs.tandem.ui.rows.TextRowItem
@@ -104,7 +106,8 @@ private val AGENT_LIVE: Set<ToolState> = setOf(ToolState.RUNNING, ToolState.WAIT
  * bottom in view. A user scroll down that reaches the bottom, End, the `↓` button and a send resume it. The focused transcript
  * scrolls with Page Up, Page Down, Home and End; Esc there gives the composer the focus ([onFocusComposer]). With [reply], the ended
  * turns' replies get their hover rows (polish spec 2.6). A local `/mcp` notice's link opens the MCP panel with [onOpenMcp]; a running
- * shell escape's `Stop command` calls [onStop]; a usage card's `Retry` calls [onUsageRetry] (desktop-parity spec 3.2).
+ * shell escape's `Stop command` calls [onStop]; a usage card's `Retry` calls [onUsageRetry] (desktop-parity spec 3.2); a waiting
+ * message's Edit and Cancel call [onWithdraw] (spec 12.3).
  */
 @Composable
 internal fun ChatPanel(
@@ -118,6 +121,7 @@ internal fun ChatPanel(
     onOpenMcp: () -> Unit = {},
     onStop: () -> Unit = {},
     onUsageRetry: (uuid: String, part: UsagePart) -> Unit = { _, _ -> },
+    onWithdraw: (uuid: String, restore: Boolean) -> Unit = { _, _ -> },
 ) {
     val chat by presenter.chat.collectAsState()
     val rows = chat.rows
@@ -228,7 +232,7 @@ internal fun ChatPanel(
                     },
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             ) {
-                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt, agentExpanded, reply, onOpenMcp, onStop, onUsageRetry) }
+                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt, agentExpanded, reply, onOpenMcp, onStop, onUsageRetry, onWithdraw) }
             }
             val buttonText = ui.follow.value.buttonText
             if (buttonText != null && listState.canScrollForward) {
@@ -312,7 +316,7 @@ private fun JumpToBottom(text: String, modifier: Modifier, onClick: () -> Unit) 
 /**
  * One row of the list, by its kind. [lastFrameAt] and [agentExpanded] (a running Agent row is open) are for the working row only,
  * [reply] for a text row's hover row, [onOpenMcp] for a notice's `Open the MCP panel` link, [onStop] for a shell row's `Stop command`,
- * [onUsageRetry] for a usage card's `Retry`.
+ * [onUsageRetry] for a usage card's `Retry`, [onWithdraw] for a waiting message's Edit and Cancel (desktop-parity spec 12.3).
  */
 @Composable
 internal fun RowItem(
@@ -324,6 +328,7 @@ internal fun RowItem(
     onOpenMcp: () -> Unit = {},
     onStop: () -> Unit = {},
     onUsageRetry: (uuid: String, part: UsagePart) -> Unit = { _, _ -> },
+    onWithdraw: (uuid: String, restore: Boolean) -> Unit = { _, _ -> },
 ) {
     if (RenderingSpike.enabled) SideEffect { RecompositionCounter.hit(rendered.row.key) }
     when (val row = rendered.row) {
@@ -335,5 +340,6 @@ internal fun RowItem(
         is TurnEndRow -> TurnEndItem(row)
         is ThinkingRow -> ThinkingRowItem(row, ui)
         is WorkingRow -> WorkingRowItem(row, lastFrameAt, agentExpanded)
+        is QueuedRow -> QueuedRowItem(row, { restore -> onWithdraw(row.key.removePrefix("q:"), restore) }, rendered.images)
     }
 }

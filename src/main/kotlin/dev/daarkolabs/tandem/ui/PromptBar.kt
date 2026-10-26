@@ -111,6 +111,7 @@ import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.SystemInfo
 import dev.daarkolabs.tandem.chat.Attachments
 import dev.daarkolabs.tandem.chat.PaletteItem
 import dev.daarkolabs.tandem.chat.PaletteOutcome
@@ -120,11 +121,16 @@ import dev.daarkolabs.tandem.chat.ScrollEvent
 import dev.daarkolabs.tandem.chat.SlashIntercept
 import dev.daarkolabs.tandem.chat.SlashPalette
 import dev.daarkolabs.tandem.chat.StopTarget
+import dev.daarkolabs.tandem.chat.busyRefusal
 import dev.daarkolabs.tandem.chat.committedDraft
+import dev.daarkolabs.tandem.chat.composerPlaceholder
 import dev.daarkolabs.tandem.chat.intercepts
+import dev.daarkolabs.tandem.chat.isSlashCommand
 import dev.daarkolabs.tandem.chat.moved
 import dev.daarkolabs.tandem.chat.paletteFor
 import dev.daarkolabs.tandem.chat.pick
+import dev.daarkolabs.tandem.chat.sendNowTooltip
+import dev.daarkolabs.tandem.chat.sendsLater
 import dev.daarkolabs.tandem.chat.shellCommand
 import dev.daarkolabs.tandem.chat.slashIntercept
 import dev.daarkolabs.tandem.chat.stopTarget
@@ -140,6 +146,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
@@ -179,9 +187,12 @@ import kotlin.math.roundToInt
  *
  * The prompt being typed is [ui]'s draft, with [ui]'s attachments, so both survive switching sessions. Images come from a paste, a
  * drop on the box or the `+` menu's file chooser in [project] (polish spec 2.7); one that cannot be attached leaves its notice above
- * the box. Enter sends unless the text is blank and nothing is attached, and does nothing while a turn runs or the last prompt is
- * still being encoded; Shift+Enter is a newline; Esc goes to the open card ([onCardEscape]), else stops a running turn. A prompt goes
- * out through [sender], which encodes its images off the EDT; a send makes the list follow its bottom again. A pick goes to
+ * the box. Enter sends unless the text is blank and nothing is attached or the last prompt is still being encoded; while Claude works
+ * it sends at once, and Ctrl/Cmd+Enter queues for after the turn, when the CLI takes messages while it works, else the notice says
+ * why (desktop-parity spec 12.1, 12.2); a busy slash command or draft with images goes `later`. Shift+Enter is a newline; Esc goes
+ * to the open card ([onCardEscape]), else stops a running turn. A prompt goes out through [sender], which encodes its images off the
+ * EDT; a send makes the list follow its bottom again. Messages that come back without running go back in the composer, ahead of the
+ * draft ([restoreReturned]). A pick goes to
  * [manager], which switches a running process at once and starts a stopped session with it; it becomes the project's last pick in
  * [workspace] too, which a new session starts from. A session whose process ended takes prompts too: the next one starts it again.
  * With [focus] the prompt takes the focus, and then [onFocused] is called.
@@ -193,8 +204,9 @@ import kotlin.math.roundToInt
  * sends nothing and leaves the attachments for the next prompt.
  *
  * Before that table, a draft that is a shell escape (`! command`, MCP spec 12.1) runs in the login shell through [manager] instead of
- * being sent: the draft is cleared, the attachments are left for the next prompt and the list follows its bottom again. While the
- * command runs the composer is busy, and Stop (the button or Esc) stops the command; otherwise it stops the turn ([stopTarget]).
+ * being sent: the draft is cleared, the attachments are left for the next prompt and the list follows its bottom again; while Claude
+ * works or another `!` runs it is not run and the draft stays (spec 12.4). While the command runs the composer is busy, and Stop (the
+ * button or Esc) stops the command; otherwise it stops the turn ([stopTarget]).
  */
 @Composable
 internal fun PromptBar(
@@ -219,14 +231,14 @@ internal fun PromptBar(
             if (last >= 0) ui.listState.animateScrollToItem(last)
         }
     }
-    val sendNow = {
-        if (sendDraft(ui, sender)) scrollToEnd()
+    val sendNow = { later: Boolean ->
+        if (sendDraft(ui, sender, later)) scrollToEnd()
     }
     // The interception table (MCP spec 3.4): Tandem's own commands act here and clear the draft, sending nothing and leaving the
-    // attachment strip as it is; anything else is today's send, attachments included.
-    val runIntercept = { intercept: SlashIntercept ->
+    // attachment strip as it is; anything else is today's send, attachments included, [later] or not (desktop-parity spec 12.1).
+    val runIntercept = { intercept: SlashIntercept, later: Boolean ->
         when (intercept) {
-            is SlashIntercept.Send -> sendNow()
+            is SlashIntercept.Send -> sendNow(later)
             SlashIntercept.OpenMcp -> ui.openMcpPanel()
             SlashIntercept.PickModel -> ui.menuRequest.value = FooterMenu.MODEL
             SlashIntercept.PickPermissionMode -> ui.menuRequest.value = FooterMenu.MODE
@@ -237,18 +249,43 @@ internal fun PromptBar(
         }
         if (intercept !is SlashIntercept.Send) ui.draft.clearText()
     }
-    // The send path, Enter or Send, palette or not (a pasted `/mcp` behaves the same): a shell escape runs first (MCP spec 12.1); else
-    // the table runs on the trimmed draft before the attachments are encoded.
-    val send: () -> Unit = {
+    // The send path, Enter or Send, palette or not (a pasted `/mcp` behaves the same): a shell escape runs first (MCP spec 12.1), but
+    // not while Claude works or another `!` runs: the draft stays and the notice says why (desktop-parity spec 12.4); else the table
+    // runs on the trimmed draft before the attachments are encoded. While busy, the queue key ([queueKey], Ctrl/Cmd+Enter), a slash
+    // command and a draft with images go `later` (spec 12.1, D8's recorded outcomes).
+    val send: (queueKey: Boolean) -> Unit = { queueKey ->
         val text = ui.draft.text.toString()
         val command = shellCommand(text)
-        if (command != null) {
-            manager.runShell(handle.id, command)
-            ui.draft.clearText()
-            ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
-            scrollToEnd()
-        } else {
-            runIntercept(slashIntercept(text.trim(), composer.models))
+        when {
+            command != null && (composer.busy || composer.shellRunning) -> ui.composerNotice.value = busyRefusal(composer, shell = true)
+            command != null -> {
+                manager.runShell(handle.id, command)
+                ui.draft.clearText()
+                ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
+                scrollToEnd()
+            }
+            else -> {
+                val later = sendsLater(isSlashCommand(text, composer), ui.attachments.size, composer.busy, queueKey)
+                runIntercept(slashIntercept(text.trim(), composer.models), later)
+            }
+        }
+    }
+    // An Enter that cannot send now says why (spec 12.2), unless there is nothing to send.
+    val refuse = {
+        val text = ui.draft.text.toString()
+        if (text.isNotBlank() || ui.attachments.isNotEmpty()) {
+            busyRefusal(composer, shell = shellCommand(text) != null, cardOpen = composer.cardOpen)?.let { ui.composerNotice.value = it }
+        }
+    }
+    // Messages that came back without running (a withdraw's Edit, Stop, the process's end: spec 12.3, 12.5) go back in the composer,
+    // ahead of the draft, their images decoded off the EDT; then the session forgets them.
+    LaunchedEffect(handle.id, presenter) {
+        presenter.composer.map { it.returned }.distinctUntilChanged().collect { returned ->
+            if (returned.isEmpty()) return@collect
+            val images = ArrayList<Pair<String, ByteArray>>()
+            restoreReturned(ui, returned) { mediaType, bytes -> images += mediaType to bytes }
+            images.forEachIndexed { i, (_, bytes) -> attach(ui, "Image ${i + 1}", bytes) }
+            manager.takeReturned(handle.id, returned.map { it.uuid })
         }
     }
     // A shell escape that runs makes the composer busy, as a turn does (MCP spec 12.1).
@@ -277,12 +314,12 @@ internal fun PromptBar(
             is PaletteOutcome.Intercept -> {
                 // A row's own name never reads as text to send; should one, the send path gets that text, not the typed prefix.
                 (outcome.intercept as? SlashIntercept.Send)?.let { ui.draft.setTextAndPlaceCursorAtEnd(it.text) }
-                runIntercept(outcome.intercept)
+                runIntercept(outcome.intercept, false)
             }
             is PaletteOutcome.Insert -> ui.draft.setTextAndPlaceCursorAtEnd(outcome.text)
             is PaletteOutcome.Send -> {
                 ui.draft.setTextAndPlaceCursorAtEnd(outcome.text)
-                send()
+                send(outcome.later)
             }
             PaletteOutcome.Ignored -> Unit
         }
@@ -292,7 +329,10 @@ internal fun PromptBar(
     val pickFrom = { shown: SlashPalette?, item: PaletteItem?, insert: Boolean ->
         if (shown != null) {
             val index = item?.let(shown.items::indexOf)?.takeIf { it >= 0 } ?: shown.selected
-            execute(pick(shown.copy(selected = index), insert, busy = busy || sending, composer.models))
+            val outcome = pick(shown.copy(selected = index), insert, busy = busy || sending, composer.models, midTurn = composer.midTurnSends)
+            // A busy pick that does nothing says why (spec 12.2): the CLI is still starting, or takes no message while it works.
+            if (outcome == PaletteOutcome.Ignored && !insert && composer.busy) busyRefusal(composer)?.let { ui.composerNotice.value = it }
+            execute(outcome)
         }
     }
     // The ring's popover (desktop-parity spec 3.1): one controller per open popover, over the session's flows mapped off the EDT, in
@@ -352,7 +392,11 @@ internal fun PromptBar(
             busy,
             sending,
             composer.cardOpen,
-            focus,
+            midTurn = composer.midTurnSends,
+            // A `!` alone makes the composer busy, but its prompts wait behind the escape's frames (spec 12.4): Enter sends.
+            shellOnly = !composer.busy && composer.shellRunning,
+            placeholder = composerPlaceholder(composer, SystemInfo.isMac),
+            focus = focus,
             onFocused,
             inputFocused = inputFocused,
             palette = { palette.value },
@@ -365,7 +409,9 @@ internal fun PromptBar(
             onDrop = attachFiles,
             onAction = { action ->
                 when (action) {
-                    ComposerAction.Send -> send()
+                    ComposerAction.Send -> send(false)
+                    ComposerAction.QueueLater -> send(true)
+                    ComposerAction.BusyRefused -> refuse()
                     ComposerAction.Stop -> when (stopTarget(composer.shellRunning)) {
                         StopTarget.Shell -> manager.stopShell(handle.id)
                         StopTarget.Turn -> manager.interrupt(handle.id)
@@ -417,8 +463,9 @@ internal fun PromptBar(
 
 /**
  * The text area, `+` and Send or Stop in one filled rounded box, as wide as the footer under it, with the attached images above them
- * ([AttachmentStrip]): Stop while [busy]. Keys go through [composerKey] with [busy] or [sending] (a prompt still being encoded),
- * [cardOpen], whether the slash palette is open ([palette], read at each key, so never a frame-old one) and whether the draft is one
+ * ([AttachmentStrip]): Stop while [busy], with Send left of it while the CLI takes messages while it works ([midTurn]) and the draft
+ * can be sent. Keys go through [composerKey] with [busy] or [sending] (a prompt still being encoded), [cardOpen], [midTurn],
+ * [shellOnly] (only a `!` runs), whether the slash palette is open ([palette], read at each key, so never a frame-old one) and whether the draft is one
  * of Tandem's own commands ([interceptable], which Enter runs even while busy), and Send is disabled
  * while [sending]; [onAction] does what they return. `+` opens the paged menu ([AddButton], [PlusMenu]): `Add files or photos` calls
  * [onAdd], `Slash commands` puts `/` in an empty draft and focuses the text area, `Connectors` opens the MCP panel, and the Plugins
@@ -427,7 +474,8 @@ internal fun PromptBar(
  * its focused border while a drag of files hovers it. With [focus] the text area takes the focus, and then [onFocused] is called;
  * whether it has the focus is [inputFocused]. The palette ([SlashPaletteView]) opens above the box at its left edge, never wider than
  * it, and a click on one of its rows goes to [onPalettePick]; while it is open on a lone `/` the text area reads `/Type to filter`
- * ([FilterHint]). It takes those fields, not the whole composer model, so that a change to another one leaves it alone.
+ * ([FilterHint]); empty, it reads [placeholder]. It takes those fields, not the whole composer model, so that a change to another one
+ * leaves it alone.
  */
 @Composable
 private fun PromptBox(
@@ -435,6 +483,9 @@ private fun PromptBox(
     busy: Boolean,
     sending: Boolean,
     cardOpen: Boolean,
+    midTurn: Boolean,
+    shellOnly: Boolean,
+    placeholder: String,
     focus: Boolean,
     onFocused: () -> Unit,
     inputFocused: MutableState<Boolean>,
@@ -463,6 +514,9 @@ private fun PromptBox(
     // Derived, so that the box recomposes when the hint comes or goes, not at every keystroke.
     val currentPalette by rememberUpdatedState(palette)
     val filterHint by remember(ui) { derivedStateOf { filterHintShown(ui.draft.text, currentPalette()) } }
+    // Derived, so that the busy Send comes and goes with the draft, not at every keystroke.
+    val currentSending by rememberUpdatedState(sending)
+    val sendable by remember(ui) { derivedStateOf { canSend(ui.draft.text.toString(), ui.attachments.size, currentSending) } }
     val imagePaste = remember { ImagePasteProvider { currentOnAction(ComposerAction.PasteImage) } }
     val dropTarget = remember {
         object : DragAndDropTarget {
@@ -563,17 +617,25 @@ private fun PromptBox(
                             }
                         }
                         .onPreviewKeyEvent { event ->
-                            composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, interceptable, onAction)
+                            composerKeyEvent(event, busy || sending, cardOpen, midTurn, shellOnly, ui, palette() != null, interceptable, onAction)
                         },
                     lineLimits = TextFieldLineLimits.MultiLine(1, 8),
                     undecorated = true,
-                    placeholder = { Text("Type / for commands", color = colors.text.info) },
+                    placeholder = { Text(placeholder, color = colors.text.info) },
                 )
                 if (filterHint) FilterHint(top = 8.dp)
             }
             // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
             val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
             if (busy) {
+                // Send now beside Stop while Claude works (desktop-parity spec 12.1), once the draft can be sent; a click acts as Enter.
+                if (midTurn && !cardOpen && sendable) {
+                    WithTooltip(sendNowTooltip(SystemInfo.isMac)) {
+                        IconButton(onClick = { onAction(ComposerAction.Send) }, modifier = buttonModifier.semantics { contentDescription = "Send" }) {
+                            Text("↵", style = JewelTheme.editorTextStyle, color = colors.text.info)
+                        }
+                    }
+                }
                 IconButton(onClick = { onAction(ComposerAction.Stop) }, modifier = buttonModifier.semantics { contentDescription = "Stop" }) {
                     Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
                 }
@@ -629,6 +691,8 @@ private fun composerKeyEvent(
     event: KeyEvent,
     busy: Boolean,
     cardOpen: Boolean,
+    midTurn: Boolean,
+    shellOnly: Boolean,
     ui: ChatUiState,
     paletteOpen: Boolean,
     interceptable: () -> Boolean,
@@ -644,6 +708,8 @@ private fun composerKeyEvent(
         ctrlOrMeta,
         busy = busy,
         cardOpen = cardOpen,
+        midTurn = midTurn,
+        shellOnly = shellOnly,
         draftEmpty = draft.text.isEmpty(),
         hasAttachments = ui.attachments.isNotEmpty(),
         paletteOpen = paletteOpen,

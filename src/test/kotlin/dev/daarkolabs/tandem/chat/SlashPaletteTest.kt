@@ -192,6 +192,21 @@ class SlashPaletteTest {
     }
 
     @Test
+    fun `a busy pick with mid-turn sends sends the command later`() {
+        // D8's after-the-turn outcome for queue-later-command (spec 12.1, deviation 18)
+        assertEquals(PaletteOutcome.Send("/usage", later = true), pick(palette("/usage"), insert = false, busy = true, models, midTurn = true))
+        assertEquals(PaletteOutcome.Ignored, pick(palette("/usage"), insert = false, busy = true, models, midTurn = false))
+        assertEquals(PaletteOutcome.Send("/usage", later = false), pick(palette("/usage"), insert = false, busy = false, models))
+        assertEquals(PaletteOutcome.Send("/usage"), pick(palette("/usage"), insert = false, busy = false, models, midTurn = true))
+        // What an idle pick does otherwise: a row waiting for its argument inserts, the typed draft goes as typed, later.
+        assertEquals(PaletteOutcome.Insert("/compact "), pick(palette("/compact"), insert = false, busy = true, models, midTurn = true))
+        assertEquals(PaletteOutcome.Send("/nosuch", later = true), pick(palette("/nosuch"), insert = false, busy = true, models, midTurn = true))
+        // Intercepted rows and Tab's insert are unchanged.
+        assertEquals(PaletteOutcome.Intercept(SlashIntercept.OpenMcp), pick(palette("/mcp"), insert = false, busy = true, models, midTurn = true))
+        assertEquals(PaletteOutcome.Insert("/usage "), pick(palette("/usage"), insert = true, busy = true, models, midTurn = true))
+    }
+
+    @Test
     fun `Enter sends the row's name, not the typed prefix`() {
         val us = palette("/us")
         assertEquals("usage", us.items[us.selected].name)

@@ -59,7 +59,9 @@ object WorkingIndicator {
     private fun inLastTurn(callId: String, rows: List<ChatRow>): Boolean {
         for (i in rows.indices.reversed()) {
             when (val row = rows[i]) {
-                is UserRow, is ShellRow -> return false
+                // A prompt the CLI took into the turn (its caption) is inside the turn.
+                is UserRow -> if (row.caption == null) return false
+                is ShellRow -> return false
                 is ToolRow -> if (row.calls.any { it.id == callId }) return true
                 else -> Unit
             }
@@ -71,8 +73,9 @@ object WorkingIndicator {
     private fun thinkingStreams(state: ChatState): Boolean {
         val entries = state.entries
         for (i in entries.indices.reversed()) {
-            when (val entry = entries[i]) {
-                is ChatEntry.User, is ChatEntry.Shell -> return false
+            val entry = entries[i]
+            if (entry.startsTurn()) return false
+            when (entry) {
                 is ChatEntry.Assistant -> if (entry.parentToolUseId == null && entry.streaming &&
                     entry.blocks.any { it is AssistantBlock.Thinking && it.completedAtMillis == null }
                 ) {

@@ -13,15 +13,20 @@ import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.chat.UserRow
 import dev.daarkolabs.tandem.chat.paletteFor
+import dev.daarkolabs.tandem.session.ReturnedSend
+import dev.daarkolabs.tandem.session.UserImage
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.junit.jupiter.api.Test
+import java.util.Base64
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -296,5 +301,29 @@ class ChatUiStateTest {
 
     private companion object {
         const val HEIGHT = 600
+    }
+
+    @Test
+    fun `restoreReturned puts the texts ahead of the draft and re-attaches the images once`() {
+        // spec 12.3, 12.5; Review Focus 6: a message that came back is never lost
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 1, 2, 3)
+        val ui = ChatUiState()
+        ui.draft.setTextAndPlaceCursorAtEnd("draft")
+        val attached = ArrayList<Pair<String, ByteArray>>()
+        val returned = listOf(
+            ReturnedSend("a", "first", emptyList()),
+            ReturnedSend("b", "second", listOf(UserImage("b#0", "image/png", Base64.getEncoder().encodeToString(png)))),
+        )
+        runBlocking { withTimeout(10_000) { restoreReturned(ui, returned) { type, bytes -> attached += type to bytes } } }
+        assertEquals("first\n\nsecond\n\ndraft", ui.draft.text.toString())
+        assertEquals(TextRange(ui.draft.text.length), ui.draft.selection)
+        assertEquals(1, attached.size)
+        assertEquals("image/png", attached.single().first)
+        assertTrue(png.contentEquals(attached.single().second))
+
+        // An empty draft takes the texts alone, with no blank line after them.
+        val empty = ChatUiState()
+        runBlocking { withTimeout(10_000) { restoreReturned(empty, listOf(ReturnedSend("c", "only", emptyList()))) { _, _ -> error("no image") } } }
+        assertEquals("only", empty.draft.text.toString())
     }
 }

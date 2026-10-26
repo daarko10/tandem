@@ -2,9 +2,14 @@ package dev.daarkolabs.tandem.ui
 
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import dev.daarkolabs.tandem.chat.ScrollEvent
+import dev.daarkolabs.tandem.session.ReturnedSend
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.Base64
 
 /** What a key typed in the composer does (spec 4.15, 4.18). */
 internal enum class ComposerAction {
@@ -40,6 +45,12 @@ internal enum class ComposerAction {
 
     /** Closes the palette, the text staying: Esc. */
     PaletteClose,
+
+    /** Sends the prompt with `"priority":"later"`: Ctrl/Cmd+Enter while Claude works (desktop-parity spec 12.1). */
+    QueueLater,
+
+    /** An Enter that cannot send now: the composer notice says why ([dev.daarkolabs.tandem.chat.busyRefusal], spec 12.2). */
+    BusyRefused,
 }
 
 /**
@@ -47,11 +58,14 @@ internal enum class ComposerAction {
  * turn runs or a prompt is still being encoded ([busy]) and while a card waits for an answer ([cardOpen]); null leaves the key to the
  * text area.
  *
- * Enter alone sends, and does nothing while a turn runs (the Stop button stands in for Send) or a card is open (until it is answered,
- * spec 4.15), whether or not the reducer still counts the turn as running, unless the draft is one of Tandem's own commands
- * ([interceptable], asked for a plain Enter only): the interception table runs then, palette or not, busy or not, and sends nothing
- * (MCP spec 3.4). Shift+Enter is a newline, which the composer types itself ([composerFallback]), and Alt+Enter and Ctrl/Cmd+Enter
- * do nothing yet. Esc goes to the open card first, then stops a running turn.
+ * Enter sends; Ctrl/Cmd+Enter (Ctrl and Meta alike, on every OS) sends too, and while Claude works ([busy]) queues the prompt for
+ * after the turn ([ComposerAction.QueueLater], desktop-parity spec 12.1). While busy, a process that takes messages while it works
+ * ([midTurn]) takes Enter as a send now; one that does not refuses both Enters ([ComposerAction.BusyRefused], whose notice says why,
+ * spec 12.2), except when only a `!` command runs ([shellOnly]): the prompt then waits behind its escape (spec 12.4). A card open
+ * refuses both Enters until it is answered, except Ctrl/Cmd+Enter with [midTurn] (D8's `queue-during-card` waits, spec 12.2). A draft
+ * that is one of Tandem's own commands ([interceptable], asked only while busy or with a card open) runs whatever the key: the
+ * interception table runs then, palette or not, and sends nothing (MCP spec 3.4). Shift+Enter is a newline, which the composer types
+ * itself ([composerFallback]), and Alt+Enter is left alone. Esc goes to the open card first, then stops a running turn.
  *
  * Ctrl/Cmd+V pastes images, busy or not, when [clipboardHasImage] says the clipboard holds a file list or an image without text
  * ([ComposerImages.clipboardHasImage]); it is asked for that key only, and otherwise the text area pastes. Backspace removes the last
@@ -70,6 +84,8 @@ internal fun composerKey(
     ctrlOrMeta: Boolean,
     busy: Boolean,
     cardOpen: Boolean,
+    midTurn: Boolean = false,
+    shellOnly: Boolean = false,
     draftEmpty: Boolean = false,
     hasAttachments: Boolean = false,
     paletteOpen: Boolean = false,
@@ -82,10 +98,14 @@ internal fun composerKey(
     if (paletteOpen) paletteKey(key, modified = shift || alt || ctrlOrMeta)?.let { return it }
     return when (key) {
         Key.Enter, Key.NumPadEnter -> when {
-            shift || alt || ctrlOrMeta -> null
-            !busy && !cardOpen -> ComposerAction.Send
-            interceptable() -> ComposerAction.Send
-            else -> null
+            shift || alt -> null
+            paletteOpen && ctrlOrMeta -> null
+            (busy || cardOpen) && interceptable() -> ComposerAction.Send
+            cardOpen -> if (ctrlOrMeta && midTurn) ComposerAction.QueueLater else ComposerAction.BusyRefused
+            !busy || shellOnly -> ComposerAction.Send
+            !midTurn -> ComposerAction.BusyRefused
+            ctrlOrMeta -> ComposerAction.QueueLater
+            else -> ComposerAction.Send
         }
         Key.Escape -> when {
             cardOpen -> ComposerAction.CardEscape
@@ -118,19 +138,47 @@ internal fun canSend(text: String, attachmentCount: Int, sending: Boolean): Bool
 /**
  * Enter or the Send button: sends [ui]'s draft and attachments through [sender] when [canSend] lets it, checked against the
  * sender's own flag, not the last composition's, so a click or an Enter during an encode sends nothing and leaves the draft and the
- * attachments as they are (polish spec 2.7). On the EDT: the prompt is captured and cleared at once, and the sender encodes its
- * images off it. Returns whether it sent, so that the caller scrolls the list to its bottom.
+ * attachments as they are (polish spec 2.7). [later]: with `"priority":"later"` (desktop-parity spec 12.1). On the EDT: the prompt
+ * is captured and cleared at once, and the sender encodes its images off it. Returns whether it sent, so that the caller scrolls the
+ * list to its bottom.
  */
-internal fun sendDraft(ui: ChatUiState, sender: ComposerSender): Boolean {
+internal fun sendDraft(ui: ChatUiState, sender: ComposerSender, later: Boolean = false): Boolean {
     val text = ui.draft.text.toString().trim()
     if (!canSend(text, ui.attachments.size, sender.sending.value)) return false
     val images = ui.attachments.map { CapturedImage(it.mediaType, it.bytes) }
     ui.draft.clearText()
     ui.attachments.clear()
     ui.composerNotice.value = null
-    sender.submit(CapturedPrompt(text, images))
+    sender.submit(CapturedPrompt(text, images, later))
     ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
     return true
+}
+
+/**
+ * Puts the messages that came back without running ([returned], desktop-parity spec 12.3, 12.5) back in [ui]'s composer: their texts
+ * in order, joined by a blank line, ahead of the draft (a blank line between them and the draft, none when the draft is empty), the
+ * cursor at the end; their images decoded from base64 on [Dispatchers.Default], then each attached once through [attach] on the
+ * caller's context (the EDT: hard rule 1 keeps the decoding off it).
+ */
+internal suspend fun restoreReturned(ui: ChatUiState, returned: List<ReturnedSend>, attach: (mediaType: String, bytes: ByteArray) -> Unit) {
+    if (returned.isEmpty()) return
+    val images = returned.flatMap { it.images }
+    val decoded = if (images.isEmpty()) {
+        emptyList()
+    } else {
+        withContext(Dispatchers.Default) {
+            images.mapNotNull { image -> runCatching { Base64.getDecoder().decode(image.base64) }.getOrNull()?.let { image.mediaType to it } }
+        }
+    }
+    val texts = returned.map { it.text }.filter { it.isNotBlank() }.joinToString("\n\n")
+    val draft = ui.draft.text.toString()
+    val restored = when {
+        texts.isEmpty() -> draft
+        draft.isEmpty() -> texts
+        else -> "$texts\n\n$draft"
+    }
+    if (restored != draft) ui.draft.setTextAndPlaceCursorAtEnd(restored)
+    decoded.forEach { (mediaType, bytes) -> attach(mediaType, bytes) }
 }
 
 /** What the composer does itself with an Enter that [composerKey] leaves to the text area (spec 4.15). */
@@ -138,7 +186,10 @@ internal enum class ComposerFallback {
     /** Types a newline ([insertNewline]): Shift+Enter, which the text area would drop. */
     Newline,
 
-    /** Swallows the key: a plain Enter while a turn runs or a card is open, which the text area would otherwise type as a newline. */
+    /**
+     * Swallows the key: a plain Enter while a turn runs or a card is open, which the text area would otherwise type as a newline. Since
+     * desktop-parity spec 12.2 [composerKey] answers every such Enter itself, so this is a guard only.
+     */
     Swallow,
 }
 

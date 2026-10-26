@@ -41,7 +41,8 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
  * focus with [onFocusComposer]; Esc in the prompt box while a card is open gives the card's Esc answer (spec 4.18). A card that opens
  * takes the focus only when [cardTakesFocus] says so then. Under each ended turn's reply, Copy and Fork from here go through [actions].
  * Prompts, with their attached images, go out through the session's [sender]. A local `/mcp` notice's link calls [onOpenMcp], a
- * running shell escape's `Stop command` [onStop], and a usage card's `Retry` [onUsageRetry].
+ * running shell escape's `Stop command` [onStop], and a usage card's `Retry` [onUsageRetry]; a waiting message's Edit and Cancel go to
+ * [manager] (desktop-parity spec 12.3).
  */
 @Composable
 internal fun ChatPane(
@@ -94,7 +95,19 @@ internal fun ChatPane(
             } else {
                 "Ask Claude anything about this project."
             }
-            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis, onFocusComposer, reply, onOpenMcp, onStop, onUsageRetry)
+            ChatPanel(
+                project,
+                presenter,
+                ui,
+                emptyText,
+                handle.lastFrameAtMillis,
+                onFocusComposer,
+                reply,
+                onOpenMcp,
+                onStop,
+                onUsageRetry,
+                onWithdraw = { uuid, restore -> manager.withdraw(handle.id, uuid, restore) },
+            )
         }
         pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) }
         PromptBar(

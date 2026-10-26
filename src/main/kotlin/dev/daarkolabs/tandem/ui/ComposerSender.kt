@@ -16,13 +16,16 @@ import java.util.Base64
 /** One image of a captured prompt: its media type and its raw bytes, encoded only by the [ComposerSender]. */
 internal class CapturedImage(val mediaType: String, val bytes: ByteArray)
 
-/** A prompt as the composer captured it on Enter: its text and its attachments, in order. */
-internal class CapturedPrompt(val text: String, val images: List<CapturedImage>)
+/**
+ * A prompt as the composer captured it on Enter: its text and its attachments, in order; [later] to send it with
+ * `"priority":"later"` (desktop-parity spec 12.1).
+ */
+internal class CapturedPrompt(val text: String, val images: List<CapturedImage>, val later: Boolean = false)
 
 /**
  * One session's sender of prompts (polish spec 2.7, 3.4): the composer captures a prompt on the EDT ([submit]) and this encodes its
- * images as base64 on [Dispatchers.Default], then hands it to [send] (`manager.send`), one prompt at a time and in the order
- * captured. [sending] is true from a capture until [send] has returned for every prompt captured so far: the composer counts as busy
+ * images as base64 on [Dispatchers.Default], then hands it to [send] (`manager.send`) with its `later` flag, one prompt at a time and
+ * in the order captured. [sending] is true from a capture until [send] has returned for every prompt captured so far: the composer counts as busy
  * meanwhile, so a second Enter during a long encode does nothing, as during a turn.
  *
  * It runs in [scope] (the session's job in [ChatPresenters]) until that is cancelled, when the session closes. A prompt not yet sent
@@ -31,7 +34,7 @@ internal class CapturedPrompt(val text: String, val images: List<CapturedImage>)
  */
 internal class ComposerSender(
     scope: CoroutineScope,
-    private val send: (String, List<ImageBlock>) -> Unit,
+    private val send: (String, List<ImageBlock>, Boolean) -> Unit,
     private val dropped: (String) -> Unit,
     private val encode: (ByteArray) -> String = { Base64.getEncoder().encodeToString(it) },
 ) {
@@ -58,7 +61,7 @@ internal class ComposerSender(
                     val blocks = withContext(Dispatchers.Default) { prompt.images.map { ImageBlock(it.mediaType, encode(it.bytes)) } }
                     inFlight = null
                     try {
-                        send(prompt.text, blocks)
+                        send(prompt.text, blocks, prompt.later)
                     } finally {
                         done()
                     }

@@ -29,7 +29,9 @@ enum class RowGap(val dp: Int) {
 
 /**
  * What the user sent, `u:<entry id>`. [mono]: a slash command or a `!` shell line, drawn in the editor font. [images]: the images
- * sent with it, in order, by id only (polish spec 2.7); an images-only prompt has a blank [text].
+ * sent with it, in order, by id only (polish spec 2.7); an images-only prompt has a blank [text]. [caption]: the line under the
+ * bubble, [FOLDED_CAPTION] for a prompt the CLI took into the running turn (desktop-parity spec 12.1); null for a prompt that
+ * started its own turn.
  */
 data class UserRow(
     override val key: String,
@@ -37,6 +39,22 @@ data class UserRow(
     val mono: Boolean,
     override val gap: RowGap = RowGap.TURN,
     val images: ImmutableList<ImageRef> = persistentListOf(),
+    val caption: String? = null,
+) : ChatRow
+
+/**
+ * A message sent while Claude works that the CLI has not started yet (desktop-parity spec 12.1), `q:<uuid>`: a dimmed bubble with its
+ * [text] and [images] after the working row, and its [caption] ([queuedCaption]). [withdrawable]: it has Edit and Cancel (spec 12.3);
+ * [withdrawing]: a withdraw is out, and both are disabled. Once started, the message is a [UserRow] under the user row's own key.
+ */
+data class QueuedRow(
+    override val key: String,
+    val text: String,
+    val images: ImmutableList<ImageRef>,
+    val caption: String,
+    val withdrawable: Boolean,
+    val withdrawing: Boolean,
+    override val gap: RowGap = RowGap.AFTER_BUBBLE,
 ) : ChatRow
 
 /**

@@ -14,6 +14,8 @@ import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.McpResult
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
+import dev.daarkolabs.tandem.session.PendingSend
+import dev.daarkolabs.tandem.session.PendingStage
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.TurnEnd
@@ -1471,4 +1473,163 @@ class ChatRowsBuilderTest {
         for (i in at + 1 until rows.rows.size) assertSame(rows.rows[i], after.rows[i], "row $i")
         for (i in 0 until at) assertSame(rows.rows[i], after.rows[i], "row $i")
     }
+
+    // Spec 12.1's pending bubbles and folded prompts (D11), on replays that inject only the host's sends at their lines.
+
+    private fun pending(uuid: String, text: String, later: Boolean, stage: PendingStage, images: List<UserImage> = emptyList()) =
+        PendingSend(uuid, text, images, 0L, later, stage)
+
+    @Test
+    fun `waiting messages draw QueuedRows after the working row, in order`() {
+        val image = UserImage("s2#0", "image/png", "iVBORw0KGgo=")
+        val running = reduce(ChatState(), SessionEvent.UserSent("p", "Run it", atMillis = 0L))
+        val state = running.copy(
+            pendingSends = listOf(
+                pending("s1", "steer", later = false, stage = PendingStage.QUEUED),
+                pending("s2", "later", later = true, stage = PendingStage.QUEUED, images = listOf(image)),
+                pending("s3", "held", later = true, stage = PendingStage.HELD),
+                pending("s4", "withdrawing", later = true, stage = PendingStage.WITHDRAWING),
+            ),
+        )
+        val rows = ChatRowsBuilder(options).build(state).rows
+        val working = rows.indexOfFirst { it is WorkingRow }
+        assertTrue(working >= 0, rows.toString())
+        val queued = rows.drop(working + 1).map { assertIs<QueuedRow>(it) }
+        assertEquals(listOf("q:s1", "q:s2", "q:s3", "q:s4"), queued.map { it.key })
+        assertEquals(listOf("steer", "later", "held", "withdrawing"), queued.map { it.text })
+        assertEquals(
+            listOf(
+                "Sent · Claude reads it at its next step",
+                "Queued · sends when Claude is done",
+                "Waits for the shell command's output to go out",
+                "Withdrawing…",
+            ),
+            queued.map { it.caption },
+        )
+        // D8's queue-cancel-steer outcome is withdrawable: a steer gets Edit and Cancel too.
+        assertEquals(listOf(true, true, true, true), queued.map { it.withdrawable })
+        assertEquals(listOf(false, false, false, true), queued.map { it.withdrawing })
+        assertEquals(persistentListOf(ImageRef("s2#0", "image/png", 0)), queued[1].images)
+        assertTrue(queued[0].images.isEmpty())
+        assertTrue(queued.all { it.gap == RowGap.AFTER_BUBBLE })
+        // A message waiting after the turn's result (queue-later:51 to :53) still draws, with no working row.
+        val gap = ChatRowsBuilder(options).build(state.copy(turn = null, busy = false)).rows
+        assertEquals(listOf("q:s1", "q:s2", "q:s3", "q:s4"), gap.filterIsInstance<QueuedRow>().map { it.key })
+        assertIs<QueuedRow>(gap.last())
+    }
+
+    @Test
+    fun `a folded prompt has its caption and the turn one footer`() {
+        val footers = HashSet<String>()
+        val (_, rows) = replayWithSends(
+            "queue-fold",
+            mapOf(
+                1 to listOf(SessionEvent.UserSent(QP, "Run the two commands")),
+                19 to listOf(SessionEvent.UserSent(QF, KIWI, live = true)),
+            ),
+        ) { _, _, lineRows -> lineRows.rows.filterIsInstance<TurnEndRow>().forEach { footers += it.key } }
+        val users = rows.rows.filterIsInstance<UserRow>()
+        assertEquals(2, users.size, rows.rows.toString())
+        val (prompt, folded) = users
+        assertNull(prompt.caption)
+        assertEquals(KIWI, folded.text)
+        assertEquals("Sent while Claude worked", folded.caption)
+        assertEquals("u:$QF", folded.key)
+        // Right after the first Bash call's row (queue-fold:14's call, its result at :21).
+        val at = rows.rows.indexOf(folded)
+        val bash = toolUseAt("queue-fold", 14).id
+        assertEquals(listOf(bash), assertIs<ToolRow>(rows.rows[at - 1]).calls.map { it.id })
+        assertEquals(1, footers.size, footers.toString())
+        assertEquals(1, rows.rows.count { it is TurnEndRow })
+        assertTrue(rows.rows.none { it is QueuedRow })
+    }
+
+    @Test
+    fun `queue-later has two footers`() {
+        val footers = LinkedHashSet<String>()
+        val (state, rows) = replayWithSends(
+            "queue-later",
+            mapOf(
+                1 to listOf(SessionEvent.UserSent(QP, "Run the two commands")),
+                19 to listOf(SessionEvent.UserSent(QF, KIWI, later = true, live = true)),
+            ),
+        ) { _, _, lineRows -> lineRows.rows.filterIsInstance<TurnEndRow>().forEach { footers += it.key } }
+        assertEquals(2, footers.size, footers.toString())
+        assertEquals(2, state.turnsEnded)
+        val user = rows.rows.filterIsInstance<UserRow>().single { it.key == "u:$QF" }
+        assertNull(user.caption)
+        assertEquals(KIWI, user.text)
+        assertTrue(state.entries.none { it is ChatEntry.User && it.text == PROMPT })
+    }
+
+    @Test
+    fun `the key moves from the queued row to the user row once started`() {
+        val seen = HashMap<Int, ChatRows>()
+        replayWithSends(
+            "queue-later",
+            mapOf(
+                1 to listOf(SessionEvent.UserSent(QP, "Run the two commands")),
+                19 to listOf(SessionEvent.UserSent(QF, KIWI, later = true, live = true)),
+            ),
+        ) { line, _, lineRows -> seen[line] = lineRows }
+        val waiting = seen.getValue(19).rows
+        val queued = waiting.filterIsInstance<QueuedRow>().single()
+        assertEquals("q:$QF", queued.key)
+        assertEquals("Queued · sends when Claude is done", queued.caption)
+        assertTrue(waiting.none { it.key == "u:$QF" })
+        // Through the gap between the result (:51) and its started (:53) the bubble stays.
+        assertEquals(listOf("q:$QF"), seen.getValue(52).rows.filterIsInstance<QueuedRow>().map { it.key })
+        val started = seen.getValue(53).rows
+        assertTrue(started.none { it is QueuedRow }, started.toString())
+        assertEquals(KIWI, started.filterIsInstance<UserRow>().single { it.key == "u:$QF" }.text)
+    }
+
+    @Test
+    fun `a later context runs as its own local turn after the running one`() {
+        // spec: a later /context runs as its own local turn after the running one
+        // D8's after-the-turn outcome (probes 5.1): queue-later-command's C (/context) and I (an image message), both later.
+        val p = "<command_uuid-4>"
+        val c = "<command_uuid-29>"
+        val i = "<command_uuid-31>"
+        val image = UserImage("$i#0", "image/png", "iVBORw0KGgo=")
+        val seen = HashMap<Int, Pair<ChatState, ChatRows>>()
+        val (state, rows) = replayWithSends(
+            "queue-later-command",
+            mapOf(
+                1 to listOf(SessionEvent.UserSent(p, "Run the command")),
+                23 to listOf(SessionEvent.UserSent(c, "/context", later = true, live = true)),
+                24 to listOf(
+                    SessionEvent.UserSent(i, "What colour is this image? Reply with one word.", images = listOf(image), later = true, live = true),
+                ),
+            ),
+        ) { line, lineState, lineRows -> seen[line] = lineState to lineRows }
+        // The running turn ends as a model turn with its footer (queue-later-command:35), its two messages still waiting.
+        val (afterResult, resultRows) = seen.getValue(35)
+        assertEquals(1, afterResult.turnsEnded)
+        val footer = resultRows.rows.filterIsInstance<TurnEndRow>().single()
+        assertEquals(TurnEnd.COMPLETED, footer.end)
+        assertEquals(listOf("q:$c", "q:$i"), resultRows.rows.filterIsInstance<QueuedRow>().map { it.key })
+        assertTrue(resultRows.rows.none { it is NoticeRow && it.kind == NoticeKind.LOCAL_COMMAND })
+        // Then the command runs as its own turn: its bubble, then its local notice.
+        val all = rows.rows
+        val command = all.indexOfFirst { it is UserRow && it.key == "u:$c" }
+        val done = all.indexOfFirst { it is TextRow && it.markdown == "DONE" }
+        assertTrue(done in 0 until command, all.toString())
+        assertNull((all[command] as UserRow).caption)
+        val notice = assertIs<NoticeRow>(all[command + 1])
+        assertEquals(NoticeKind.LOCAL_COMMAND, notice.kind)
+        assertEquals("context", notice.command)
+        // The image message after it, as its own turn, which the last footer closes.
+        val imageRow = all.indexOfFirst { it is UserRow && it.key == "u:$i" }
+        assertTrue(imageRow > command + 1, all.toString())
+        assertEquals(1, (all[imageRow] as UserRow).images.size)
+        assertIs<TurnEndRow>(all.last())
+        assertTrue(all.none { it is QueuedRow })
+        assertEquals(listOf(p, c, i), state.entries.filterIsInstance<ChatEntry.User>().map { it.id })
+        assertTrue(state.entries.filterIsInstance<ChatEntry.User>().none { it.folded })
+    }
 }
+
+private const val QP: String = "<command_uuid-4>"
+private const val QF: String = "<command_uuid-25>"
+private const val KIWI: String = "Also say the word KIWI at the end."

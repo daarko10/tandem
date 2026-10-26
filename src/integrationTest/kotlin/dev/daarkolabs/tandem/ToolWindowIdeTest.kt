@@ -945,6 +945,66 @@ class ToolWindowIdeTest {
         )
     }
 
+    // Desktop-parity spec 9.7, IDE test 1: a steer sent with Enter while a Bash runs folds into the turn (fake rule (m)).
+    @Test
+    fun `send while Claude works`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat(
+            "queued-steer",
+            fixtures = listOf("queue-fold"),
+            sentLog = log,
+            extraEnv = mapOf("TANDEM_FAKE_QUEUED_DELAY_MS" to "1500"),
+        ) {
+            newSession()
+            enterPrompt("Run the two commands")
+            // The first Bash row: the fake waits at queue-fold:19 for the message sent while it runs.
+            waitForTextContaining("sleep 6")
+            enterPrompt("Also say the word KIWI at the end.")
+            // Contained, not equal: the bubble's text and caption are one node for assistive technology.
+            waitForTextContaining("Sent · Claude reads it at its next step")
+            takeScreenshot("queued-steer")
+            waitForTextContaining("Sent while Claude worked")
+            waitForTurnEnd()
+            assertEquals(1, ui.xx(FOOTER).list().size, "one turn, one footer")
+        }
+        val users = sent.filter { it.type == "user" }
+        assertEquals(2, users.size, users.toString())
+        assertTrue("Also say the word KIWI at the end." in users[1].toString(), users[1].toString())
+        assertFalse("priority" in users[1], users[1].toString())
+    }
+
+    // Desktop-parity spec 9.7, IDE test 2: Ctrl/Cmd+Enter queues for later, and Edit takes it back (queue-cancel's first turn).
+    @Test
+    fun `queue for later and edit`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val kiwi = "Reply with only the word KIWI."
+        val sent = runChat("queued-later", fixtures = listOf("queue-cancel"), sentLog = log) {
+            newSession()
+            enterPrompt("Run the command")
+            // The Bash row, by the call's own description (`Sleeping then echo first`, queue-cancel:18).
+            waitForTextContaining("echo first")
+            focusPromptBox()
+            promptBox().keyboard { typeText(kiwi, 20) }
+            waitFor("prompt box holds the message", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='$kiwi']").present() }
+            // Also the check that the keymap lets Ctrl/Cmd+Enter reach the composer (spec 11 item 10).
+            ui.keyboard { hotKey(if (isMac) KeyEvent.VK_META else KeyEvent.VK_CONTROL, KeyEvent.VK_ENTER) }
+            waitFor("prompt box cleared after Ctrl/Cmd+Enter", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
+            waitForTextContaining("Queued · sends when Claude is done")
+            takeScreenshot("queued-later")
+            iconButton("Edit queued message").click(Point(10, 10))
+            waitFor("the message back in the prompt box", 1.minutes) { ui.x("$PROMPT_BOX[@editabletext='$kiwi']").present() }
+            waitForTurnEnd()
+        }
+        val users = sent.filter { it.type == "user" }
+        assertEquals(2, users.size, "no third user frame: $users")
+        val later = users[1]
+        assertEquals("later", later["priority"]?.jsonPrimitive?.content, later.toString())
+        val uuid = later["uuid"]!!.jsonPrimitive.content
+        val after = sent.drop(sent.indexOf(later) + 1).mapNotNull { it["request"]?.jsonObject }
+        val cancel = after.single { it["subtype"]?.jsonPrimitive?.content == "cancel_async_message" }
+        assertEquals(uuid, cancel["message_uuid"]?.jsonPrimitive?.content, cancel.toString())
+    }
+
     @Test
     fun `a bang command runs locally and Claude replies`() {
         val log = Files.createTempFile("tandem-sent", ".ndjson")

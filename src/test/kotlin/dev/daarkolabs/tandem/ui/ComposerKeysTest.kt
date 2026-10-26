@@ -42,6 +42,8 @@ class ComposerKeysTest {
         ctrlOrMeta: Boolean = false,
         busy: Boolean = false,
         cardOpen: Boolean = false,
+        midTurn: Boolean = false,
+        shellOnly: Boolean = false,
         draftEmpty: Boolean = false,
         hasAttachments: Boolean = false,
         paletteOpen: Boolean = false,
@@ -56,6 +58,8 @@ class ComposerKeysTest {
         ctrlOrMeta,
         busy,
         cardOpen,
+        midTurn = midTurn,
+        shellOnly = shellOnly,
         draftEmpty = draftEmpty,
         hasAttachments = hasAttachments,
         paletteOpen = paletteOpen,
@@ -74,10 +78,69 @@ class ComposerKeysTest {
         assertNull(composer(enter, type = KeyEventType.KeyUp))
     }
 
+    // Spec 12.1, 12.2: sending while Claude works.
     @Test
-    fun `Enter does nothing while busy`() {
-        assertNull(composer(enter, busy = true))
-        assertNull(composer(enter, busy = true, cardOpen = true))
+    fun `busy with mid-turn sends, Enter sends and Ctrl or Cmd+Enter queues`() {
+        assertEquals(ComposerAction.Send, composer(enter, busy = true, midTurn = true))
+        assertEquals(ComposerAction.Send, composer(key(AwtKeyEvent.VK_ENTER, numPad = true), busy = true, midTurn = true))
+        // Ctrl and Meta alike: the caller passes either as ctrlOrMeta, on every OS.
+        assertEquals(ComposerAction.QueueLater, composer(enter, ctrlOrMeta = true, busy = true, midTurn = true))
+        assertEquals(ComposerAction.QueueLater, composer(key(AwtKeyEvent.VK_ENTER, numPad = true), ctrlOrMeta = true, busy = true, midTurn = true))
+        assertNull(composer(enter, type = KeyEventType.KeyUp, busy = true, midTurn = true))
+    }
+
+    @Test
+    fun `busy without mid-turn sends, Enter is refused`() {
+        assertEquals(ComposerAction.BusyRefused, composer(enter, busy = true))
+        assertEquals(ComposerAction.BusyRefused, composer(enter, ctrlOrMeta = true, busy = true))
+        // A refused Enter never reaches the fallback, which would swallow it in silence.
+        assertNull(composer(enter, type = KeyEventType.KeyUp, busy = true))
+    }
+
+    @Test
+    fun `idle, Ctrl or Cmd+Enter sends`() {
+        assertEquals(ComposerAction.Send, composer(enter, ctrlOrMeta = true))
+        assertEquals(ComposerAction.Send, composer(enter, ctrlOrMeta = true, midTurn = true))
+    }
+
+    @Test
+    fun `a card open refuses both Enters`() {
+        for (busy in listOf(false, true)) {
+            assertEquals(ComposerAction.BusyRefused, composer(enter, busy = busy, cardOpen = true), "busy $busy")
+            assertEquals(ComposerAction.BusyRefused, composer(enter, ctrlOrMeta = true, busy = busy, cardOpen = true), "busy $busy")
+            assertEquals(ComposerAction.BusyRefused, composer(key(AwtKeyEvent.VK_ENTER, numPad = true), busy = busy, cardOpen = true))
+        }
+        // The fallback keeps its swallow for a plain Enter with a card open, no longer reached from the Enter branch.
+        assertEquals(ComposerFallback.Swallow, fallback(enter, cardOpen = true))
+        // D8's queue-during-card outcome waits (probes 5.1): Ctrl/Cmd+Enter queues for later with a card open; plain Enter stays refused.
+        assertEquals(ComposerAction.QueueLater, composer(enter, ctrlOrMeta = true, busy = true, cardOpen = true, midTurn = true))
+        assertEquals(ComposerAction.BusyRefused, composer(enter, busy = true, cardOpen = true, midTurn = true))
+    }
+
+    @Test
+    fun `a running ! alone does not refuse Enter`() {
+        // Spec 12.4 rule 2: the prompt is held behind the escape's frames, capabilities or not.
+        assertEquals(ComposerAction.Send, composer(enter, busy = true, shellOnly = true, midTurn = false))
+        assertEquals(ComposerAction.Send, composer(enter, ctrlOrMeta = true, busy = true, shellOnly = true))
+        assertEquals(ComposerAction.Stop, composer(escape, busy = true, shellOnly = true))
+    }
+
+    @Test
+    fun `the palette open, Ctrl or Cmd+Enter does nothing and Enter picks`() {
+        assertNull(composer(enter, ctrlOrMeta = true, paletteOpen = true))
+        assertNull(composer(enter, ctrlOrMeta = true, busy = true, midTurn = true, paletteOpen = true))
+        assertEquals(ComposerAction.PalettePick, composer(enter, paletteOpen = true))
+        assertEquals(ComposerAction.PalettePick, composer(enter, busy = true, midTurn = true, paletteOpen = true))
+    }
+
+    @Test
+    fun `Shift+Enter stays a newline and Alt+Enter is left alone`() {
+        for (busy in listOf(false, true)) {
+            assertNull(composer(enter, shift = true, busy = busy, midTurn = true))
+            assertNull(composer(enter, alt = true, busy = busy, midTurn = true))
+        }
+        assertEquals(ComposerFallback.Newline, fallback(enter, shift = true))
+        assertNull(fallback(enter, alt = true))
     }
 
     // MCP spec 3.4: the interception table runs palette or not, so a busy Enter on `/mcp` (the palette closed by Esc) or on
@@ -90,12 +153,14 @@ class ComposerKeysTest {
             assertEquals(ComposerAction.Send, composer(enter, busy = true, interceptable = interceptable), draft)
             assertEquals(ComposerAction.Send, composer(enter, cardOpen = true, interceptable = interceptable), draft)
             assertEquals(ComposerAction.Send, composer(key(AwtKeyEvent.VK_ENTER, numPad = true), busy = true, interceptable = interceptable))
-            // Modifiers keep their own rules: Shift+Enter stays a newline, Cmd-Enter does nothing.
+            // Ctrl/Cmd+Enter runs it too, before the queue key's rule; Shift+Enter stays a newline.
+            assertEquals(ComposerAction.Send, composer(enter, ctrlOrMeta = true, busy = true, interceptable = interceptable), draft)
+            assertEquals(ComposerAction.Send, composer(enter, ctrlOrMeta = true, busy = true, midTurn = true, interceptable = interceptable))
             assertNull(composer(enter, shift = true, busy = true, interceptable = interceptable))
-            assertNull(composer(enter, ctrlOrMeta = true, busy = true, interceptable = interceptable))
         }
         for (draft in listOf("/model nosuch", "/hello", "hello")) {
-            assertNull(composer(enter, busy = true, interceptable = { intercepts(draft, models) }), draft)
+            // Not Tandem's: the busy rules apply (spec 12.2).
+            assertEquals(ComposerAction.BusyRefused, composer(enter, busy = true, interceptable = { intercepts(draft, models) }), draft)
         }
         // Asked only for a busy plain Enter: an idle Enter sends without it.
         assertEquals(ComposerAction.Send, composer(enter, interceptable = { error("not asked") }))
@@ -103,18 +168,9 @@ class ComposerKeysTest {
     }
 
     @Test
-    fun `Enter does nothing while a card is open`() {
-        // The reducer keeps busy while a request waits; the card rule holds on its own should one ever outlive it (spec 4.15).
-        assertNull(composer(enter, cardOpen = true))
-        assertNull(composer(key(AwtKeyEvent.VK_ENTER, numPad = true), cardOpen = true))
-        assertEquals(ComposerFallback.Swallow, fallback(enter, cardOpen = true))
+    fun `Shift+Enter with a card open is a newline`() {
         assertEquals(ComposerFallback.Newline, fallback(enter, shift = true, cardOpen = true))
-    }
-
-    @Test
-    fun `Cmd-Enter does nothing`() {
-        assertNull(composer(enter, ctrlOrMeta = true))
-        assertNull(composer(enter, alt = true))
+        assertNull(composer(enter, shift = true, cardOpen = true))
     }
 
     @Test
@@ -297,7 +353,7 @@ class ComposerKeysTest {
                 Base64.getEncoder().encodeToString(it)
             }
             val sent: MutableList<String> = Collections.synchronizedList(ArrayList())
-            val sender = ComposerSender(scope, { text, _ -> sent += text }, {}, encode)
+            val sender = ComposerSender(scope, { text, _, _ -> sent += text }, {}, encode)
             val ui = ChatUiState()
             ui.draft.setTextAndPlaceCursorAtEnd(" first ")
             ui.attachments += image("a")
@@ -354,8 +410,12 @@ class ComposerKeysTest {
 
     @Test
     fun `Enter does nothing while a prompt is being encoded`() {
-        // PromptBox passes busy || sending as busy (polish spec 2.7).
-        assertNull(composer(enter, busy = true, hasAttachments = true))
+        // PromptBox passes busy || sending as busy (polish spec 2.7). Since desktop-parity spec 12.2 the key answers a busy Enter
+        // itself: without mid-turn sends it is refused, whose notice says nothing for a session that is not busy (busyRefusal); with
+        // them it sends, and sendDraft sends nothing while the sender encodes (canSend).
+        assertEquals(ComposerAction.BusyRefused, composer(enter, busy = true, hasAttachments = true))
+        assertEquals(ComposerAction.Send, composer(enter, busy = true, midTurn = true, hasAttachments = true))
+        assertFalse(canSend("x", 1, sending = true))
         assertEquals(ComposerFallback.Swallow, fallback(enter, busy = true))
     }
 
