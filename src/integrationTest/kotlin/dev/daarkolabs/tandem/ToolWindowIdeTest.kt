@@ -797,27 +797,34 @@ class ToolWindowIdeTest {
             waitFor("the usage card", 1.minutes) { described(USAGE_CARD).present() }
             waitForTextContaining("Est. cost \$0.15")
             waitForTextContaining(">99% of cost")
-            waitForText("Last 24 hours · 23 sessions · 8.3k requests · approximate, overlapping measures · this machine only, excludes claude.ai")
+            waitForText(DAY_CAVEAT)
             // Three tips, then the disclosure (spec 16.2): the fourth shows only once it is open.
             assertFalse(menuItem("Start fresh when you switch tasks").present(), "the fourth tip waits behind Show 2 more")
             menuItem("Show 2 more").click(Point(10, 10))
             waitForText("Start fresh when you switch tasks")
             assertTrue(menuItem("Show fewer").present(), "the open tips' disclosure reads Show fewer")
             menuItem("7d").click(Point(10, 10))
-            waitForText("Last 7 days · 88 sessions · 19.7k requests · approximate, overlapping measures · this machine only, excludes claude.ai")
+            waitForText(WEEK_CAVEAT)
             takeScreenshot("usage-card")
             // The ring leads to the card too (spec 16.2): the popover closes and the CLI answers with a second card.
             waitForTurnEnd()
+            // The first card keeps 7d (its choice lives in the session's ChatUiState), so from here on it never shows the 24h caveat.
+            waitForText(WEEK_CAVEAT)
+            assertFalse(text(DAY_CAVEAT).present(), "the first card shows only the 7d caveat")
             ui.x(RING).click(Point(10, 10))
             waitFor("the popover's Show session usage", 30.seconds) { menuItem("Show session usage").present() }
             menuItem("Show session usage").click(Point(10, 10))
-            // The transcript is a lazy list: the first card, scrolled out of view, is no longer composed, so the second card is told
-            // by the third prompt it answers rather than by counting nodes.
             waitFor("the popover closed and the ring's /usage went out", 1.minutes) {
                 !described("Context window breakdown").present() &&
                     log.readLines().count { line -> line.contains("\"type\":\"user\"") } == 3
             }
-            waitFor("the second card", 1.minutes) { described(USAGE_CARD).present() }
+            // The transcript is a lazy list: the first card may be scrolled out of view and no longer composed, so a single card node
+            // proves nothing. The second card is told apart by what only it can show: a new card starts on 24h, and the first card
+            // stays on 7d. With both cards composed, two card nodes prove it as well.
+            waitFor("the second card", 1.minutes) {
+                val cards = ui.xx("//div[@class='ComposeNode' and @contentdescription='$USAGE_CARD']").list().size
+                cards == 2 || (cards >= 1 && text(DAY_CAVEAT).present())
+            }
             waitFor("the second card's requests reached the CLI", 30.seconds) {
                 log.readText().split("\"subtype\":\"get_usage\"").size - 1 == 4
             }
@@ -1405,8 +1412,11 @@ class ToolWindowIdeTest {
     }
 
     private fun Driver.waitForText(text: String) {
-        waitFor("'$text' rendered", 2.minutes) { ui.x("//div[@class='ComposeNode' and @visible_text='$text']").present() }
+        waitFor("'$text' rendered", 2.minutes) { text(text).present() }
     }
+
+    /** The node whose text is [text]. */
+    private fun Driver.text(text: String): UiComponent = ui.x("//div[@class='ComposeNode' and @visible_text='$text']")
 
     /** As [waitForText], for [text] as a part of a node's text, such as one pair of a wrapping line. */
     private fun Driver.waitForTextContaining(text: String) {
@@ -1488,6 +1498,8 @@ class ToolWindowIdeTest {
 
         /** The /usage card's description (desktop-parity spec 3.7). */
         const val USAGE_CARD = "Usage for this session"
+        const val DAY_CAVEAT = "Last 24 hours · 23 sessions · 8.3k requests · approximate, overlapping measures · this machine only, excludes claude.ai"
+        const val WEEK_CAVEAT = "Last 7 days · 88 sessions · 19.7k requests · approximate, overlapping measures · this machine only, excludes claude.ai"
 
         /** The footer's context ring. */
         const val RING = "//div[@class='ComposeNode' and @contentdescription='Context window']"
