@@ -210,7 +210,7 @@ class PagedMenuTest {
     private fun scrollsToLast(plugins: ImmutableList<PluginEntry>, page: Int, last: String, back: String, closing: String?) =
         timeoutRunBlocking(kotlin.time.Duration.parse("60s")) {
             val state = PagedMenuState().apply { openAt(page) }
-            val actions = PlusMenuActions({}, {}, {}, {}, {})
+            val actions = PlusMenuActions({}, {}, {}, {}, {}, {})
             // Skia's reference cleaner and Java2D's disposer start with the first rendered scene and live as long as the JVM.
             ThreadLeakTracker.longRunningThreadCreated(ApplicationManager.getApplication(), "Reference Cleaner", "Java2D Disposer")
             withContext(Dispatchers.EDT) {

@@ -96,6 +96,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -123,6 +124,7 @@ import dev.daarkolabs.tandem.chat.SlashIntercept
 import dev.daarkolabs.tandem.chat.SlashPalette
 import dev.daarkolabs.tandem.chat.StopTarget
 import dev.daarkolabs.tandem.chat.committedDraft
+import dev.daarkolabs.tandem.chat.displayPath
 import dev.daarkolabs.tandem.chat.intercepts
 import dev.daarkolabs.tandem.chat.moved
 import dev.daarkolabs.tandem.chat.paletteFor
@@ -132,8 +134,13 @@ import dev.daarkolabs.tandem.chat.slashIntercept
 import dev.daarkolabs.tandem.chat.stopTarget
 import dev.daarkolabs.tandem.chat.withCommand
 import dev.daarkolabs.tandem.ide.CONNECTORS_URL
+import dev.daarkolabs.tandem.ide.FolderCheck
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
+import dev.daarkolabs.tandem.ide.checkFolder
+import dev.daarkolabs.tandem.ide.laterOnEdt
+import dev.daarkolabs.tandem.session.AddedFolder
+import dev.daarkolabs.tandem.session.FolderState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.collections.immutable.ImmutableList
@@ -143,6 +150,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -349,7 +357,38 @@ internal fun PromptBar(
         onDispose { ui.attach = null }
     }
     // The `+` menu's Connectors page (spec 17.2): the MCP panel's controller, built as McpPanelHost builds it but started on open.
-    val opener = remember(project) { project.service<TandemSessions>().browserOpener }
+    val sessions = remember(project) { project.service<TandemSessions>() }
+    val opener = sessions.browserOpener
+    // `Add folder` (spec 3.4): the chooser, modal, in an EDT event of its own after the menu's click, never in the click or in [scope];
+    // only the chosen path enters a coroutine, for the checks on IO and the add. [closed] runs once the chooser has closed, chosen or not.
+    val addFolder: (closed: () -> Unit) -> Unit = { closed ->
+        val later = laterOnEdt(project)
+        sessions.folderChooser.chooseLater(
+            project,
+            onChosen = { chosen ->
+                scope.launch {
+                    val check = withContext(Dispatchers.IO) {
+                        checkFolder(chosen, sessions.projectDirectory, handle.folders.value.map { folder -> folder.path })
+                    }
+                    when (check) {
+                        is FolderCheck.Refused -> ui.composerNotice.value = check.message
+                        is FolderCheck.Add -> manager.addFolder(handle.id, check.realPath)
+                    }
+                }
+            },
+            launcher = { task ->
+                later(
+                    Runnable {
+                        try {
+                            task.run()
+                        } finally {
+                            closed()
+                        }
+                    },
+                )
+            },
+        )
+    }
     val connectorController: (CoroutineScope) -> McpPanelController = remember(handle, manager, opener) {
         { pageScope ->
             connectorPageController(
@@ -384,6 +423,9 @@ internal fun PromptBar(
             pluginsKnown = composer.pluginsKnown,
             columnWidth = columnWidthOf,
             onAdd = { ComposerImages.chooseImagesLater(project, onChosen = attachFiles) },
+            onAddFolder = addFolder,
+            folders = handle.folders,
+            onRemoveFolder = { path -> manager.removeFolder(handle.id, path) },
             onDrop = attachFiles,
             connectorController = connectorController,
             onBrowseConnectors = browseConnectors,
@@ -470,6 +512,9 @@ private fun PromptBox(
     pluginsKnown: Boolean,
     columnWidth: () -> Dp?,
     onAdd: () -> Unit,
+    onAddFolder: (closed: () -> Unit) -> Unit,
+    folders: StateFlow<List<AddedFolder>>,
+    onRemoveFolder: (String) -> Unit,
     onDrop: (List<Path>) -> Unit,
     onAction: (ComposerAction) -> Unit,
     connectorController: (CoroutineScope) -> McpPanelController,
@@ -486,6 +531,7 @@ private fun PromptBox(
     LaunchedEffect(refocus) { if (refocus > 0) inputFocus.requestFocus() }
     val currentOnDrop by rememberUpdatedState(onDrop)
     val currentOnAdd by rememberUpdatedState(onAdd)
+    val currentOnAddFolder by rememberUpdatedState(onAddFolder)
     val currentOnBrowse by rememberUpdatedState(onBrowseConnectors)
     val currentOnAction by rememberUpdatedState(onAction)
     // Derived, so that the box recomposes when the hint comes or goes, not at every keystroke.
@@ -539,6 +585,8 @@ private fun PromptBox(
                 target = dropTarget,
             ),
     ) {
+        // The session's added folders, at the top of the box, above the images (spec 3.4).
+        FolderStrip(folders, onRemoveFolder)
         // The attached images, above the row, across the box's inner width (polish spec 2.7).
         if (ui.attachments.isNotEmpty()) AttachmentStrip(ui.attachments)
         Row(
@@ -560,6 +608,8 @@ private fun PromptBox(
                 actions = remember(ui) {
                     PlusMenuActions(
                         onAddFiles = { currentOnAdd() },
+                        // The text area takes the focus once the chooser has closed (spec 3.5).
+                        onAddFolder = { currentOnAddFolder { refocus++ } },
                         onSlashCommands = {
                             ui.openPalette()
                             refocus++
@@ -751,6 +801,10 @@ private fun AddButton(
     val handing = remember(actions) {
         PlusMenuActions(
             onAddFiles = actions.onAddFiles,
+            onAddFolder = {
+                handsFocus.value = true
+                actions.onAddFolder()
+            },
             onSlashCommands = {
                 handsFocus.value = true
                 actions.onSlashCommands()
@@ -822,12 +876,14 @@ private fun AddButton(
 }
 
 /**
- * What the `+` menu's rows do: [onAddFiles] the image chooser (after the menu closed), [onSlashCommands] `/` and the palette,
+ * What the `+` menu's rows do: [onAddFiles] the image chooser (after the menu closed), [onAddFolder] the folder chooser (after the
+ * menu closed; the text area takes the focus once it has closed), [onSlashCommands] `/` and the palette,
  * [onBrowseConnectors] claude.ai's connectors page in the browser (after the menu closed), [onManageConnectors] the MCP panel (through
  * [openMcpFromMenu], which closes the menu first), and [onCommand] a plugin's command into the draft.
  */
 internal class PlusMenuActions(
     val onAddFiles: () -> Unit,
+    val onAddFolder: () -> Unit,
     val onSlashCommands: () -> Unit,
     val onBrowseConnectors: () -> Unit,
     val onManageConnectors: (PagedMenuState) -> Unit,
@@ -838,7 +894,7 @@ internal class PlusMenuActions(
  * The `+` menu (desktop-parity spec 3.3, 17.1, 17.3), [gapPx] above its anchor and left-aligned, on [state]'s page, every page
  * between [width]'s bounds and at most [maxHeight] high. Each page is one passive item ([pagedRows], spec open item 6): its `‹` row
  * and its closing line stay put while its rows scroll ([ScrolledRows]) under the cap, the keyboard's selection
- * brought into view. Page [PLUS_MAIN]: `Add files or photos` (with [addFilesShortcut], spec 17.1), `Slash commands`, `Connectors ›`
+ * brought into view. Page [PLUS_MAIN]: `Add files or photos` (with [addFilesShortcut], spec 17.1), `Add folder`, `Slash commands`, `Connectors ›`
  * and `Plugins ›`, each with its icon. Page [PLUS_CONNECTORS]: [connectors] ([connectorsPage]).
  * Page [PLUS_PLUGINS]: `‹ Plugins`, one row per plugin of [plugins] (or the line that says why there is none, [pluginsKnown]), the
  * `/plugin` hint. Page [PLUS_FIRST_PLUGIN] + i: `‹ <label>`, then its skills and its commands under their headings; a pick closes the
@@ -1057,7 +1113,7 @@ internal fun PageSeparator() {
 }
 
 /**
- * The `+` menu's first page (spec 3.3, 17.1): four rows in the desktop's order, each with its icon. `Add files or photos` shows
+ * The `+` menu's first page (spec 3.3, 17.1): five rows in the desktop's order, each with its icon. `Add files or photos` shows
  * [shortcut] at its end when [shortcutShown] ([plusShortcutShown]), else in its tooltip; nothing when the action is unbound.
  */
 private fun MenuScope.mainPage(
@@ -1081,6 +1137,10 @@ private fun MenuScope.mainPage(
             val tip = shortcut?.takeUnless { shortcutShown }?.joinToString(" ")
             if (tip != null) WithTooltip("Add files or photos ($tip)") { MenuLabel("Add files or photos") } else MenuLabel("Add files or photos")
         }
+        PageRow(iconKey = AllIconsKeys.Nodes.Folder, onClick = {
+            state.close()
+            actions.onAddFolder()
+        }) { MenuLabel("Add folder") }
         PageRow(iconKey = AllIconsKeys.Nodes.Console, onClick = {
             state.close()
             actions.onSlashCommands()
@@ -1205,6 +1265,74 @@ internal fun MenuLabel(label: String, modifier: Modifier = Modifier, end: @Compo
 @Composable
 private fun DimLine(text: String, palette: ChatPalette, small: TextStyle) {
     Text(text, style = small, color = palette.dim, modifier = PASSIVE_INSET)
+}
+
+/**
+ * The session's added folders (spec 3.4, 3.5, 3.7), collected from [folders], in a row that wraps: one pill per folder with a folder
+ * icon and its name, described as `Folder <name>` with its state as the state description, its full path (the home as `~`) and its
+ * state in the tooltip, in the error colour when the CLI did not add it; a 16 dp `×` (`Remove folder <name>`) calls [onRemove].
+ * Nothing while there is no folder.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FolderStrip(folders: StateFlow<List<AddedFolder>>, onRemove: (String) -> Unit) {
+    val added by folders.collectAsState()
+    if (added.isEmpty()) return
+    val home = remember { System.getProperty("user.home") }
+    val shape = RoundedCornerShape(6.dp)
+    val colors = JewelTheme.globalColors
+    FlowRow(
+        Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        added.forEach { folder ->
+            key(folder.path) {
+                val name = folderName(folder.path)
+                val state = folderStateText(folder.state)
+                val tint = if (folder.state == FolderState.MISSING) colors.text.error else colors.text.normal
+                Row(
+                    Modifier.border(1.dp, colors.borders.normal, shape).padding(start = 6.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    WithTooltip(tooltip = {
+                        Column {
+                            Text(displayPath(folder.path, home, null))
+                            Text(state)
+                        }
+                    }) {
+                        Row(
+                            Modifier.semantics(mergeDescendants = true) {
+                                contentDescription = "Folder $name"
+                                stateDescription = state
+                            },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(AllIconsKeys.Nodes.Folder, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(name, color = tint, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp))
+                        }
+                    }
+                    IconButton(
+                        onClick = { onRemove(folder.path) },
+                        modifier = Modifier.padding(start = 2.dp).size(16.dp).semantics { contentDescription = "Remove folder $name" },
+                    ) {
+                        Icon(AllIconsKeys.General.Close, contentDescription = null)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A folder's name: the last segment of its [path] (a root has none: the path itself). */
+private fun folderName(path: String): String = path.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\').ifEmpty { path }
+
+/** A folder pill's state line (spec 3.4). */
+private fun folderStateText(state: FolderState): String = when (state) {
+    FolderState.PENDING -> "Applies with the next prompt."
+    FolderState.ACTIVE -> "Added to this session."
+    FolderState.MISSING -> "The CLI did not add this folder."
 }
 
 /**

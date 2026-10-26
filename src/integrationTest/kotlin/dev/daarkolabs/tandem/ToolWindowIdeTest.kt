@@ -833,16 +833,17 @@ class ToolWindowIdeTest {
             pressUntil("+ focused", { ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) } }) { focusedIconButton("Add").present() }
             ui.keyboard { enter() }
             waitFor("Enter opened page 1", 30.seconds) { plusItem("Plugins").present() }
-            // Page 1: exactly four rows, in the desktop's order (spec 3.3; Add folder joins in D6b).
-            assertEquals(4, ui.xx(MENU_ITEM).list().size, "page 1 has four rows")
+            // Page 1: exactly five rows, in the desktop's order (spec 3.3).
+            assertEquals(5, ui.xx(MENU_ITEM).list().size, "page 1 has five rows")
             assertTrue(
                 ui.x(
-                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Add folder").removePrefix("//")}" +
+                        "/following::${plusItemPath("Slash commands").removePrefix("//")}" +
                         "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
                 ).present(),
-                "Add files or photos, Slash commands, Connectors, Plugins in document order",
+                "Add files or photos, Add folder, Slash commands, Connectors, Plugins in document order",
             )
-            // Kept as a test artifact: page 1's four rows, each with its icon.
+            // Kept as a test artifact: page 1's five rows, each with its icon.
             takeScreenshot("plus-menu-main")
             // → is not bound in the + menu (deviation 23): still page 1.
             ui.keyboard { key(KeyEvent.VK_RIGHT) }
@@ -877,6 +878,49 @@ class ToolWindowIdeTest {
         assertEquals(1, sent.count { it.type == "user" }, "only the first prompt went out: ${sent.map { it.type }}")
     }
 
+    // spec: Add folder respawns with --add-dir (IDE test 4)
+    @Test
+    fun `Add folder respawns with --add-dir`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // Outside the project; the chooser's property goes through the same posted event as the platform chooser, whose modal
+        // FolderChooserTest covers.
+        val folder = Files.createTempDirectory("tandem-add-folder").resolve("shared-lib").createDirectories()
+        val real = folder.toRealPath().toString()
+        val sent = runChat(
+            "add-folder",
+            fixtures = listOf("plain-reply", "plain-reply"),
+            sentLog = log,
+            systemProperties = mapOf("tandem.addFolder" to folder.toString()),
+        ) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            // Page 1: exactly five rows, in the desktop's order (spec 3.3).
+            assertEquals(5, ui.xx(MENU_ITEM).list().size, "page 1 has five rows")
+            assertTrue(
+                ui.x(
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Add folder").removePrefix("//")}" +
+                        "/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                        "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
+                ).present(),
+                "Add files or photos, Add folder, Slash commands, Connectors, Plugins in document order",
+            )
+            plusItem("Add folder").click(Point(10, 10))
+            waitFor("the folder's pill", 1.minutes) { described("Folder shared-lib").present() }
+            enterPrompt("hi")
+            waitForTurnEnd()
+            // Kept as a test artifact: the pill at the top of the composer box.
+            takeScreenshot("folder-pill")
+        }
+        val spawns = sent.filter { it.type == "__spawn__" }.map { spawn -> spawn["argv"]!!.jsonArray.map { it.jsonPrimitive.content } }
+        assertEquals(2, spawns.size, spawns.toString())
+        assertFalse("--add-dir" in spawns[0], "the first spawn had no folder: ${spawns[0]}")
+        val second = spawns[1]
+        val at = second.indexOf("--add-dir")
+        assertTrue(at >= 0 && second.getOrNull(at + 1) == real, "the second spawn passes --add-dir $real: $second")
+    }
+
     // spec: the plus menu shows where things come from (9.8 IDE test 1)
     @Test
     fun `the plus menu shows where things come from`() {
@@ -889,14 +933,15 @@ class ToolWindowIdeTest {
             widenToolWindow()
             iconButton("Add").click(Point(10, 10))
             waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
-            // Page 1: exactly four rows, in the desktop's order (Add folder joins in D6b).
-            assertEquals(4, ui.xx(MENU_ITEM).list().size, "page 1 has four rows")
+            // Page 1: exactly five rows, in the desktop's order (spec 3.3).
+            assertEquals(5, ui.xx(MENU_ITEM).list().size, "page 1 has five rows")
             assertTrue(
                 ui.x(
-                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Add folder").removePrefix("//")}" +
+                        "/following::${plusItemPath("Slash commands").removePrefix("//")}" +
                         "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
                 ).present(),
-                "Add files or photos, Slash commands, Connectors, Plugins in document order",
+                "Add files or photos, Add folder, Slash commands, Connectors, Plugins in document order",
             )
             assertTrue(containing(ADD_FILES_SHORTCUT).present(), "the shortcut text on a wide menu (deviation 28)")
             ui.keyboard { escape() }
@@ -1355,7 +1400,8 @@ class ToolWindowIdeTest {
      * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists and sleeps
      * [lineDelayMs] before each stream line. The frames go to [sentLog] as the fake CLI reads them, so that [script] can wait for one.
      * [extraEnv] adds variables to the IDE's environment, which the fake CLI inherits; with [browserLog] a link the plugin opens in
-     * the browser is a `{"type":"__browse__","url":…}` line in [sentLog] instead (`tandem.browserOpener=log`).
+     * the browser is a `{"type":"__browse__","url":…}` line in [sentLog] instead (`tandem.browserOpener=log`). [systemProperties] are
+     * set in the IDE's JVM (`tandem.addFolder`, say).
      */
     private fun runChat(
         name: String,
@@ -1367,6 +1413,7 @@ class ToolWindowIdeTest {
         lineDelayMs: Int? = null,
         extraEnv: Map<String, String> = emptyMap(),
         browserLog: Boolean = false,
+        systemProperties: Map<String, String> = emptyMap(),
         script: Driver.() -> Unit,
     ): List<JsonObject> {
         ideContext(
@@ -1379,6 +1426,7 @@ class ToolWindowIdeTest {
             lineDelayMs,
             extraEnv = extraEnv,
             browserLog = browserLog,
+            systemProperties = systemProperties,
         ).runTandem(name, script)
         return if (sentLog.exists()) sentLog.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject } else emptyList()
     }
@@ -1394,6 +1442,7 @@ class ToolWindowIdeTest {
         lineDelayMs: Int? = null,
         extraEnv: Map<String, String> = emptyMap(),
         browserLog: Boolean = false,
+        systemProperties: Map<String, String> = emptyMap(),
     ): IDETestContext =
         Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
@@ -1409,6 +1458,7 @@ class ToolWindowIdeTest {
                 if (lineDelayMs != null) withEnv("TANDEM_FAKE_LINE_DELAY_MS", lineDelayMs.toString())
                 extraEnv.forEach { (key, value) -> withEnv(key, value) }
                 if (browserLog) addSystemProperty("tandem.browserOpener", "log")
+                systemProperties.forEach { (key, value) -> addSystemProperty(key, value) }
             }
         }
 

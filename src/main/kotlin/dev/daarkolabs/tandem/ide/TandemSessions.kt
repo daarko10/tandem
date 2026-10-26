@@ -66,6 +66,10 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     /** The project's base path, absolute and as the platform gives it; the user's home for a project without one. Sessions run in it. */
     private val directory: Path = baseDirectory(project)
 
+    /** The project's directory, as sessions run in it: `Add folder` refuses it and the folders under it (spec 3.4). */
+    internal val projectDirectory: Path
+        get() = directory
+
     /** [directory] with its links resolved, native separators: the path the CLI keys its transcript folder on. Read off the EDT. */
     private val projectPath: Lazy<String> = lazy { physical(directory).toString() }
 
@@ -120,6 +124,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
 
     /** Opens an MCP server's sign-in page in the system browser (spec 3.3, 4.4); tests swap in a log line (`tandem.browserOpener`). */
     val browserOpener: BrowserOpener = BrowserOpeners.default()
+
+    /** Picks the folder `Add folder` adds (desktop-parity spec 3.4); tests name one with `tandem.addFolder`. */
+    val folderChooser: FolderChooser = FolderChoosers.default()
 
     // The settings as already loaded: loading them reads a file, which the constructor must not (it may run on the EDT), so when
     // they are not loaded yet the default holds until ensureStarted reads them on IO, before it restores any session.

@@ -113,7 +113,7 @@ class ConnectorsPageTest {
                                 maxHeight = 268.dp,
                                 gapPx = 8,
                                 onDismissRequest = { mode -> menu.dismiss(mode, anchorHovered = false) },
-                                actions = PlusMenuActions({}, {}, {}, {}, {}),
+                                actions = PlusMenuActions({}, {}, {}, {}, {}, {}),
                                 connectors = page,
                             )
                         }
