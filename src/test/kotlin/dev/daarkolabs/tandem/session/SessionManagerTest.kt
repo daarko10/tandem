@@ -4,8 +4,11 @@ import com.intellij.openapi.diagnostic.Logger
 import dev.daarkolabs.tandem.protocol.BashEscape
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.protocol.McpConfig
+import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.session.transcript.LoadedTranscript
 import dev.daarkolabs.tandem.session.transcript.SessionIndex
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
@@ -247,6 +250,62 @@ class SessionManagerTest {
         assertFalse("--model" in argv, argv.toString())
         assertNull(handle.state.value.requestedModel, "nothing was picked")
         assertEquals("claude-sonnet-5-5", handle.state.value.activeModel)
+    }
+
+    @Test
+    fun `a session without a process offers the models the last process listed, else the remembered ones`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "agent-sync")
+        val remembered = listOf(ModelOption("opus", "Opus", null, "claude-opus-5-5"))
+        manager.seedModels(remembered)
+        assertEquals(remembered, manager.models.value, "until a process lists them, the list an earlier IDE run remembered")
+
+        // Restored with the project: no process, so no initialize response of its own.
+        val resumed = manager.open(seeded, spawn = false)
+        assertEquals(SessionStatus.STOPPED, resumed.status.value)
+        assertEquals(emptyList(), resumed.state.value.models)
+        assertEquals(remembered, manager.models.value)
+
+        // Another session's process answers initialize (agent-sync's line 2) without a prompt: its list is every session's now.
+        val live = manager.create(NewSessionOptions())
+        val listed = live.state.first { it.models.isNotEmpty() }.models
+        assertEquals(listed, manager.models.first { it == listed })
+        assertEquals("Opus 5.5", listed.first { it.resolvedModel == "claude-opus-5-5" && it.value != "default" }.displayName)
+        assertEquals(emptyList(), resumed.state.value.models, "the resumed session's own list stays its process's")
+        assertEquals(1, spawns().size, "no process was started to read the list")
+
+        manager.seedModels(remembered)
+        assertEquals(listed, manager.models.value, "a remembered list never replaces one a process gave")
+    }
+
+    @Test
+    fun `a session without a process offers the commands the last process offered, else the remembered ones`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "mcp-slash")
+        val remembered = CommandCatalogue(listOf(SlashCommand("hello", "Hi (project)")), terminal = setOf("doctor", "old"))
+        manager.seedCommands(remembered)
+        assertEquals(remembered, manager.commands.value, "until a process offers them, the catalogue an earlier IDE run remembered")
+
+        // Restored with the project: no process, so no initialize answer of its own.
+        val resumed = manager.open(seeded, spawn = false)
+        assertEquals(emptyList(), resumed.state.value.commands)
+
+        // Another session's process answers initialize (mcp-slash:1) without a prompt: its commands are every session's now.
+        val live = manager.create(NewSessionOptions())
+        val offered = live.state.first { it.commands.isNotEmpty() }.commands
+        assertEquals(73, offered.size)
+        assertEquals(CommandCatalogue(offered, remembered.terminal), manager.commands.first { it.commands == offered })
+        assertEquals(1, spawns().size, "no process was started to read them")
+
+        // Its first init (with its first prompt) names the terminal-only ones, which replace the remembered names.
+        manager.send(live.id, "/usage")
+        val terminal = live.state.first { it.terminalCommands.isNotEmpty() }.terminalCommands
+        assertEquals(setOf("doctor", "color", "focus", "reload-plugins"), terminal)
+        assertEquals(terminal, manager.commands.first { it.terminal == terminal }.terminal)
+        assertEquals(emptyList(), resumed.state.value.commands, "the resumed session's own catalogue stays its process's")
+
+        manager.seedCommands(remembered)
+        assertEquals(CommandCatalogue(offered, terminal), manager.commands.value, "a remembered catalogue never replaces one a process gave")
     }
 
     @Test
@@ -539,6 +598,21 @@ class SessionManagerTest {
         handle.state.first { s -> s.entries.count { it is ChatEntry.Notice } == 2 }
         assertEquals(emptyList(), handle.state.value.prompts())
         assertEquals(SessionStatus.STOPPED, handle.status.value)
+        assertFalse(log.exists(), "no process was started")
+    }
+
+    @Test
+    fun `a shell escape whose claude is not found says its output was not sent`() = test {
+        unix()
+        val manager = manager(lookup = { null })
+        val handle = manager.create(NewSessionOptions())
+        manager.runShell(handle.id, "echo hi")
+        val done = handle.state.first { s -> s.entries.lastOrNull().let { it is ChatEntry.Notice && it.level == NoticeLevel.WARNING } }
+        val (install, unsent) = done.entries.takeLast(2).map { it as ChatEntry.Notice }
+        assertEquals(NoticeLevel.ERROR, install.level)
+        assertTrue("not found" in install.text, install.text)
+        assertEquals("The output of ! echo hi was not sent: the CLI ended first.", unsent.text)
+        assertEquals(ShellEnd.Exited(0), done.shell().end)
         assertFalse(log.exists(), "no process was started")
     }
 
@@ -1292,6 +1366,8 @@ class SessionManagerTest {
             // A request while no turn runs: it asks for attention as a request, and the user looks at it.
             process.script.println(Fixtures.lines("permission").first { "\"can_use_tool\"" in it })
             handle.status.first { it == SessionStatus.WAITING }
+            // The manager follows the status in a coroutine of its own: looking before it has seen WAITING would race its attention.
+            handle.attention.first { it }
             manager.select(handle.id)
             manager.select(null)
             manager.allow(handle.id, handle.state.value.pendingPermissions.single().requestId, always = false)
@@ -1616,6 +1692,113 @@ class SessionManagerTest {
         mcpAuth.first { it[server]?.outcome != null }[server]!!.outcome!!
 
     @Test
+    fun `the MCP panel's start resumes a session without a process, sends no prompt, and its servers become the project's known ones`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "mcp-status")
+        val resumed = manager.open(seeded, spawn = false)
+        assertEquals(SessionStatus.STOPPED, resumed.status.value)
+        assertEquals(McpResult.Failed(McpError.NotRunning), manager.refreshMcp(seeded))
+        assertEquals(emptyList(), manager.knownMcpServers.value, "no process has listed any yet")
+
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = false))
+        val listed = manager.refreshMcp(seeded).ok()
+        assertEquals(listed, resumed.mcpServers.first { it.detailed }.servers)
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = false), "a running session is not started again")
+
+        val argv = spawns().single()
+        assertEquals(seeded, argv.valueOf("--resume"), "resumed with its usual arguments")
+        assertFalse("--session-id" in argv, argv.toString())
+        assertTrue(frames().none { it.type() == "user" }, "no prompt is sent")
+        assertEquals(listed.map { it.lastKnown() }, manager.knownMcpServers.value)
+        assertEquals(listed.map { it.name }, manager.knownMcpServers.value.map { it.name })
+    }
+
+    @Test
+    fun `the known servers keep only what the panel shows`() {
+        val server = McpServerInfo(
+            "remote",
+            McpStatus.CONNECTED,
+            "connected",
+            error = "boom",
+            config = McpConfig("http", command = "npx", args = listOf("--token", "s3cret"), url = "https://user:pw@mcp.example.com:8443/k3y?token=t"),
+        )
+        val known = server.lastKnown()
+        assertEquals(McpConfig("http", command = "npx", args = emptyList(), url = "https://mcp.example.com:8443"), known.config)
+        assertEquals(server.copy(config = known.config), known, "everything else as the panel shows it")
+        assertNull(McpServerInfo("bare", McpStatus.FAILED, "failed").lastKnown().config)
+    }
+
+    @Test
+    fun `the MCP panel's start stops an idle session to make room`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "mcp-status", maxLive = 1)
+        val idle = manager.started()
+        manager.open(seeded, spawn = false)
+
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = false))
+        idle.status.await(SessionStatus.STOPPED)
+        awaitLog { spawns().size == 2 }
+        assertEquals(seeded, spawns().last().valueOf("--resume"))
+    }
+
+    @Test
+    fun `the MCP panel's start never stops a session in a turn, and goes over the cap only when asked`() = test {
+        seed(seeded)
+        val manager = manager(fixtures = "permission,mcp-status", maxLive = 1)
+        val busy = manager.create(NewSessionOptions())
+        manager.send(busy.id, "Create the fixture file")
+        busy.awaitRequest("<request_id-26>")
+        val resumed = manager.open(seeded, spawn = false)
+
+        assertEquals(McpStart.NoRoom(1), manager.startForMcp(seeded, overCap = false))
+        assertEquals(1, spawns().size, "nothing started")
+        assertEquals(SessionStatus.STOPPED, resumed.status.value)
+        assertTrue(resumed.state.value.notices(NoticeLevel.INFO).isEmpty(), "nothing in the chat")
+
+        // Start session: the user asked for it, so it starts over the cap, as a prompt would, and the chat says so.
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = true))
+        awaitLog { spawns().size == 2 }
+        assertEquals(seeded, spawns().last().valueOf("--resume"))
+        assertEquals(listOf("Max live sessions exceeded"), resumed.state.value.notices(NoticeLevel.INFO))
+        assertEquals(SessionStatus.WAITING, busy.status.value, "the session in a turn runs on")
+        manager.refreshMcp(seeded).ok()
+    }
+
+    @Test
+    fun `the MCP panel's start says why no process could start`() = test {
+        seed(seeded)
+        val manager = manager(binary = null)
+        val resumed = manager.open(seeded, spawn = false)
+        assertEquals(McpStart.Failed(SessionManager.NO_CLI_TEXT), manager.startForMcp(seeded, overCap = false))
+        assertEquals(SessionStatus.STOPPED, resumed.status.value)
+        assertEquals(McpStart.Failed(SessionManager.CLOSED_TEXT), manager.startForMcp("not-open", overCap = false))
+    }
+
+    @Test
+    fun `a process that cannot launch ends the MCP panel's start with the chat's reason`() = test {
+        seed(seeded)
+        val manager = manager(binary = dir.resolve("no-such-claude").toString())
+        val resumed = manager.open(seeded, spawn = false)
+        // The launch fails in the process's own coroutine: the start attaches it, and its end follows.
+        assertEquals(McpStart.Running, manager.startForMcp(seeded, overCap = false))
+        val ended = resumed.state.first { it.ended }
+        assertTrue(ended.notices(NoticeLevel.ERROR).single().startsWith("Could not start `"), ended.notices(NoticeLevel.ERROR).toString())
+        val listed = manager.refreshMcp(seeded)
+        assertTrue(listed == McpResult.Failed(McpError.NotRunning) || listed == McpResult.Failed(McpError.Ended), listed.toString())
+    }
+
+    @Test
+    fun `a new process starts without the servers of the one before`() = test {
+        val (manager, handle) = mcpSession()
+        assertTrue(handle.state.value.mcp.servers.isNotEmpty())
+        manager.stop(handle.id)
+        assertTrue(handle.state.value.mcp.servers.isNotEmpty(), "a stopped session keeps its last list, which the badge does not count")
+
+        assertEquals(McpStart.Running, manager.startForMcp(handle.id, overCap = false))
+        assertEquals(McpState(), handle.state.value.mcp, "its servers come with its own init or mcp_status")
+    }
+
+    @Test
     fun `opening the servers sends mcp_status and the handle publishes the rows`() = test {
         val manager = manager(fixtures = "mcp-status")
         val handle = manager.started()
@@ -1680,6 +1863,19 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `a sign-in link that does not open posts the error without the terminal hint`() = test {
+        val (manager, handle) = mcpSession(every = 50.milliseconds)
+
+        val result = manager.startMcpAuth(handle.id, "authy") { throw java.io.IOException("no browser") }
+
+        assertEquals(McpResult.Failed(McpError.Rejected("no browser", linkFailed = true)), result)
+        val chat = handle.state.first { it.notices(NoticeLevel.ERROR).isNotEmpty() }
+        assertEquals(listOf("Sign-in to authy failed: no browser"), chat.notices(NoticeLevel.ERROR))
+        assertEquals(emptySet(), handle.mcpLoginHinted.value, "mcp_authenticate itself succeeded (spec 4.2)")
+        assertEquals(emptyMap(), handle.mcpAuth.value)
+    }
+
+    @Test
     fun `the sign-in poll times out while the server still needs auth`() = test {
         val (manager, handle) = mcpSession(every = 50.milliseconds, timeout = 300.milliseconds)
 
@@ -1689,6 +1885,30 @@ class SessionManagerTest {
         val chat = handle.state.first { it.notices(NoticeLevel.WARNING).isNotEmpty() }
         assertEquals(listOf("Sign-in to authy did not complete within 3 minutes."), chat.notices(NoticeLevel.WARNING))
         assertTrue(framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } >= 2, "the poll asked more than once")
+    }
+
+    // MCP spec 3.3 steps 3 and 5: a pending server (reconnecting after the callback, unrecorded) keeps the wait going, and every
+    // outcome but Cancel and the session's end has a chat notice.
+    @Test
+    fun `a sign-in waits through pending and says when the server changed or went`() {
+        fun listed(status: McpStatus, error: String? = null) = listOf(McpServerInfo("authy", status, status.wire, error = error))
+        assertNull(signInOutcome(listed(McpStatus.NEEDS_AUTH), "authy"))
+        assertNull(signInOutcome(listed(McpStatus.PENDING), "authy"), "pending goes on waiting")
+        assertEquals(McpAuthOutcome.Connected, signInOutcome(listed(McpStatus.CONNECTED), "authy"), "then connected ends it")
+        assertEquals(McpAuthOutcome.Removed, signInOutcome(emptyList(), "authy"))
+        assertEquals(McpAuthOutcome.Changed(McpStatus.FAILED, "boom"), signInOutcome(listed(McpStatus.FAILED, "boom"), "authy"))
+
+        assertEquals(NoticeLevel.WARNING to "Sign-in to authy ended: authy is no longer configured.", signInNotice("authy", McpAuthOutcome.Removed))
+        assertEquals(
+            NoticeLevel.WARNING to "Sign-in to authy ended: the server is now disabled.",
+            signInNotice("authy", McpAuthOutcome.Changed(McpStatus.DISABLED, null)),
+        )
+        assertEquals(
+            NoticeLevel.WARNING to "Sign-in to authy ended: the server is now in an unknown state.",
+            signInNotice("authy", McpAuthOutcome.Changed(McpStatus.OTHER, null)),
+        )
+        assertEquals(NoticeLevel.ERROR to "Sign-in to authy failed: boom", signInNotice("authy", McpAuthOutcome.Changed(McpStatus.FAILED, "boom")))
+        assertNull(signInNotice("authy", McpAuthOutcome.Failed(McpError.Ended)), "the chat shows the session's end already")
     }
 
     @Test
@@ -1967,7 +2187,7 @@ class SessionManagerTest {
     @Test
     fun `with replies off a shell escape sends one context frame`() = test {
         unix()
-        val manager = manager(fixtures = "bash-mode", respondToShell = { false })
+        val manager = manager(fixtures = "bash-mode-context", respondToShell = { false })
         val handle = manager.create(NewSessionOptions())
         manager.runShell(handle.id, "echo hi")
         val quiet = handle.state.first { s -> s.entries.any { it is ChatEntry.Shell && it.sent } && s.quietSends.isEmpty() }

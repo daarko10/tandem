@@ -4,6 +4,7 @@ import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.session.McpState
 import dev.daarkolabs.tandem.session.TANDEM_MCP_SERVER
+import dev.daarkolabs.tandem.session.mcpUrlOrigin
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
@@ -32,7 +33,7 @@ enum class McpSource(val title: String) {
 
 /**
  * One server as the panel draws it. [key] is unique in the panel (two entries may share a [name]); [name] is what every request
- * sends, [displayName] what the row shows. [detail] is line 2 (the url without its query and fragment, else the command without its
+ * sends, [displayName] what the row shows. [detail] is line 2 (the url's scheme, host and port only, else the command without its
  * args); [error] the entry's error verbatim, whatever the status. [readOnly]: Tandem's own server, which has no action. [rawSource]
  * is the wire source of an [McpSource.OTHER] row, for its pill.
  */
@@ -55,7 +56,8 @@ data class McpGroupModel(val source: McpSource, val rows: ImmutableList<McpRowMo
 
 /**
  * The whole panel: [connected] of [total] servers connected, the non-empty [groups] in [McpSource] order, whether a server is still
- * [hasPending] (the panel refreshes again), and whether the session is [stopped] (every row without actions).
+ * [hasPending] (the panel refreshes again), and whether the session is [stopped] (every row without actions): its rows are then the
+ * last known ones, not the live list of a running process.
  */
 data class McpPanelModel(
     val connected: Int,
@@ -63,7 +65,18 @@ data class McpPanelModel(
     val groups: ImmutableList<McpGroupModel>,
     val hasPending: Boolean,
     val stopped: Boolean,
-)
+) {
+    /**
+     * The sheet's title: `MCP servers · C of T connected` for a live list; `MCP servers · last known: C of T connected` for the last
+     * known rows of a session that is [stopped] or starting, and `MCP servers` alone when none is known.
+     */
+    val title: String
+        get() = when {
+            !stopped -> "MCP servers · $connected of $total connected"
+            total == 0 -> "MCP servers"
+            else -> "MCP servers · last known: $connected of $total connected"
+        }
+}
 
 private const val CONNECTOR_PREFIX: String = "claude.ai "
 private const val DYNAMIC_SOURCE: String = "dynamic"
@@ -94,10 +107,20 @@ fun mcpPanel(
     )
 }
 
-/** The header badge, `connected/total`; null when the session reports no server (`0/0` is never drawn). */
-fun mcpBadge(state: McpState): String? {
-    if (state.servers.isEmpty()) return null
+/**
+ * The header badge, `connected/total`; null when the session reports no server (`0/0` is never drawn), and while it has no [live]
+ * process: its servers are then an earlier process's, which no count may show as live.
+ */
+fun mcpBadge(state: McpState, live: Boolean = true): String? {
+    if (!live || state.servers.isEmpty()) return null
     return "${state.servers.count { it.status == McpStatus.CONNECTED }}/${state.servers.size}"
+}
+
+/** The header button's tooltip: `MCP servers: C of T connected` while the [badge][mcpBadge] shows; else what the panel offers. */
+fun mcpTooltip(state: McpState, live: Boolean = true): String = when {
+    !live -> "MCP servers: the session is not running"
+    state.servers.isEmpty() -> "MCP servers"
+    else -> "MCP servers: ${state.servers.count { it.status == McpStatus.CONNECTED }} of ${state.servers.size} connected"
 }
 
 private fun sourceOf(server: McpServerInfo): McpSource = when {
@@ -170,9 +193,11 @@ private fun actionsOf(server: McpServerInfo, loginHinted: Set<String>): Immutabl
     McpStatus.OTHER -> persistentListOf(McpAction.DISABLE)
 }
 
-/** Line 2: the url up to its query or fragment, else the command alone; args and query values can carry tokens and never show. */
+/**
+ * Line 2: the url's scheme, host and port, else the command alone. Args, user info, the path (some hosted servers put their key in
+ * it) and the query can carry tokens, and never show (spec 3.2). A url that does not parse, or has no host, falls back to the command.
+ */
 private fun detailOf(server: McpServerInfo): String? {
     val config = server.config ?: return null
-    val url = config.url?.let { url -> url.substring(0, url.indexOfAny(charArrayOf('?', '#')).takeIf { it >= 0 } ?: url.length) }
-    return url?.takeIf { it.isNotBlank() } ?: config.command?.takeIf { it.isNotBlank() }
+    return config.url?.let(::mcpUrlOrigin) ?: config.command?.takeIf { it.isNotBlank() }
 }

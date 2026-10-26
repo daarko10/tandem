@@ -1,7 +1,9 @@
 package dev.daarkolabs.tandem.ui
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -22,3 +24,15 @@ internal fun smallTextStyle(): TextStyle = JewelTheme.defaultTextStyle.copyWithS
 @Composable
 internal fun monoTextStyle(): TextStyle =
     JewelTheme.editorTextStyle.copy(fontSize = (bodySize().value - 1).sp, lineHeight = JewelTheme.defaultTextStyle.lineHeight)
+
+/** One line of [style]: its line height, else 1.4 times its size (12 sp when it has none). */
+@Composable
+internal fun lineHeight(style: TextStyle): Dp {
+    val size = style.fontSize.takeIf { it.isSp } ?: 12.sp
+    val line = when {
+        style.lineHeight.isSp -> style.lineHeight
+        style.lineHeight.isEm -> size * style.lineHeight.value
+        else -> size * 1.4f
+    }
+    return with(LocalDensity.current) { line.toDp() }
+}

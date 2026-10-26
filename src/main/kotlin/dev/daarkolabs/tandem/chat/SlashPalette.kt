@@ -24,7 +24,10 @@ data class PaletteItem(
     val intercepted: Boolean,
 )
 
-/** The open palette: [query] is the draft as typed, slash included; [footer] reads `No matching command` when [items] is empty. */
+/**
+ * The open palette: [query] is the draft as typed, slash included; [footer] reads `No matching command` when [items] is empty, and
+ * `Commands load when the session starts` while no process has offered any.
+ */
 data class SlashPalette(val query: String, val items: ImmutableList<PaletteItem>, val selected: Int, val footer: String?)
 
 private val PALETTE_DRAFT: Regex = Regex("^/\\S*$")
@@ -51,8 +54,8 @@ private class Entry(val item: PaletteItem, val aliases: List<String>)
  * The palette for [draft], or null unless it is one slash token (`^/\S*$`). The catalogue is [commands] (the initialize answer)
  * without the [terminal] names (never one of Tandem's four) and the `__` names, with Tandem's four rows in place or appended; with no
  * [commands] yet, Tandem's four rows and [fallbackNames] (`init.slash_commands`) under the same filters, and a footer saying the
- * commands load later. Rows rank exact name, name prefix, alias prefix, substring, in catalogue order within a rank. [selected] is
- * clamped into the rows.
+ * commands load later, also when no row matches (the command may well exist). Rows rank exact name, name prefix, alias prefix,
+ * substring, in catalogue order within a rank. [selected] is clamped into the rows.
  */
 fun slashPalette(draft: String, commands: List<SlashCommand>, fallbackNames: List<String>, terminal: Set<String>, selected: Int = 0): SlashPalette? {
     if (!PALETTE_DRAFT.matches(draft)) return null
@@ -60,8 +63,8 @@ fun slashPalette(draft: String, commands: List<SlashCommand>, fallbackNames: Lis
     val catalogue = if (fallback) fallbackCatalogue(fallbackNames, terminal) else catalogue(commands, terminal)
     val items = ranked(draft.drop(1), catalogue)
     val footer = when {
-        items.isEmpty() -> NO_MATCH
         fallback -> COMMANDS_LOADING
+        items.isEmpty() -> NO_MATCH
         else -> null
     }
     return SlashPalette(draft, items, clamp(selected, items), footer)
@@ -124,7 +127,9 @@ sealed interface SlashIntercept {
 /**
  * The interception table of spec 3.4 on [text], trimmed: `/mcp` opens the panel, `/model` the model menu, `/model <name>` picks the
  * model of [models] whose value or display name is the whole of `<name>` (ignoring case), `/permissions` and `/mode` open the
- * permission-mode menu; anything else, `/mcp <args>` included, is sent as typed.
+ * permission-mode menu; anything else, `/mcp <args>` included, is sent as typed. The composer passes [ComposerModel.models], which
+ * falls back to the CLI's aliases ([dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES]), so a session that has not listed its models
+ * still intercepts `/model <alias>`.
  */
 fun slashIntercept(text: String, models: List<ModelOption>): SlashIntercept {
     val trimmed = text.trim()
@@ -141,6 +146,12 @@ fun slashIntercept(text: String, models: List<ModelOption>): SlashIntercept {
         }
     }
 }
+
+/**
+ * Whether sending [draft] runs one of Tandem's own commands of [slashIntercept]'s table instead of going to the CLI: a plain Enter
+ * runs it while a turn runs or a card is open too, as a palette pick of its row does (spec 3.4).
+ */
+fun intercepts(draft: String, models: List<ModelOption>): Boolean = slashIntercept(draft.trim(), models) !is SlashIntercept.Send
 
 /** What a palette pick does; the composer only executes it. */
 sealed interface PaletteOutcome {

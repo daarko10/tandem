@@ -10,8 +10,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Whether the Gradle jobs run. A pull request that changes only paths no Gradle task reads (docs, scripts, skills, the
+  # other workflows and their action, CODEOWNERS, README.md, CLAUDE.md, LICENSE) skips them; Script tests still runs. The
+  # pattern names what may be skipped, not what runs, so src/, the build files, the wrapper, .gitignore, build.yml itself
+  # and any new path run everything, and so does every push to main.
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    outputs:
+      gradle: ${{ steps.filter.outputs.gradle }}
+    steps:
+      # A pull request checks out its merge commit, whose first parent is the base branch.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Decide whether the Gradle jobs run
+        id: filter
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "a $EVENT runs every job"; echo "gradle=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # --no-renames: a file moved from src/ to docs/ lists both paths, so the move runs Gradle. A failed diff fails the job.
+          files="$(git diff --no-renames --name-only HEAD^1 HEAD)"
+          skip='^(docs/|scripts/|\.claude/|\.github/actions/|\.github/workflows/(cli-contract|drift-fix|macos-ide-test)\.yml$|\.github/CODEOWNERS$|README\.md$|CLAUDE\.md$|LICENSE$)'
+          # grep -v exits 0 when some path is not skippable, 1 when every path is, and 2 or more on an error (a bad pattern): an error is red, never a skip.
+          rc=0; grep -qvE "$skip" <<<"$files" || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "::error title=Changes::grep failed with exit code $rc"; exit 1
+          elif [ -n "$files" ] && [ "$rc" -eq 1 ]; then
+            echo "$(wc -l <<<"$files") changed files, none read by Gradle: the Gradle jobs are skipped"
+            echo "gradle=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "gradle=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The recording scripts' and the workflows' own tests: plain Python, no Gradle and no real claude. Every change runs them.
+  scripts:
+    name: Script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Script tests
+        shell: bash
+        run: cd scripts && python3 -m unittest -v
+
   build:
     name: Build and test
+    needs: [ changes ]
+    if: needs.changes.outputs.gradle == 'true'
     runs-on: ubuntu-latest
     steps:
       # The platform tests need room for the IDE, its caches and their VFS: a full runner fails them with "No space left on device".
@@ -21,10 +71,6 @@ jobs:
           tool-cache: false
           large-packages: false
       - uses: actions/checkout@v7
-      # The recording scripts' own tests: plain Python, no Gradle and no real claude.
-      - name: Script tests
-        shell: bash
-        run: cd scripts && python3 -m unittest -v
       - uses: actions/setup-java@v6
         with:
           distribution: zulu
@@ -79,6 +125,8 @@ jobs:
   # (macos-ide-test.yml): a macOS runner costs about ten times a Linux one.
   build-macos:
     name: Build and test (macOS)
+    needs: [ changes ]
+    if: needs.changes.outputs.gradle == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -116,9 +164,12 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
 
+  # The verifier and the IDE test build the plugin themselves and start alongside Build and test rather than after it: they
+  # reuse nothing from it (a pull request's jobs never write the Gradle cache), so waiting only added its minutes.
   verify:
     name: Plugin Verifier
-    needs: [ build ]
+    needs: [ changes ]
+    if: needs.changes.outputs.gradle == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Free disk space
@@ -156,10 +207,17 @@ jobs:
           name: plugin-verifier-report
           path: ./build/reports/pluginVerifier
 
+  # Each IDE test starts its own IDE (about 1.5 minutes or more), so the tests are split across three jobs that run side
+  # by side: a job runs the tests whose position in their class, sorted by name, is its index modulo three (IdeTestShard).
   ide-test:
-    name: IDE test
-    needs: [ build ]
+    name: IDE test (${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [ changes ]
+    if: needs.changes.outputs.gradle == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ 1, 2, 3 ]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v2.0.0
@@ -176,7 +234,9 @@ jobs:
           cache-read-only: true
       # Starts a real IDE with the built plugin installed (IDE Starter + UI Driver); it needs a display.
       - name: Run the IDE test
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" ./gradlew integrationTest
+        env:
+          IDE_TEST_SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" ./gradlew integrationTest -Dtandem.ideTestShard="$IDE_TEST_SHARD"
       - name: Report IDE test failures
         if: ${{ failure() }}
         shell: bash
@@ -190,7 +250,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
-          name: ide-test-logs
+          name: ide-test-logs-${{ matrix.shard }}
           path: |
             out/ide-tests/tests/**/log/**
             build/reports/tests/integrationTest

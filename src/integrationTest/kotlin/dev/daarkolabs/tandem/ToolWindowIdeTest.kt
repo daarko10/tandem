@@ -23,6 +23,7 @@ import com.intellij.ide.starter.models.TestCase
 import com.intellij.ide.starter.plugins.PluginConfigurator
 import com.intellij.ide.starter.project.LocalProjectInfo
 import com.intellij.ide.starter.runner.Starter
+import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -35,6 +36,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.ExtendWith
 import java.awt.GraphicsEnvironment
 import java.awt.Image
 import java.awt.Point
@@ -71,8 +73,9 @@ import kotlin.time.Duration.Companion.seconds
  * the UI sends and logs every frame it receives, so each test checks both the rendered UI and the protocol traffic.
  *
  * Unlike the platform tests, the plugin is loaded by its own plugin classloader here, as it is for users.
- * Run with `xvfb-run ./gradlew integrationTest` when there is no display.
+ * Run with `xvfb-run ./gradlew integrationTest` when there is no display. CI splits the tests across jobs ([IdeTestShard]).
  */
+@ExtendWith(IdeTestShard::class)
 class ToolWindowIdeTest {
     private val pluginZip = Path.of(System.getProperty("tandem.pluginZip"))
     private val fakeClaude = System.getProperty("tandem.fakeClaude")
@@ -644,10 +647,19 @@ class ToolWindowIdeTest {
             focusPromptBox()
             promptBox().keyboard { typeText("/", 20) }
             waitFor("the palette", 30.seconds) { described("Slash commands").present() }
-            // Every command: more than 8 rows, so the list scrolls (the scrollbar stays inside the palette, MCP spec 3.4).
+            // The desktop's form (MCP spec 14): the composer reads `/Type to filter`, and the first row's description is in its box,
+            // the scope first (the fixture's first command is the project's `actions`).
+            waitForText("Type to filter")
+            waitFor("the first row's description", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'project · Implement')]").present()
+            }
+            // Every command: more than 10 rows, so the list scrolls (the scrollbar stays inside the palette, MCP spec 3.4).
             takeScreenshot("slash-palette-all")
             promptBox().keyboard { typeText("mc", 20) }
             waitFor("the palette narrowed to /mcp", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='/mc']").present() }
+            // The highlighted row's description, now /mcp's (rows show only names), and no hint once the filter has text.
+            waitForText("Manage MCP servers")
+            assertFalse(ui.x("//div[@class='ComposeNode' and @visible_text='Type to filter']").present(), "the hint follows only a lone /")
             takeScreenshot("slash-palette")
             ui.keyboard { enter() }
             waitFor("the MCP panel", 1.minutes) { described("MCP servers panel").present() }
@@ -688,6 +700,56 @@ class ToolWindowIdeTest {
         val prompts = sent.filter { it.type == "user" }.map { it["message"]!!.jsonObject["content"].toString() }
         assertEquals(4, prompts.size, prompts.toString())
         listOf("/usage", "/context", "/help", "/hello").forEachIndexed { index, text -> assertTrue(text in prompts[index], prompts.toString()) }
+    }
+
+    @Test
+    fun `a bang command runs locally and Claude replies`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("bang-command", fixtures = listOf("bash-mode-respond"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            // The same send path as a prompt: Send runs the command instead of sending it.
+            typePrompt("! echo hi")
+            // The row's header, by its description and its text: the session's title in the header is described the same way.
+            waitFor("the shell row", 1.minutes) { node("! echo hi") { "$it='! echo hi'" }.present() }
+            // The output's last line: the IDE runs the user's real login profile, which may print first.
+            waitFor("the command's output", 1.minutes) { ui.xx(shellOutputEndingWith("hi")).list().isNotEmpty() }
+            // Any node holding the reply's text: the reply's whole sentence is one text row (bash-mode-respond:41).
+            waitFor("Claude's reply", 2.minutes) {
+                ui.xx("//div[@class='ComposeNode' and contains(@visible_text, 'The probe ran')]").list().isNotEmpty()
+            }
+            waitFor("the turn footer", 1.minutes) { ui.xx(FOOTER).list().isNotEmpty() }
+            waitForTurnEnd()
+            takeScreenshot("bang-command")
+            // The quiet result of the command frame draws no footer: only the reply's turn has one.
+            assertEquals(1, ui.xx(FOOTER).list().size, "one footer")
+            assertFalse(described("Stop command").present(), "no Stop on the row once the command ended")
+        }
+        val users = sent.filter { it.type == "user" }
+        assertEquals(2, users.size, users.toString())
+        val (input, output) = users
+        assertEquals("<bash-input>echo hi</bash-input>", input.content())
+        assertEquals(false, input["shouldQuery"]?.jsonPrimitive?.booleanOrNull)
+        val stdout = output.content()
+        assertTrue(stdout.startsWith("<bash-stdout>"), stdout)
+        assertTrue(stdout.endsWith("hi\n</bash-stdout><bash-stderr></bash-stderr>"), stdout)
+        assertFalse("shouldQuery" in output, output.toString())
+    }
+
+    @Test
+    fun `a bang command stops from the row`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        runChat("bang-stop", fixtures = listOf("bash-mode-respond"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            typePrompt("! sleep 30")
+            waitFor("the row's Stop", 1.minutes) { described("Stop command").present() }
+            iconButton("Stop command").click(Point(10, 10))
+            waitFor("the stopped status", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'Stopped after')]").present()
+            }
+            assertFalse(described("Stop command").present(), "no Stop on the row once the command stopped")
+        }
     }
 
     @Test
@@ -896,7 +958,9 @@ class ToolWindowIdeTest {
     /**
      * What the footer's model control reads for [fixture] (`fixtures/<fixture>.ndjson`, next to the fake CLI) with no model picked
      * (spec 2.3, `<Model>`): the display name of the entry other than `default`, in its first control_response that lists models,
-     * whose `resolvedModel` is the model its first `system/init` reports; else that model's wire id.
+     * whose `resolvedModel` is the model its first `system/init` reports; without such a list, in an IDE where no process has listed
+     * any, the name of the CLI's alias for that model's family ([CLI_MODEL_ALIASES]: `Sonnet` for `claude-sonnet-5-5`); else that
+     * model's wire id.
      */
     private fun defaultModelName(fixture: String): String {
         val lines = Path.of(fakeClaude).resolveSibling("fixtures/$fixture.ndjson").readLines().filter { it.isNotBlank() }
@@ -908,7 +972,9 @@ class ToolWindowIdeTest {
         val entry = models.firstOrNull {
             it["value"]?.jsonPrimitive?.content != "default" && it["resolvedModel"]?.jsonPrimitive?.content == running
         }
-        return entry?.get("displayName")?.jsonPrimitive?.content ?: running
+        return entry?.get("displayName")?.jsonPrimitive?.content
+            ?: CLI_MODEL_ALIASES.firstOrNull { it.value != "default" && it.value in running.split('-') }?.displayName
+            ?: running
     }
 
     /**
@@ -1177,6 +1243,19 @@ class ToolWindowIdeTest {
     private fun Driver.openSidebar() {
         iconButton("Show sessions").click(Point(10, 10))
     }
+
+    /**
+     * A shell row's output whose last line ends with [text]: the output node (`Shell output`) itself when its text is merged into it,
+     * else the text node inside it.
+     */
+    private fun shellOutputEndingWith(text: String): String {
+        fun endsWith(attr: String) = "substring($attr, string-length($attr) - ${text.length - 1}) = '$text'"
+        val output = "//div[@class='ComposeNode' and @contentdescription='Shell output']"
+        return "$output[${endsWith("@text")} or ${endsWith("@visible_text")}] | $output//div[@class='ComposeNode' and ${endsWith("@visible_text")}]"
+    }
+
+    /** A `user` frame's `message.content`, a string in the shell escape frames. */
+    private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
 
     private fun Driver.waitForText(text: String) {
         waitFor("'$text' rendered", 2.minutes) { ui.x("//div[@class='ComposeNode' and @visible_text='$text']").present() }

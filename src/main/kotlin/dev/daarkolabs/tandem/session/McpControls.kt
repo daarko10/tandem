@@ -3,13 +3,15 @@ package dev.daarkolabs.tandem.session
 import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.McpStatus
+import kotlinx.coroutines.flow.StateFlow
+import java.net.URI
 
 // MCP controls of a session (docs/superpowers/specs/2026-10-21-mcp-controls-design.md 4.2): what an MCP request answers.
 
 /**
  * What the MCP panel asks of a session's MCP servers, by session id. [SessionManager] implements it; the panel's controller depends
- * on this interface only, so its tests pass a recording fake. Every call answers [McpError.NotRunning] when the session has no live
- * process. Safe to call from any thread; the suspend functions never block one.
+ * on this interface only, so its tests pass a recording fake. Every request answers [McpError.NotRunning] when the session has no
+ * live process; [startForMcp] starts one. Safe to call from any thread; the suspend functions never block one.
  */
 interface McpControls {
     /**
@@ -33,6 +35,52 @@ interface McpControls {
 
     /** Stops waiting for [server]'s sign-in: its wait leaves [SessionHandle.mcpAuth], without a notice. */
     fun cancelMcpAuth(id: SessionId, server: String)
+
+    /**
+     * The project's last known servers: the last `mcp_status` answer any process of the project gave, each entry cut to what the
+     * panel shows ([lastKnown]). Kept in memory only; empty until a process has answered. What the panel of a session without a
+     * live list shows, marked as last known.
+     */
+    val knownMcpServers: StateFlow<List<McpServerInfo>>
+
+    /**
+     * Starts session [id]'s process for its MCP panel, unless one runs: resumed with its usual arguments, no prompt sent. Within the
+     * live-session cap, an idle session may be stopped to make room and one in a turn never is; when that is not enough nothing
+     * starts ([McpStart.NoRoom]), unless [overCap] (the user pressed Start session), which starts it over the cap with the chat's
+     * notice, as a prompt would. Runs whole in the session's scope.
+     */
+    suspend fun startForMcp(id: SessionId, overCap: Boolean): McpStart
+}
+
+/** What [McpControls.startForMcp] came to. */
+sealed interface McpStart {
+    /** A process runs for the session: it ran already, or started now (it may still end before it answers anything). */
+    data object Running : McpStart
+
+    /** Nothing started: [maxLive] sessions run a process and none of them is idle. */
+    data class NoRoom(val maxLive: Int) : McpStart
+
+    /** No process could start; [reason] says why, as the chat does. */
+    data class Failed(val reason: String) : McpStart
+}
+
+/**
+ * [this] as [McpControls.knownMcpServers] keeps it: what the panel shows and no more, so the launch config keeps its type, its command
+ * and its url's origin ([mcpUrlOrigin]), and drops its args and the rest of its url, which can carry tokens.
+ */
+internal fun McpServerInfo.lastKnown(): McpServerInfo =
+    copy(config = config?.let { it.copy(args = emptyList(), url = it.url?.let(::mcpUrlOrigin)) })
+
+/**
+ * `scheme://host[:port]` of [url], its user info dropped, or null when it does not parse as one with a scheme and an authority: all of
+ * a server's url the MCP panel shows (spec 3.2). The path (some hosted servers put their key in it) and the query never show.
+ */
+fun mcpUrlOrigin(url: String): String? {
+    val uri = runCatching { URI(url.trim()) }.getOrNull() ?: return null
+    val scheme = uri.scheme ?: return null
+    // The raw authority keeps an `@` inside user info escaped, so the host and port follow the last one.
+    val authority = uri.rawAuthority?.substringAfterLast('@')?.takeIf { it.isNotBlank() } ?: return null
+    return "$scheme://$authority"
 }
 
 /** A sign-in wait of [server], since [startedAtMillis]; [outcome] once it ended (the wait then leaves the map 5 s later). */
@@ -68,8 +116,12 @@ sealed interface McpResult<out T> {
 
 /** Why an MCP control request failed. */
 sealed interface McpError {
-    /** The CLI answered with an error, or with an answer Tandem cannot use; [message] says which, as the CLI wrote it when it did. */
-    data class Rejected(val message: String) : McpError
+    /**
+     * The CLI answered with an error, or with an answer Tandem cannot use; [message] says which, as the CLI wrote it when it did.
+     * [linkFailed]: `mcp_authenticate` itself succeeded, but its sign-in link was not an `http(s)` URL or did not open, so no
+     * terminal sign-in is hinted (MCP spec 3.3 step 2; step 4's hint is for an error of the request itself).
+     */
+    data class Rejected(val message: String, val linkFailed: Boolean = false) : McpError
 
     /** The CLI did not answer within [seconds]. */
     data class TimedOut(val seconds: Int) : McpError

@@ -20,8 +20,10 @@ import dev.daarkolabs.tandem.protocol.ContentBlock
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.session.AssistantBlock
+import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.UserImage
@@ -331,6 +333,25 @@ class ChatPresenterTest {
             assertEquals(ForkState.ENABLED, forkState(id2, presenter.latestReply.value, presenter.busy.value))
             assertEquals(ForkState.NOT_LATEST, forkState(id1, presenter.latestReply.value, presenter.busy.value))
             assertSame(first, replyRow(presenter.chat.value))
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `the composer offers the models another process listed until the session's own process lists them`() = runBlocking {
+        val opus = ModelOption("opus", "Opus", null, "claude-opus-5-5")
+        val sonnet = ModelOption("sonnet", "Sonnet", null, "claude-sonnet-5-5")
+        val state = MutableStateFlow(ChatState(activeModel = "claude-opus-5-5"))
+        val known = MutableStateFlow<List<ModelOption>>(emptyList())
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)), models = known)
+            assertEquals(CLI_MODEL_ALIASES, presenter.composer.value.models, "before any process has listed them")
+            known.value = listOf(opus)
+            assertEquals(listOf(opus), withTimeout(TIMEOUT) { presenter.composer.first { it.models == listOf(opus) } }.models)
+            state.value = state.value.copy(models = listOf(sonnet))
+            assertEquals(listOf(sonnet), withTimeout(TIMEOUT) { presenter.composer.first { it.models == listOf(sonnet) } }.models)
         } finally {
             scope.cancel()
         }

@@ -392,13 +392,17 @@ class SessionHandle internal constructor(
 
     /**
      * Shows in the chat why no process could start ([SessionEvent.Ended] with [detail]) and drops the queued prompts, which
-     * nothing can take now. Returns how many there were.
+     * nothing can take now, with a warning after it for each queued shell escape whose output is not sent (hard rule 5). Returns
+     * how many were dropped.
      */
     internal fun failToStart(detail: String): Int = synchronized(lock) {
         attachment?.let { releaseLocked(it.session) }
         val dropped = queued.size
+        val unsent = queued.filterIsInstance<Outbound.ShellEscape>()
+            .map { SessionEvent.HostNotice(NoticeLevel.WARNING, unsentShellText(it.command)) }
         queued.clear()
-        publishLocked(reduce(mutableState.value, SessionEvent.Ended(detail, isError = true)), attached = false)
+        val ended = reduce(mutableState.value, SessionEvent.Ended(detail, isError = true))
+        publishLocked(unsent.fold(ended) { acc, notice -> reduce(acc, notice) }, attached = false)
         dropped
     }
 

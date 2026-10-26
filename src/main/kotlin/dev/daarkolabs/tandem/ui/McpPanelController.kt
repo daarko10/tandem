@@ -13,6 +13,7 @@ import dev.daarkolabs.tandem.session.McpAuthWait
 import dev.daarkolabs.tandem.session.McpControls
 import dev.daarkolabs.tandem.session.McpError
 import dev.daarkolabs.tandem.session.McpResult
+import dev.daarkolabs.tandem.session.McpStart
 import dev.daarkolabs.tandem.session.McpState
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionStatus
@@ -28,10 +29,12 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 // The MCP panel's controller (docs/superpowers/specs/2026-10-21-mcp-controls-design.md 3.2, 3.3, 4.4): its requests and their
 // errors, off the EDT. The sheet only draws what it exposes.
@@ -48,6 +51,61 @@ private const val MAX_REPOLLS: Int = 5
 private const val DYNAMIC_SOURCE: String = "dynamic"
 
 private const val SESSION_ENDED: String = "The session has ended."
+
+/** How long the first live list of a session the panel started may take to reach the session's state, after its answer came. */
+private const val LIVE_LIST_WAIT_MILLIS: Long = 2_000
+
+/**
+ * The panel's own start of its session: a session with no process when the panel opens (a resumed one before its first prompt) is
+ * started, and until its process lists its servers the panel shows the project's last known ones, without actions.
+ */
+internal sealed interface McpPanelStart {
+    /** No start of the panel's own: the session had a process when the panel opened, or the one it started has listed its servers. */
+    data object None : McpPanelStart
+
+    /** The session's process is starting, or has started and not listed its servers yet. */
+    data object Starting : McpPanelStart
+
+    /** Not started: the [maxLive] sessions that may run a process all run one, and none of them is idle. */
+    data class NoRoom(val maxLive: Int) : McpPanelStart
+
+    /** The start failed, or the process ended before it listed its servers: [message] says why (hard rule 5). */
+    data class Failed(val message: String) : McpPanelStart
+}
+
+/**
+ * The line under the sheet's title that says how the session stands: [text], in the error colour when [isError], with `Start session`
+ * when [canStart].
+ */
+internal data class McpPanelNotice(val text: String, val isError: Boolean = false, val canStart: Boolean = false)
+
+/**
+ * The sheet's notice line for [model] while the panel's own start stands at [start]: while it starts, that it does; when the cap left
+ * no room or the start failed, why, with `Start session`; a session that stopped while the panel was open says so, with `Start
+ * session`; a live session without servers says it has none configured, unless the title area shows why its list is missing ([message]).
+ */
+internal fun mcpPanelNotice(model: McpPanelModel, start: McpPanelStart, message: String?): McpPanelNotice? = when (start) {
+    McpPanelStart.Starting -> McpPanelNotice("Starting the session…")
+    is McpPanelStart.NoRoom -> McpPanelNotice(noRoomText(start.maxLive), canStart = true)
+    is McpPanelStart.Failed -> McpPanelNotice(start.message, isError = true, canStart = true)
+    McpPanelStart.None -> when {
+        model.stopped -> McpPanelNotice("The session is not running. Start it to manage its servers.", canStart = true)
+        model.total == 0 && message == null -> McpPanelNotice("No MCP servers are configured for this session.")
+        else -> null
+    }
+}
+
+/** Why the panel did not start its session: every session the cap lets run a process is busy, none idle to stop. */
+private fun noRoomText(maxLive: Int): String {
+    val busy = if (maxLive == 1) "the 1 session that may run is busy" else "the $maxLive sessions that may run are all busy"
+    return "Not started: $busy (Max live sessions, in Settings | Tools | Tandem). Start this one anyway to manage its servers."
+}
+
+/**
+ * Why the process the panel started ended before it listed its servers: the chat's notice of its end, [reason], when there is one.
+ */
+internal fun startEndedText(reason: String?): String =
+    if (reason != null) "The session could not start. $reason" else "The session could not start. Its chat says why."
 
 private fun timedOut(seconds: Int): String = "The CLI did not answer within $seconds s."
 
@@ -113,6 +171,13 @@ internal fun McpRowButtons.hasEnabledButton(): Boolean = when (this) {
  * One open MCP panel of session [id] (spec 4.4): [rows] from the session's [servers], the servers that showed the terminal hint
  * ([loginHinted]) and its [status]; the four requests through [controls], a sign-in's link opened by [opener].
  *
+ * A session without a process when a user action opened the panel ([startOnOpen]) is started ([McpControls.startForMcp], within the
+ * cap): until its process has listed its servers, [rows] are the project's last known ones ([McpControls.knownMcpServers]), without
+ * actions, and [start] says how the start stands; a start the cap stopped, or that failed, says why, and [startSession] starts it over
+ * the cap. A panel shown again without one (its session selected again, the panel left open) starts nothing: a stopped session says
+ * so, with `Start session`, as one that stops while the panel is open. Why a process the panel started ended comes from [endReason],
+ * the chat's notice of its end.
+ *
  * It lists the servers when it opens, on every new `system/init` (`initCount`), when the session's process starts (its [status]
  * leaves `STOPPED`) and, while an answer lists a `pending` server, again [pendingRepollMillis] later, at most 5 times in a row. After
  * a row action it lists them again, unless the session is not running or has ended. A refresh's error shows in the title area
@@ -126,12 +191,15 @@ internal class McpPanelController(
     /** The sign-in waits of the session, by server ([dev.daarkolabs.tandem.session.SessionHandle.mcpAuth]). */
     val auth: StateFlow<Map<String, McpAuthWait>>,
     loginHinted: StateFlow<Set<String>>,
-    status: StateFlow<SessionStatus>,
+    private val status: StateFlow<SessionStatus>,
     private val controls: McpControls,
     private val opener: BrowserOpener,
     scope: CoroutineScope,
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val pendingRepollMillis: Long = 2_000,
+    private val endReason: () -> String? = { null },
+    /** Whether a user action opened the panel (the header's button, `/mcp`, a notice's link): only then is a stopped session started. */
+    startOnOpen: Boolean = true,
 ) {
     private val job: Job = SupervisorJob(scope.coroutineContext[Job])
 
@@ -143,25 +211,48 @@ internal class McpPanelController(
     private var repolls = 0
     private var repoll: Job? = null
 
+    /** The status last seen, by the status watcher or by a start that saw its process attach: a start lists the servers only once. */
+    private var lastStatus: SessionStatus = status.value
+
     private val mutableBusy = MutableStateFlow<McpBusy?>(null)
     private val mutableMessage = MutableStateFlow<String?>(null)
+    private val mutableMessageRetry = MutableStateFlow(false)
     private val mutableRefreshing = MutableStateFlow(false)
     private val mutableRowErrors = MutableStateFlow<Map<String, String>>(emptyMap())
     private val mutableRetryActions = MutableStateFlow<Map<String, McpAction>>(emptyMap())
 
+    // A session with no process when a user action opens the panel is started at once: its first rows are already the last known ones.
+    private val mutableStart =
+        MutableStateFlow(if (startOnOpen && status.value == SessionStatus.STOPPED) McpPanelStart.Starting else McpPanelStart.None)
+
+    /** How the panel's own start of the session stands ([McpPanelStart]). */
+    val start: StateFlow<McpPanelStart> = mutableStart.asStateFlow()
+
     /**
-     * The panel's rows ([mcpPanel]): greyed, without actions, while the session is `STOPPED`. The first model is built where the
-     * controller is made (a pure fold of the servers the session already lists), every later one on [dispatcher].
+     * The panel's rows ([mcpPanel]): greyed, without actions, while the session is `STOPPED`; the project's last known ones, as greyed,
+     * while the panel's own start has not brought the live list. The first model is built where the controller is made (a pure fold of
+     * the servers already known), every later one on [dispatcher].
      */
     val rows: StateFlow<McpPanelModel> =
-        combine(servers, loginHinted, status) { state, hinted, now -> panelOf(state, hinted, now) }
-            .stateIn(work, SharingStarted.Eagerly, panelOf(servers.value, loginHinted.value, status.value))
+        combine(servers, controls.knownMcpServers, loginHinted, status, mutableStart) { state, known, hinted, now, start ->
+            panelOf(state, known, hinted, now, start)
+        }.stateIn(
+            work,
+            SharingStarted.Eagerly,
+            panelOf(servers.value, controls.knownMcpServers.value, loginHinted.value, status.value, mutableStart.value),
+        )
 
     /** The row whose request runs ([McpBusy]); the sign-in wait is not one. */
     val busy: StateFlow<McpBusy?> = mutableBusy.asStateFlow()
 
-    /** The title area's error: a refresh's, or an action's on a server the follow-up list no longer has. Shown with `Retry`. */
+    /** The title area's error: a refresh's, or an action's on a server the follow-up list no longer has. */
     val message: StateFlow<String?> = mutableMessage.asStateFlow()
+
+    /**
+     * Whether [message] gets `Retry`, which lists the servers again: only a listing that failed or timed out (spec 3.2), never
+     * `The session has ended.`, which a retry cannot help, nor an action's error moved there.
+     */
+    val messageRetry: StateFlow<Boolean> = mutableMessageRetry.asStateFlow()
 
     /** Whether a refresh runs: the title gets ` · Refreshing…`. */
     val refreshing: StateFlow<Boolean> = mutableRefreshing.asStateFlow()
@@ -176,7 +267,8 @@ internal class McpPanelController(
     val titleNote: StateFlow<String?> = auth.map(::removedNote).stateIn(work, SharingStarted.Eagerly, removedNote(auth.value))
 
     init {
-        work.launch { refreshNow() }
+        val startAtOnce = mutableStart.value == McpPanelStart.Starting
+        work.launch { if (startAtOnce) startNow(overCap = false) else refreshNow() }
         val initCount = servers.value.initCount
         work.launch {
             var seen = initCount
@@ -187,14 +279,28 @@ internal class McpPanelController(
                 }
             }
         }
-        val first = status.value
         work.launch {
-            var last = first
             status.collect { now ->
-                if (last == SessionStatus.STOPPED && now != SessionStatus.STOPPED) launch { refreshNow() }
-                last = now
+                val last = lastStatus
+                lastStatus = now
+                if (last == SessionStatus.STOPPED && now != SessionStatus.STOPPED) {
+                    when (mutableStart.value) {
+                        McpPanelStart.None -> launch { refreshNow() }
+                        McpPanelStart.Starting -> Unit // the start lists them itself
+                        // Started meanwhile from elsewhere (a prompt): its list replaces the last known one, as after the panel's start.
+                        is McpPanelStart.NoRoom, is McpPanelStart.Failed -> launch {
+                            mutableStart.value = McpPanelStart.Starting
+                            listStarted()
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /** `Start session`: starts the session over the cap if it must, as a prompt would; nothing while a start runs. */
+    fun startSession() {
+        work.launch { if (mutableStart.value != McpPanelStart.Starting) startNow(overCap = true) }
     }
 
     /** Lists the servers again (`Refresh servers`, the title area's `Retry`). */
@@ -222,8 +328,55 @@ internal class McpPanelController(
         job.cancel()
     }
 
-    private fun panelOf(state: McpState, hinted: Set<String>, now: SessionStatus): McpPanelModel =
-        mcpPanel(state, loginHinted = hinted, live = now != SessionStatus.STOPPED)
+    private fun panelOf(
+        state: McpState,
+        known: List<McpServerInfo>,
+        hinted: Set<String>,
+        now: SessionStatus,
+        start: McpPanelStart,
+    ): McpPanelModel =
+        if (start == McpPanelStart.None) {
+            mcpPanel(state, loginHinted = hinted, live = now != SessionStatus.STOPPED)
+        } else {
+            mcpPanel(McpState(known), live = false)
+        }
+
+    /** Starts the session ([McpControls.startForMcp]), then lists its servers ([listStarted]); or says why it did not start. */
+    private suspend fun startNow(overCap: Boolean) {
+        mutableStart.value = McpPanelStart.Starting
+        showMessage(null, retry = false)
+        when (val started = controls.startForMcp(id, overCap)) {
+            McpStart.Running -> {
+                lastStatus = status.value // its process attached: the status watcher has nothing more to list for it
+                listStarted()
+            }
+            is McpStart.NoRoom -> mutableStart.value = McpPanelStart.NoRoom(started.maxLive)
+            is McpStart.Failed -> mutableStart.value = McpPanelStart.Failed(started.reason)
+        }
+    }
+
+    /**
+     * The first listing of a process the panel started, or that started while the panel waited: once the session's state has the
+     * list, it replaces the last known one. A process that ended first fails the start with why it ended; a listing the CLI refused
+     * or did not answer leaves the running session's rows, and the title area says why the list is missing.
+     */
+    private suspend fun listStarted() {
+        val listed = refreshNow()
+        mutableStart.value = when (listed) {
+            is McpResult.Ok -> {
+                // The session's state takes the answer a step after the answer itself.
+                withTimeoutOrNull(LIVE_LIST_WAIT_MILLIS) { servers.first { it.detailed && it.servers == listed.value } }
+                McpPanelStart.None
+            }
+            is McpResult.Failed -> when (listed.error) {
+                McpError.NotRunning, McpError.Ended -> {
+                    showMessage(null, retry = false) // the start's own failure says it
+                    McpPanelStart.Failed(startEndedText(endReason()))
+                }
+                is McpError.Rejected, is McpError.TimedOut -> McpPanelStart.None
+            }
+        }
+    }
 
     private suspend fun refreshNow(): McpResult<List<McpServerInfo>> {
         refreshesRunning++
@@ -237,15 +390,15 @@ internal class McpPanelController(
             is McpResult.Ok -> {
                 // The plan's rule: every Ok clears the title area, a re-poll's included, so an action error moved there by
                 // act lasts until the next listing (it was shown, hard rule 5).
-                mutableMessage.value = null
+                showMessage(null, retry = false)
                 afterList(result.value)
             }
             is McpResult.Failed -> when (val error = result.error) {
-                is McpError.Rejected -> mutableMessage.value = "Could not list servers: ${error.message}"
-                is McpError.TimedOut -> mutableMessage.value = "Could not list servers: ${timedOut(error.seconds)}"
+                is McpError.Rejected -> showMessage("Could not list servers: ${error.message}", retry = true)
+                is McpError.TimedOut -> showMessage("Could not list servers: ${timedOut(error.seconds)}", retry = true)
                 // The session is not running: the stopped sheet says so itself.
                 McpError.NotRunning -> Unit
-                McpError.Ended -> mutableMessage.value = SESSION_ENDED
+                McpError.Ended -> showMessage(SESSION_ENDED, retry = false)
             }
         }
         return result
@@ -287,7 +440,7 @@ internal class McpPanelController(
         val shown = mutableRowErrors.value[name]
         if (shown != null && listed is McpResult.Ok && listed.value.none { it.name == name }) {
             // The row is gone with the server: its error moves to the title area, never lost with the row (hard rule 5).
-            mutableMessage.value = "$name: $shown · $name is no longer configured"
+            showMessage("$name: $shown · $name is no longer configured", retry = false)
             mutableRowErrors.update { it - name }
             mutableRetryActions.update { it - name }
         }
@@ -295,7 +448,7 @@ internal class McpPanelController(
 
     /**
      * Starts [name]'s sign-in. The wait itself shows through [auth]; only a start that failed shows in the row, with the hint the
-     * manager's [loginHinted] goes with (spec 3.3 step 4).
+     * manager's [loginHinted] goes with (spec 3.3 step 4), except for a link that could not be used (step 2), which gets none.
      */
     private suspend fun authenticate(name: String) {
         val result = try {
@@ -313,7 +466,8 @@ internal class McpPanelController(
             is McpError.Rejected -> "Could not start sign-in: ${error.message}"
             is McpError.TimedOut -> timedOut(error.seconds)
         }
-        rowError(name, "$text\n${signInHint(name)}", retry = McpAction.AUTHENTICATE)
+        val linkFailed = (error as? McpError.Rejected)?.linkFailed == true
+        rowError(name, if (linkFailed) text else "$text\n${signInHint(name)}", retry = McpAction.AUTHENTICATE)
     }
 
     /** What to do after a sign-in that could not start, by the server's source: a `dynamic` one is unknown to a terminal login. */
@@ -323,6 +477,11 @@ internal class McpPanelController(
         } else {
             "Run claude mcp login \"$name\" in a terminal, then press Reconnect, or start a new session."
         }
+
+    private fun showMessage(text: String?, retry: Boolean) {
+        mutableMessageRetry.value = retry && text != null
+        mutableMessage.value = text
+    }
 
     private fun rowError(name: String, text: String, retry: McpAction?) {
         mutableRowErrors.update { it + (name to text) }

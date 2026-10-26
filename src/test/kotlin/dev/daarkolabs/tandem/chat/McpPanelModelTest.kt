@@ -110,16 +110,25 @@ class McpPanelModelTest {
     }
 
     @Test
-    fun `line two is the command without args or the url without query and fragment`() {
-        val http = server("h", config = McpConfig("http", null, emptyList(), "http://h/mcp?x=1#f"))
-        assertEquals("http://h/mcp", row(http).detail)
-        assertEquals("http://h/mcp", row(server("f", config = McpConfig("http", null, emptyList(), "http://h/mcp#f?x=1"))).detail)
+    fun `line two is the command without args or the url's scheme, host and port`() {
+        fun url(url: String) = row(server("h", config = McpConfig("http", "/bin/fallback", emptyList(), url))).detail
+        assertEquals("http://h", url("http://h/mcp?x=1#f"))
+        assertEquals("http://h", url("http://h/mcp#f?x=1"))
+        // User info and a key in the path never show (spec 3.2: a screen share).
+        assertEquals("https://h", url("https://u:secret@h/x"))
+        assertEquals("https://h", url("https://h/api/mcp/s/SECRET/mcp"))
+        assertEquals("https://h:8443", url("https://h:8443/mcp"))
+        assertEquals("https://h:1", url("https://u:p%40ss@h:1/x"))
+        assertEquals("http://my_server.local:9", url("http://my_server.local:9/mcp"))
+        // No host, or no parse: the command instead, never the raw url.
+        assertEquals("/bin/fallback", url("not a url"))
+        assertEquals("/bin/fallback", url("mcp/relative"))
         val stdio = server("s", config = McpConfig("stdio", "/usr/bin/python3", listOf("-I", "--token=secret"), null))
         assertEquals("/usr/bin/python3", row(stdio).detail)
         assertNull(row(server("bare")).detail)
         assertNull(row(server("empty", config = McpConfig(null, null, emptyList(), null))).detail)
         // Recorded: mcp-status:18.
-        assertEquals(listOf("/usr/bin/python3", "/bin/false", "http://127.0.0.1:33041/mcp"), mcpPanel(listed(18)).rows().map { it.detail })
+        assertEquals(listOf("/usr/bin/python3", "/bin/false", "http://127.0.0.1:33041"), mcpPanel(listed(18)).rows().map { it.detail })
     }
 
     @Test
@@ -265,6 +274,20 @@ class McpPanelModelTest {
         // A disabled server counts in the total.
         assertEquals("0/3", mcpBadge(listed(20)))
         assertEquals(McpPanelModel(0, 0, persistentListOf(), hasPending = false, stopped = false), mcpPanel(McpState()))
+    }
+
+    @Test
+    fun `a session without a process shows no count, and its panel's title marks its rows last known`() {
+        val listed = listed(18)
+        assertNull(mcpBadge(listed, live = false), "an earlier process's counts are never shown as live")
+        assertEquals("MCP servers: the session is not running", mcpTooltip(listed, live = false))
+        assertEquals("MCP servers: 1 of 3 connected", mcpTooltip(listed))
+        assertEquals("MCP servers", mcpTooltip(McpState()))
+
+        assertEquals("MCP servers · 1 of 3 connected", mcpPanel(listed).title)
+        assertEquals("MCP servers · 0 of 0 connected", mcpPanel(McpState()).title)
+        assertEquals("MCP servers · last known: 1 of 3 connected", mcpPanel(listed, live = false).title)
+        assertEquals("MCP servers", mcpPanel(McpState(), live = false).title, "none known: no count at all")
     }
 
     @Test

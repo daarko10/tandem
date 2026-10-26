@@ -1,0 +1,508 @@
+# Turns a red nightly `CLI contract` run into a pull request: downloads the run's redacted recording, classifies the red
+# (scripts/classify_drift.py), and runs the repository skill fix-contract-drift with Workload Identity Federation (the same
+# four identifiers as cli-contract.yml; the federation rule admits runs on main only). A run the CLI did not answer is
+# reported on the issue "CLI contract: the CLI did not answer" instead, and an open PR labelled contract-drift skips the
+# agent. Only a scheduled or dispatched run of this repository's own nightly is fixed, never a fork's or a pull request's.
+# The agent never starts unless a ruleset on main requires a pull request with an approving review from a code owner and
+# approval of the most recent push, and main's CODEOWNERS owns every file: that protection, not the tool allowlist, keeps
+# the App token off main. The ruleset binds only while GitHub enforces it (a public repository, or a private one on
+# GitHub Pro, Team or Enterprise), which this workflow cannot tell: keeping it enforced is the owner's part. A second
+# job, enforce, checks the pull request's file list on a fresh runner once the agent's job has ended; a third, remind,
+# comments on the pull request the gate found waiting. Nothing here merges or publishes. Rehearsal: `gh workflow run
+# cli-contract.yml -f drift=<mode>` makes the nightly mutate its own recording, so this workflow fires as for a real red;
+# workflow_dispatch with rehearse=true runs the fixer alone on a mutated fixture. CLAUDE.md names the loop.
+name: Drift fix
+
+on:
+  workflow_run:
+    workflows: [CLI contract]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      rehearse:
+        description: Run the fixer alone against a recording mutated on purpose, with no download; the draft PR it opens is closed, not merged
+        type: boolean
+        default: false
+      mode:
+        description: "Rehearsal drift: init-model-key (decoder) or transcript-content-key (reader)"
+        type: string
+        default: init-model-key
+      run_id:
+        description: The id of a red CLI contract run to fix now (ignored with rehearse)
+        type: string
+        default: ""
+
+permissions:
+  id-token: write # the federation exchange, and the Claude GitHub App token exchange
+  contents: read # the checkout, and the drift branch read through the API; the fix branch is pushed with the App token
+  pull-requests: read # the gate's PR list only: this token, which test code the agent ran with sudo can read from the
+  # runner's memory, can neither approve nor comment on a pull request (a comment needs pull-requests: write even through
+  # the issues endpoint); the reminder on a waiting PR is the remind job's, with its own token (see the enforce job's note)
+  issues: write # the report for a run the CLI did not answer
+  actions: read # the red run and its artifact
+
+concurrency:
+  group: drift-fix
+  cancel-in-progress: false
+
+env:
+  ANTHROPIC_FEDERATION_RULE_ID: fdrl_019BGJmAMDiAL6DmAQENbhfk
+  ANTHROPIC_ORGANIZATION_ID: 8336fe5f-a7f7-4255-9fe0-7f594d5a8ec8
+  ANTHROPIC_SERVICE_ACCOUNT_ID: svac_01F45vdtRBnPSRZHXY8ek1fn
+  ANTHROPIC_WORKSPACE_ID: wrkspc_012JJzfEG8tDKeta7pe3CCa5
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    # The agent step's own 75 minutes plus the setup before it: `Reproduce the red` (a compile plus the IntelliJ Platform;
+    # a nightly running the same Gradle step took 23 minutes end to end) is bounded at 30 and `Fetch the recording` at
+    # 5, which leaves 10 for the disk, the checkout, Java, the Gradle cache and the gh calls, so the agent step's timeout
+    # fires first and the job ends normally, with the outputs enforce reads.
+    timeout-minutes: 120
+    # Read by the enforce and remind jobs. All but agent were written before the agent started, and a step's
+    # GITHUB_OUTPUT is read when that step ends, so no later step of this job can rewrite them through GITHUB_OUTPUT;
+    # agent only appears in a message. Code the agent ran holds root on this runner, though, and could tamper with the
+    # runner worker that reports them: enforce is a check, not a guarantee; the ruleset on main is the guarantee.
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      waiting: ${{ steps.gate.outputs.waiting }}
+      protected: ${{ steps.protect.outcome }}
+      kind: ${{ steps.classify.outputs.kind }}
+      agent: ${{ steps.agent.outputs.conclusion }}
+      id: ${{ steps.run.outputs.id }}
+      url: ${{ steps.run.outputs.url }}
+      date: ${{ steps.run.outputs.date }}
+    # github.ref is refs/heads/main for a workflow_run job, whose OIDC subject is then
+    # repo:daarko10@34120174/tandem@1421183639:ref:refs/heads/main, the one the federation rule admits. A dispatch from
+    # another branch is skipped here instead of failing at the federation exchange after the disk and Gradle setup.
+    # workflow_run also fires for a fork's pull request, whose head_branch and workflow name are the fork's to choose: a
+    # fork can name a workflow "CLI contract", run it from its own branch main, fail it on purpose and upload its own
+    # contract-recording. So the run must come from this repository and from the nightly's own triggers (schedule,
+    # workflow_dispatch); "Name the red run" checks the same through the API, for a run_id too.
+    if: >-
+      github.repository == 'daarko10/tandem' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch')))
+    steps:
+      # No stored credential: the only GitHub credential the agent holds is the App token the action exports.
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Ensure the labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create contract-drift --force --color B60205 --description "Opened or reported by the drift loop (drift-fix.yml)"
+          gh label create rehearsal --force --color FBCA04 --description "A drift-loop rehearsal: close, do not merge"
+          gh label create drift-halted --force --color 5319E7 --description "Halts the drift loop while open: remove it to re-arm"
+      # Outputs: id, url and UTC date of the red run (this run itself when rehearse=true), and rehearse=true|false. The id
+      # must be a number and name a failed run of this repository's CLI contract on main, scheduled or dispatched (the
+      # nightly's only triggers): a branch's run carries that branch's own recording, and a fork's pull request can name a
+      # workflow "CLI contract" and a branch main. The REST run object names the head repository and the event, which
+      # gh run view does not. The refusal prints those fields as compact JSON, so no field can start a workflow command.
+      - name: Name the red run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+          REHEARSE: ${{ inputs.rehearse }}
+        run: |
+          set -euo pipefail
+          if [ "$REHEARSE" = "true" ]; then
+            id="$GITHUB_RUN_ID"; url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"; date="$(date -u +%F)"
+          else
+            id="${EVENT_RUN_ID:-$INPUT_RUN_ID}"
+            if [ -z "$id" ]; then echo "::error title=Drift fix::No run to fix: pass run_id, or rehearse=true."; exit 1; fi
+            [[ "$id" =~ ^[0-9]+$ ]] || { echo "::error title=Drift fix::run_id must be a number."; exit 1; }
+            view="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id")"
+            url="$(jq -r .html_url <<<"$view")"; date="$(jq -r '.created_at[0:10]' <<<"$view")"
+            if ! jq -e --arg repo "$GITHUB_REPOSITORY" '.name == "CLI contract" and .conclusion == "failure" and .head_branch == "main" and .head_repository.full_name == $repo and (.event == "schedule" or .event == "workflow_dispatch")' <<<"$view" >/dev/null; then
+              echo "::error title=Drift fix::Run $id is not a failed scheduled or dispatched CLI contract run on main of $GITHUB_REPOSITORY: $(jq -c '[.name, .conclusion, .head_branch, .head_repository.full_name, .event]' <<<"$view")."; exit 1
+            fi
+          fi
+          printf 'id=%s\nurl=%s\ndate=%s\nrehearse=%s\n' "$id" "$url" "$date" "$([ "$REHEARSE" = "true" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "fixing run $url ($date)"
+      # No artifact at all is a red of kind 1 (the record step wrote nothing), classified below; not an error here. Any
+      # other failure of the download (a 403, an API outage, a renamed artifact, an expired retention) fails the job: it is
+      # not "the CLI did not answer". build/drift is created here because the steps below write into it. gh's --jq prints
+      # null as an empty line, hence tostring: the absent artifact reads "null", never "". Bounded at 5 minutes (the artifact
+      # is a few small files), so a hung download cannot eat the agent's share of the job's 120.
+      - name: Fetch the recording
+        if: steps.run.outputs.rehearse != 'true'
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.run.outputs.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/drift
+          present="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" --jq '[.artifacts[].name] | index("contract-recording") | tostring')"
+          if [ "$present" = "null" ]; then echo "the run left no recording"; exit 0; fi
+          gh run download "$RUN_ID" -n contract-recording -D build/drift/recording
+      # The fixer-only rehearsal: the committed history-reply fixture, mutated, stands in for the download. The script leaves
+      # the marker build/drift/recording/rehearsal, as the nightly's own rehearsal step leaves one in its artifact.
+      - name: Mutate a recording for the rehearsal
+        if: steps.run.outputs.rehearse == 'true'
+        env:
+          MODE: ${{ inputs.mode }}
+        run: python3 -I scripts/make_drift.py "$MODE" build/drift/recording
+      # Rules 1-3 of the classification need no test results: a run the CLI did not answer is known here, and neither the
+      # disk, Java and Gradle cache setup below nor the Gradle step (the platform download, a compile) runs for it. Nothing
+      # up to here needs Java or the room: checkout, gh, jq and python3 are on the runner. The marker names a rehearsal,
+      # whichever path left it.
+      - name: Classify before Gradle
+        id: precheck
+        run: |
+          set -euo pipefail
+          mkdir -p build/drift
+          python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test | tee build/drift/precheck.json
+          echo "kind=$(jq -r .kind build/drift/precheck.json)" >> "$GITHUB_OUTPUT"
+          echo "rehearsal=$([ -f build/drift/recording/rehearsal ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      # The disk, Java and the Gradle cache serve `Reproduce the red` and the agent only, so a run the CLI did not answer
+      # skips them too (they cost about three minutes, the Gradle cache alone over three gigabytes) and is reported within
+      # a minute. The platform tests the skill runs need the room, as in build.yml.
+      - name: Free disk space
+        if: steps.precheck.outputs.kind != 'cli-did-not-answer'
+        uses: jlumbroso/free-disk-space@v2.0.0
+        with:
+          tool-cache: false
+          large-packages: false
+      - if: steps.precheck.outputs.kind != 'cli-did-not-answer'
+        uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+      # Read-only against an accidental save: setup-gradle's post step never saves this job's Gradle User Home, which the
+      # test code the agent wrote can rewrite (build cache entries, dependency jars), into main's scope, which Build on
+      # main and on every PR restores. It does not bind hostile code: that test code runs with sudo on a job on main and
+      # could write such a cache itself with the runner's cache token; nothing in the repository closes that, and after
+      # a suspect run the owner clears the caches (Actions | Caches).
+      - if: steps.precheck.outputs.kind != 'cli-did-not-answer'
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+      # Reproduces the red here and leaves the assertion messages in build/test-results/test for the classification.
+      # --rerun: the build cache (org.gradle.caching, restored by setup-gradle) keys the task on the code and the path, not
+      # the recording's contents, so without it a ContractTest that passed once on this commit could replay from the cache.
+      # Bounded at 30 minutes: a hung platform download or a stuck test ends here as a failed reproduction, which
+      # continue-on-error hands to the classification (unknown, or what the results hold) and the standing issue, instead
+      # of running into the job's 120, whose cancellation could leave enforce without the outputs it reads.
+      - name: Reproduce the red
+        if: steps.precheck.outputs.kind != 'cli-did-not-answer'
+        timeout-minutes: 30
+        continue-on-error: true
+        run: ./gradlew test --tests '*ContractTest*' --rerun -Dtandem.contractDir="$PWD/build/drift/recording"
+      - name: Classify
+        id: classify
+        if: steps.precheck.outputs.kind != 'cli-did-not-answer'
+        run: |
+          set -euo pipefail
+          python3 -I scripts/classify_drift.py build/drift/recording build/test-results/test | tee build/drift/classification.json
+          echo "kind=$(jq -r .kind build/drift/classification.json)" >> "$GITHUB_OUTPUT"
+      # Kind 1 and unknown: one standing issue, one comment per red run, no branch, no agent. The job ends green. Reads the
+      # classification when Gradle ran, else the precheck. The comment's bold first line names the kind, since the title
+      # names only kind 1: an unknown red is one the CLI answered and the loop cannot classify.
+      - name: Report a run the agent cannot fix
+        if: steps.precheck.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'cli-did-not-answer' || steps.classify.outputs.kind == 'unknown'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ steps.run.outputs.url }}
+        run: |
+          set -euo pipefail
+          file=build/drift/classification.json; [ -f "$file" ] || file=build/drift/precheck.json
+          title="CLI contract: the CLI did not answer"
+          body="$(jq -r --arg url "$RUN_URL" '"\(if .kind == "unknown" then "**The CLI answered; the red is unclassified.**" else "**The CLI did not answer.**" end)\n\nThe CLI contract run \($url) is red and the drift loop cannot fix it.\n\n- kind: \(.kind)\n- CLI version: \(.cli_version // "unknown")\n- detail: \(.detail)\n- files: \(if .files == [] then "none" else (.files | join(", ")) end)"' "$file")"
+          issue="$(gh issue list --label contract-drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -z "$issue" ]; then gh issue create --title "$title" --label contract-drift --body "$body"; else gh issue comment "$issue" --body "$body"; fi
+      # One open fix at a time: a red that persists for a week opens one PR, not seven. The reminder on the waiting PR
+      # is the remind job's: commenting on a pull request needs pull-requests: write even through the issues endpoint
+      # (issues: write alone gets a 403), and this job's token holds none. Only the number reaches the output. First, an
+      # open issue labelled drift-halted skips the agent with no reminder (no waiting=): the enforce job sets that label
+      # when an agent run left no branch and no pull request, which nothing else would stop from recurring nightly.
+      - name: Skip when a fix is already waiting
+        id: gate
+        if: steps.classify.outputs.kind == 'decoder' || steps.classify.outputs.kind == 'reader'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          halted="$(gh issue list --label drift-halted --state open --json number --jq '.[0].number // empty')"
+          if [[ "$halted" =~ ^[0-9]+$ ]]; then
+            echo "the loop is halted by issue #$halted; remove the drift-halted label to re-arm"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+          elif [ -n "$halted" ]; then
+            echo "::error title=Drift fix::gh issue list named an open drift-halted issue without a number; the agent is not started."; exit 1
+          fi
+          pr="$(gh pr list --label contract-drift --state open --json number --jq '.[0].number // empty')"
+          if [[ "$pr" =~ ^[0-9]+$ ]]; then
+            echo "a fix is already waiting in PR #$pr; the remind job comments on it and the agent does not start"
+            printf 'proceed=false\nwaiting=%s\n' "$pr" >> "$GITHUB_OUTPUT"
+          elif [ -z "$pr" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Drift fix::gh pr list named an open contract-drift pull request without a number; the agent is not started."; exit 1
+          fi
+      # The precondition the whole loop rests on, checked before any spend: the App token the action exports can push to
+      # any branch no rule protects, main included. Only a ruleset counts: the workflow token can read its rules (metadata
+      # access) but not a classic protection's review count (administration access), and a classic rule with no option
+      # ticked still reads protected: true while it accepts a direct push. One approving review alone is not enough
+      # either: the App holds pull-requests write, so it can approve a pull request it did not author (the owner's open
+      # PR after a push to its unprotected head branch, a Dependabot PR) and then merge it, and test code the agent wrote
+      # runs with the App token in its environment. main passes when an active ruleset's pull_request rule requires at
+      # least one approving review, review from code owners and approval of the most recent reviewable push (an App is
+      # no code owner, and cannot approve its own push), and main's .github/CODEOWNERS owns every file with a `* @owner`
+      # line: the code-owner review binds only files that have an owner. Anything else, a failed read or an answer that
+      # is not a number included, fails the step: the run is red and the agent does not start. A ruleset bypass list
+      # naming the Claude App would defeat the rule, so each qualifying ruleset is read by its id (by exit status, as
+      # below) and an Integration (an App) on its bypass list refuses, whatever its bypass mode; a role (the owner's
+      # admin role, how the only code owner merges) is allowed. GitHub returns bypass_actors only to a caller who can
+      # edit the ruleset, which the workflow token never can (it has no administration permission), so on a real run
+      # the list is withheld, the step says so in its log, and keeping the App off it stays the owner's part. So does
+      # keeping the ruleset enforced: on a private repository of a personal account GitHub enforces a ruleset only with
+      # GitHub Pro or above, and no read open to this token tells an enforced ruleset from an unenforced one, so reading
+      # the rule does not prove enforcement. The same step refuses a drift branch that already
+      # exists (a closed PR whose branch was kept, and the same run dispatched again): the agent's `git push -u origin
+      # HEAD` would be rejected as non-fast-forward after the spend, and the enforce job would misread the old branch as
+      # a stopped agent. Only a 404 means "no branch": gh prints the error body on stdout and exits 1 on any HTTP error,
+      # so the read is decided by its exit status and then by the body's status, and a 5xx or a rate limit refuses too.
+      # The CODEOWNERS read is decided the same way: a 404 is a missing file, which owns nothing; anything else refuses
+      # without a verdict, never as "no owner line". Last, any drift/ branch of this repository without an open pull
+      # request from it refuses (an earlier night's agent that pushed and was stopped, or opened nothing after a push; a
+      # closed fix whose branch was kept): without that, every night of the same red would start another agent run until
+      # the owner acted, so a failed night costs one run until the owner deletes the branch. The repository setting
+      # "Automatically delete head branches" removes a merged fix's branch.
+      - name: Require a protected main
+        id: protect
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: drift/${{ steps.run.outputs.date }}-${{ steps.run.outputs.id }}
+        run: |
+          set -euo pipefail
+          ids="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main?per_page=100" --jq '[.[] | select(.type == "pull_request" and (.parameters.required_approving_review_count // 0) >= 1 and .parameters.require_code_owner_review == true and .parameters.require_last_push_approval == true) | .ruleset_id | tostring] | unique | join(" ")')"
+          if [[ "$ids" =~ ^[0-9]+( [0-9]+)*$ ]]; then
+            echo "main requires a pull request, an approving review from a code owner and approval of the last push (ruleset $ids)"
+          else
+            echo "::error title=Drift fix::No ruleset on main requires a pull request with an approving review from a code owner and approval of the most recent push (a private repository of a personal account enforces one only with GitHub Pro); the agent is not started."; exit 1
+          fi
+          for id in $ids; do
+            if ! ruleset="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" 2>/dev/null)"; then
+              status="$(jq -r '.status // empty' <<<"$ruleset" 2>/dev/null || true)"
+              echo "::error title=Drift fix::Reading the ruleset $id failed (HTTP status '${status:-none}'), so whether an App can bypass it is not known; the agent is not started."; exit 1
+            fi
+            listed="$(jq -r '.bypass_actors | type' <<<"$ruleset")"
+            if [ "$listed" = "null" ]; then
+              echo "ruleset $id: GitHub shows its bypass list only to a caller who can edit the ruleset, not to this token; keeping the Claude App off it is the owner's part"
+            elif [ "$listed" = "array" ]; then
+              apps="$(jq -c '[.bypass_actors[] | select(.actor_type == "Integration") | {actor_type, actor_id}]' <<<"$ruleset")"
+              if [ "$apps" != "[]" ]; then
+                echo "::error title=Drift fix::The ruleset $id on main lets an App bypass it ($apps), so the Claude App's token could push to main or merge without review; remove it from the bypass list. The agent is not started."; exit 1
+              fi
+              echo "ruleset $id: no App on its bypass list"
+            else
+              echo "::error title=Drift fix::The ruleset $id answered a bypass list of type '$listed'; the agent is not started."; exit 1
+            fi
+          done
+          if ! owners="$(gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/.github/CODEOWNERS?ref=main" 2>/dev/null)"; then
+            status="$(jq -r '.status // empty' <<<"$owners" 2>/dev/null || true)"
+            if [ "$status" != "404" ]; then
+              echo "::error title=Drift fix::Reading main's .github/CODEOWNERS failed (HTTP status '${status:-none}'), so whether it owns every file is not known; the agent is not started."; exit 1
+            fi
+            owners=""
+          fi
+          if ! grep -qE '^\*[[:space:]]+@' <<<"$owners"; then
+            echo "::error title=Drift fix::main's .github/CODEOWNERS has no line owning every file (* @owner), so the ruleset's code-owner review binds nothing; the agent is not started."; exit 1
+          fi
+          if existing="$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name 2>/dev/null)"; then
+            echo "::error title=Drift fix::The branch $BRANCH exists (a closed pull request's branch, kept); delete it to retry this run."; exit 1
+          fi
+          status="$(jq -r '.status // empty' <<<"$existing" 2>/dev/null || true)"
+          if [ "$status" != "404" ]; then
+            echo "::error title=Drift fix::Reading the branch $BRANCH failed (HTTP status '${status:-none}'), so whether it exists is not known; the agent is not started."; exit 1
+          fi
+          if ! branches="$(gh api --paginate "repos/$GITHUB_REPOSITORY/branches?per_page=100" --jq '.[].name')"; then
+            echo "::error title=Drift fix::Listing the branches failed, so whether an earlier drift fix left a branch without a pull request is not known; the agent is not started."; exit 1
+          fi
+          if ! heads="$(gh pr list --state open --limit 100 --json headRefName,isCrossRepository --jq '.[] | select(.isCrossRepository == false) | .headRefName')"; then
+            echo "::error title=Drift fix::Listing the open pull requests failed, so whether a drift branch has one is not known; the agent is not started."; exit 1
+          fi
+          stale="$( (grep -E '^drift/' <<<"$branches" || true) | (grep -vxF -f <(printf '%s\n' "$heads") || true) | paste -sd ' ' -)"
+          if [ -n "$stale" ]; then
+            echo "::error title=Drift fix::The drift branches $stale exist without an open pull request (an earlier fix that opened none, or a closed one's branch, kept); read them, then delete them to re-arm the loop. The agent is not started."; exit 1
+          fi
+      # No github_token input: the action authenticates as the Claude GitHub App, sets the origin URL and the commit
+      # identity before the CLI starts, and the PR it opens starts the Build workflow. The allowlist names the
+      # invocations the skill prescribes; the push rule is exact (a :* rule matches the prefix followed by a space, so
+      # drift/:* would never match the push), `cat`, `ls` and `date` are not on it (the skill prescribes none of them),
+      # and `cp` is admitted from the recording into the fixtures only, as a pattern (a `*` not in a trailing `:*`
+      # matches anything, spaces included), so the deny rules `cp *..*` and `cp * * *` take back a `..` and a third
+      # argument (a target directory, `-t`). The redactor, which opens and writes its output path itself (no Edit rule
+      # sees that write), is admitted the same way from the fixtures onto the fixtures only, with the same two deny
+      # rules. The `Edit(path)` deny rules keep the CLI's Edit, Write and NotebookEdit tools, and an output redirection's
+      # target, out of some of the files that run code before the push (the build scripts, gradle.properties and the
+      # wrapper, scripts/, the hooks in .claude/ and .git/): the CLI (2.1.308) matches every file-writing tool against
+      # `Edit(path)` rules and never consults a `Write(path)` rule, so none is listed. `Read(.git/**)` keeps the Read,
+      # Grep and Glob tools and the file commands the CLI recognises in Bash (cat, head, tail, sed, tee) out of .git/ (the
+      # App token is in the origin URL of .git/config), but not a Bash `grep`, which `Bash(grep:*)` admits: the deny
+      # rules `grep *.git/*`, `grep -r*`, `grep * -r*`, `grep -R*` and `grep * -R*` take back a .git/ path and a recursive
+      # grep as plainly spelled (the skill's only grep, `grep -nE '<pattern>' <copies>`, names the fixture copies and
+      # matches none of them); a combined flag (`-nr`) or a glob (`.gi?/`) still passes. The token is the agent's own and
+      # is revoked in the action's post step, so what that leaves is its exposure in a PR body or a comment, not a
+      # capability. `python3 -I scripts/classify_drift.py` reads only a contract-hello.ndjson and TEST-*.xml files under
+      # the directories it is given, none of which .git/ holds, so pointed at .git/ it prints file names only.
+      # `claude:*` keeps a second CLI out. Whether a
+      # redirection after a kept prefix rule (`grep … > file`, `git log … > file`) reaches its target past them rests
+      # on the CLI's parsing of the command, and test code under src/test runs anyway, so the enforce job checks the
+      # result on a fresh runner: that file list, the App token's missing workflows permission and the ruleset on main
+      # are the guard either way.
+      # `attribution` empty keeps the CLI's own co-author trailer and "Generated with" line out of the commit and the PR
+      # body. The action also loads the project's .claude/settings.json, whose allow rules are merged in; the deny rules
+      # below take back the Gradle tasks and ktlint it allows that the skill never prescribes, every flag after
+      # `./gradlew check` (its rule there is a prefix): `-x` and `--exclude-task` as prefix rules, and the wildcard rule
+      # `./gradlew check *-*` (a rule with a `*` not in a trailing `:*` is a pattern) for `--exclude-task=koverVerify`,
+      # `--init-script` and the rest, and `./gradlew test *check*`, the other spelling of a check that skips
+      # koverVerify. What runs the real `./gradlew check` is Build on the pull request, not the agent's report. Neither
+      # list is what protects main: the ruleset on main (a pull request plus a code owner's approving review of the last
+      # push, required by the step above) and the App token's scope are.
+      - name: Fix the drift
+        id: agent
+        if: steps.gate.outputs.proceed == 'true' && steps.protect.outcome == 'success'
+        uses: anthropics/claude-code-action@v1
+        timeout-minutes: 75
+        with:
+          anthropic_federation_rule_id: ${{ env.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic_organization_id: ${{ env.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic_service_account_id: ${{ env.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          anthropic_workspace_id: ${{ env.ANTHROPIC_WORKSPACE_ID }}
+          prompt: "/fix-contract-drift run=${{ steps.run.outputs.url }} recording=build/drift/recording classification=build/drift/classification.json rehearsal=${{ steps.precheck.outputs.rehearsal }} date=${{ steps.run.outputs.date }}"
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 120
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(./gradlew check),Bash(./gradlew test:*),Bash(python3 -I scripts/classify_drift.py:*),Bash(python3 -I scripts/redact_fixture.py src/test/resources/fixtures/* src/test/resources/fixtures/*),Bash(python3 -m unittest discover -s scripts -t scripts),Bash(gh pr create:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue comment:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git switch:*),Bash(git clean:*),Bash(git push -u origin HEAD),Bash(cp build/drift/recording/* src/test/resources/fixtures/*),Bash(grep:*)"
+          settings: |
+            {"permissions": {"deny": ["Edit(.github/**)", "Edit(build.gradle.kts)", "Edit(settings.gradle.kts)", "Edit(gradle.properties)", "Edit(gradle/**)", "Read(.git/**)", "Edit(.git/**)", "Edit(scripts/**)", "Edit(.claude/**)", "Edit(CLAUDE.md)", "Bash(claude:*)", "Bash(cp *..*)", "Bash(cp * * *)", "Bash(python3 -I scripts/redact_fixture.py *..*)", "Bash(python3 -I scripts/redact_fixture.py * * *)", "Bash(./gradlew check -x:*)", "Bash(./gradlew check --exclude-task:*)", "Bash(./gradlew check *-*)", "Bash(./gradlew test *check*)", "Bash(./gradlew compileKotlin:*)", "Bash(./gradlew compileTestKotlin:*)", "Bash(./gradlew buildPlugin:*)", "Bash(./gradlew verifyPlugin:*)", "Bash(ktlint:*)", "Bash(grep *.git/*)", "Bash(grep -r*)", "Bash(grep * -r*)", "Bash(grep -R*)", "Bash(grep * -R*)"]}, "env": {"BASH_DEFAULT_TIMEOUT_MS": "1800000", "BASH_MAX_TIMEOUT_MS": "2700000"}, "attribution": {"commit": "", "pr": ""}}
+  # The reminder on the pull request the gate found waiting, once per further red. Commenting on a pull request needs
+  # pull-requests: write even through the issues endpoint (issues: write alone gets a 403), and the fix job's token must
+  # hold no such write (the agent's test code can read it), so the comment is posted here, in a job that runs no agent
+  # code and has no checkout. The fix job ends green when the gate skipped, so no always() is needed; a gate halted by
+  # a drift-halted issue names no waiting pull request, so nothing is reminded. GH_REPO names the repository because no
+  # checkout is there to infer it from.
+  remind:
+    needs: fix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: needs.fix.outputs.proceed == 'false' && needs.fix.outputs.waiting != ''
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Comment on the waiting pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WAITING: ${{ needs.fix.outputs.waiting }}
+          RUN_URL: ${{ needs.fix.outputs.url }}
+          DATE: ${{ needs.fix.outputs.date }}
+        run: |
+          set -euo pipefail
+          [[ "$WAITING" =~ ^[0-9]+$ ]] || { echo "::error title=Drift fix::The gate skipped the agent but named no waiting pull request."; exit 1; }
+          gh pr comment "$WAITING" --body "The nightly of $DATE is still red: $RUN_URL. This pull request is still waiting; merge it, or close it and delete its branch, to re-arm the loop."
+          echo "commented on PR #$WAITING"
+  # The check that depends neither on the agent obeying the skill nor on the runner its code ran on: the fix job runs test
+  # code the agent wrote (./gradlew test) with sudo, and that code can change what a later step of the same job sees (a
+  # gh first on PATH, BASH_ENV, GITHUB_PATH, GITHUB_ENV), so the step that reads the PR's file list runs here, on a fresh
+  # runner, with no checkout and only the permissions it needs. What it reads from the fix job was written before the
+  # agent started and cannot be rewritten through GITHUB_OUTPUT (see that job's outputs); root on that runner could still
+  # tamper with the worker that reports them, so this job is a check, not a guarantee: the ruleset on main is the
+  # guarantee. agent only appears in a message. The loop's pull requests are the open ones whose head is this run's
+  # branch in this repository (never a fork's PR from a branch of the same name: the run id is visible in Actions, and a
+  # fork's PR labelled here would hold the gate against every later real fix) or which carry the label contract-drift
+  # (the gate proceeded only when none carried it, so every one of them was opened during this run): the file list of
+  # each is checked, never only the first's; a PR from the branch that lacks the label gets it, so the gate holds while
+  # it is open; and more than one is red, since the agent opens one. A PR touching anything outside the allowlist is
+  # commented on, left open and the run is red. It is never closed: the gate keys on an open contract-drift PR, so a
+  # close (with its branch deleted) would re-arm the loop and the next nightly would produce the same fix again.
+  # Once the gate proceeded, no PR is a red run: a pushed branch without one (the agent was stopped by the timeout or the
+  # turn limit) is reported on the standing issue, and the next nightly refuses at the stale drift/ branch; no branch at
+  # all is a denied command, a redactor stop, an action that skipped the agent, or an agent that gave up, reported on the
+  # same issue, which gets the label drift-halted: the gate skips the agent while it is open with that label, so such a
+  # night costs one run, not one per night. The branch is read through the API with the workflow token (contents:
+  # read; the App token was revoked in the fix job's post step): gh prints the error body on stdout and exits 1 on any
+  # HTTP error, so the read is decided by its exit status, only a 404 in the body means "no branch", and any other
+  # failure (a 5xx, a rate limit) is red without a verdict rather than "pushed no branch". GH_REPO names the repository
+  # because no checkout is there to infer it from. No draft is opened: GITHUB_TOKEN cannot create a pull request while the repository setting
+  # "Allow GitHub Actions to create and approve pull requests" is off, and off it stays: on, github-actions[bot] could
+  # approve pull requests, and the fix job's token is readable by the agent's test code (the code-owner rule would still
+  # refuse that approval; the setting is the second lock). The PR's file list is read on its own line, so a failed read
+  # fails the step instead of passing as "no offending path". It comes from the REST files list, paged (up to 3000
+  # files), with the old path of each rename: GraphQL's `files` (gh pr view) stops at 100 and names only a rename's new
+  # path, so a file moved into src/test/ from outside the allowlist would pass.
+  enforce:
+    needs: fix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: always() && needs.fix.outputs.proceed == 'true' && needs.fix.outputs.protected == 'success'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Enforce the edit allowlist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: drift/${{ needs.fix.outputs.date }}-${{ needs.fix.outputs.id }}
+          RUN_URL: ${{ needs.fix.outputs.url }}
+          KIND: ${{ needs.fix.outputs.kind }}
+          AGENT: ${{ needs.fix.outputs.agent }}
+        run: |
+          set -euo pipefail
+          open="$(gh pr list --state open --limit 100 --json number,headRefName,labels,isCrossRepository)"
+          mapfile -t prs < <(jq -r --arg branch "$BRANCH" '.[] | select((.headRefName == $branch and .isCrossRepository == false) or any(.labels[]; .name == "contract-drift")) | "\(.number) \(.headRefName) \(if any(.labels[]; .name == "contract-drift") then "labelled" else "unlabelled" end)"' <<<"$open")
+          if [ "${#prs[@]}" -eq 0 ]; then
+            if branch="$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .name 2>/dev/null)"; then
+              title="CLI contract: the CLI did not answer"
+              body="The drift fix for $RUN_URL pushed the branch $BRANCH but opened no pull request: the agent was stopped (timeout or turn limit; its step ended '${AGENT:-skipped}'). Review the branch by hand, then delete it to re-arm the loop: the fixer does not start while a drift/ branch has no open pull request."
+              issue="$(gh issue list --label contract-drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+              if [ -z "$issue" ]; then gh issue create --title "$title" --label contract-drift --body "$body"; else gh issue comment "$issue" --body "$body"; fi
+              echo "::error title=Drift fix::The agent pushed $BRANCH but opened no PR; reported on the standing issue."; exit 1
+            fi
+            status="$(jq -r '.status // empty' <<<"$branch" 2>/dev/null || true)"
+            if [ "$status" != "404" ]; then
+              echo "::error title=Drift fix::Reading the branch $BRANCH failed (HTTP status '${status:-none}'), so whether the agent pushed it is not known; the run is red without a verdict."; exit 1
+            fi
+            title="CLI contract: the CLI did not answer"
+            body="The drift fix for $RUN_URL (classification $KIND) pushed no branch and opened no pull request; its agent step ended '${AGENT:-skipped}': a denied command, a redactor stop, the action skipped after a workflow-validation error, or the agent gave up. Read the Fix the drift step's log. The loop is halted: the fixer does not start while this issue is open with the label drift-halted; remove the label, or close the issue, to re-arm it."
+            issue="$(gh issue list --label contract-drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+            if [ -z "$issue" ]; then
+              gh issue create --title "$title" --label contract-drift --label drift-halted --body "$body"
+            else
+              gh issue comment "$issue" --body "$body"
+              gh api "repos/$GITHUB_REPOSITORY/issues/$issue/labels" -f "labels[]=drift-halted" >/dev/null
+            fi
+            echo "::error title=Drift fix::The classification was $KIND but the agent pushed no branch and opened no PR (its step ended '${AGENT:-skipped}'): a denied command, a redactor stop (see the standing issue), the action skipped after a workflow-validation error, or the agent gave up; read the Fix the drift step's log. Reported on the standing issue, labelled drift-halted: the loop skips the agent until the label is removed."; exit 1
+          fi
+          red=0
+          for entry in "${prs[@]}"; do
+            read -r pr head labelled <<<"$entry"
+            if [ "$labelled" = unlabelled ]; then
+              gh api "repos/$GITHUB_REPOSITORY/issues/$pr/labels" -f "labels[]=contract-drift" >/dev/null
+              echo "::warning title=Drift fix::PR #$pr from $head carried no contract-drift label; added, so the gate holds while it is open."
+            fi
+            files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$pr/files" --jq '.[] | .filename, (.previous_filename // empty)')"
+            offending="$(grep -vE '^(src/main/kotlin/dev/daarkolabs/tandem/protocol/|src/main/kotlin/dev/daarkolabs/tandem/session/transcript/|src/test/|docs/protocol\.md$)' <<<"$files" || true)"
+            if [ -n "$offending" ]; then
+              gh pr comment "$pr" --body "$(printf 'drift-fix.yml: this fix edits files outside the allowlist (protocol/, session/transcript/, src/test/, docs/protocol.md); it is left open so the loop holds (the gate skips while it is open) and the owner decides. Close it and delete its branch to re-arm the loop, or merge after review.\n\n%s' "$offending")"
+              echo "::error title=Drift fix::PR #$pr edits files outside the allowlist; commented and left open."; red=1
+            else
+              echo "PR #$pr ($head) stays within the allowlist"
+            fi
+          done
+          if [ "${#prs[@]}" -gt 1 ]; then
+            echo "::error title=Drift fix::${#prs[@]} open pull requests belong to the loop (${prs[*]%% *}); the agent opens one. Close the extra ones by hand; the gate holds while any is open."; red=1
+          fi
+          exit "$red"

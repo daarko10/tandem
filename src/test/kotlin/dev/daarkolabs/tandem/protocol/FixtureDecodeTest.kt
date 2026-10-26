@@ -713,7 +713,7 @@ class FixtureDecodeTest {
         assertEquals("<synthetic>", line.model)
         assertEquals(LocalCommand("mcp", "", null, text), line.localCommand)
         assertEquals(listOf<ContentBlock>(ContentBlock.Text(text)), line.content)
-        assertTrue(text.endsWith(" Use `/mcp` in the terminal for details."))
+        assertTrue(line.localCommand!!.stdout!!.endsWith(dev.daarkolabs.tandem.chat.MCP_TERMINAL_HINT))
 
         val result = assertIs<CliMessage.Result>(at("mcp-slash", 6))
         assertEquals("mcp", result.localCommand)
@@ -787,5 +787,19 @@ class FixtureDecodeTest {
         val ended = assertIs<CliMessage.Result>(at("bash-mode-respond", 41))
         assertEquals(1, ended.numTurns)
         assertEquals(listOf("<command_uuid-10>"), ended.userMessageUuids)
+    }
+
+    @Test
+    fun `bash-mode-context - the one context frame ends in a zero-turn result naming its uuid`() {
+        val quiet = assertIs<CliMessage.Result>(at("bash-mode-context", 6))
+        assertEquals(0, quiet.numTurns)
+        assertEquals(0L, quiet.durationApiMs)
+        assertEquals("", quiet.result)
+        assertEquals(false, quiet.isError)
+        assertEquals(listOf("<command_uuid-4>"), quiet.userMessageUuids)
+        val prompt = assertIs<CliMessage.Result>(at("bash-mode-context", 20))
+        assertEquals(1, prompt.numTurns)
+        assertEquals(listOf("<command_uuid-10>"), prompt.userMessageUuids)
+        assertEquals("bash-mode-probe", prompt.result)
     }
 }

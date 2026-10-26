@@ -268,9 +268,9 @@ object ToolBodies {
 
     /**
      * [text] as at most [MAX_LINES] lines, with the line count of the whole text. Text over [MAX_CHARS] characters is cut there and
-     * ends with `… (cut, N more characters)`.
+     * ends with `… (cut, N more characters)`. A shell escape's row cuts its output with it too (MCP spec 12.1).
      */
-    private fun clamp(text: String): Pair<ImmutableList<String>, Int> {
+    internal fun clamp(text: String): Pair<ImmutableList<String>, Int> {
         val all = contentLines(text)
         if (all.isEmpty()) return persistentListOf<String>() to 0
         val kept = all.take(MAX_LINES)

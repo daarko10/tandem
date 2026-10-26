@@ -157,6 +157,9 @@ class HostMessagesTest {
         val recorded = Json.parseToJsonElement(Fixtures.transcript("bash-mode").readLines()[4]).jsonObject
         val context = HostMessages.bashContext("echo bash-mode-probe && printf err >&2", "bash-mode-probe\nerr", "", "u3")
         assertEquals(recorded["message"]!!.jsonObject["content"], context["message"]!!.jsonObject["content"])
+        // The one frame Tandem sends with replies off, as bash-mode-context recorded it (2.1.308).
+        val sent = Json.parseToJsonElement(Fixtures.transcript("bash-mode-context").readLines()[2]).jsonObject
+        assertEquals(sent["message"]!!.jsonObject["content"], context["message"]!!.jsonObject["content"])
         assertEquals(JsonPrimitive(false), context["shouldQuery"])
         assertEquals(JsonPrimitive("u3"), context["uuid"])
     }

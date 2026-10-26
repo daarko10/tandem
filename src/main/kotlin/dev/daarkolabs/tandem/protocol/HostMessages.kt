@@ -64,7 +64,8 @@ object HostMessages {
 
     /**
      * A shell escape for the context only, in one frame: the merged content of `transcripts/bash-mode.jsonl:5`, `shouldQuery: false`.
-     * Unrecorded as one host frame (the probe sent two quiet frames, which the CLI merged into this content).
+     * Recorded as one host frame in `bash-mode-context` (2.1.308): a zero-turn `result` names its uuid (`bash-mode-context.ndjson:6`),
+     * and the transcript keeps the content as sent (`transcripts/bash-mode-context.jsonl:3`).
      */
     fun bashContext(command: String, stdout: String, stderr: String, uuid: String): JsonObject =
         bashFrame(BashEscape.context(command, stdout, stderr), uuid, query = false)

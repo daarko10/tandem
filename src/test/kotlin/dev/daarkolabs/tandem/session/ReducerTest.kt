@@ -223,6 +223,7 @@ class ReducerTest {
         assertTrue(modelMatches("opus", "claude-opus-5-5"))
         assertTrue(modelMatches("claude-opus-5-5[1m]", "claude-opus-5-5"))
         assertTrue(modelMatches("default", "claude-sonnet-5-5"))
+        assertTrue(modelMatches("fable", "claude-fable-5-1"))
         assertFalse(modelMatches("opus", "claude-sonnet-5-5"))
     }
 
@@ -1484,6 +1485,20 @@ class ReducerTest {
     }
 
     @Test
+    fun `the one context frame's quiet result empties the quiet sends`() {
+        val sent = reduce(ChatState(), SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), null, 0))
+        val quiet = fold(sent, "bash-mode-context", 1, 6)
+        assertTrue(quiet.quietSends.isEmpty())
+        assertTrue(quiet.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(quiet.busy)
+        val prompted = reduce(quiet, SessionEvent.UserSent("<command_uuid-10>", "Reply with only the text the command printed to stdout", 0))
+        val answered = fold(prompted, "bash-mode-context", 7, 21)
+        assertTrue(answered.quietSends.isEmpty())
+        assertFalse(answered.busy)
+        assertEquals(1, answered.entries.count { it is ChatEntry.TurnEnded })
+    }
+
+    @Test
     fun `a responding shell send opens a turn that its reply's result ends`() {
         val sent = reduce(ChatState(), SessionEvent.ShellSent("shell-1", listOf("<command_uuid-4>"), "<command_uuid-10>", 0))
         assertTrue(sent.busy)
@@ -1526,6 +1541,42 @@ class ReducerTest {
         assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
         assertFalse(state.busy)
         assertEquals("<session_id-2>", state.sessionId)
+    }
+
+    @Test
+    fun `an error result for a quiet send says the turn failed`() {
+        val state = listOf(
+            SessionEvent.ShellSent("shell-1", listOf("a"), null, 0),
+            edited("bash-mode", 8) {
+                it["user_message_uuids"] = Json.parseToJsonElement("[\"a\"]")
+                it["is_error"] = JsonPrimitive(true)
+                it["result"] = JsonPrimitive("boom")
+            },
+        ).fold(ChatState(), ::reduce)
+        assertTrue(state.quietSends.isEmpty())
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().single()
+        assertEquals(NoticeLevel.ERROR, notice.level)
+        assertTrue(notice.text.startsWith("The turn failed"), notice.text)
+        assertTrue("boom" in notice.text, notice.text)
+        assertTrue(state.entries.none { it is ChatEntry.TurnEnded })
+        assertFalse(state.busy)
+    }
+
+    @Test
+    fun `an error zero-turn result without uuids is a failed result`() {
+        val state = listOf(
+            SessionEvent.ShellSent("shell-1", listOf("a"), null, 0),
+            edited("bash-mode", 8) {
+                it.remove("user_message_uuids")
+                it["is_error"] = JsonPrimitive(true)
+                it["result"] = JsonPrimitive("boom")
+            },
+        ).fold(ChatState(), ::reduce)
+        assertTrue(state.quietSends.isEmpty())
+        assertEquals(TurnEnd.FAILED, state.entries.filterIsInstance<ChatEntry.TurnEnded>().single().end)
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().single()
+        assertEquals(NoticeLevel.ERROR, notice.level)
+        assertTrue(notice.text.startsWith("The turn failed") && "boom" in notice.text, notice.text)
     }
 
     @Test

@@ -39,6 +39,22 @@ data class UserRow(
     val images: ImmutableList<ImageRef> = persistentListOf(),
 ) : ChatRow
 
+/**
+ * A shell escape (`! command`, MCP spec 12.1), `sh:<entry id>`, in place of a user bubble: its [command], its [output] with colour
+ * escapes stripped and cut like a tool body (at most 400 lines; [totalLines] counts them all), whether it still [running] (its Stop),
+ * and the line under it, when there is something to say: [status] (`exit 2`, `Stopped after 3.0s`, …), an error when [statusError].
+ */
+data class ShellRow(
+    override val key: String,
+    val command: String,
+    val output: ImmutableList<String>,
+    val totalLines: Int,
+    val running: Boolean,
+    val status: String?,
+    val statusError: Boolean,
+    override val gap: RowGap = RowGap.TURN,
+) : ChatRow
+
 /** One image of a [UserRow]: the id of its [dev.daarkolabs.tandem.session.UserImage], its media type and its [index] in the message. */
 data class ImageRef(val id: String, val mediaType: String, val index: Int)
 

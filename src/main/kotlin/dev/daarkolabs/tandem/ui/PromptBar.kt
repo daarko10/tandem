@@ -76,13 +76,18 @@ import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.Attachments
 import dev.daarkolabs.tandem.chat.PaletteItem
 import dev.daarkolabs.tandem.chat.PaletteOutcome
+import dev.daarkolabs.tandem.chat.ScrollEvent
 import dev.daarkolabs.tandem.chat.SlashIntercept
 import dev.daarkolabs.tandem.chat.SlashPalette
+import dev.daarkolabs.tandem.chat.StopTarget
 import dev.daarkolabs.tandem.chat.committedDraft
+import dev.daarkolabs.tandem.chat.intercepts
 import dev.daarkolabs.tandem.chat.moved
 import dev.daarkolabs.tandem.chat.paletteFor
 import dev.daarkolabs.tandem.chat.pick
+import dev.daarkolabs.tandem.chat.shellCommand
 import dev.daarkolabs.tandem.chat.slashIntercept
+import dev.daarkolabs.tandem.chat.stopTarget
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
@@ -125,6 +130,10 @@ import kotlin.math.roundToInt
  * send, palette or not, first runs the interception table (`slashIntercept`): `/mcp` opens the MCP panel, `/model` the model menu,
  * `/permissions` and `/mode` the mode menu ([ChatUiState.menuRequest]), `/model <name>` picks that model; each clears the draft,
  * sends nothing and leaves the attachments for the next prompt.
+ *
+ * Before that table, a draft that is a shell escape (`! command`, MCP spec 12.1) runs in the login shell through [manager] instead of
+ * being sent: the draft is cleared, the attachments are left for the next prompt and the list follows its bottom again. While the
+ * command runs the composer is busy, and Stop (the button or Esc) stops the command; otherwise it stops the turn ([stopTarget]).
  */
 @Composable
 internal fun PromptBar(
@@ -142,20 +151,21 @@ internal fun PromptBar(
     val composer by presenter.composer.collectAsState()
     val sending by sender.sending.collectAsState()
     val scope = rememberCoroutineScope()
-    val sendNow = {
-        if (sendDraft(ui, sender)) {
-            scope.launch {
-                val last = ui.listState.layoutInfo.totalItemsCount - 1
-                if (last >= 0) ui.listState.animateScrollToItem(last)
-            }
+    val scrollToEnd: () -> Unit = {
+        scope.launch {
+            val last = ui.listState.layoutInfo.totalItemsCount - 1
+            if (last >= 0) ui.listState.animateScrollToItem(last)
         }
+    }
+    val sendNow = {
+        if (sendDraft(ui, sender)) scrollToEnd()
     }
     // The interception table (MCP spec 3.4): Tandem's own commands act here and clear the draft, sending nothing and leaving the
     // attachment strip as it is; anything else is today's send, attachments included.
     val runIntercept = { intercept: SlashIntercept ->
         when (intercept) {
             is SlashIntercept.Send -> sendNow()
-            SlashIntercept.OpenMcp -> ui.mcpPanelOpen.value = true
+            SlashIntercept.OpenMcp -> ui.openMcpPanel()
             SlashIntercept.PickModel -> ui.menuRequest.value = FooterMenu.MODEL
             SlashIntercept.PickPermissionMode -> ui.menuRequest.value = FooterMenu.MODE
             is SlashIntercept.SetModel -> {
@@ -165,9 +175,22 @@ internal fun PromptBar(
         }
         if (intercept !is SlashIntercept.Send) ui.draft.clearText()
     }
-    // The send path, Enter or Send, palette or not (a pasted `/mcp` behaves the same): the table runs on the trimmed draft before the
-    // attachments are encoded.
-    val send = { runIntercept(slashIntercept(ui.draft.text.toString().trim(), composer.models)) }
+    // The send path, Enter or Send, palette or not (a pasted `/mcp` behaves the same): a shell escape runs first (MCP spec 12.1); else
+    // the table runs on the trimmed draft before the attachments are encoded.
+    val send: () -> Unit = {
+        val text = ui.draft.text.toString()
+        val command = shellCommand(text)
+        if (command != null) {
+            manager.runShell(handle.id, command)
+            ui.draft.clearText()
+            ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
+            scrollToEnd()
+        } else {
+            runIntercept(slashIntercept(text.trim(), composer.models))
+        }
+    }
+    // A shell escape that runs makes the composer busy, as a turn does (MCP spec 12.1).
+    val busy = composer.busy || composer.shellRunning
     // The palette (MCP spec 3.4, 4.4, 7): read where it is used, so a key handler always sees the current text's palette, never a
     // frame-old filter. It filters on the committed text only, and shows only while the text area has the focus.
     val inputFocused = remember { mutableStateOf(false) }
@@ -206,7 +229,7 @@ internal fun PromptBar(
     val pickFrom = { shown: SlashPalette?, item: PaletteItem?, insert: Boolean ->
         if (shown != null) {
             val index = item?.let(shown.items::indexOf)?.takeIf { it >= 0 } ?: shown.selected
-            execute(pick(shown.copy(selected = index), insert, busy = composer.busy || sending, composer.models))
+            execute(pick(shown.copy(selected = index), insert, busy = busy || sending, composer.models))
         }
     }
     val attachFiles: (List<Path>) -> Unit = { paths ->
@@ -223,20 +246,24 @@ internal fun PromptBar(
         }
         PromptBox(
             ui,
-            composer.busy,
+            busy,
             sending,
             composer.cardOpen,
             focus,
             onFocused,
             inputFocused = inputFocused,
             palette = { palette.value },
+            interceptable = { intercepts(ui.draft.text.toString(), composer.models) },
             onPalettePick = { item -> pickFrom(paletteOf(true), item, false) },
-            onAdd = { scope.launch { attachFiles(ComposerImages.chooseImages(project)) } },
+            onAdd = { ComposerImages.chooseImagesLater(project, onChosen = attachFiles) },
             onDrop = attachFiles,
             onAction = { action ->
                 when (action) {
                     ComposerAction.Send -> send()
-                    ComposerAction.Stop -> manager.interrupt(handle.id)
+                    ComposerAction.Stop -> when (stopTarget(composer.shellRunning)) {
+                        StopTarget.Shell -> manager.stopShell(handle.id)
+                        StopTarget.Turn -> manager.interrupt(handle.id)
+                    }
                     ComposerAction.CardEscape -> onCardEscape()
                     ComposerAction.PasteImage -> scope.launch { paste(ui) }
                     ComposerAction.RemoveLastImage -> ui.attachments.removeLastOrNull()
@@ -285,13 +312,14 @@ internal fun PromptBar(
 /**
  * The text area, `+` and Send or Stop in one filled rounded box, as wide as the footer under it, with the attached images above them
  * ([AttachmentStrip]): Stop while [busy]. Keys go through [composerKey] with [busy] or [sending] (a prompt still being encoded),
- * [cardOpen] and whether the slash palette is open ([palette], read at each key, so never a frame-old one), and Send is disabled
+ * [cardOpen], whether the slash palette is open ([palette], read at each key, so never a frame-old one) and whether the draft is one
+ * of Tandem's own commands ([interceptable], which Enter runs even while busy), and Send is disabled
  * while [sending]; [onAction] does what they return. `+` opens a menu whose `Add files or photos` calls [onAdd] and whose
  * `Slash commands` puts `/` in an empty draft and focuses the text area; files dropped on the box go to [onDrop], and the box draws
  * its focused border while a drag of files hovers it. With [focus] the text area takes the focus, and then [onFocused] is called;
- * whether it has the focus is [inputFocused]. The palette ([SlashPaletteView]) opens above the box, as wide as it, and a click on
- * one of its rows goes to [onPalettePick]. It takes those fields, not the whole composer model, so that a change to another one
- * leaves it alone.
+ * whether it has the focus is [inputFocused]. The palette ([SlashPaletteView]) opens above the box at its left edge, never wider than
+ * it, and a click on one of its rows goes to [onPalettePick]; while it is open on a lone `/` the text area reads `/Type to filter`
+ * ([FilterHint]). It takes those fields, not the whole composer model, so that a change to another one leaves it alone.
  */
 @Composable
 private fun PromptBox(
@@ -303,6 +331,7 @@ private fun PromptBox(
     onFocused: () -> Unit,
     inputFocused: MutableState<Boolean>,
     palette: () -> SlashPalette?,
+    interceptable: () -> Boolean,
     onPalettePick: (PaletteItem) -> Unit,
     onAdd: () -> Unit,
     onDrop: (List<Path>) -> Unit,
@@ -319,6 +348,9 @@ private fun PromptBox(
     LaunchedEffect(refocus) { if (refocus > 0) inputFocus.requestFocus() }
     val currentOnDrop by rememberUpdatedState(onDrop)
     val currentOnAction by rememberUpdatedState(onAction)
+    // Derived, so that the box recomposes when the hint comes or goes, not at every keystroke.
+    val currentPalette by rememberUpdatedState(palette)
+    val filterHint by remember(ui) { derivedStateOf { filterHintShown(ui.draft.text, currentPalette()) } }
     val imagePaste = remember { ImagePasteProvider { currentOnAction(ComposerAction.PasteImage) } }
     val dropTarget = remember {
         object : DragAndDropTarget {
@@ -384,24 +416,32 @@ private fun PromptBox(
                     refocus++
                 },
             )
-            TextArea(
-                ui.draft,
-                Modifier.weight(1f).heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
-                    .focusRequester(inputFocus)
-                    .onFocusChanged { inputFocused.value = it.hasFocus }
-                    // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it: while the
-                    // clipboard holds images, the focused composer's paste provider takes the paste from the Compose text paste (polish
-                    // spec 2.7). Asked for only by a paste, so the clipboard's flavours are not queried on every action update.
-                    .provideData {
-                        lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
-                            imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
+            // The text area, and over it `Type to filter` after a lone `/` while the palette is open (MCP spec 14): its own
+            // placeholder shows only while it is empty.
+            Box(Modifier.weight(1f)) {
+                TextArea(
+                    ui.draft,
+                    Modifier.fillMaxWidth().heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
+                        .focusRequester(inputFocus)
+                        .onFocusChanged { inputFocused.value = it.hasFocus }
+                        // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it: while
+                        // the clipboard holds images, the focused composer's paste provider takes the paste from the Compose text paste
+                        // (polish spec 2.7). Asked for only by a paste, so the clipboard's flavours are not queried on every action
+                        // update.
+                        .provideData {
+                            lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
+                                imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
+                            }
                         }
-                    }
-                    .onPreviewKeyEvent { event -> composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, onAction) },
-                lineLimits = TextFieldLineLimits.MultiLine(1, 8),
-                undecorated = true,
-                placeholder = { Text("Type / for commands", color = colors.text.info) },
-            )
+                        .onPreviewKeyEvent { event ->
+                            composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, interceptable, onAction)
+                        },
+                    lineLimits = TextFieldLineLimits.MultiLine(1, 8),
+                    undecorated = true,
+                    placeholder = { Text("Type / for commands", color = colors.text.info) },
+                )
+                if (filterHint) FilterHint(top = 8.dp)
+            }
             // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
             val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
             if (busy) {
@@ -424,7 +464,7 @@ private fun PromptBox(
         val shown = palette()
         if (shown != null && boxWidth > 0) {
             val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
-            SlashPaletteView(shown, boxWidth, maxHeightPx = boxTop - gap) { item ->
+            SlashPaletteView(shown, boxWidthPx = boxWidth, maxHeightPx = boxTop - gap) { item ->
                 onPalettePick(item)
                 inputFocus.requestFocus()
             }
@@ -453,7 +493,8 @@ private class ImagePasteProvider(private val onPaste: () -> Unit) : PasteProvide
  * Hands [event] to [composerKey] and runs what it returns, else to [composerFallback]: a newline in [ui]'s draft ([insertNewline]),
  * which the text area would not type, or nothing at all (spec 4.15). Every other key goes to the text area. With the slash palette
  * open ([paletteOpen]) its keys come first (MCP spec 3.4); a pick that does nothing still takes the key, so a busy Enter types no
- * newline. Ctrl/Cmd+V asks the clipboard for its flavours only (polish spec 2.7): the data is read later, off the EDT.
+ * newline. With the palette closed, a busy Enter on one of Tandem's own commands ([interceptable]) still runs it. Ctrl/Cmd+V asks
+ * the clipboard for its flavours only (polish spec 2.7): the data is read later, off the EDT.
  */
 private fun composerKeyEvent(
     event: KeyEvent,
@@ -461,6 +502,7 @@ private fun composerKeyEvent(
     cardOpen: Boolean,
     ui: ChatUiState,
     paletteOpen: Boolean,
+    interceptable: () -> Boolean,
     onAction: (ComposerAction) -> Unit,
 ): Boolean {
     val draft = ui.draft
@@ -477,6 +519,7 @@ private fun composerKeyEvent(
         hasAttachments = ui.attachments.isNotEmpty(),
         paletteOpen = paletteOpen,
         panelOpen = ui.mcpPanelOpen.value,
+        interceptable = interceptable,
         clipboardHasImage = { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } },
     )
     if (action != null) {

@@ -3,6 +3,7 @@ package dev.daarkolabs.tandem.ui
 import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionHandle
 import kotlinx.coroutines.CoroutineScope
@@ -30,7 +31,7 @@ class ChatPresentersTest {
             val entered = CountDownLatch(1)
             val latch = CountDownLatch(1)
             val sent: MutableList<String> = Collections.synchronizedList(ArrayList())
-            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), send = { _, text, _ ->
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()), send = { _, text, _ ->
                 entered.countDown()
                 latch.await(TIMEOUT, TimeUnit.MILLISECONDS)
                 sent += text
@@ -53,6 +54,21 @@ class ChatPresentersTest {
             // a was already inside send when the session closed: it went out; only b is dropped.
             runBlocking { withTimeout(TIMEOUT) { while (sent.isEmpty()) delay(10) } }
             assertEquals(listOf("a"), sent)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a session without a process of its own offers the models given`() {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val opus = ModelOption("opus", "Opus 5.5", null, "claude-opus-5-5", effortLevels = listOf("low", "high"))
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(listOf(opus)))
+            // Restored with the project: no process, so no initialize response of its own.
+            val handle = SessionHandle("a", scope, ChatState(activeModel = "claude-opus-5-5"), MutableStateFlow(emptyList()), 0L)
+            presenters.retain(listOf(handle))
+            assertEquals(listOf(opus), presenters.presenter(handle).composer.value.models)
         } finally {
             scope.cancel()
         }
