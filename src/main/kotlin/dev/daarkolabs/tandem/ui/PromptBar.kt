@@ -9,25 +9,33 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -52,9 +60,13 @@ import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.awtTransferable
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
@@ -67,10 +79,18 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.IntrinsicMeasurable
+import androidx.compose.ui.layout.IntrinsicMeasureScope
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.Measurable
+import androidx.compose.ui.layout.MeasurePolicy
+import androidx.compose.ui.layout.MeasureResult
+import androidx.compose.ui.layout.MeasureScope
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -81,7 +101,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.coerceAtLeast
 import androidx.compose.ui.unit.dp
 import com.intellij.ide.PasteProvider
 import com.intellij.openapi.actionSystem.ActionUpdateThread
@@ -126,15 +148,23 @@ import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.LocalComponent
 import org.jetbrains.jewel.foundation.actionSystem.provideData
 import org.jetbrains.jewel.foundation.theme.JewelTheme
+import org.jetbrains.jewel.foundation.theme.LocalContentColor
+import org.jetbrains.jewel.foundation.theme.LocalTextStyle
+import org.jetbrains.jewel.ui.Orientation
+import org.jetbrains.jewel.ui.component.Divider
 import org.jetbrains.jewel.ui.component.Icon
 import org.jetbrains.jewel.ui.component.IconButton
 import org.jetbrains.jewel.ui.component.InlineWarningBanner
+import org.jetbrains.jewel.ui.component.LocalMenuController
+import org.jetbrains.jewel.ui.component.MenuItemState
 import org.jetbrains.jewel.ui.component.MenuScope
 import org.jetbrains.jewel.ui.component.PopupMenu
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextArea
-import org.jetbrains.jewel.ui.component.separator
+import org.jetbrains.jewel.ui.component.VerticalScrollbar
+import org.jetbrains.jewel.ui.icon.IconKey
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
+import org.jetbrains.jewel.ui.theme.menuStyle
 import java.awt.datatransfer.DataFlavor
 import java.nio.file.Path
 import java.util.UUID
@@ -390,8 +420,10 @@ internal fun PromptBar(
  * ([AttachmentStrip]): Stop while [busy]. Keys go through [composerKey] with [busy] or [sending] (a prompt still being encoded),
  * [cardOpen], whether the slash palette is open ([palette], read at each key, so never a frame-old one) and whether the draft is one
  * of Tandem's own commands ([interceptable], which Enter runs even while busy), and Send is disabled
- * while [sending]; [onAction] does what they return. `+` opens a menu whose `Add files or photos` calls [onAdd] and whose
- * `Slash commands` puts `/` in an empty draft and focuses the text area; files dropped on the box go to [onDrop], and the box draws
+ * while [sending]; [onAction] does what they return. `+` opens the paged menu ([AddButton], [PlusMenu]): `Add files or photos` calls
+ * [onAdd], `Slash commands` puts `/` in an empty draft and focuses the text area, `Connectors` opens the MCP panel, and the Plugins
+ * pages list [plugins] (whether the list is known yet is [pluginsKnown]); the menu's width comes from the chat column's width
+ * ([columnWidth], [plusMenuWidth]) and its height from the room above the box. Files dropped on the box go to [onDrop], and the box draws
  * its focused border while a drag of files hovers it. With [focus] the text area takes the focus, and then [onFocused] is called;
  * whether it has the focus is [inputFocused]. The palette ([SlashPaletteView]) opens above the box at its left edge, never wider than
  * it, and a click on one of its rows goes to [onPalettePick]; while it is open on a lone `/` the text area reads `/Type to filter`
@@ -426,6 +458,7 @@ private fun PromptBox(
     var refocus by remember { mutableIntStateOf(0) }
     LaunchedEffect(refocus) { if (refocus > 0) inputFocus.requestFocus() }
     val currentOnDrop by rememberUpdatedState(onDrop)
+    val currentOnAdd by rememberUpdatedState(onAdd)
     val currentOnAction by rememberUpdatedState(onAction)
     // Derived, so that the box recomposes when the hint comes or goes, not at every keystroke.
     val currentPalette by rememberUpdatedState(palette)
@@ -495,9 +528,10 @@ private fun PromptBox(
                 width = plusMenuWidth(columnWidth() ?: UNMEASURED_COLUMN),
                 // The room above the box, as the palette measures it (MCP spec 14); none before the box is placed.
                 maxHeight = with(density) { (boxTop - 8.dp.roundToPx()).takeIf { it > 0 }?.toDp() },
-                actions = remember(ui, onAdd) {
+                // Keyed on the state alone: [onAdd] is a new lambda at every recomposition of PromptBar, and is read when picked.
+                actions = remember(ui) {
                     PlusMenuActions(
-                        onAddFiles = onAdd,
+                        onAddFiles = { currentOnAdd() },
                         onSlashCommands = {
                             ui.openPalette()
                             refocus++
@@ -754,12 +788,12 @@ internal class PlusMenuActions(
 
 /**
  * The `+` menu (desktop-parity spec 3.3, 17.1, 17.3), [gapPx] above its anchor and left-aligned, on [state]'s page, every page
- * between [width]'s bounds and at most [maxHeight] high (Jewel's menu scrolls its own column under the cap, passed as the menu's
- * modifier, which `MenuContent` applies before its `width(IntrinsicSize.Max)` and around its `verticalScroll` column; a focused row is
- * brought into view as the keys move the selection). Page [PLUS_MAIN]: `Add files or photos`, `Slash commands`, `Connectors ›` and
- * `Plugins ›`, each with its icon. Page [PLUS_PLUGINS]: `‹ Plugins`, one row per plugin of [plugins] (or the line that says why there
- * is none, [pluginsKnown]), the `/plugin` hint. Page [PLUS_FIRST_PLUGIN] + i: `‹ <label>`, then its skills and its commands under their
- * headings; a pick closes the menu and calls [PlusMenuActions.onCommand]. Names and descriptions are config text: plain [Text].
+ * between [width]'s bounds and at most [maxHeight] high. Each page is one passive item ([pagedRows], spec open item 6): its `‹` row
+ * and its closing line stay put while its rows scroll ([ScrolledRows]) under the cap, the keyboard's selection
+ * brought into view. Page [PLUS_MAIN]: `Add files or photos`, `Slash commands`, `Connectors ›` and `Plugins ›`, each with its icon.
+ * Page [PLUS_PLUGINS]: `‹ Plugins`, one row per plugin of [plugins] (or the line that says why there is none, [pluginsKnown]), the
+ * `/plugin` hint. Page [PLUS_FIRST_PLUGIN] + i: `‹ <label>`, then its skills and its commands under their headings; a pick closes the
+ * menu and calls [PlusMenuActions.onCommand]. Names and descriptions are config text: plain [Text].
  */
 @Composable
 internal fun PlusMenu(
@@ -776,6 +810,11 @@ internal fun PlusMenu(
     val small = smallTextStyle()
     val page = state.page
     val plugin = if (page >= PLUS_FIRST_PLUGIN) plugins.getOrNull(page - PLUS_FIRST_PLUGIN) else null
+    // The page's own column is capped at the menu's cap less the menu's padding and border, so that the menu never scrolls itself.
+    val menu = JewelTheme.menuStyle.metrics
+    val pageCap = maxHeight?.let {
+        (it - menu.contentPadding.calculateTopPadding() - menu.contentPadding.calculateBottomPadding() - menu.borderWidth * 2).coerceAtLeast(0.dp)
+    }
     PopupMenu(
         onDismissRequest = onDismissRequest,
         popupPositionProvider = remember(gapPx) { AboveAnchor(alignEnd = false, gapPx = gapPx) },
@@ -784,29 +823,175 @@ internal fun PlusMenu(
             .testTag("plus-menu"),
     ) {
         when {
-            plugin != null -> pluginPage(state, plugin, palette, small, actions)
+            plugin != null -> pluginPage(state, page, pageCap, plugin, palette, small, actions)
             // A plugin's page whose plugin left the list (a new init) shows the Plugins page.
-            page == PLUS_PLUGINS || page >= PLUS_FIRST_PLUGIN -> pluginsPage(state, plugins, pluginsKnown, palette, small)
-            else -> mainPage(state, palette, actions)
+            page == PLUS_PLUGINS || page >= PLUS_FIRST_PLUGIN -> pluginsPage(state, page, pageCap, plugins, pluginsKnown, palette, small)
+            else -> mainPage(state, page, pageCap, palette, actions)
         }
     }
 }
 
-/** The `+` menu's first page (spec 3.3, 17.1): four rows in the desktop's order, each with its icon. */
-private fun MenuScope.mainPage(state: PagedMenuState, palette: ChatPalette, actions: PlusMenuActions) {
-    selectableItem(selected = false, iconKey = AllIconsKeys.Actions.Attach, onClick = {
-        state.close()
-        actions.onAddFiles()
-    }) { MenuLabel("Add files or photos") }
-    selectableItem(selected = false, iconKey = AllIconsKeys.Nodes.Console, onClick = {
-        state.close()
-        actions.onSlashCommands()
-    }) { MenuLabel("Slash commands") }
-    selectableItem(selected = false, iconKey = AllIconsKeys.Webreferences.Server, onClick = { actions.onConnectors(state) }) {
-        MenuLabel("Connectors") { Text("›", color = palette.dim) }
+/**
+ * A `+` menu page (spec 3.3 Size, open item 6) as one passive item at most [cap] high: [header] (the `‹` row) and a separator above,
+ * [rows] in a vertical scroll ([ScrolledRows]) that takes the room left, and [footer] (the closing line) under a separator below. Jewel's
+ * own menu scrolls every item in one column, so a `‹` row given to it as an item would scroll away with the rows; here the rows are
+ * Jewel's own menu items ([PageRow]), which the menu's Up and Down reach through the focus order, and the focused one is brought
+ * into view inside the inner scroll. The scroll starts at the top of each [page].
+ */
+private fun MenuScope.pagedRows(
+    page: Int,
+    cap: Dp?,
+    header: (@Composable () -> Unit)? = null,
+    footer: (@Composable () -> Unit)? = null,
+    rows: @Composable ColumnScope.() -> Unit,
+) {
+    passiveItem {
+        key(page) {
+            Column(if (cap != null) Modifier.heightIn(max = cap) else Modifier) {
+                if (header != null) {
+                    header()
+                    PageSeparator()
+                }
+                ScrolledRows(Modifier.weight(1f, fill = false), rows)
+                if (footer != null) {
+                    PageSeparator()
+                    footer()
+                }
+            }
+        }
     }
-    selectableItem(selected = false, iconKey = AllIconsKeys.Nodes.Plugin, onClick = { state.show(PLUS_PLUGINS) }) {
-        MenuLabel("Plugins") { Text("›", color = palette.dim) }
+}
+
+/**
+ * A page's rows in a vertical scroll with Jewel's scrollbar over their end edge, as the plan card's is. Its own layout, because Jewel's
+ * `VerticallyScrollableContainer` measures its scrollbar at a fixed infinite height when asked for its intrinsic size, which Jewel's
+ * menu does (`width(IntrinsicSize.Max)`); here the rows alone answer for the intrinsic sizes, and the scrollbar takes the rows' height.
+ */
+@Composable
+private fun ScrolledRows(modifier: Modifier, rows: @Composable ColumnScope.() -> Unit) {
+    val scroll = rememberScrollState()
+    Layout(
+        content = {
+            Column(Modifier.verticalScroll(scroll), content = rows)
+            VerticalScrollbar(scroll)
+        },
+        modifier = modifier,
+        measurePolicy = ScrolledRowsPolicy,
+    )
+}
+
+/** [ScrolledRows]' layout: the rows as they measure, the scrollbar at their end and their height; the rows' intrinsic sizes. */
+private object ScrolledRowsPolicy : MeasurePolicy {
+    override fun MeasureScope.measure(measurables: List<Measurable>, constraints: Constraints): MeasureResult {
+        val rows = measurables[0].measure(constraints)
+        val bar = measurables[1].measure(Constraints.fixedHeight(rows.height))
+        return layout(rows.width, rows.height) {
+            rows.place(0, 0)
+            bar.place(rows.width - bar.width, 0)
+        }
+    }
+
+    override fun IntrinsicMeasureScope.minIntrinsicWidth(measurables: List<IntrinsicMeasurable>, height: Int): Int =
+        measurables[0].minIntrinsicWidth(height)
+
+    override fun IntrinsicMeasureScope.maxIntrinsicWidth(measurables: List<IntrinsicMeasurable>, height: Int): Int =
+        measurables[0].maxIntrinsicWidth(height)
+
+    override fun IntrinsicMeasureScope.minIntrinsicHeight(measurables: List<IntrinsicMeasurable>, width: Int): Int =
+        measurables[0].minIntrinsicHeight(width)
+
+    override fun IntrinsicMeasureScope.maxIntrinsicHeight(measurables: List<IntrinsicMeasurable>, width: Int): Int =
+        measurables[0].maxIntrinsicHeight(width)
+}
+
+/**
+ * A selectable row of a [pagedRows] page, drawn and run as Jewel's own menu item is (its `MenuItemBase` is internal to Jewel): the
+ * item's colours, padding, minimum height, rounded selection and icon slot from the menu's style; focusable, so the menu's Up and Down
+ * reach it through the focus order and the inner scroll brings it into view; a hover moves the focus to it; a click runs [onClick] and
+ * then asks the menu to close, as Jewel's items do, so a page turn's [PagedMenuState.show] holds it open as before.
+ */
+@Composable
+private fun PageRow(onClick: () -> Unit, iconKey: IconKey? = null, content: @Composable () -> Unit) {
+    val style = JewelTheme.menuStyle
+    val metrics = style.metrics.itemMetrics
+    val colors = style.colors.itemColors
+    val controller = LocalMenuController.current
+    val inputModes = LocalInputModeManager.current
+    val source = remember { MutableInteractionSource() }
+    val focus = remember { FocusRequester() }
+    val hovered by source.collectIsHoveredAsState()
+    val focused by source.collectIsFocusedAsState()
+    val pressed by source.collectIsPressedAsState()
+    LaunchedEffect(hovered) { if (hovered) focus.requestFocus() }
+    val state = MenuItemState.of(selected = false, enabled = true, focused = focused, hovered = hovered, pressed = pressed)
+    val background by colors.backgroundFor(state)
+    val contentColor by colors.contentFor(state)
+    Box(
+        Modifier.focusRequester(focus)
+            .selectable(selected = false, interactionSource = source, indication = null) {
+                onClick()
+                controller.closeAll(inputModes.inputMode, true)
+            }
+            .fillMaxWidth(),
+    ) {
+        CompositionLocalProvider(LocalContentColor provides contentColor, LocalTextStyle provides LocalTextStyle.current.copy(color = contentColor)) {
+            Row(
+                Modifier.fillMaxWidth().defaultMinSize(minHeight = metrics.minHeight)
+                    .drawBehind {
+                        val outer = metrics.outerPadding
+                        val left = outer.calculateLeftPadding(layoutDirection).toPx()
+                        val top = outer.calculateTopPadding().toPx()
+                        val corner = metrics.selectionCornerSize.toPx(size, this)
+                        drawRoundRect(
+                            background,
+                            topLeft = Offset(left, top),
+                            size = Size(size.width - left - outer.calculateRightPadding(layoutDirection).toPx(), size.height - top - outer.calculateBottomPadding().toPx()),
+                            cornerRadius = CornerRadius(corner, corner),
+                        )
+                    }
+                    .padding(metrics.contentPadding),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (iconKey != null) Icon(iconKey, contentDescription = null, modifier = Modifier.size(metrics.iconSize))
+                Box(Modifier.weight(1f)) { content() }
+            }
+        }
+    }
+}
+
+/** A separator inside a [pagedRows] page, drawn as Jewel's menu separator is: its height, padding, thickness and colour. */
+@Composable
+private fun PageSeparator() {
+    val style = JewelTheme.menuStyle
+    val metrics = style.metrics.itemMetrics
+    Box(Modifier.height(metrics.separatorHeight), contentAlignment = Alignment.Center) {
+        Divider(
+            Orientation.Horizontal,
+            Modifier.fillMaxWidth().padding(metrics.separatorPadding),
+            color = style.colors.itemColors.separator,
+            thickness = metrics.separatorThickness,
+        )
+    }
+}
+
+/** The `+` menu's first page (spec 3.3, 17.1): four rows in the desktop's order, each with its icon. */
+private fun MenuScope.mainPage(state: PagedMenuState, page: Int, cap: Dp?, palette: ChatPalette, actions: PlusMenuActions) {
+    pagedRows(page, cap) {
+        PageRow(iconKey = AllIconsKeys.Actions.Attach, onClick = {
+            state.close()
+            actions.onAddFiles()
+        }) { MenuLabel("Add files or photos") }
+        PageRow(iconKey = AllIconsKeys.Nodes.Console, onClick = {
+            state.close()
+            actions.onSlashCommands()
+        }) { MenuLabel("Slash commands") }
+        PageRow(iconKey = AllIconsKeys.Webreferences.Server, onClick = { actions.onConnectors(state) }) {
+            MenuLabel("Connectors") { Text("›", color = palette.dim) }
+        }
+        PageRow(iconKey = AllIconsKeys.Nodes.Plugin, onClick = { state.show(PLUS_PLUGINS) }) {
+            MenuLabel("Plugins") { Text("›", color = palette.dim) }
+        }
     }
 }
 
@@ -814,49 +999,65 @@ private fun MenuScope.mainPage(state: PagedMenuState, palette: ChatPalette, acti
  * The Plugins page (spec 3.3, 17.3): `‹ Plugins`, one row per plugin, `<label>` with `v<version>` and `›`, or `No commands or skills`
  * for one with neither (that row opens nothing), then the `/plugin` hint.
  */
-private fun MenuScope.pluginsPage(state: PagedMenuState, plugins: ImmutableList<PluginEntry>, known: Boolean, palette: ChatPalette, small: TextStyle) {
-    backItem("Plugins", palette) { state.show(PLUS_MAIN) }
-    separator()
-    when {
-        !known -> passiveItem { DimLine("Plugins show after the first prompt.", palette, small) }
-        plugins.isEmpty() -> passiveItem { DimLine("No plugins in this session.", palette, small) }
-        else -> plugins.forEachIndexed { index, plugin ->
-            val opens = plugin.skills.isNotEmpty() || plugin.commands.isNotEmpty()
-            // A plugin with neither opens nothing: its click turns to the page the menu is on, holding it open.
-            selectableItem(selected = false, onClick = { state.show(if (opens) PLUS_FIRST_PLUGIN + index else PLUS_PLUGINS) }) {
-                WithTooltip(plugin.source?.let { "${plugin.name} · $it" } ?: plugin.name) {
-                    MenuLabel(plugin.label, Modifier.semantics { contentDescription = "${plugin.label} plugin" }) {
-                        plugin.version?.let { Text("v$it", color = palette.dim, maxLines = 1) }
-                        if (opens) {
+private fun MenuScope.pluginsPage(
+    state: PagedMenuState,
+    page: Int,
+    cap: Dp?,
+    plugins: ImmutableList<PluginEntry>,
+    known: Boolean,
+    palette: ChatPalette,
+    small: TextStyle,
+) {
+    pagedRows(
+        page,
+        cap,
+        header = { BackRow("Plugins", palette) { state.show(PLUS_MAIN) } },
+        footer = { DimLine("Add or manage plugins with /plugin in a terminal.", palette, small) },
+    ) {
+        when {
+            !known -> DimLine("Plugins show after the first prompt.", palette, small)
+            plugins.isEmpty() -> DimLine("No plugins in this session.", palette, small)
+            else -> plugins.forEachIndexed { index, plugin ->
+                val opens = plugin.skills.isNotEmpty() || plugin.commands.isNotEmpty()
+                // A plugin with neither opens nothing: its click turns to the page the menu is on, holding it open.
+                PageRow(onClick = { state.show(if (opens) PLUS_FIRST_PLUGIN + index else PLUS_PLUGINS) }) {
+                    WithTooltip(plugin.source?.let { "${plugin.name} · $it" } ?: plugin.name) {
+                        MenuLabel(plugin.label, Modifier.semantics { contentDescription = "${plugin.label} plugin" }) {
+                            plugin.version?.let { Text("v$it", color = palette.dim, maxLines = 1) }
                             if (plugin.version != null) Spacer(Modifier.width(6.dp))
-                            Text("›", color = palette.dim)
-                        } else {
-                            if (plugin.version != null) Spacer(Modifier.width(6.dp))
-                            Text("No commands or skills", style = small, color = palette.dim, maxLines = 1)
+                            if (opens) {
+                                Text("›", color = palette.dim)
+                            } else {
+                                Text("No commands or skills", style = small, color = palette.dim, maxLines = 1)
+                            }
                         }
                     }
                 }
             }
         }
     }
-    separator()
-    passiveItem { DimLine("Add or manage plugins with /plugin in a terminal.", palette, small) }
 }
 
 /** One plugin's page (spec 3.3, 17.3): `‹ <label>`, then `Skills` and its rows, then `Commands` and its rows, each only when not empty. */
-private fun MenuScope.pluginPage(state: PagedMenuState, plugin: PluginEntry, palette: ChatPalette, small: TextStyle, actions: PlusMenuActions) {
-    backItem(plugin.label, palette) { state.show(PLUS_PLUGINS) }
-    separator()
-    for ((title, rows) in listOf("Skills" to plugin.skills, "Commands" to plugin.commands)) {
-        if (rows.isEmpty()) continue
-        passiveItem {
+private fun MenuScope.pluginPage(
+    state: PagedMenuState,
+    page: Int,
+    cap: Dp?,
+    plugin: PluginEntry,
+    palette: ChatPalette,
+    small: TextStyle,
+    actions: PlusMenuActions,
+) {
+    pagedRows(page, cap, header = { BackRow(plugin.label, palette) { state.show(PLUS_PLUGINS) } }) {
+        for ((title, rows) in listOf("Skills" to plugin.skills, "Commands" to plugin.commands)) {
+            if (rows.isEmpty()) continue
             Text(title, style = small, color = palette.dim, modifier = PASSIVE_INSET.semantics { heading() })
-        }
-        for (command in rows) {
-            selectableItem(selected = false, onClick = {
-                state.close()
-                actions.onCommand(command)
-            }) { CommandRow(command, palette, small) }
+            for (command in rows) {
+                PageRow(onClick = {
+                    state.close()
+                    actions.onCommand(command)
+                }) { CommandRow(command, palette, small) }
+            }
         }
     }
 }
@@ -875,9 +1076,10 @@ private fun CommandRow(command: PluginCommand, palette: ChatPalette, small: Text
     if (command.tooltip.isNotBlank()) WithTooltip(command.tooltip) { row() } else row()
 }
 
-/** A page's first row, `‹ <title>`, which turns the menu back with [back]. */
-private fun MenuScope.backItem(title: String, palette: ChatPalette, back: () -> Unit) {
-    selectableItem(selected = false, onClick = back) {
+/** A page's first row, `‹ <title>`, above the page's scroll, which turns the menu back with [back]. */
+@Composable
+private fun BackRow(title: String, palette: ChatPalette, back: () -> Unit) {
+    PageRow(onClick = back) {
         Text(
             buildAnnotatedString {
                 withStyle(SpanStyle(color = palette.dim)) { append("‹") }

@@ -26,6 +26,7 @@ import com.intellij.testFramework.junit5.TestApplication
 import dev.daarkolabs.tandem.chat.PluginCommand
 import dev.daarkolabs.tandem.chat.PluginEntry
 import dev.daarkolabs.tandem.chat.PluginItemKind
+import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.Dispatchers
@@ -155,46 +156,79 @@ class PagedMenuTest {
 
     // spec: a long page scrolls and keeps the keyboard selection on screen (open item 6)
     @Test
-    fun `a long page scrolls and keeps the keyboard selection on screen`() = timeoutRunBlocking(kotlin.time.Duration.parse("60s")) {
+    fun `a long page scrolls and keeps the keyboard selection on screen`() {
         val commands = (1..20).map { PluginCommand("step-$it", "/kit:step-$it", "Runs step $it of the made-up kit.", "", PluginItemKind.COMMAND) }
         val plugin = PluginEntry("kit", "kit", "kit", "1.0.0", "kit@inline", persistentListOf(), commands.toImmutableList())
-        val state = PagedMenuState().apply { openAt(PLUS_FIRST_PLUGIN) }
-        val actions = PlusMenuActions({}, {}, {}, {})
-        // Skia's reference cleaner and Java2D's disposer start with the first rendered scene and live as long as the JVM.
-        ThreadLeakTracker.longRunningThreadCreated(ApplicationManager.getApplication(), "Reference Cleaner", "Java2D Disposer")
-        withContext(Dispatchers.EDT) {
-            // 300 px high at a density of 1: the `+` at the bottom, so the room above it is what the cap allows.
-            val scene = ImageComposeScene(400, 300, Density(1f)) {
-                SwingBridgeTheme {
-                    Box(Modifier.fillMaxSize()) {
-                        Box(Modifier.align(Alignment.BottomStart).size(24.dp)) {
-                            PlusMenu(state, persistentListOf(plugin), true, 240.dp to 360.dp, maxHeight = 268.dp, gapPx = 8, onDismissRequest = { false }, actions)
+        scrollsToLast(persistentListOf(plugin), PLUS_FIRST_PLUGIN, last = "/kit:step-20", back = "‹ kit", closing = null)
+    }
+
+    // spec: the ‹ row stays above the scroll and the page's closing line below it (3.3 Size)
+    @Test
+    fun `the back row and the closing line stay put while the rows scroll`() {
+        val plugins = (1..20).map { i ->
+            val command = PluginCommand("run", "/kit-$i:run", "Runs the made-up kit $i.", "", PluginItemKind.COMMAND)
+            PluginEntry("kit-$i", "kit-$i", "kit-$i", "1.0.$i", "kit-$i@inline", persistentListOf(), persistentListOf(command))
+        }
+        scrollsToLast(
+            plugins.toImmutableList(),
+            PLUS_PLUGINS,
+            last = "kit-20 plugin",
+            back = "‹ Plugins",
+            closing = "Add or manage plugins with /plugin in a terminal.",
+        )
+    }
+
+    /**
+     * Opens the `+` menu on [page] of [plugins] in a 300 px scene with 268 dp above the `+` (an ImageComposeScene under the bridge
+     * theme), checks that the page fits under that cap with [last] out of view, presses Down until [last] has the focus, and checks
+     * that [last], the [back] row and the [closing] line are all inside the page: the rows scrolled, the back row and the closing line
+     * did not.
+     */
+    private fun scrollsToLast(plugins: ImmutableList<PluginEntry>, page: Int, last: String, back: String, closing: String?) =
+        timeoutRunBlocking(kotlin.time.Duration.parse("60s")) {
+            val state = PagedMenuState().apply { openAt(page) }
+            val actions = PlusMenuActions({}, {}, {}, {})
+            // Skia's reference cleaner and Java2D's disposer start with the first rendered scene and live as long as the JVM.
+            ThreadLeakTracker.longRunningThreadCreated(ApplicationManager.getApplication(), "Reference Cleaner", "Java2D Disposer")
+            withContext(Dispatchers.EDT) {
+                // 300 px high at a density of 1: the `+` at the bottom, so the room above it is what the cap allows.
+                val scene = ImageComposeScene(400, 300, Density(1f)) {
+                    SwingBridgeTheme {
+                        Box(Modifier.fillMaxSize()) {
+                            Box(Modifier.align(Alignment.BottomStart).size(24.dp)) {
+                                PlusMenu(state, plugins, true, 240.dp to 360.dp, maxHeight = 268.dp, gapPx = 8, onDismissRequest = { false }, actions)
+                            }
                         }
                     }
                 }
-            }
-            try {
-                scene.render()
-                val page = nodes(scene).single { it.config.getOrNull(SemanticsProperties.TestTag) == "plus-menu" }.boundsInRoot
-                assertTrue(page.height <= 268f, "the page is no taller than the room above its anchor: $page")
-                val last = "/kit:step-20"
-                assertFalse(inside(bounds(scene, last), page), "the last row starts out of view")
-                repeat(40) {
-                    if (focused(scene) == last) return@repeat
-                    for ((type, id) in listOf(KeyEventType.KeyDown to KeyEvent.KEY_PRESSED, KeyEventType.KeyUp to KeyEvent.KEY_RELEASED)) {
-                        val awt = KeyEvent(source, id, 0L, 0, KeyEvent.VK_DOWN, KeyEvent.CHAR_UNDEFINED)
-                        scene.sendKeyEvent(androidx.compose.ui.input.key.KeyEvent(key = Key.DirectionDown, type = type, nativeEvent = awt))
+                try {
+                    scene.render()
+                    scene.render(16_000_000L)
+                    val menu = nodes(scene).single { it.config.getOrNull(SemanticsProperties.TestTag) == "plus-menu" }.boundsInRoot
+                    assertTrue(menu.height <= 268f, "the page is no taller than the room above its anchor: $menu")
+                    assertFalse(inside(bounds(scene, last), menu), "the last row starts out of view")
+                    assertTrue(inside(textBounds(scene, back), menu), "the back row starts in view")
+                    closing?.let { assertTrue(inside(textBounds(scene, it), menu), "the closing line starts in view") }
+                    repeat(60) {
+                        if (focused(scene) == last) return@repeat
+                        for ((type, id) in listOf(KeyEventType.KeyDown to KeyEvent.KEY_PRESSED, KeyEventType.KeyUp to KeyEvent.KEY_RELEASED)) {
+                            val awt = KeyEvent(source, id, 0L, 0, KeyEvent.VK_DOWN, KeyEvent.CHAR_UNDEFINED)
+                            scene.sendKeyEvent(androidx.compose.ui.input.key.KeyEvent(key = Key.DirectionDown, type = type, nativeEvent = awt))
+                        }
+                        scene.render((it + 2) * 50_000_000L)
                     }
-                    scene.render(it * 50_000_000L)
+                    assertEquals(last, focused(scene), "Down reaches the last row")
+                    scene.render(5_000_000_000L)
+                    assertTrue(inside(bounds(scene, last), menu), "the selected last row is inside the page: ${bounds(scene, last)} in $menu")
+                    assertTrue(inside(textBounds(scene, back), menu), "the back row stays above the scroll: ${textBounds(scene, back)} in $menu")
+                    closing?.let {
+                        assertTrue(inside(textBounds(scene, it), menu), "the closing line stays below the scroll: ${textBounds(scene, it)} in $menu")
+                    }
+                } finally {
+                    scene.close()
                 }
-                assertEquals(last, focused(scene), "Down reaches the last row")
-                scene.render(5_000_000_000L)
-                assertTrue(inside(bounds(scene, last), page), "the selected last row is inside the page: ${bounds(scene, last)} in $page")
-            } finally {
-                scene.close()
             }
         }
-    }
 
     private fun nodes(scene: ImageComposeScene): List<SemanticsNode> =
         scene.semanticsOwners.flatMap { owner -> all(owner.unmergedRootSemanticsNode) }
@@ -204,6 +238,12 @@ class PagedMenuTest {
     /** Where the row described as [description] is laid out, unclipped: inside the page's bounds only when scrolled into view. */
     private fun bounds(scene: ImageComposeScene, description: String): Rect {
         val node = nodes(scene).first { description in it.config.getOrNull(SemanticsProperties.ContentDescription).orEmpty() }
+        return Rect(node.positionInRoot, node.size.toSize())
+    }
+
+    /** Where the text [text] is laid out, unclipped. */
+    private fun textBounds(scene: ImageComposeScene, text: String): Rect {
+        val node = nodes(scene).first { node -> node.config.getOrNull(SemanticsProperties.Text).orEmpty().any { it.text == text } }
         return Rect(node.positionInRoot, node.size.toSize())
     }
 
