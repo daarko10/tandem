@@ -275,6 +275,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                                         cardTakesFocus = chatHoldsFocus,
                                         onOpenMcp = { ui.openMcpPanel() },
                                         onStop = { manager.stopShell(selected.id) },
+                                        onUsageRetry = { uuid, part -> manager.retryUsage(selected.id, uuid, part) },
                                     )
                                 }
                             }

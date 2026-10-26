@@ -19,6 +19,7 @@ import dev.daarkolabs.tandem.chat.NoticeLink
 import dev.daarkolabs.tandem.chat.NoticeRow
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
+import dev.daarkolabs.tandem.session.UsagePart
 import dev.daarkolabs.tandem.ui.LocalUrlHandler
 import dev.daarkolabs.tandem.ui.chatColumn
 import kotlinx.collections.immutable.ImmutableList
@@ -39,14 +40,30 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
  * command is unknown); its text stays plain, never Markdown, so backticks show as typed, except `/context`'s report, whose [blocks]
  * (parsed off the EDT, desktop-parity spec 3.1) draw as a reply's Markdown does, so its tables read as tables. `/mcp`'s ends with the
  * link `Open the MCP panel` in place of the CLI's terminal hint, which calls [onOpenMcp].
+ *
+ * A `/usage` (or `/cost`) notice of the live stream with its card (desktop-parity spec 3.2, 3.7) draws [UsageCardView] in place of
+ * the text, and its `Retry` calls [onUsageRetry] with the line's uuid. That row is not merged: its `Reply to /<command>` sits on a
+ * container that does not merge, so the card, its window control, each `Retry` and the disclosures stay their own nodes.
  */
 @Composable
-internal fun NoticeItem(row: NoticeRow, blocks: ImmutableList<MarkdownBlock>? = null, onOpenMcp: () -> Unit = {}) {
+internal fun NoticeItem(
+    row: NoticeRow,
+    blocks: ImmutableList<MarkdownBlock>? = null,
+    onOpenMcp: () -> Unit = {},
+    onUsageRetry: (uuid: String, part: UsagePart) -> Unit = { _, _ -> },
+) {
     val colors = JewelTheme.globalColors.text
-    val modifier = Modifier.chatColumn().padding(top = row.gap.dp.dp)
-        .thenIf(row.kind == NoticeKind.LOCAL_COMMAND) {
-            semantics(mergeDescendants = true) { contentDescription = row.command?.let { "Reply to /$it" } ?: "Command output" }
+    val description = row.command?.let { "Reply to /$it" } ?: "Command output"
+    val usage = row.usage
+    val uuid = row.sourceUuid
+    if (usage != null && uuid != null) {
+        Column(Modifier.chatColumn().padding(top = row.gap.dp.dp).semantics { contentDescription = description }) {
+            UsageCardView(usage, row.key) { part -> onUsageRetry(uuid, part) }
         }
+        return
+    }
+    val modifier = Modifier.chatColumn().padding(top = row.gap.dp.dp)
+        .thenIf(row.kind == NoticeKind.LOCAL_COMMAND) { semantics(mergeDescendants = true) { contentDescription = description } }
     if (blocks != null) {
         Column(modifier) {
             Markdown(blocks, row.text, modifier = Modifier.fillMaxWidth(), selectable = true, onUrlClick = LocalUrlHandler.current)

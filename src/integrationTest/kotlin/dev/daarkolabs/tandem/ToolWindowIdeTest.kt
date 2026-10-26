@@ -783,6 +783,55 @@ class ToolWindowIdeTest {
         }
     }
 
+    // spec: /usage shows a card
+    @Test
+    fun `usage shows a card`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // The fake replays parity-usage's turns in order, one per prompt: the model reply under `hi`, the /usage turn under /usage
+        // and the /cost turn (whose local command is usage, parity-usage:28) under the ring's `Show session usage`.
+        val sent = runChat("usage-card", fixtures = listOf("parity-usage"), sentLog = log) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            enterPrompt("/usage")
+            waitFor("the usage card", 1.minutes) { described(USAGE_CARD).present() }
+            waitForTextContaining("Est. cost \$0.15")
+            waitForTextContaining(">99% of cost")
+            waitForText("Last 24 hours · 23 sessions · 8.3k requests · approximate, overlapping measures · this machine only, excludes claude.ai")
+            // Three tips, then the disclosure (spec 16.2): the fourth shows only once it is open.
+            assertFalse(menuItem("Start fresh when you switch tasks").present(), "the fourth tip waits behind Show 2 more")
+            menuItem("Show 2 more").click(Point(10, 10))
+            waitForText("Start fresh when you switch tasks")
+            assertTrue(menuItem("Show fewer").present(), "the open tips' disclosure reads Show fewer")
+            menuItem("7d").click(Point(10, 10))
+            waitForText("Last 7 days · 88 sessions · 19.7k requests · approximate, overlapping measures · this machine only, excludes claude.ai")
+            takeScreenshot("usage-card")
+            // The ring leads to the card too (spec 16.2): the popover closes and the CLI answers with a second card.
+            waitForTurnEnd()
+            ui.x(RING).click(Point(10, 10))
+            waitFor("the popover's Show session usage", 30.seconds) { menuItem("Show session usage").present() }
+            menuItem("Show session usage").click(Point(10, 10))
+            // The transcript is a lazy list: the first card, scrolled out of view, is no longer composed, so the second card is told
+            // by the third prompt it answers rather than by counting nodes.
+            waitFor("the popover closed and the ring's /usage went out", 1.minutes) {
+                !described("Context window breakdown").present() &&
+                    log.readLines().count { line -> line.contains("\"type\":\"user\"") } == 3
+            }
+            waitFor("the second card", 1.minutes) { described(USAGE_CARD).present() }
+            waitFor("the second card's requests reached the CLI", 30.seconds) {
+                log.readText().split("\"subtype\":\"get_usage\"").size - 1 == 4
+            }
+        }
+        val prompts = sent.filter { it.type == "user" }
+        assertEquals("/usage", prompts.last()["message"]!!.jsonObject.text(), "the ring sends /usage")
+        val usage = sent.mapNotNull { it["request"]?.jsonObject }.filter { it["subtype"]?.jsonPrimitive?.content == "get_usage" }
+        assertEquals(
+            listOf(true, false, true, false),
+            usage.map { it["skip_behaviors"]?.jsonPrimitive?.content == "true" },
+            "get_usage with skip_behaviors, then without it, for each card: $usage",
+        )
+    }
+
     @Test
     fun `a bang command runs locally and Claude replies`() {
         val log = Files.createTempFile("tandem-sent", ".ndjson")
@@ -1335,6 +1384,10 @@ class ToolWindowIdeTest {
         return "$output[${endsWith("@text")} or ${endsWith("@visible_text")}] | $output//div[@class='ComposeNode' and ${endsWith("@visible_text")}]"
     }
 
+    /** A prompt's text: its `content`'s text blocks, joined. */
+    private fun JsonObject.text(): String =
+        this["content"]!!.jsonArray.mapNotNull { block -> block.jsonObject["text"]?.jsonPrimitive?.content }.joinToString("")
+
     /** A `user` frame's `message.content`, a string in the shell escape frames. */
     private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
 
@@ -1353,6 +1406,11 @@ class ToolWindowIdeTest {
 
     private fun Driver.waitForText(text: String) {
         waitFor("'$text' rendered", 2.minutes) { ui.x("//div[@class='ComposeNode' and @visible_text='$text']").present() }
+    }
+
+    /** As [waitForText], for [text] as a part of a node's text, such as one pair of a wrapping line. */
+    private fun Driver.waitForTextContaining(text: String) {
+        waitFor("'$text' rendered within a text", 2.minutes) { ui.x("//div[@class='ComposeNode' and contains(@visible_text, '$text')]").present() }
     }
 
     /** Clicks the prompt box and waits until it has the keyboard focus. */
@@ -1427,6 +1485,9 @@ class ToolWindowIdeTest {
 
         /** Whether the IDE runs on macOS, where paste is Cmd+V. */
         val isMac: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
+
+        /** The /usage card's description (desktop-parity spec 3.7). */
+        const val USAGE_CARD = "Usage for this session"
 
         /** The footer's context ring. */
         const val RING = "//div[@class='ComposeNode' and @contentdescription='Context window']"

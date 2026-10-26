@@ -20,6 +20,7 @@ import dev.daarkolabs.tandem.chat.PermissionCard
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
+import dev.daarkolabs.tandem.session.UsagePart
 import dev.daarkolabs.tandem.ui.cards.PendingCardHost
 import dev.daarkolabs.tandem.ui.cards.answerFor
 import dev.daarkolabs.tandem.ui.cards.escapeAnswer
@@ -39,8 +40,8 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
  * [focusPrompt] the prompt box takes the focus, and then [onPromptFocused] is called. Esc in the transcript asks for the prompt box's
  * focus with [onFocusComposer]; Esc in the prompt box while a card is open gives the card's Esc answer (spec 4.18). A card that opens
  * takes the focus only when [cardTakesFocus] says so then. Under each ended turn's reply, Copy and Fork from here go through [actions].
- * Prompts, with their attached images, go out through the session's [sender]. A local `/mcp` notice's link calls [onOpenMcp], and a
- * running shell escape's `Stop command` [onStop].
+ * Prompts, with their attached images, go out through the session's [sender]. A local `/mcp` notice's link calls [onOpenMcp], a
+ * running shell escape's `Stop command` [onStop], and a usage card's `Retry` [onUsageRetry].
  */
 @Composable
 internal fun ChatPane(
@@ -58,6 +59,7 @@ internal fun ChatPane(
     cardTakesFocus: () -> Boolean = { false },
     onOpenMcp: () -> Unit = {},
     onStop: () -> Unit = {},
+    onUsageRetry: (uuid: String, part: UsagePart) -> Unit = { _, _ -> },
 ) {
     val composer by presenter.composer.collectAsState()
     val pendingFlow = remember(presenter) { presenter.chat.map { it.pendingCard() }.distinctUntilChanged() }
@@ -92,7 +94,7 @@ internal fun ChatPane(
             } else {
                 "Ask Claude anything about this project."
             }
-            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis, onFocusComposer, reply, onOpenMcp, onStop)
+            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis, onFocusComposer, reply, onOpenMcp, onStop, onUsageRetry)
         }
         pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) }
         PromptBar(
