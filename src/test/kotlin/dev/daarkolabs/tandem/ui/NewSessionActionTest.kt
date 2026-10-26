@@ -116,6 +116,21 @@ class NewSessionActionTest {
         awaitNoOwnFakeCli()
     }
 
+    // spec: the action starts the project's sessions when the tool window was never built
+    @Test
+    fun `the action starts the project's sessions when the tool window was never built`() = timeoutRunBlocking(30.seconds) {
+        openProjectAsync(tempDir.get().resolve("unstarted").createDirectories()).useProjectAsync { project ->
+            val sessions = TandemSessions.get(project)
+            assertFalse(sessions.shutdownHookRegistered, "nothing started the sessions yet")
+            val window = TandemWindowService.get(project)
+            window.activateWindow = { then -> then() }
+            val created = withContext(Dispatchers.EDT) { window.newSession() }
+            assertTrue(sessions.shutdownHookRegistered, "the sessions were started, with their exit hook")
+            assertEquals(created, sessions.manager.selected.value)
+        }
+        awaitNoOwnFakeCli()
+    }
+
     // spec: at the cap a new session's tab replaces the idle one's
     @Test
     fun `at the cap a new session's tab replaces the idle one's`() = timeoutRunBlocking(60.seconds) {

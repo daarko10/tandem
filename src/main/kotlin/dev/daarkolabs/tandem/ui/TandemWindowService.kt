@@ -58,9 +58,11 @@ internal class TandemWindowService(private val project: Project) {
 
     /**
      * Starts a session with [newSessionOptions] and selects it, then shows the tool window and gives the new session's composer the
-     * focus (spec 18.2). Returns its id.
+     * focus (spec 18.2). Returns its id. Starts [TandemSessions] first (idempotent): run from Find Action before the tool window was
+     * ever built, the session still gets the exit hook, the notifier and the workspace's models and commands.
      */
     fun newSession(): SessionId {
+        TandemSessions.get(project).ensureStarted()
         val id = actions.create(newSessionOptions())
         activateWindow { requestFocus(id) }
         return id
