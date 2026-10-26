@@ -1653,6 +1653,89 @@ class SessionManagerTest {
             .string("authUrl")!!
 
     /** A new session of this manager, once its process is attached. */
+    // --- Desktop parity (spec 4.2, 9.2): the context breakdown and the usage card through the fake's rules (h)-(j) ---
+
+    private fun ChatState.usageNotice(): ChatEntry.Notice? = entries.filterIsInstance<ChatEntry.Notice>().lastOrNull { it.usage != null }
+
+    /** A session of [manager] that ran its first prompt to the end. */
+    private suspend fun SessionManager.afterFirstTurn(): SessionHandle {
+        val handle = started()
+        send(handle.id, "one")
+        handle.state.first { it.turnsEnded == 1 && !it.busy }
+        return handle
+    }
+
+    /** The usage card of [handle] once neither part is loading. */
+    private suspend fun loadedCard(handle: SessionHandle): ChatEntry.Notice = handle.state.first { state ->
+        val card = state.usageNotice()?.usage
+        card != null && card.session != UsagePartState.Loading && card.history != UsagePartState.Loading
+    }.usageNotice()!!
+
+    @Test
+    fun `contextBreakdown coalesces a second call`() = test {
+        val manager = manager(fixtures = "parity-context", delayMs = 300)
+        val handle = manager.afterFirstTurn()
+        val answers = List(3) { async { manager.contextBreakdown(handle.id) } }.awaitAll()
+        val breakdowns = answers.map { (it as? McpResult.Ok)?.value ?: fail("expected an answer, got $it") }
+        assertEquals(1, breakdowns.distinct().size, "every caller gets the same breakdown")
+        assertEquals(10L, breakdowns.first().categories.single { it.id == "messages" }.tokens, "rule (h) serves parity-context:2")
+        assertTrue(requests("get_context_usage").size <= 2, "one run and one shared follow-up: ${requests("get_context_usage").size}")
+        assertEquals(breakdowns.first(), handle.state.value.contextBreakdown)
+    }
+
+    @Test
+    fun `NotRunning without a process`() = test {
+        val manager = manager()
+        val handle = manager.started()
+        manager.stop(handle.id)
+        assertEquals(McpResult.Failed(McpError.NotRunning), manager.contextBreakdown(handle.id))
+        assertEquals(McpResult.Failed(McpError.NotRunning), manager.contextBreakdown("no-such-session"))
+        assertEquals(emptyList(), requests("get_context_usage"))
+    }
+
+    @Test
+    fun `a CLI without get_context_usage answers its error`() = test {
+        val manager = manager(fixtures = "plain-reply")
+        val handle = manager.started()
+        assertEquals(
+            McpResult.Failed(McpError.Rejected("Unsupported control request subtype: get_context_usage")),
+            manager.contextBreakdown(handle.id),
+        )
+    }
+
+    @Test
+    fun `a usage prompt fills its card from the CLI's answers`() = test {
+        val manager = manager(fixtures = "parity-usage")
+        val handle = manager.afterFirstTurn()
+        manager.send(handle.id, "/usage")
+        val card = loadedCard(handle).usage!!
+        val session = (card.session as UsagePartState.Loaded).value
+        assertEquals(0.1523063, session.totalCostUsd)
+        val history = (card.history as UsagePartState.Loaded).value
+        assertEquals(23, history?.day?.sessionCount)
+        val usage = requests("get_usage").map { it["request"]!!.jsonObject }
+        assertEquals(2, usage.size)
+        assertEquals(true, usage[0]["skip_behaviors"]?.jsonPrimitive?.boolean)
+        assertFalse("skip_behaviors" in usage[1], usage[1].toString())
+    }
+
+    @Test
+    fun `retryUsage on a stopped session ends the part`() = test {
+        val manager = manager(fixtures = "parity-usage")
+        val handle = manager.afterFirstTurn()
+        manager.send(handle.id, "/usage")
+        val notice = loadedCard(handle)
+        manager.stop(handle.id)
+        val sent = requests("get_usage").size
+
+        manager.retryUsage(handle.id, notice.sourceUuid!!, UsagePart.SESSION)
+        val card = handle.state.value.entries.filterIsInstance<ChatEntry.Notice>().single { it.id == notice.id }.usage!!
+        assertEquals(UsagePartState.Failed(McpError.NotRunning), card.session)
+        assertEquals(notice.usage!!.history, card.history)
+        assertEquals(sent, requests("get_usage").size, "no frame")
+        assertEquals(SessionStatus.STOPPED, handle.status.value)
+    }
+
     private suspend fun SessionManager.started(): SessionHandle {
         val handle = create(NewSessionOptions())
         handle.status.first { it == SessionStatus.IDLE }

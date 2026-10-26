@@ -1381,4 +1381,99 @@ class ClaudeSessionTest {
         assertTrue(state.busy, "the shell escape's reply turn is open")
         run.close()
     }
+
+    // --- Desktop parity (spec 3.2, 4.2, 9.2): get_usage after a usage line, get_context_usage ---
+
+    /** The `response` object of the `control_response` at [line] of fixture [name], as JSON text. */
+    private fun payloadAt(name: String, line: Int): String =
+        Json.parseToJsonElement(Fixtures.lines(name)[line - 1]).jsonObject["response"]!!.jsonObject["response"].toString()
+
+    private fun ChatState.usageCard(): UsageCard? =
+        entries.filterIsInstance<ChatEntry.Notice>().lastOrNull { it.sourceUuid != null }?.usage
+
+    private suspend fun ScriptedSession.card(done: (UsageCard) -> Boolean): UsageCard =
+        withTimeout(10_000) { session.state.first { s -> s.usageCard()?.let(done) == true }.usageCard()!! }
+
+    private fun UsagePartState<*>.loading(): Boolean = this == UsagePartState.Loading
+
+    @Test
+    fun `a usage line sends both get_usage requests in order`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.write(Fixtures.lines("parity-usage")[21])
+        run.settled()
+        assertTrue(run.stdin.readLines().none { "get_usage" in it }, "nothing before the local turn's result")
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), run.session.state.value.usageCard())
+
+        run.write(Fixtures.lines("parity-usage")[22])
+        val first = run.requestOf("get_usage")
+        assertEquals(true, first["request"]!!.jsonObject["skip_behaviors"]!!.jsonPrimitive.boolean)
+        run.success(first["request_id"]!!.jsonPrimitive.content, payloadAt("parity-usage", 16))
+        val second = run.requestOf("get_usage", 2)
+        assertFalse("skip_behaviors" in second["request"]!!.jsonObject, second.toString())
+        run.success(second["request_id"]!!.jsonPrimitive.content, payloadAt("parity-usage", 17))
+
+        val card = run.card { !it.session.loading() && !it.history.loading() }
+        val session = assertIs<UsagePartState.Loaded<*>>(card.session).value as dev.daarkolabs.tandem.protocol.SessionUsage
+        assertEquals(0.1523063, session.totalCostUsd)
+        val history = assertIs<UsagePartState.Loaded<*>>(card.history).value as dev.daarkolabs.tandem.protocol.UsageHistory
+        assertEquals(23, history.day?.sessionCount)
+        assertEquals(2, run.stdin.readLines().count { "get_usage" in it })
+        run.close()
+    }
+
+    @Test
+    fun `the history request is not sent once the process ended`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.write(Fixtures.lines("parity-usage")[21])
+        run.write(Fixtures.lines("parity-usage")[22])
+        run.written("get_usage")
+        run.die()
+
+        val card = run.card { !it.session.loading() && !it.history.loading() }
+        assertEquals(UsageCard(UsagePartState.Failed(McpError.Ended), UsagePartState.Failed(McpError.Ended)), card)
+        withTimeout(10_000) { run.session.job.children.toList().forEach { it.join() } }
+        assertEquals(1, run.stdin.readLines().count { "get_usage" in it })
+        run.close()
+    }
+
+    // spec: contextUsage decodes off the caller's thread and times out at 30 s
+    @Test
+    fun `contextUsage times out at 30 s and a success lands in the state`() = runBlocking {
+        val quiet = ScriptedSession(tmp, newSessionId, mcpMillisPerSecond = 10) // a second is 10 ms here; nothing answers
+        quiet.session.start()
+        assertEquals(McpResult.Failed(McpError.TimedOut(30)), withTimeout(10_000) { quiet.session.contextUsage() })
+        assertEquals(null, quiet.settled().contextBreakdown)
+        quiet.close()
+
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val b17 = ControlPayloads.contextUsage(
+            (Ndjson.decode(Fixtures.lines("parity-context")[16]) as CliMessage.ControlResponse).payload,
+        )!!
+        val answered = async { run.session.contextUsage() }
+        run.success(run.requestIdOf("get_context_usage"), payloadAt("parity-context", 17))
+        assertEquals(McpResult.Ok(b17), withTimeout(10_000) { answered.await() })
+        assertEquals(b17, run.session.state.value.contextBreakdown)
+
+        val empty = async { run.session.contextUsage() }
+        run.success(run.requestIdOf("get_context_usage", 2), "{}")
+        assertEquals(McpResult.Failed(McpError.Rejected("the CLI's answer had no categories")), withTimeout(10_000) { empty.await() })
+        assertEquals(b17, run.session.state.value.contextBreakdown, "a failed answer keeps the last breakdown")
+        run.close()
+    }
+
+    @Test
+    fun `retryUsage of the history sends the full request alone`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.retryUsage("<uuid-28>", UsagePart.HISTORY)
+        val request = run.requestOf("get_usage")
+        assertFalse("skip_behaviors" in request["request"]!!.jsonObject, request.toString())
+        run.success(request["request_id"]!!.jsonPrimitive.content, payloadAt("parity-usage", 17))
+        run.settled()
+        assertEquals(1, run.stdin.readLines().count { "get_usage" in it })
+        run.close()
+    }
 }

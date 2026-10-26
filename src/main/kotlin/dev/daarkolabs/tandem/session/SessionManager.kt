@@ -2,6 +2,7 @@ package dev.daarkolabs.tandem.session
 
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.McpServerInfo
@@ -132,7 +133,7 @@ class SessionManager internal constructor(
     private val respondToShell: () -> Boolean = { true },
     /** Runs the shell escapes ([runShell]). */
     private val shell: ShellRunner = ShellRunner(environment = System::getenv),
-) : McpControls {
+) : McpControls, ContextControls {
     /** Reads histories with [TranscriptReader]. */
     constructor(
         scope: CoroutineScope,
@@ -187,10 +188,13 @@ class SessionManager internal constructor(
     private val closings = HashMap<SessionId, Long>()
 
     /**
-     * Per session: the `mcp_status` run in flight ([McpRefresh.running]) and the follow-up run that callers arriving meanwhile share
-     * ([McpRefresh.next]). Weak keys, so a closed session's entry goes with its handle. Guarded by [lock].
+     * Per session: the `mcp_status` run in flight ([Coalesced.running]) and the follow-up run that callers arriving meanwhile share
+     * ([Coalesced.next]). Weak keys, so a closed session's entry goes with its handle. Guarded by [lock].
      */
-    private val mcpRefreshes = WeakHashMap<SessionHandle, McpRefresh>()
+    private val mcpRefreshes = WeakHashMap<SessionHandle, Coalesced<List<McpServerInfo>>>()
+
+    /** Per session: the `get_context_usage` run in flight and its shared follow-up, as [mcpRefreshes]. Guarded by [lock]. */
+    private val contextFetches = WeakHashMap<SessionHandle, Coalesced<ContextBreakdown>>()
 
     /** Per session: the sign-in wait of each server, by name ([startMcpAuth]). Guarded by [lock]. */
     private val mcpAuthJobs = WeakHashMap<SessionHandle, MutableMap<String, Job>>()
@@ -534,12 +538,50 @@ class SessionManager internal constructor(
     override suspend fun refreshMcp(id: SessionId): McpResult<List<McpServerInfo>> {
         val handle = handle(id) ?: return McpResult.Failed(McpError.NotRunning)
         handle.liveSession() ?: return McpResult.Failed(McpError.NotRunning)
+        return coalesced(handle, mcpRefreshes, "SessionManager.mcpStatus") {
+            val listed = handle.mcpActions.withLock { handle.liveSession()?.mcpStatus() ?: McpResult.Failed(McpError.NotRunning) }
+            if (listed is McpResult.Ok) mutableKnownMcp.value = listed.value.map { it.lastKnown() }
+            listed
+        }
+    }
+
+    /** Not under [SessionHandle.mcpActions]: a breakdown changes nothing, so it need not wait for an MCP action. */
+    override suspend fun contextBreakdown(id: SessionId): ControlResult<ContextBreakdown> {
+        val handle = handle(id) ?: return McpResult.Failed(McpError.NotRunning)
+        handle.liveSession() ?: return McpResult.Failed(McpError.NotRunning)
+        return coalesced(handle, contextFetches, "SessionManager.contextUsage") {
+            handle.liveSession()?.contextUsage() ?: McpResult.Failed(McpError.NotRunning)
+        }
+    }
+
+    /**
+     * Asks again for [part] of the usage card of [uuid] in session [id] ([ClaudeSession.retryUsage]); without a live process the
+     * part reads [McpError.NotRunning] at once.
+     */
+    fun retryUsage(id: SessionId, uuid: String, part: UsagePart) {
+        val handle = handle(id) ?: return
+        handle.pick(
+            live = { it.retryUsage(uuid, part) },
+            stopped = SessionEvent.UsageFetched(uuid, part, McpResult.Failed(McpError.NotRunning)),
+        )
+    }
+
+    /**
+     * [run]'s answer for [handle], one run in flight at a time: a call made while one runs waits for, and shares, one follow-up run
+     * ([Coalesced.next]). [entries] holds each session's [Coalesced].
+     */
+    private suspend fun <T> coalesced(
+        handle: SessionHandle,
+        entries: WeakHashMap<SessionHandle, Coalesced<T>>,
+        name: String,
+        run: suspend () -> McpResult<T>,
+    ): McpResult<T> {
         val answer = synchronized(lock) {
-            val refresh = mcpRefreshes.getOrPut(handle, ::McpRefresh)
-            if (refresh.running != null) {
-                refresh.next ?: CompletableDeferred<McpResult<List<McpServerInfo>>>().also { refresh.next = it }
+            val entry = entries.getOrPut(handle) { Coalesced() }
+            if (entry.running != null) {
+                entry.next ?: CompletableDeferred<McpResult<T>>().also { entry.next = it }
             } else {
-                CompletableDeferred<McpResult<List<McpServerInfo>>>().also { first -> startRefreshes(handle, refresh, first) }
+                CompletableDeferred<McpResult<T>>().also { first -> startCoalesced(handle, entry, first, name, run) }
             }
         }
         return answer.await()
@@ -616,19 +658,21 @@ class SessionManager internal constructor(
     }
 
     /**
-     * Starts [handle]'s `mcp_status` runs, under [lock]: the first answers [first]; then, while callers arrived meanwhile
-     * ([McpRefresh.next]), one more run answers all of them. A run cut off by the session's end answers [McpError.Ended].
+     * Starts [handle]'s runs of [run] in its scope, under [lock]: the first answers [first]; then, while callers arrived meanwhile
+     * ([Coalesced.next]), one more run answers all of them. A run cut off by the session's end answers [McpError.Ended].
      */
-    private fun startRefreshes(handle: SessionHandle, refresh: McpRefresh, first: CompletableDeferred<McpResult<List<McpServerInfo>>>) {
-        val job = handle.scope.launch(CoroutineName("SessionManager.mcpStatus")) {
-            var target: CompletableDeferred<McpResult<List<McpServerInfo>>>? = first
+    private fun <T> startCoalesced(
+        handle: SessionHandle,
+        refresh: Coalesced<T>,
+        first: CompletableDeferred<McpResult<T>>,
+        name: String,
+        run: suspend () -> McpResult<T>,
+    ) {
+        val job = handle.scope.launch(CoroutineName(name)) {
+            var target: CompletableDeferred<McpResult<T>>? = first
             try {
                 while (target != null) {
-                    val listed = handle.mcpActions.withLock {
-                        handle.liveSession()?.mcpStatus() ?: McpResult.Failed(McpError.NotRunning)
-                    }
-                    if (listed is McpResult.Ok) mutableKnownMcp.value = listed.value.map { it.lastKnown() }
-                    target.complete(listed)
+                    target.complete(run())
                     target = synchronized(lock) {
                         refresh.next?.also { refresh.next = null } ?: run {
                             refresh.running = null
@@ -963,10 +1007,13 @@ class SessionManager internal constructor(
     }
 }
 
-/** A session's `mcp_status` run in flight and the follow-up run shared by the callers that came meanwhile; see [SessionManager.refreshMcp]. */
-private class McpRefresh {
+/**
+ * A session's request run in flight and the follow-up run shared by the callers that came meanwhile; see [SessionManager.refreshMcp]
+ * and [SessionManager.contextBreakdown].
+ */
+private class Coalesced<T> {
     var running: Job? = null
-    var next: CompletableDeferred<McpResult<List<McpServerInfo>>>? = null
+    var next: CompletableDeferred<McpResult<T>>? = null
 }
 
 /**

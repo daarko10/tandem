@@ -12,7 +12,7 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
                           KEY, SECRET, PASSWORD, CREDENTIAL or AUTH (in any case) is logged as <redacted>.
                           Every frame the host writes follows, one per line
   TANDEM_FAKE_SESSION_ID  the session id to use, whatever the arguments say
-  TANDEM_FAKE_DELAY_MS    sleep this long before emitting each control_request
+  TANDEM_FAKE_DELAY_MS    sleep this long before emitting each control_request, and before the answers of rules (h) and (i)
   TANDEM_FAKE_GATE_FILE   before emitting each control_request (after the delay, if both are set), wait until this file
                           exists, checking every 100 ms for up to 60 s, then emit it anyway: a test holds a request
                           back until it is ready for it, in place of guessing a delay
@@ -71,6 +71,16 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
       a `system/status` line that has `user_message_uuids` gets the list as it stands. So a result names the host's own sends,
       as the real CLI's does (`bash-mode:8` names both quiet sends, `bash-mode-respond:6` the command frame and `:41` the
       output frame), never the recorded `<command_uuid-N>` placeholders.
+  (h) `get_context_usage` is answered inline, at any time and in every fixture, with the fixture's first control_response
+      whose payload has a `categories` array with a `messages` category (the full answer; `parity-context:2`), else with
+      {"subtype":"error","error":"Unsupported control request subtype: get_context_usage"} (the shape of `parity-context:19`).
+  (i) `get_usage` is answered inline, at any time and in every fixture: with `skip_behaviors: true` by the first
+      control_response whose payload has a `session` object and `behaviors: null` (`parity-usage:16`), without it by the
+      first whose `behaviors` is an object (`:17`), else with the same error naming `get_usage`.
+  (j) In a fixture whose name starts with `parity-`, every control_response line leaves the in-order replay (`initialize`
+      is still answered by (a)): its answers were given to requests sent out of the recorded order. Any other host control
+      request gets a bare success there, as in an MCP fixture (c).
+  (k) `--add-dir` arguments are logged with the rest of the argv in `__spawn__`, nothing more.
 """
 import copy
 import fcntl
@@ -278,8 +288,28 @@ def answer_mcp(request_id, subtype, request):
         answer(request_id)
 
 
+def unsupported(subtype):
+    return "Unsupported control request subtype: " + subtype
+
+
+def answer_parity(request_id, subtype, request):
+    """Rules (h) and (i): `get_context_usage` and `get_usage` from the fixture's recorded answers, else the CLI's error."""
+    if delay_ms:
+        time.sleep(delay_ms / 1000)
+    if subtype == "get_context_usage":
+        payload = context_payload
+    elif request.get("skip_behaviors") is True:
+        payload = usage_session_payload
+    else:
+        payload = usage_history_payload
+    if payload is None:
+        answer(request_id, error=unsupported(subtype))
+    else:
+        answer(request_id, copy.deepcopy(payload))
+
+
 def answer_inline(frame):
-    """Answers a host control request at once when rules (a)-(d) say so; True if it did (the frame is then used up)."""
+    """Answers a host control request at once when rules (a)-(d) and (h)-(j) say so; True if it did (the frame is then used up)."""
     if frame.get("type") != "control_request":
         return False
     request = frame.get("request") or {}
@@ -289,6 +319,9 @@ def answer_inline(frame):
         if initialize_line is not None:
             answer(request_id, copy.deepcopy(payload_of(initialize_line)))
         return True
+    if subtype in ("get_context_usage", "get_usage"):
+        answer_parity(request_id, subtype, request)
+        return True
     if isinstance(subtype, str) and subtype.startswith("mcp_"):
         if mcp_fixture:
             answer_mcp(request_id, subtype, request)
@@ -297,6 +330,9 @@ def answer_inline(frame):
         return True
     if mcp_fixture:
         answer(request_id, {"still_queued": []} if subtype == "interrupt" else None)
+        return True
+    if parity_fixture:
+        answer(request_id)
         return True
     return False
 
@@ -320,6 +356,19 @@ responses = [message for message in lines if message.get("type") == "control_res
 initialize_line = next((m for m in responses if "commands" in (payload_of(m) or {})), responses[0] if responses else None)
 server_payloads = [payload_of(m) for m in responses if isinstance((payload_of(m) or {}).get("mcpServers"), list)]
 mcp_fixture = bool(server_payloads)
+parity_fixture = fixture.startswith("parity-")
+
+
+def is_full_breakdown(payload):
+    """A `get_context_usage` answer with its `messages` category: the full one, not the summary (`parity-context:18`)."""
+    categories = payload.get("categories")
+    return isinstance(categories, list) and any(isinstance(c, dict) and c.get("id") == "messages" for c in categories)
+
+
+payloads = [payload_of(m) or {} for m in responses]
+context_payload = next((p for p in payloads if is_full_breakdown(p)), None)
+usage_session_payload = next((p for p in payloads if isinstance(p.get("session"), dict) and "behaviors" in p and p["behaviors"] is None), None)
+usage_history_payload = next((p for p in payloads if isinstance(p.get("behaviors"), dict)), None)
 
 
 def has_pending(payload):
@@ -340,7 +389,7 @@ pending_served = False
 auth_payload = next((payload_of(m) for m in responses if "authUrl" in (payload_of(m) or {})), None)
 auth_started = {}
 
-if mcp_fixture:
+if mcp_fixture or parity_fixture:
     replay = [message for message in lines if message.get("type") != "control_response"]
 else:
     replay = [message for message in lines if message is not initialize_line]

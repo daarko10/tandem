@@ -1,15 +1,22 @@
 package dev.daarkolabs.tandem.session
 
+import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.diagnostic.debug
+import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ContentBlock
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.InboundRequest
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.McpServerSummary
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SessionUsage
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.protocol.TaskUsage
+import dev.daarkolabs.tandem.protocol.UsageAnswer
+import dev.daarkolabs.tandem.protocol.UsageHistory
 import dev.daarkolabs.tandem.protocol.array
 import dev.daarkolabs.tandem.protocol.asObject
 import dev.daarkolabs.tandem.protocol.boolean
@@ -96,7 +103,26 @@ sealed interface SessionEvent {
      * quiet result): the turn [ShellSent] opened ends as stopped, without a footer, since no model call ran.
      */
     data class ShellReplyDropped(val id: String) : SessionEvent
+
+    /** The CLI answered `get_context_usage` with [breakdown]: it replaces [ChatState.contextBreakdown]. */
+    data class ContextBreakdownListed(val breakdown: ContextBreakdown) : SessionEvent
+
+    /** [part] of the usage card of the notice whose [ChatEntry.Notice.sourceUuid] is [uuid] came to [result]. */
+    data class UsageFetched(val uuid: String, val part: UsagePart, val result: ControlResult<UsageAnswer>) : SessionEvent
+
+    /** The user asked again for [part] of [uuid]'s usage card: [UsagePart.SESSION] loads both parts again, [UsagePart.HISTORY] its own. */
+    data class UsageRetry(val uuid: String, val part: UsagePart) : SessionEvent
 }
+
+private val LOG: Logger
+    get() = logger<SessionEvent>()
+
+/**
+ * Whether this stream line is the CLI's own answer to `/usage` (or `/cost`, which runs the same command) on the main thread, with a
+ * uuid to key its card by: the reducer gives its notice a [UsageCard], and [ClaudeSession] fetches the card's numbers after the
+ * local turn's `result`. One predicate for both, so no card waits for a fetch that never starts.
+ */
+internal fun CliMessage.Assistant.isUsageLine(): Boolean = localCommand?.command == "usage" && parentToolUseId == null && uuid != null
 
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
 fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
@@ -158,6 +184,63 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     // As an interrupt marker shows it, but no model call ran: no footer, no turn end counted.
     is SessionEvent.ShellReplyDropped -> state.notice(NoticeLevel.INFO, "Stopped.", NoticeKind.INTERRUPTED)
         .copy(busy = false, turn = null, turnInterrupted = false)
+    is SessionEvent.ContextBreakdownListed -> state.copy(contextBreakdown = event.breakdown)
+    is SessionEvent.UsageFetched -> state.updateUsageCard(event.uuid) { card ->
+        when (event.part) {
+            UsagePart.SESSION -> card.copy(session = sessionPart(event.result))
+            UsagePart.HISTORY -> card.copy(history = historyPart(event.result))
+        }
+    }
+    is SessionEvent.UsageRetry -> state.updateUsageCard(event.uuid) { card ->
+        when (event.part) {
+            UsagePart.SESSION -> UsageCard(UsagePartState.Loading, UsagePartState.Loading)
+            UsagePart.HISTORY -> card.copy(history = UsagePartState.Loading)
+        }
+    }
+}
+
+/** The session part of a usage card for [result]: a success without a `session` object fails it (spec 3.2). */
+private fun sessionPart(result: ControlResult<UsageAnswer>): UsagePartState<SessionUsage> = when (result) {
+    is McpResult.Ok -> result.value.session?.let { UsagePartState.Loaded(it) }
+        ?: UsagePartState.Failed(McpError.Rejected("the CLI's answer had no session"))
+    is McpResult.Failed -> UsagePartState.Failed(result.error)
+}
+
+/** The history part of a usage card for [result]: a success's history, null when the CLI did not report one. */
+private fun historyPart(result: ControlResult<UsageAnswer>): UsagePartState<UsageHistory?> = when (result) {
+    is McpResult.Ok -> UsagePartState.Loaded(result.value.history)
+    is McpResult.Failed -> UsagePartState.Failed(result.error)
+}
+
+/**
+ * This state with the usage card of the notice whose source is [uuid] changed by [change], found scanning back from the end; the
+ * same instance when there is none (an answer for a notice that is gone, such as a reloaded chat's).
+ */
+private inline fun ChatState.updateUsageCard(uuid: String, change: (UsageCard) -> UsageCard): ChatState {
+    val position = entries.indexOfLast { it is ChatEntry.Notice && it.sourceUuid == uuid }
+    val notice = entries.getOrNull(position) as? ChatEntry.Notice
+    val card = notice?.usage
+    if (card == null) {
+        LOG.debug { "no usage card for $uuid" }
+        return this
+    }
+    return copy(entries = entryList().mutate { list -> list[position] = notice.copy(usage = change(card)) })
+}
+
+/** Every usage card part still loading reads [McpError.Ended]: no answer can reach it any more. Ids stay where they are. */
+private fun ChatState.endUsageCards(): ChatState {
+    if (entries.none { it is ChatEntry.Notice && it.usage != null }) return this
+    return copy(
+        entries = entryList().mutate { list ->
+            for (position in list.indices) {
+                val entry = list[position]
+                if (entry is ChatEntry.Notice) {
+                    val ended = entry.withUsageEnded()
+                    if (ended !== entry) list[position] = ended
+                }
+            }
+        },
+    )
 }
 
 /** This state with the shell entry [id] changed by [change]; unchanged without one. */
@@ -187,7 +270,7 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
     } else {
         event.detail
     }
-    var next = state.finishStreaming()
+    var next = state.finishStreaming().endUsageCards()
     if (turn != null && end != null) {
         next = next.append(
             ChatEntry.TurnEnded(
@@ -229,6 +312,9 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         mcp = state.mcp.mergedWith(message.mcpServers),
         slashCommandNames = message.slashCommands,
         terminalCommands = message.terminalSlashCommands.toSet(),
+        plugins = message.plugins,
+        skills = message.skills,
+        additionalDirectories = message.additionalDirectories,
     ).checkModel(message.model)
     is CliMessage.SystemStatus -> state.copy(permissionMode = message.permissionMode ?: state.permissionMode)
     is CliMessage.ApiRetry -> state.notice(NoticeLevel.INFO, retryText(message))
@@ -359,11 +445,13 @@ private fun McpState.mergedWith(listed: List<McpServerSummary>): McpState {
  * `/`: the CLI does not echo the prompt), else after [runCommand]. The turn in progress, if any, is flagged local, so that its
  * result ends it without a footer.
  */
-private fun ChatState.localCommandNotice(text: String, runCommand: String?): ChatState {
+private fun ChatState.localCommandNotice(text: String, runCommand: String?, sourceUuid: String? = null, usage: UsageCard? = null): ChatState {
     val prompt = (entries.lastOrNull { it is ChatEntry.User } as ChatEntry.User?)?.text
     val typed = prompt?.takeIf { it.startsWith("/") }?.drop(1)?.takeWhile { !it.isWhitespace() }?.ifEmpty { null }
-    return withTurn { it.copy(localCommand = true) }
-        .notice(NoticeLevel.INFO, text, NoticeKind.LOCAL_COMMAND, command = typed ?: runCommand, runCommand = runCommand)
+    return withTurn { it.copy(localCommand = true) }.notice(
+        NoticeLevel.INFO, text, NoticeKind.LOCAL_COMMAND,
+        command = typed ?: runCommand, runCommand = runCommand, sourceUuid = sourceUuid, usage = usage,
+    )
 }
 
 /**
@@ -492,6 +580,10 @@ private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at:
     // The CLI answered the prompt itself: what it printed is a notice, not a reply (spec 3.5).
     message.localCommand?.let { local ->
         val text = local.stdout ?: message.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+        // A stream's usage line gets the card its fetch fills (spec 3.2); a transcript's comes as LocalCommandOutput and gets none.
+        if (message.isUsageLine()) {
+            return next.localCommandNotice(text, local.command, message.uuid, UsageCard(UsagePartState.Loading, UsagePartState.Loading))
+        }
         return next.localCommandNotice(text, local.command)
     }
     message.error?.let { error ->
@@ -935,4 +1027,7 @@ private fun ChatState.notice(
     kind: NoticeKind = NoticeKind.GENERIC,
     command: String? = null,
     runCommand: String? = null,
-): ChatState = append(ChatEntry.Notice("notice-$noticeCount", level, text, kind, command, runCommand)).copy(noticeCount = noticeCount + 1)
+    sourceUuid: String? = null,
+    usage: UsageCard? = null,
+): ChatState = append(ChatEntry.Notice("notice-$noticeCount", level, text, kind, command, runCommand, sourceUuid, usage))
+    .copy(noticeCount = noticeCount + 1)

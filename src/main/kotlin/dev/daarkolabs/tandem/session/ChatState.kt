@@ -1,9 +1,13 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.PermissionDenial
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.PluginInfo
+import dev.daarkolabs.tandem.protocol.SessionUsage
 import dev.daarkolabs.tandem.protocol.SlashCommand
+import dev.daarkolabs.tandem.protocol.UsageHistory
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
@@ -100,6 +104,14 @@ data class ChatState(
      * sent. Empty once the process that owed them ends, and once [settled].
      */
     val quietSends: Set<String> = emptySet(),
+    /** The context window by category, from the latest `get_context_usage` answer; null until one came. Kept by [settled]. */
+    val contextBreakdown: ContextBreakdown? = null,
+    /** The plugins the latest `system/init` lists (`plugins`); absent means none. */
+    val plugins: List<PluginInfo> = emptyList(),
+    /** The folders the latest `system/init` lists besides the working directory (`additional_directories`); absent means none. */
+    val additionalDirectories: List<String> = emptyList(),
+    /** The skills the latest `system/init` lists (`skills`); absent means none. */
+    val skills: List<String> = emptyList(),
 )
 
 /**
@@ -266,6 +278,10 @@ sealed interface ChatEntry {
         val kind: NoticeKind = NoticeKind.GENERIC,
         val command: String? = null,
         val runCommand: String? = null,
+        /** On a usage notice of the stream: the `uuid` of the CLI's line, which keys its [usage] card's answers. */
+        val sourceUuid: String? = null,
+        /** On a usage notice of the stream ([isUsageLine]): the card the `get_usage` answers fill; null on any other notice. */
+        val usage: UsageCard? = null,
     ) : ChatEntry
 
     /**
@@ -300,6 +316,21 @@ sealed interface ChatEntry {
 }
 
 enum class NoticeLevel { INFO, WARNING, ERROR }
+
+/** The `/usage` card of a usage notice: this session's numbers (`get_usage` with `skip_behaviors`) and the machine's history. */
+data class UsageCard(val session: UsagePartState<SessionUsage>, val history: UsagePartState<UsageHistory?>)
+
+/** Where one part of a [UsageCard] stands: its request runs, it answered (a null history: the CLI did not report one), or it failed. */
+sealed interface UsagePartState<out T> {
+    data object Loading : UsagePartState<Nothing>
+
+    data class Loaded<T>(val value: T) : UsagePartState<T>
+
+    data class Failed(val error: ControlError) : UsagePartState<Nothing>
+}
+
+/** A part of a [UsageCard]: [SESSION] (the request without the scan) or [HISTORY] (the full request). */
+enum class UsagePart { SESSION, HISTORY }
 
 /**
  * What a notice stands for: [INTERRUPTED] is the "Stopped." of an interrupted turn, which the chat shows as the turn's end;
@@ -350,10 +381,17 @@ data class PendingPermission(
 /**
  * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming. No quiet send waits
  * for its result either: the process that owed it is gone, and the next one starts from this. A shell escape stays as it is (a
- * command runs on in Tandem's own process). A transcript loaded by `TranscriptReader` comes back settled.
+ * command runs on in Tandem's own process). A usage card's part still loading can no longer be answered: it reads
+ * [McpError.Ended]. The context breakdown stays. A transcript loaded by `TranscriptReader` comes back settled.
  */
 internal fun ChatState.settled(): ChatState = copy(
-    entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it },
+    entries = entries.map {
+        when {
+            it is ChatEntry.Assistant && it.streaming -> it.copy(streaming = false)
+            it is ChatEntry.Notice -> it.withUsageEnded()
+            else -> it
+        }
+    },
     busy = false,
     pendingPermissions = emptyList(),
     permissionModeChanges = emptyMap(),
@@ -364,3 +402,13 @@ internal fun ChatState.settled(): ChatState = copy(
     turn = null,
     quietSends = emptySet(),
 )
+
+/** This notice with each part of its usage card that is still loading turned [McpError.Ended]; the same instance when none is. */
+internal fun ChatEntry.Notice.withUsageEnded(): ChatEntry.Notice {
+    val card = usage ?: return this
+    if (card.session != UsagePartState.Loading && card.history != UsagePartState.Loading) return this
+    return copy(usage = UsageCard(card.session.endedIfLoading(), card.history.endedIfLoading()))
+}
+
+private fun <T> UsagePartState<T>.endedIfLoading(): UsagePartState<T> =
+    if (this == UsagePartState.Loading) UsagePartState.Failed(McpError.Ended) else this

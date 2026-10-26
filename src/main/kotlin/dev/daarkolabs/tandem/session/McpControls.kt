@@ -114,6 +114,12 @@ sealed interface McpResult<out T> {
     data class Failed(val error: McpError) : McpResult<Nothing>
 }
 
+/** What any control request came to: the MCP round's request results serve every control request (no rename this round). */
+typealias ControlResult<T> = McpResult<T>
+
+/** Why a control request failed; see [McpError]. */
+typealias ControlError = McpError
+
 /** Why an MCP control request failed. */
 sealed interface McpError {
     /**

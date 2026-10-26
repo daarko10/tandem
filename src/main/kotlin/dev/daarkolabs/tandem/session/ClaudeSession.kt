@@ -4,6 +4,7 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.HostMessages
 import dev.daarkolabs.tandem.protocol.ImageBlock
@@ -12,6 +13,7 @@ import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.UsageAnswer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineName
@@ -58,6 +60,15 @@ private const val MCP_STATUS_SECONDS = 15
 
 /** How long `mcp_reconnect` and `mcp_authenticate` wait for their answer (a guess: a reconnect that succeeds is unrecorded). */
 private const val MCP_SLOW_SECONDS = 30
+
+/** How long `get_context_usage` waits for its answer (spec 4.2). */
+private const val CONTEXT_USAGE_SECONDS = 30
+
+/** How long `get_usage` with `skip_behaviors` waits (the session block, no scan; a guess, spec 4.2). */
+private const val USAGE_SESSION_SECONDS = 15
+
+/** How long `get_usage` without `skip_behaviors` waits (it scans this machine's transcripts; a guess, spec 4.2). */
+private const val USAGE_HISTORY_SECONDS = 60
 
 /**
  * How long the end waits, once the process has exited, for the rest of its stderr. A normal exit's last lines are there at once; a
@@ -217,6 +228,12 @@ class ClaudeSession(
 
     /** A responding shell escape's output frame, waiting for the quiet result of its command frame. */
     private var pendingOutput: PendingOutput? = null
+
+    /**
+     * The uuid of the latest usage line ([isUsageLine]) whose local turn has not ended yet: the next `result` launches its fetch.
+     * Read and written by the reader coroutine only.
+     */
+    private var pendingUsage: String? = null
 
     private class HeldEscape(val id: String, val command: String, val output: String, val respond: Boolean)
 
@@ -543,6 +560,58 @@ class ClaudeSession(
         }
 
     /**
+     * The session's context window by category (`get_context_usage`, 30 s). A success also replaces [ChatState.contextBreakdown]; one
+     * without `categories` is [McpError.Rejected].
+     */
+    suspend fun contextUsage(): ControlResult<ContextBreakdown> {
+        val result = mcpRequest(CONTEXT_USAGE_SECONDS, HostMessages::getContextUsage) { payload ->
+            ControlPayloads.contextUsage(payload)?.let { McpResult.Ok(it) }
+                ?: McpResult.Failed(McpError.Rejected("the CLI's answer had no categories"))
+        }
+        if (result is McpResult.Ok) dispatch(SessionEvent.ContextBreakdownListed(result.value))
+        LOG.info("get_context_usage: ${result.javaClass.simpleName}")
+        return result
+    }
+
+    /**
+     * This session's usage (`get_usage`): with [skipBehaviors] the session block only (15 s), without it also the scan of this
+     * machine's transcripts (60 s). A success without an object payload is [McpError.Rejected].
+     */
+    suspend fun usage(skipBehaviors: Boolean): ControlResult<UsageAnswer> {
+        val seconds = if (skipBehaviors) USAGE_SESSION_SECONDS else USAGE_HISTORY_SECONDS
+        val result = mcpRequest(seconds, { HostMessages.getUsage(it, skipBehaviors) }) { payload ->
+            ControlPayloads.usage(payload)?.let { McpResult.Ok(it) } ?: McpResult.Failed(McpError.Rejected("the CLI's answer had no session"))
+        }
+        LOG.info("get_usage skip_behaviors=$skipBehaviors: ${result.javaClass.simpleName}")
+        return result
+    }
+
+    /**
+     * Asks again for [part] of the usage card of [uuid] ([SessionEvent.UsageRetry] first): [UsagePart.SESSION] sends both requests,
+     * as the first fetch did, [UsagePart.HISTORY] the full request alone.
+     */
+    fun retryUsage(uuid: String, part: UsagePart) {
+        dispatch(SessionEvent.UsageRetry(uuid, part))
+        when (part) {
+            UsagePart.SESSION -> fetchUsage(uuid)
+            UsagePart.HISTORY -> scope.launch(CoroutineName("ClaudeSession.usage")) {
+                dispatch(SessionEvent.UsageFetched(uuid, UsagePart.HISTORY, usage(skipBehaviors = false)))
+            }
+        }
+    }
+
+    /**
+     * Fills the usage card of [uuid], in this session's scope: the session block first, then, unless the process ended meanwhile,
+     * the full request with the scan (spec 3.2). A part whose answer cannot come any more reads [McpError.Ended].
+     */
+    private fun fetchUsage(uuid: String) {
+        scope.launch(CoroutineName("ClaudeSession.usage")) {
+            dispatch(SessionEvent.UsageFetched(uuid, UsagePart.SESSION, usage(skipBehaviors = true)))
+            if (!ended) dispatch(SessionEvent.UsageFetched(uuid, UsagePart.HISTORY, usage(skipBehaviors = false)))
+        }
+    }
+
+    /**
      * One MCP [request] of [seconds]: a success's payload goes to [decode], off the caller's thread; an error answer is
      * [McpError.Rejected] with the CLI's text.
      */
@@ -636,7 +705,15 @@ class ClaudeSession(
             }
             dispatch(SessionEvent.Cli(message, at))
             if (message is CliMessage.SystemInit && message.sessionId.isNotEmpty()) _reportedSessionId.value = message.sessionId
-            if (message is CliMessage.Result) advanceShell()
+            // A usage line's numbers are asked for once its local turn has ended, between turns, as the probes sent them (spec 3.2).
+            if (message is CliMessage.Assistant && message.isUsageLine()) pendingUsage = message.uuid
+            if (message is CliMessage.Result) {
+                pendingUsage?.let {
+                    pendingUsage = null
+                    fetchUsage(it)
+                }
+                advanceShell()
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
@@ -9,6 +10,9 @@ import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
+import dev.daarkolabs.tandem.protocol.UsageAnswer
+import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -23,6 +27,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ReducerTest {
@@ -1612,6 +1617,148 @@ class ReducerTest {
         assertEquals("a.txt", shell.output)
         assertEquals(7L, shell.startedAtMillis)
         assertNull(state.runningShell)
+    }
+
+    // --- Desktop parity (spec 4.2, 9.2): plugins, skills and folders from init, the usage card, the context breakdown ---
+
+    private fun usageAt(line: Int): UsageAnswer =
+        assertNotNull(ControlPayloads.usage((at("parity-usage", line) as CliMessage.ControlResponse).payload))
+
+    private fun breakdownAt(line: Int): ContextBreakdown =
+        assertNotNull(ControlPayloads.contextUsage((at("parity-context", line) as CliMessage.ControlResponse).payload))
+
+    private fun ChatState.usageNotices(): List<ChatEntry.Notice> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.kind == NoticeKind.LOCAL_COMMAND }
+
+    /** A state with one usage notice for `u1` whose card is [card]. */
+    private fun withCard(card: UsageCard, breakdown: ContextBreakdown? = null): ChatState {
+        val line = Fixtures.lines("parity-usage")[21].replace("<uuid-28>", "u1")
+        return reduce(ChatState(contextBreakdown = breakdown), cli(line)).let { state ->
+            val notice = state.usageNotices().single()
+            state.copy(entries = state.entries.map { if (it === notice) notice.copy(usage = card) else it }, entryIndex = emptyMap())
+        }
+    }
+
+    private fun ChatState.card(): UsageCard = assertNotNull(usageNotices().single().usage)
+
+    @Test
+    fun `an init sets the plugins and added directories`() {
+        val states = replay("parity-add-dir")
+        assertEquals(4, states[5].plugins.size)
+        assertEquals(emptyList(), states[5].additionalDirectories)
+        assertEquals(listOf("<path>"), states[17].additionalDirectories)
+    }
+
+    @Test
+    fun `an init replaces the skills`() {
+        val states = replay("parity-add-dir")
+        assertEquals(35, states[5].skills.size)
+        assertTrue("probe-kit:greet" in states[5].skills)
+        val withoutSkills = edited("parity-add-dir", 5) { it.remove("skills") }
+        assertEquals(emptyList(), reduce(states[5], withoutSkills).skills)
+    }
+
+    @Test
+    fun `a stream usage line gets a pending card`() {
+        val state = replay("parity-usage")[22]
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().last()
+        assertEquals(NoticeKind.LOCAL_COMMAND, notice.kind)
+        assertEquals("usage", notice.runCommand)
+        assertEquals("<uuid-28>", notice.sourceUuid)
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), notice.usage)
+    }
+
+    // spec: /cost gets the same card
+    @Test
+    fun `cost gets the same card`() {
+        val notices = replay("parity-usage")[28].usageNotices()
+        assertEquals(2, notices.size)
+        assertEquals("<uuid-36>", notices[1].sourceUuid)
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), notices[1].usage)
+    }
+
+    @Test
+    fun `a transcript's usage line has no card`() = runBlocking {
+        val notices = TranscriptReader.read(Fixtures.transcript("parity-usage")).state.usageNotices()
+        assertEquals(2, notices.size)
+        assertTrue(notices.all { it.usage == null && it.sourceUuid == null }, notices.toString())
+    }
+
+    @Test
+    fun `usage answers fill their own card`() {
+        val u16 = usageAt(16)
+        val u17 = usageAt(17)
+        val through = replay("parity-usage")[28]
+        val first = reduce(through, SessionEvent.UsageFetched("<uuid-28>", UsagePart.SESSION, McpResult.Ok(u16)))
+        val (one, two) = first.usageNotices()
+        assertEquals(UsagePartState.Loaded(u16.session!!), one.usage!!.session)
+        assertEquals(UsagePartState.Loading, one.usage!!.history)
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), two.usage)
+
+        val second = reduce(first, SessionEvent.UsageFetched("<uuid-36>", UsagePart.HISTORY, McpResult.Ok(u17)))
+        assertEquals(UsagePartState.Loaded(u17.history), second.usageNotices()[1].usage!!.history)
+        assertEquals(UsagePartState.Loading, second.usageNotices()[1].usage!!.session)
+        assertEquals(one, second.usageNotices()[0])
+    }
+
+    @Test
+    fun `a usage answer for an unknown uuid changes nothing`() {
+        val state = replay("parity-usage")[28]
+        assertSame(state, reduce(state, SessionEvent.UsageFetched("nope", UsagePart.SESSION, McpResult.Ok(usageAt(16)))))
+        assertSame(state, reduce(state, SessionEvent.UsageRetry("nope", UsagePart.SESSION)))
+    }
+
+    @Test
+    fun `a session answer without session fails the part`() {
+        val state = reduce(
+            withCard(UsageCard(UsagePartState.Loading, UsagePartState.Loading)),
+            SessionEvent.UsageFetched("u1", UsagePart.SESSION, McpResult.Ok(UsageAnswer(null, null))),
+        )
+        assertEquals(UsagePartState.Failed(McpError.Rejected("the CLI's answer had no session")), state.card().session)
+        val failed = reduce(state, SessionEvent.UsageFetched("u1", UsagePart.HISTORY, McpResult.Failed(McpError.TimedOut(60))))
+        assertEquals(UsagePartState.Failed(McpError.TimedOut(60)), failed.card().history)
+    }
+
+    @Test
+    fun `retry sets the parts loading`() {
+        val failed = UsagePartState.Failed(McpError.TimedOut(15))
+        val both = reduce(withCard(UsageCard(failed, failed)), SessionEvent.UsageRetry("u1", UsagePart.SESSION))
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), both.card())
+
+        val loaded = UsagePartState.Loaded(usageAt(16).session!!)
+        val history = reduce(withCard(UsageCard(loaded, failed)), SessionEvent.UsageRetry("u1", UsagePart.HISTORY))
+        assertEquals(UsageCard(loaded, UsagePartState.Loading), history.card())
+    }
+
+    @Test
+    fun `a breakdown answer replaces the last one`() {
+        val b2 = breakdownAt(2)
+        val b17 = breakdownAt(17)
+        val state = reduce(reduce(ChatState(), SessionEvent.ContextBreakdownListed(b2)), SessionEvent.ContextBreakdownListed(b17))
+        assertEquals(b17, state.contextBreakdown)
+    }
+
+    @Test
+    fun `a process end turns loading usage parts into ended`() {
+        val loaded = UsagePartState.Loaded(usageAt(16).session!!)
+        val ended = reduce(withCard(UsageCard(loaded, UsagePartState.Loading)), SessionEvent.Ended("x", isError = false))
+        assertEquals(UsageCard(loaded, UsagePartState.Failed(McpError.Ended)), ended.card())
+    }
+
+    @Test
+    fun `a stop settles loading usage parts`() {
+        val b17 = breakdownAt(17)
+        val settled = withCard(UsageCard(UsagePartState.Loading, UsagePartState.Loading), breakdown = b17).settled()
+        assertEquals(UsageCard(UsagePartState.Failed(McpError.Ended), UsagePartState.Failed(McpError.Ended)), settled.card())
+        assertEquals(b17, settled.contextBreakdown)
+    }
+
+    @Test
+    fun `a usage line inside a subagent gets no card`() {
+        val line = edited("parity-usage", 22) { it["parent_tool_use_id"] = JsonPrimitive("toolu_1") }
+        val notice = reduce(ChatState(), line).usageNotices().single()
+        assertNull(notice.usage)
+        assertNull(notice.sourceUuid)
     }
 }
 
