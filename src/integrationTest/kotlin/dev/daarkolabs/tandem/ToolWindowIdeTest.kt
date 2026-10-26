@@ -13,6 +13,7 @@ import com.intellij.driver.sdk.isPluginLoaded
 import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.singleProject
 import com.intellij.driver.sdk.ui.components.UiComponent
+import com.intellij.driver.sdk.ui.components.elements.list
 import com.intellij.driver.sdk.ui.ui
 import com.intellij.driver.sdk.waitFor
 import com.intellij.driver.sdk.waitForIndicators
@@ -1144,7 +1145,7 @@ class ToolWindowIdeTest {
         // The platform's tab keys: $default's Alt+Left, Alt+Right and Alt+Down; the macOS keymap's Cmd+Shift+[ and Cmd+Shift+].
         val previousTab = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_SHIFT, KeyEvent.VK_OPEN_BRACKET) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_LEFT)
         val nextTab = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_SHIFT, KeyEvent.VK_CLOSE_BRACKET) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_RIGHT)
-        runChat("session-tabs", fixtures = listOf("plain-reply", "plain-reply", "plain-reply", "plain-reply")) {
+        val sent = runChat("session-tabs", fixtures = listOf("plain-reply", "plain-reply", "plain-reply", "plain-reply")) {
             // New Session from anywhere (as Find Action runs it) shows and activates the hidden tool window, and focuses the composer.
             withContext(OnDispatcher.EDT) { tandemWindow().hide() }
             waitFor("the tool window hidden", 30.seconds) { !withContext(OnDispatcher.EDT) { tandemWindow().isVisible() } }
@@ -1208,9 +1209,22 @@ class ToolWindowIdeTest {
             waitFor("the content list", 30.seconds) { contentList().present() }
             println("ShowContent list: " + contentList().getAllTexts().map { it.text })
             assertTrue(contentList().getAllTexts().map { it.text }.containsAll(listOf("New session", "Tab two")))
-            contentList().getAllTexts().first { it.text == "New session" }.click()
-            waitFor("the first tab selected by ShowContent's pick", 30.seconds) {
-                selectedTab()?.first == "New session" && ui.x("$PROMPT_BOX[@editabletext='ax']").present()
+            // Picked with the keyboard, as from the composer: Up to New session, then Enter. The Enter that closes the list must not
+            // reach the composer, which gets the focus back through focus(id), and send its draft.
+            val choices = ui.list("//div[@class='MyList' or @class='JBList']")
+            // It opens on the selected tab, Tab two, the second of two; a key's effect on the list is read once it has landed.
+            // The list's renderer may shorten a name ("New ..."), so its rows are told apart by their index.
+            assertEquals(2, choices.items.size, choices.items.toString())
+            assertEquals("Tab two", choices.items[1])
+            waitFor("the list opened on Tab two", 30.seconds) { choices.isSelectedIndex(1) }
+            ui.keyboard { up() }
+            waitFor("New session chosen in the list", 30.seconds) {
+                choices.isSelectedIndex(0) && !choices.isSelectedIndex(1)
+            }
+            ui.keyboard { enter() }
+            waitFor("the first tab selected by ShowContent's pick, its draft kept and focused", 30.seconds) {
+                selectedTab()?.first == "New session" && !contentList().present() &&
+                    ui.x("$PROMPT_BOX[@editabletext='ax' and @focused='true']").present()
             }
             openSidebar()
             waitFor("its row selected", 30.seconds) { ui.x("$ROW[@selected='true' and not(contains(@text, 'Tab two'))]").present() }
@@ -1243,6 +1257,9 @@ class ToolWindowIdeTest {
             ui.keyboard { escape() }
             takeScreenshot("session-tabs-overflow")
         }
+        // ShowContent's Enter sent no draft: the only prompts are the four typed ones.
+        val prompts = sent.filter { it.type == "user" }.map { it.toString() }
+        assertTrue(prompts.none { "\"ax\"" in it || "draft-two" in it }, "a draft was sent: $prompts")
     }
 
     // spec: closing a tab stops its session and keeps its transcript (desktop-parity spec 9.8 IDE test 4)
@@ -1482,7 +1499,6 @@ class ToolWindowIdeTest {
         override fun getTransferData(flavor: DataFlavor): Any = if (flavor == DataFlavor.imageFlavor) image else throw UnsupportedFlavorException(flavor)
     }
 
-    /** Makes the tool window wide enough to dock the sidebar: the IDE gives it less than 500 dp. */
     /** The Tandem tool window. Call on the EDT. */
     private fun Driver.tandemWindow(): ToolWindowRef =
         service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")
@@ -1529,6 +1545,7 @@ class ToolWindowIdeTest {
     /** ShowContent's list of the tool window's contents. */
     private fun Driver.contentList(): UiComponent = ui.x("//div[@class='MyList' or @class='JBList' or @class='ListWithFilter']")
 
+    /** Makes the tool window wide enough to dock the sidebar: the IDE gives it less than 500 dp. */
     private fun Driver.widenToolWindow() {
         withContext(OnDispatcher.EDT) {
             val window = service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")

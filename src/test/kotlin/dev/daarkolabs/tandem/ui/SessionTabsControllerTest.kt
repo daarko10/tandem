@@ -24,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.ThreadContextElement
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -35,8 +36,11 @@ import org.junit.jupiter.api.Test
 import java.awt.event.ContainerEvent
 import java.awt.event.ContainerListener
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JComponent
 import javax.swing.JPanel
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -184,6 +188,19 @@ class SessionTabsControllerTest {
         }
     }
 
+    /** Counts the controller's applies: the apply context's block leaves its thread once it has run, so a count is an apply done. */
+    private class AppliedCount : ThreadContextElement<Unit>, AbstractCoroutineContextElement(AppliedCount) {
+        companion object Key : CoroutineContext.Key<AppliedCount>
+
+        val count = AtomicInteger()
+
+        override fun updateThreadContext(context: CoroutineContext) {}
+
+        override fun restoreThreadContext(context: CoroutineContext, oldState: Unit) {
+            count.incrementAndGet()
+        }
+    }
+
     private fun tab(id: SessionId, status: SessionStatus = IDLE, title: String = id.uppercase(), attention: Boolean = false): TabSource =
         TabSource(id, title, status, attention)
 
@@ -321,19 +338,24 @@ class SessionTabsControllerTest {
     @Test
     fun `with no tab, one placeholder, not closeable, with an empty name`() = timeoutRunBlocking(30.seconds) {
         val h = Harness()
+        val applied = AppliedCount()
         withContext(Dispatchers.EDT) {
-            h.controller = SessionTabsController(h.manager, h.panel, h.source, h.actions, { h.focused += it }, scope, compute, Dispatchers.EDT)
+            h.controller = SessionTabsController(h.manager, h.panel, h.source, h.actions, { h.focused += it }, scope, compute, Dispatchers.EDT + applied)
             // Right after construction, before any emission.
             val placeholder = h.manager.contents.single()
             assertEquals("", placeholder.displayName)
             assertFalse(placeholder.isCloseable)
             assertSame(placeholder, h.manager.selectedContent)
+            assertEquals(0, applied.count.get(), "nothing applied yet")
         }
-        h.until("the first apply") { h.manager.contentCount == 1 }
-        delay(100)
+        // The empty source's emission, applied: the same single placeholder.
+        h.until("the empty source's apply") { applied.count.get() >= 1 }
         withContext(Dispatchers.EDT) {
-            assertEquals("", h.manager.contents.single().displayName)
-            assertSame(h.manager.contents.single(), h.manager.selectedContent)
+            val placeholder = h.manager.contents.single()
+            assertEquals("", placeholder.displayName)
+            assertFalse(placeholder.isCloseable)
+            assertSame(placeholder, h.manager.selectedContent)
+            assertTrue(h.controller.tabs.value.isEmpty())
         }
         h.withTabs(tab("a"), selected = "a")
         withContext(Dispatchers.EDT) { assertEquals(listOf("A"), h.manager.contents.map { it.displayName }) }
