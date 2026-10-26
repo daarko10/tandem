@@ -509,6 +509,17 @@ class SessionManager internal constructor(
     }
 
     /**
+     * Picks the permission mode [next] gives for session [id]'s chat as it stands (the mode cycle, spec 14.1) and returns it; null
+     * for an unknown id. The read and the pick are one step under the session's lock, so quick calls step one mode each. Never
+     * waits: a running process gets `set_permission_mode`, a stopped session starts with it.
+     */
+    fun cyclePermissionMode(id: SessionId, next: (ChatState) -> PermissionMode): PermissionMode? {
+        val mode = handle(id)?.pickMode(next) ?: return null
+        LOG.debug("cycled permission mode to ${mode.wire}")
+        return mode
+    }
+
+    /**
      * Picks an effort. A running process changes it from its next turn (`apply_flag_settings`); a stopped session starts with it
      * (`--effort`).
      */

@@ -494,6 +494,72 @@ class SessionManagerTest {
         assertEquals(0, frames().count { it.subtype() == "set_permission_mode" })
     }
 
+    /** A stand-in for `Modes.cycleFrom` (D13b): Manual → Accept edits → Plan → Manual, no mode yet counting as Manual. */
+    private val step: (ChatState) -> PermissionMode = {
+        when (it.permissionMode) {
+            PermissionMode.ACCEPT_EDITS -> PermissionMode.PLAN
+            PermissionMode.PLAN -> PermissionMode.DEFAULT
+            else -> PermissionMode.ACCEPT_EDITS
+        }
+    }
+
+    /** The modes of the `set_permission_mode` frames the host wrote, in order. */
+    private fun modeFrames(): List<String> = frames().filter { it.subtype() == "set_permission_mode" }
+        .map { it["request"]!!.jsonObject["mode"]!!.jsonPrimitive.content }
+
+    @Test
+    fun `two cyclePermissionMode calls with no reply between them send acceptEdits then plan`() = test {
+        val manager = manager() // plain-reply answers no control request
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        while (handle.liveSession() == null) delay(20)
+
+        assertEquals(PermissionMode.ACCEPT_EDITS, manager.cyclePermissionMode(handle.id, step))
+        assertEquals(PermissionMode.PLAN, manager.cyclePermissionMode(handle.id, step))
+        awaitLog { modeFrames().size == 2 }
+        assertEquals(listOf("acceptEdits", "plan"), modeFrames())
+        assertEquals(PermissionMode.PLAN, handle.state.value.permissionMode)
+    }
+
+    @Test
+    fun `a stopped session's cycle reaches the next spawn's --permission-mode`() = test {
+        val manager = manager()
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.stop(handle.id)
+
+        assertEquals(PermissionMode.ACCEPT_EDITS, manager.cyclePermissionMode(handle.id, step))
+        assertEquals(PermissionMode.PLAN, manager.cyclePermissionMode(handle.id, step))
+        manager.send(handle.id, "Reply with the single word: pong")
+        awaitLog { spawns().size == 2 }
+        assertEquals("plan", spawns().last().valueOf("--permission-mode"))
+        assertEquals(emptyList(), modeFrames(), "the picks made while stopped went into the flag")
+    }
+
+    @Test
+    fun `cyclePermissionMode on an unknown id gives null`() = test {
+        val manager = manager()
+        assertNull(manager.cyclePermissionMode("no-such-session", step))
+    }
+
+    @Test
+    fun `a cycle while a turn runs writes its frame at once`() = test {
+        // The turn waits on its permission request, and the fake reads (and logs) host frames while it waits for the answer: a
+        // frame in its log reached the process before the turn's result, which the fake writes only after that answer.
+        val manager = manager(fixtures = "permission")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Create the fixture file")
+        handle.status.await(SessionStatus.WAITING)
+
+        assertEquals(PermissionMode.ACCEPT_EDITS, manager.cyclePermissionMode(handle.id, step))
+        awaitLog { modeFrames().isNotEmpty() }
+        assertEquals(listOf("acceptEdits"), modeFrames())
+        val state = handle.state.value
+        assertTrue(state.busy, "the turn is still open")
+        assertEquals(0, state.turnsEnded)
+        manager.stop(handle.id)
+    }
+
     @Test
     fun `an effort pick on a stopped session sets the effort only`() = test {
         val manager = manager()

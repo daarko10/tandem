@@ -32,6 +32,17 @@ data class ChatState(
      */
     val permissionModeChanges: Map<String, PermissionModeChange> = emptyMap(),
     /**
+     * The modes the CLI refused to switch to (`set_permission_mode` answered with an error) while this process runs: the mode cycle
+     * skips them. A mode leaves when the CLI reports it (`system/status`, `system/init`); the set is cleared when the process ends.
+     */
+    val rejectedPermissionModes: Set<PermissionMode> = emptySet(),
+    /**
+     * The mode the process was started with (`--permission-mode`) until its first `system/init`, which is compared with it: the chat
+     * says so when the CLI started in another mode (hard rule 5). A pick on the live process before that init clears it, since the
+     * CLI's answer to that pick reports a refusal itself.
+     */
+    val launchPermissionMode: PermissionMode? = null,
+    /**
      * What Tandem passed with `--effort`, picked since (`apply_flag_settings`), or what a loaded transcript recorded: the recorded
      * `system/init` carries no effort.
      */
@@ -470,6 +481,8 @@ private fun ChatState.withNothingInProgress(): ChatState = copy(
     busy = false,
     pendingPermissions = emptyList(),
     permissionModeChanges = emptyMap(),
+    rejectedPermissionModes = emptySet(),
+    launchPermissionMode = null,
     effortChanges = emptyMap(),
     modelChanges = emptyMap(),
     ended = false,

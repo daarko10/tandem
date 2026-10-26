@@ -426,6 +426,17 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `the spawn's --permission-mode is the launch mode`() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val auto = SessionConfig("claude", tmp, sessionId = newSessionId, permissionMode = PermissionMode.AUTO)
+        assertEquals(PermissionMode.AUTO, ClaudeSession(scope, auto, fakeCli("true")).state.value.launchPermissionMode)
+        val none = SessionConfig("claude", tmp, sessionId = newSessionId)
+        val history = ChatState(launchPermissionMode = PermissionMode.PLAN)
+        assertEquals(null, ClaudeSession(scope, none, fakeCli("true"), initialState = history).state.value.launchPermissionMode)
+        scope.cancel()
+    }
+
+    @Test
     fun `a permission mode change shows before the CLI confirms it`() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("true"))

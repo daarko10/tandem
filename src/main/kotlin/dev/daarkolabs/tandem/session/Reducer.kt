@@ -189,6 +189,8 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
         permissionMode = event.mode,
         permissionModeChanges = event.requestId?.let { state.permissionModeChanges + (it to PermissionModeChange(event.mode, state.permissionMode)) }
             ?: state.permissionModeChanges,
+        // A live pick: the CLI's answer to it reports a refusal itself, so the first init no longer speaks for the launch mode.
+        launchPermissionMode = if (event.requestId != null) null else state.launchPermissionMode,
     )
     is SessionEvent.EffortRequested -> state.copy(
         effort = event.level,
@@ -412,6 +414,8 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
         ended = true,
         pendingPermissions = emptyList(),
         permissionModeChanges = emptyMap(),
+        rejectedPermissionModes = emptySet(),
+        launchPermissionMode = null,
         effortChanges = emptyMap(),
         modelChanges = emptyMap(),
         lastTurnEnd = end ?: state.lastTurnEnd,
@@ -430,9 +434,11 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
 private fun turnEndId(state: ChatState): String = "end-${state.turnsEnded + 1}"
 
 private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatState = when (message) {
-    is CliMessage.SystemInit -> state.copy(
+    is CliMessage.SystemInit -> state.checkLaunchMode(message.permissionMode).copy(
         sessionId = message.sessionId.ifEmpty { state.sessionId },
         permissionMode = message.permissionMode ?: state.permissionMode,
+        rejectedPermissionModes = state.rejectedPermissionModes - setOfNotNull(message.permissionMode),
+        launchPermissionMode = null,
         claudeCodeVersion = message.claudeCodeVersion ?: state.claudeCodeVersion,
         cwd = message.cwd ?: state.cwd,
         modelSwitchPending = false,
@@ -444,7 +450,10 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         additionalDirectories = message.additionalDirectories,
         cliCapabilities = message.capabilities.toSet(),
     ).checkModel(message.model)
-    is CliMessage.SystemStatus -> state.copy(permissionMode = message.permissionMode ?: state.permissionMode)
+    is CliMessage.SystemStatus -> state.copy(
+        permissionMode = message.permissionMode ?: state.permissionMode,
+        rejectedPermissionModes = state.rejectedPermissionModes - setOfNotNull(message.permissionMode),
+    )
     is CliMessage.ApiRetry -> state.notice(NoticeLevel.INFO, retryText(message))
     is CliMessage.ModelRefusalFallback -> {
         val text = "${message.originalModel} declined this request; " +
@@ -645,8 +654,19 @@ private fun ChatState.rejectModeChange(requestId: String, change: PermissionMode
     val reason = error?.let { " ($it)" }.orEmpty()
     // What the CLI is in now: with a later change still waiting, that change shows, but the CLI stays where it was.
     val now = (if (next == null) mode else change.previous)?.let { "; it stays ${it.wire}." } ?: "."
-    return copy(permissionMode = mode, permissionModeChanges = pending)
+    return copy(permissionMode = mode, permissionModeChanges = pending, rejectedPermissionModes = rejectedPermissionModes + change.requested)
         .notice(NoticeLevel.ERROR, "The CLI rejected the switch to permission mode ${change.requested.wire}$reason$now")
+}
+
+/**
+ * The first `system/init` after a spawn reports [reported]: when the spawn passed another `--permission-mode`
+ * ([ChatState.launchPermissionMode], still set: no live pick came first), the chat says so rather than switching the shown mode in
+ * silence (hard rule 5). An init without a mode says nothing.
+ */
+private fun ChatState.checkLaunchMode(reported: PermissionMode?): ChatState {
+    val launched = launchPermissionMode
+    if (launched == null || reported == null || launched == reported) return this
+    return notice(NoticeLevel.WARNING, "The CLI started in permission mode ${reported.wire}, not ${launched.wire} as picked.")
 }
 
 /**

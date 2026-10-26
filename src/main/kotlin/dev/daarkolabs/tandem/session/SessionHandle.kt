@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.promptTitle
 import kotlinx.coroutines.CoroutineName
@@ -389,6 +390,18 @@ class SessionHandle internal constructor(
                 publishLocked(reduce(mutableState.value, stopped), attached = false)
             }
         }
+    }
+
+    /**
+     * Picks the mode [next] gives for the chat as it stands, and returns it. Read and pick are one step under the lock, from the live
+     * process's own state, which already holds every earlier pick ([ClaudeSession.setPermissionMode] changes it at once), else from
+     * the chat: quick presses step one mode each. A running process switches (`set_permission_mode`); a stopped session starts
+     * with it (`--permission-mode`). Nothing here waits: the frame is queued for the process's writer.
+     */
+    internal fun pickMode(next: (ChatState) -> PermissionMode): PermissionMode = synchronized(lock) {
+        val mode = next(liveLocked()?.state?.value ?: mutableState.value)
+        pick(live = { it.setPermissionMode(mode) }, stopped = SessionEvent.PermissionModeRequested(mode))
+        mode
     }
 
     /** Shows a notice in the chat: through the running process, whose state the chat follows, or straight in the chat without one. */

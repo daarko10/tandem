@@ -207,6 +207,7 @@ class ClaudeSession(
             requestedModel = config.model ?: initialState.requestedModel,
             permissionMode = config.permissionMode ?: initialState.permissionMode,
             effort = config.effort ?: initialState.effort,
+            launchPermissionMode = config.permissionMode,
         ),
     )
     private val outbox = Channel<JsonObject>(Channel.UNLIMITED)

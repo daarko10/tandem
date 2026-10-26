@@ -441,6 +441,64 @@ class ReducerTest {
     }
 
     @Test
+    fun `an init whose mode differs from the spawn's --permission-mode says so`() {
+        val init = SessionEvent.Cli(at("permission-mode", 5)) // "permissionMode":"default"
+        val state = reduce(ChatState(launchPermissionMode = PermissionMode.AUTO), init)
+        val warnings = state.entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == NoticeLevel.WARNING }
+        assertEquals(listOf("The CLI started in permission mode default, not auto as picked."), warnings.map { it.text })
+        assertEquals(PermissionMode.DEFAULT, state.permissionMode)
+        assertNull(state.launchPermissionMode)
+
+        val same = reduce(ChatState(launchPermissionMode = PermissionMode.DEFAULT), init)
+        assertTrue(same.entries.none { it is ChatEntry.Notice }, "the CLI started as picked")
+        assertNull(same.launchPermissionMode)
+
+        val second = reduce(state, init)
+        assertEquals(1, second.entries.count { it is ChatEntry.Notice }, "only the first init after the spawn is checked")
+    }
+
+    @Test
+    fun `a pick before the first init cancels the launch-mode check`() {
+        var state = ChatState(launchPermissionMode = PermissionMode.ACCEPT_EDITS)
+        state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "r1"))
+        state = reduce(state, success("r1"))
+        state = reduce(state, edited("permission-mode", 5) { it["permissionMode"] = JsonPrimitive("plan") })
+        assertTrue(state.entries.none { it is ChatEntry.Notice && it.level == NoticeLevel.WARNING })
+        assertEquals(PermissionMode.PLAN, state.permissionMode)
+        assertNull(state.launchPermissionMode)
+
+        val silent = reduce(ChatState(launchPermissionMode = PermissionMode.ACCEPT_EDITS), edited("permission-mode", 5) { it.remove("permissionMode") })
+        assertTrue(silent.entries.none { it is ChatEntry.Notice && it.level == NoticeLevel.WARNING }, "an init without a mode says nothing")
+        assertNull(silent.launchPermissionMode)
+    }
+
+    @Test
+    fun `a refused mode joins rejectedPermissionModes, a reported one leaves, Ended clears them`() {
+        var state = ChatState()
+        for (line in Fixtures.lines("permission-mode-rejected")) {
+            val message = Ndjson.decode(line)
+            if (message is CliMessage.ControlResponse && !message.isSuccess) {
+                state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.BYPASS_PERMISSIONS, message.requestId))
+            }
+            state = reduce(state, SessionEvent.Cli(message))
+        }
+        assertEquals(setOf(PermissionMode.BYPASS_PERMISSIONS), state.rejectedPermissionModes)
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().single { it.level == NoticeLevel.ERROR }
+        assertEquals(
+            "The CLI rejected the switch to permission mode bypassPermissions (Cannot set permission mode to bypassPermissions " +
+                "because the session was not launched with --dangerously-skip-permissions); it stays default.",
+            notice.text,
+        )
+
+        val reported = reduce(state, cli("""{"type":"system","subtype":"status","status":null,"permissionMode":"bypassPermissions","uuid":"u","session_id":"s"}"""))
+        assertEquals(emptySet(), reported.rejectedPermissionModes)
+
+        val auto = ChatState(rejectedPermissionModes = setOf(PermissionMode.AUTO))
+        assertEquals(emptySet(), reduce(auto, SessionEvent.Ended("x", isError = false)).rejectedPermissionModes)
+        assertEquals(emptySet(), auto.settled().rejectedPermissionModes)
+    }
+
+    @Test
     fun `two picks both rejected go back to the mode the CLI kept, in either order`() {
         for (order in listOf(listOf("tandem-1", "tandem-2"), listOf("tandem-2", "tandem-1"))) {
             var state = ChatState(permissionMode = PermissionMode.DEFAULT)
