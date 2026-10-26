@@ -2017,6 +2017,70 @@ class ReducerTest {
         assertEquals(listOf(QF), source.pendingSends.map { it.uuid }, "the source keeps its waiting message")
         assertEquals(listOf("g"), source.returnedSends.map { it.uuid })
     }
+
+    // --- Fork from any reply (spec 13.1, 13.2, 9.7) ---
+
+    private fun ChatState.assistant(messageId: String): ChatEntry.Assistant = assistants().single { it.messageId == messageId }
+
+    // spec: lastUuid is the latest complete line
+    @Test
+    fun `lastUuid is the latest complete line`() {
+        val forkAt = replay("fork-at")
+        assertEquals("<uuid-14>", forkAt[11].assistants().single().lastUuid)
+        assertNull(forkAt[10].assistants().single().lastUuid, "a message drafted from deltas only has no fork point")
+
+        // One message over two complete lines (its thinking line, then its text line), as recorded.
+        val mode = replay("permission-mode")
+        assertEquals("<uuid-36>", mode[33].assistant("<id-28>").lastUuid)
+        assertEquals("<uuid-41>", mode[34].assistant("<id-28>").lastUuid)
+
+        val loaded = runBlocking { TranscriptReader.read(Fixtures.transcript("fork-at-origin")) }.state
+        assertEquals("<uuid-14>", loaded.assistants().first().lastUuid, "the transcript's uuid is the stream's")
+    }
+
+    /** `fork-at`'s origin (:1 to :55) with its three prompts sent before their inits, as the host would have sent them. */
+    private fun forkAtOrigin(): ChatState {
+        val sends = mapOf(
+            5 to listOf(SessionEvent.UserSent("<command_uuid-4>", ALPHA_PROMPT)),
+            18 to listOf(SessionEvent.UserSent("<command_uuid-21>", BRAVO_PROMPT)),
+            44 to listOf(SessionEvent.UserSent("<command_uuid-53>", CHARLIE_PROMPT)),
+        )
+        return hostReplay("fork-at", sends, skip = (56..Fixtures.lines("fork-at").size).toSet())[55]
+    }
+
+    // spec: forkedAt keeps the turn and stops at the next User or Shell
+    @Test
+    fun `forkedAt keeps the turn and stops at the next User or Shell`() {
+        val bravoTask = TaskInfo("t-bravo", "<id-28>", null, null, null, null, null, null, null, null)
+        val origin = forkAtOrigin().copy(tasks = mapOf("t-bravo" to bravoTask))
+        assertEquals(listOf(ALPHA_PROMPT, BRAVO_PROMPT, CHARLIE_PROMPT), origin.entries.filterIsInstance<ChatEntry.User>().map { it.text })
+        assertNotNull(origin.context, "the original's ring has a value")
+
+        val fork = assertNotNull(origin.forkedAt("<uuid-14>"))
+        assertEquals(listOf(ALPHA_PROMPT), fork.entries.filterIsInstance<ChatEntry.User>().map { it.text })
+        val end = assertIs<ChatEntry.TurnEnded>(fork.entries.last(), "the turn and its footer stay")
+        assertEquals(origin.entries.filterIsInstance<ChatEntry.TurnEnded>().first(), end)
+        assertEquals("OK", fork.text())
+        assertTrue(fork.entryIndex.isEmpty())
+        assertNull(fork.context)
+        assertTrue(fork.tasks.values.none { it.toolUseId == "<id-28>" }, "no task of BRAVO's Bash call")
+        assertFalse(fork.busy)
+        assertEquals(origin.entries.subList(0, fork.entries.size), fork.entries)
+
+        // A shell escape right after turn one ends the cut as a prompt does.
+        val afterTurnOne = origin.entries.indexOf(end) + 1
+        val shell = ChatEntry.Shell("sh-1", "ls", "", running = false)
+        val withShell = origin.copy(
+            entries = origin.entries.subList(0, afterTurnOne) + shell + origin.entries.subList(afterTurnOne, origin.entries.size),
+            entryIndex = emptyMap(),
+        )
+        assertEquals(fork.entries, assertNotNull(withShell.forkedAt("<uuid-14>")).entries)
+
+        assertNull(origin.forkedAt("nope"))
+        val agents = replay("agent-sync").last()
+        assertTrue(agents.assistants().any { "<uuid-50>" in it.uuids && it.parentToolUseId != null }, "agent-sync:42 is a subagent's line")
+        assertNull(agents.forkedAt("<uuid-50>"))
+    }
 }
 
 /** A complete main-thread `assistant` line with one text block. */
@@ -2031,3 +2095,9 @@ private const val QF1: String = "<command_uuid-29>"
 private const val QP2: String = "<command_uuid-47>"
 private const val QF2: String = "<command_uuid-68>"
 private const val KIWI: String = "Also say the word KIWI at the end."
+
+// The fork-at origin's three prompts (transcripts/fork-at-origin.jsonl:5, :27, :35).
+private const val ALPHA_PROMPT: String = "Remember the word ALPHA. Reply with exactly one word: OK"
+private const val BRAVO_PROMPT: String =
+    "Remember the word BRAVO. First run the shell command `echo hi` with the Bash tool, then reply with exactly one word: OK"
+private const val CHARLIE_PROMPT: String = "Remember the word CHARLIE. Reply with exactly one word: OK"

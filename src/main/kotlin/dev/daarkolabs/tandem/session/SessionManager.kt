@@ -83,6 +83,18 @@ data class NewSessionOptions(val model: String? = null, val effort: String? = nu
  */
 data class CommandCatalogue(val commands: List<SlashCommand> = emptyList(), val terminal: Set<String> = emptySet())
 
+/** What [SessionManager.forkResult] did: [Started] a fork, or [Refused] to, with the reason the chat shows (hard rule 5). */
+sealed interface ForkResult {
+    /** The fork, added, selected and starting. */
+    data class Started(val handle: SessionHandle) : ForkResult
+
+    /**
+     * Nothing forked: [NO_TRANSCRIPT], there is no transcript to fork yet; [NOT_IN_HISTORY], the line asked for is no main-thread
+     * reply line of the session's history; [BUSY], a turn started before the original's idle process could stop (spec 13.1).
+     */
+    enum class Refused : ForkResult { NO_TRANSCRIPT, NOT_IN_HISTORY, BUSY }
+}
+
 /**
  * The sessions of one project. Each open session has a [SessionHandle] in [sessions], which runs its own `claude` process
  * ([ClaudeSession]) while it is live; [summaries] lists every session the CLI has for the project, from [index].
@@ -297,17 +309,33 @@ class SessionManager internal constructor(
     }
 
     /**
-     * Forks session [id]: a new session, with a new id, that goes on from [id]'s history while [id] stays as it is. The fork is
-     * added to [sessions], selected and returned at once, and its process starts in the background, as for [create]. Null if [id]
-     * has no transcript yet, since there is nothing to fork then.
-     *
-     * The fork starts from [id]'s settled history: the open session's chat, else its transcript's. Its title is
-     * "<title of [id]> (fork)" at once, and the CLI is told so (`rename_session`) as soon as the fork's process reports its first
-     * `system/init`, which comes with its first prompt: the CLI does not title a fork itself. [SessionSpawner.configFor] says how a fork starts.
+     * Forks session [id]: a new session, with a new id, that goes on from [id]'s history while [id] stays as it is, or, with
+     * [atMessage], from that history up to the end of the turn whose main-thread reply holds the line [atMessage]
+     * ([ChatState.forkedAt], `--resume-session-at`, spec 13.1). The fork is added to [sessions], selected and returned at once,
+     * and its process starts in the background, as for [create]. Null when nothing forked; [forkResult] says why.
      */
-    suspend fun fork(id: SessionId): SessionHandle? {
-        val file = withContext(Dispatchers.IO) { index.transcript(id) } ?: return null
+    suspend fun fork(id: SessionId, atMessage: String? = null): SessionHandle? =
+        (forkResult(id, atMessage) as? ForkResult.Started)?.handle
+
+    /**
+     * [fork], with the reason when nothing forked: [ForkResult.Refused.NO_TRANSCRIPT] when there is no transcript to fork yet,
+     * [ForkResult.Refused.NOT_IN_HISTORY] when [atMessage] is no main-thread reply line of [id]'s history.
+     *
+     * The transcript forked is [id]'s; a fork with none of its own yet (no prompt sent) shows its original's lines, so it forks its
+     * original again, at its own cut unless [atMessage] names another. The fork starts from [id]'s settled history: the open
+     * session's chat, else its transcript's. Its title is "<title of [id]> (fork)" at once, and the CLI is told so
+     * (`rename_session`) as soon as the fork's process reports its first `system/init`, which comes with its first prompt: the CLI
+     * does not title a fork itself. [SessionSpawner.configFor] says how a fork starts. Tandem never falls back to a whole fork: an
+     * argv the CLI refuses shows in the fork's chat through the result and exit paths.
+     */
+    suspend fun forkResult(id: SessionId, atMessage: String? = null): ForkResult {
         val original = handle(id)
+        val own = withContext(Dispatchers.IO) { index.transcript(id) }
+        val inherited = original?.forkOf?.takeIf { own == null }
+        val source = inherited ?: id
+        val file = own
+            ?: inherited?.let { withContext(Dispatchers.IO) { index.transcript(it) } }
+            ?: return ForkResult.Refused.NO_TRANSCRIPT
         val (history, title) = if (original != null) {
             // A message waiting in the original stays the original's (spec 12.5).
             original.state.value.forkHistory() to original.title.value
@@ -315,16 +343,19 @@ class SessionManager internal constructor(
             val (loaded, loadedTitle) = load(id, file)
             loaded to (loadedTitle ?: id)
         }
+        val start = if (atMessage == null) history else history.forkedAt(atMessage) ?: return ForkResult.Refused.NOT_IN_HISTORY
+        val cut = atMessage ?: original?.forkAt?.takeIf { inherited != null }
         val forkId = UUID.randomUUID().toString()
         val fork = synchronized(lock) {
             // Its id comes with its first system/init: until then the state carries none, not the original's.
-            val (fork, _) = registerLocked(forkId, history.copy(sessionId = null), forkOf = id, pendingTitle = "$title (fork)")
+            val (fork, _) =
+                registerLocked(forkId, start.copy(sessionId = null), forkOf = source, forkAt = cut, pendingTitle = "$title (fork)")
             selectLocked(forkId)
             fork
         }
         spawner.startInBackground(fork, forPrompts = false)
-        LOG.info("session $id forked as $forkId")
-        return fork
+        LOG.info("session $id forked as $forkId" + if (cut != null) " at a reply" else " whole")
+        return ForkResult.Started(fork)
     }
 
     /** Offers [models], the list remembered from an earlier IDE run, as [SessionManager.models] until a process lists them. */
@@ -880,17 +911,18 @@ class SessionManager internal constructor(
     }
 
     /**
-     * The open handle for [id] and false, or a new one with [state], added to [sessions], and true. [forkOf] and [pendingTitle] are
-     * a fork's, see [SessionHandle].
+     * The open handle for [id] and false, or a new one with [state], added to [sessions], and true. [forkOf], [forkAt] and
+     * [pendingTitle] are a fork's, see [SessionHandle].
      */
     private fun registerLocked(
         id: SessionId,
         state: ChatState,
         forkOf: SessionId? = null,
+        forkAt: String? = null,
         pendingTitle: String? = null,
     ): Pair<SessionHandle, Boolean> {
         handle(id)?.let { return it to false }
-        val handle = SessionHandle(id, scope, state, listing, clock(), forkOf, pendingTitle)
+        val handle = SessionHandle(id, scope, state, listing, clock(), forkOf, forkAt, pendingTitle)
         addLocked(handle)
         return handle to true
     }

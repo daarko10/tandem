@@ -60,6 +60,11 @@ class SessionHandle internal constructor(
     createdAt: Long,
     /** The session this one is a fork of: its processes fork that one again for as long as this one has no transcript. */
     internal val forkOf: SessionId? = null,
+    /**
+     * With [forkOf]: the line of [forkOf]'s transcript this fork starts after (`--resume-session-at`, spec 13.1); null for a whole
+     * fork. Passed, as [forkOf] is, until this session has a transcript of its own.
+     */
+    internal val forkAt: String? = null,
     /** A title the CLI is still to be told, such as a fork's: shown at once, and sent once a process reports its `system/init`. */
     pendingTitle: String? = null,
 ) {

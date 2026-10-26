@@ -61,9 +61,11 @@ import java.util.concurrent.TimeUnit
 import kotlin.io.path.appendText
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.readBytes
 import kotlin.io.path.readLines
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -161,9 +163,9 @@ class SessionManagerTest {
 
     private fun test(block: suspend CoroutineScope.() -> Unit): Unit = runBlocking { withTimeout(30_000, block) }
 
-    /** Writes the `history-reply` transcript as session [id]'s, through [edit]. */
-    private fun seed(id: String, edit: (String) -> String = { it }) {
-        folder.resolve("$id.jsonl").writeText(edit(Fixtures.transcript("history-reply").readText()))
+    /** Writes the [fixture] transcript (by default `history-reply`) as session [id]'s, through [edit]. */
+    private fun seed(id: String, fixture: String = "history-reply", edit: (String) -> String = { it }) {
+        folder.resolve("$id.jsonl").writeText(edit(Fixtures.transcript(fixture).readText()))
     }
 
     /** The complete lines of the fake's log: a `__spawn__` line per process, then each frame the host wrote to that process. */
@@ -1068,6 +1070,95 @@ class SessionManagerTest {
         assertEquals(listOf(created), manager.sessions.value)
         assertNull(manager.selected.value)
         assertEquals(1, spawns().size)
+    }
+
+    /** The arguments of the process started for session [id] (its `--session-id`), once there is one, from `--resume` on. */
+    private suspend fun forkTail(id: String): List<String> {
+        awaitLog { spawns().any { it.valueOf("--session-id") == id } }
+        val argv = spawns().single { it.valueOf("--session-id") == id }
+        return argv.subList(argv.indexOf("--resume"), argv.size)
+    }
+
+    // spec: fork at a reply resumes with --resume-session-at and starts from the history up to that turn
+    @Test
+    fun `fork at a reply resumes with --resume-session-at and starts from the history up to that turn`() = test {
+        seed(seeded, fixture = "fork-at-origin")
+        val transcript = folder.resolve("$seeded.jsonl").readBytes()
+        val manager = manager()
+        val original = manager.open(seeded, spawn = false)
+        manager.refreshIndex()
+        original.title.await("Remember word ALPHA")
+        val history = original.state.value
+        assertEquals(3, history.prompts().size)
+        val x = assertNotNull(history.entries.filterIsInstance<ChatEntry.Assistant>().first().lastUuid)
+        assertEquals("<uuid-14>", x)
+
+        val fork = assertNotNull(manager.fork(seeded, x))
+        val tail = listOf("--resume", seeded, "--fork-session", "--session-id", fork.id, "--resume-session-at", "<uuid-14>")
+        assertEquals(tail, forkTail(fork.id))
+        assertEquals(listOf("Remember the word ALPHA. Reply with exactly one word: OK"), fork.state.value.prompts())
+        assertEquals("Remember word ALPHA (fork)", fork.title.value)
+        assertEquals(fork.id, manager.selected.value)
+        assertEquals(listOf(original, fork), manager.sessions.value)
+        assertSame(history, original.state.value, "the original's chat is untouched")
+        assertEquals("Remember word ALPHA", original.title.value)
+        assertContentEquals(transcript, folder.resolve("$seeded.jsonl").readBytes())
+
+        // Until the fork has a transcript of its own, every process forks at the same line.
+        manager.stop(fork.id)
+        manager.send(fork.id, "Which words do you remember?")
+        awaitLog { spawns().size == 2 }
+        assertEquals(tail, spawns().last().let { it.subList(it.indexOf("--resume"), it.size) })
+        fork.state.first { s -> !s.busy && s.prompts().size == 2 && s.entries.last() is ChatEntry.TurnEnded }
+
+        // Once it has, it resumes as itself.
+        seed(fork.id)
+        manager.stop(fork.id)
+        manager.send(fork.id, "And once more")
+        awaitLog { spawns().size == 3 }
+        val last = spawns().last()
+        assertEquals(fork.id, last.valueOf("--resume"))
+        assertFalse("--fork-session" in last)
+        assertFalse("--resume-session-at" in last)
+        assertContentEquals(transcript, folder.resolve("$seeded.jsonl").readBytes())
+    }
+
+    // spec: fork at a uuid not in the history gives null and starts nothing
+    @Test
+    fun `fork at a uuid not in the history gives null and starts nothing`() = test {
+        seed(seeded, fixture = "fork-at-origin")
+        val manager = manager()
+        val original = manager.open(seeded, spawn = false)
+        assertNull(manager.fork(seeded, "no-such-uuid"))
+        assertEquals(ForkResult.Refused.NOT_IN_HISTORY, manager.forkResult(seeded, "no-such-uuid"))
+        assertEquals(listOf(original), manager.sessions.value)
+        assertNull(manager.selected.value)
+
+        val created = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id))
+        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id, "<uuid-14>"))
+        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult("not-a-session-id"))
+        assertEquals(listOf(original, created), manager.sessions.value)
+        assertNull(manager.selected.value)
+        assertEquals(1, spawns().size, "only the new session's process started")
+    }
+
+    // spec: a fork without a transcript forks its original at the same line
+    @Test
+    fun `a fork without a transcript forks its original at the same line`() = test {
+        seed(seeded, fixture = "fork-at-origin")
+        val manager = manager(maxLive = 8)
+        val f = assertNotNull(manager.fork(seeded)) // no prompt: no transcript of its own
+        val g = assertNotNull(manager.fork(f.id, "<uuid-14>"))
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", g.id, "--resume-session-at", "<uuid-14>"), forkTail(g.id))
+        assertEquals(listOf("Remember the word ALPHA. Reply with exactly one word: OK"), g.state.value.prompts())
+
+        val h = assertNotNull(manager.fork(seeded, "<uuid-14>"))
+        val i = assertNotNull(manager.fork(h.id))
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", i.id, "--resume-session-at", "<uuid-14>"), forkTail(i.id))
+        assertEquals(h.state.value.entries, i.state.value.entries)
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", f.id), forkTail(f.id))
     }
 
     @Test

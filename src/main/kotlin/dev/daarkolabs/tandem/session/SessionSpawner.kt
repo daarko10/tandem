@@ -218,7 +218,8 @@ internal class SessionSpawner(
      * Either mistake fails again on every retry, so the transcript itself decides.
      *
      * A fork ([SessionHandle.forkOf]) without a transcript of its own starts as `--resume <original> --fork-session --session-id <id>`,
-     * after a stop too, so that it never goes on as an empty session; once its transcript exists it resumes as itself. Tandem gives
+     * after a stop too, so that it never goes on as an empty session; once its transcript exists it resumes as itself. A fork at a
+     * reply ([SessionHandle.forkAt]) adds `--resume-session-at <uuid>` on the same terms (spec 13.1). Tandem gives
      * the fork its id because no `system/init` tells it before the fork's first prompt. Measured with 2.1.301, sending only
      * `initialize` (docs/protocol.md lists the conditions under Sources):
      * - `--resume <x>` and `--resume <x> --fork-session` answer `initialize` and send no `system/init` until the first prompt, and
@@ -249,6 +250,7 @@ internal class SessionSpawner(
             effort = chat.effort,
             permissionMode = if (mode == null || mode in OFFERED_MODES) mode else PermissionMode.DEFAULT,
             forkSession = forkOf != null,
+            resumeSessionAt = handle.forkAt.takeIf { forkOf != null },
         )
     }
 

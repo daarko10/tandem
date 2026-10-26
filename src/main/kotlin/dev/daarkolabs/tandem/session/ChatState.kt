@@ -8,6 +8,7 @@ import dev.daarkolabs.tandem.protocol.PluginInfo
 import dev.daarkolabs.tandem.protocol.SessionUsage
 import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.protocol.UsageHistory
+import kotlinx.collections.immutable.toPersistentList
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
@@ -311,6 +312,11 @@ sealed interface ChatEntry {
         val subagentType: String? = null,
         val taskDescription: String? = null,
         val atMillis: Long? = null,
+        /**
+         * The uuid of its latest complete line, where a fork at this message cuts (`--resume-session-at`, spec 13.1); null for a
+         * message drafted from stream deltas only.
+         */
+        val lastUuid: String? = null,
     ) : ChatEntry
 
     /**
@@ -478,6 +484,29 @@ private fun ChatState.withNothingInProgress(): ChatState = copy(
  * added: a waiting message stays the original's and still runs there.
  */
 internal fun ChatState.forkHistory(): ChatState = copy(pendingSends = emptyList(), returnedSends = emptyList()).settled()
+
+/**
+ * The history a fork at [uuid] starts from (spec 13.1): [forkHistory] up to the first main-thread [ChatEntry.Assistant] whose
+ * [ChatEntry.Assistant.uuids] hold [uuid], and on to the next [ChatEntry.User] or [ChatEntry.Shell] entry after it, so that its
+ * whole turn and the turn's footer stay. The ring waits for the fork's first turn ([ChatState.context] null), and only the tasks of
+ * calls still shown stay. Null when no main-thread assistant entry holds [uuid] (a subagent's line, or none of this history's).
+ */
+internal fun ChatState.forkedAt(uuid: String): ChatState? {
+    val history = forkHistory()
+    val entries = history.entries
+    val at = entries.indexOfFirst { it is ChatEntry.Assistant && it.parentToolUseId == null && uuid in it.uuids }
+    if (at < 0) return null
+    val next = (at + 1 until entries.size).firstOrNull { entries[it] is ChatEntry.User || entries[it] is ChatEntry.Shell }
+    val kept = entries.subList(0, next ?: entries.size).toPersistentList()
+    val calls = kept.asSequence().filterIsInstance<ChatEntry.Assistant>().flatMap { it.blocks }
+        .filterIsInstance<AssistantBlock.ToolUse>().mapTo(HashSet()) { it.id }
+    return history.copy(
+        entries = kept,
+        entryIndex = emptyMap(),
+        context = null,
+        tasks = history.tasks.filterValues { it.toolUseId in calls },
+    )
+}
 
 /** This notice with each part of its usage card that is still loading turned [McpError.Ended]; the same instance when none is. */
 internal fun ChatEntry.Notice.withUsageEnded(): ChatEntry.Notice {
