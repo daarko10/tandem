@@ -28,6 +28,12 @@ sealed interface CliMessage {
         val slashCommands: List<String> = emptyList(),
         /** `terminal_slash_commands`: the names of the commands that only work in the CLI's own terminal. */
         val terminalSlashCommands: List<String> = emptyList(),
+        /** `plugins`: the session's plugins, built-in ones included ([PluginInfo.builtin]). */
+        val plugins: List<PluginInfo> = emptyList(),
+        /** `additional_directories`: the folders the CLI was given with `--add-dir`. */
+        val additionalDirectories: List<String> = emptyList(),
+        /** `skills`: the names of the session's skills, in the CLI's order; the one list that tells a skill from a command. */
+        val skills: List<String> = emptyList(),
         override val raw: JsonObject,
     ) : CliMessage
 

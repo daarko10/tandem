@@ -58,6 +58,9 @@ object Ndjson {
                 mcpServers = o.objects("mcp_servers").mapNotNull(::mcpServerSummary),
                 slashCommands = o.strings("slash_commands"),
                 terminalSlashCommands = o.strings("terminal_slash_commands"),
+                plugins = o.objects("plugins").mapNotNull(::pluginInfo),
+                additionalDirectories = o.strings("additional_directories"),
+                skills = o.strings("skills"),
                 raw = o,
             )
         }

@@ -117,6 +117,14 @@ object HostMessages {
         put("serverName", serverName)
     }
 
+    /** Asks for the context window by category (`get_context_usage`, probes 3.2). */
+    fun getContextUsage(requestId: String): JsonObject = request(requestId, "get_context_usage") {}
+
+    /** Asks for the session's cost and, unless [skipBehaviors], the machine's usage history (`get_usage`, probes 3.2). */
+    fun getUsage(requestId: String, skipBehaviors: Boolean): JsonObject = request(requestId, "get_usage") {
+        if (skipBehaviors) put("skip_behaviors", true)
+    }
+
     /** Allows a `can_use_tool` request. Always echo the (possibly edited) input. */
     fun allow(requestId: String, toolUseId: String?, updatedInput: JsonObject, updatedPermissions: List<JsonObject> = emptyList()): JsonObject =
         success(requestId) {

@@ -88,6 +88,19 @@ class HostMessagesTest {
     }
 
     @Test
+    fun `the parity requests match the probe frames`() {
+        assertEquals("""{"type":"control_request","request_id":"c1","request":{"subtype":"get_context_usage"}}""", wire(HostMessages.getContextUsage("c1")))
+        assertEquals(
+            """{"type":"control_request","request_id":"u1","request":{"subtype":"get_usage","skip_behaviors":true}}""",
+            wire(HostMessages.getUsage("u1", skipBehaviors = true)),
+        )
+        assertEquals(
+            """{"type":"control_request","request_id":"u2","request":{"subtype":"get_usage"}}""",
+            wire(HostMessages.getUsage("u2", skipBehaviors = false)),
+        )
+    }
+
+    @Test
     fun `the four mcp requests match the probe frames`() {
         assertEquals("""{"type":"control_request","request_id":"m1","request":{"subtype":"mcp_status"}}""", wire(HostMessages.mcpStatus("m1")))
         assertEquals(

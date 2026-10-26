@@ -804,4 +804,153 @@ class FixtureDecodeTest {
         assertEquals(listOf("<command_uuid-10>"), prompt.userMessageUuids)
         assertEquals("bash-mode-probe", prompt.result)
     }
+
+    private fun contextUsage(line: Int): ContextBreakdown =
+        assertNotNull(ControlPayloads.contextUsage(response("parity-context", line).payload))
+
+    private fun usage(line: Int): UsageAnswer = assertNotNull(ControlPayloads.usage(response("parity-usage", line).payload))
+
+    // spec: parity-context: the breakdown after a turn decodes every category
+    @Test
+    fun `parity-context - the breakdown after a turn decodes every category`() {
+        val b17 = contextUsage(17)
+        assertEquals(
+            listOf(
+                "system_prompt", "system_tools", "system_tools_deferred", "memory_files", "skills", "messages", "autocompact_buffer",
+                "free_space",
+            ),
+            b17.categories.map { it.id },
+        )
+        assertEquals(listOf("used", "used", "deferred", "used", "used", "used", "buffer", "free"), b17.categories.map { it.kind })
+        assertEquals(38032L, b17.categories.filter { it.kind == "used" }.sumOf { it.tokens })
+        assertEquals(38032L, b17.totalTokens)
+        assertEquals(1_000_000L, b17.maxTokens)
+        assertEquals(1_000_000L, b17.rawMaxTokens)
+        assertEquals(4, b17.percentage)
+        assertEquals("claude-sonnet-5-5", b17.model)
+        val deferred = b17.categories.single { it.deferred }
+        assertEquals("system_tools_deferred" to 22275L, deferred.id to deferred.tokens)
+        assertEquals(listOf(MemoryFileUsage("<path>", "Project", 4300)), b17.memoryFiles)
+        assertEquals(listOf(McpToolUsage("mcp__echo__echo", "echo", 0, false)), b17.mcpTools)
+        assertEquals(36, b17.skills.size)
+        assertEquals(3155L, b17.skills.sumOf { it.tokens })
+        assertEquals(SkillUsage("probe-kit:greet", "plugin", "probe-kit", 22), b17.skills.single { it.name == "probe-kit:greet" })
+        assertTrue(b17.mcpInstructions.isEmpty())
+        assertTrue(b17.agents.isEmpty())
+    }
+
+    // spec: parity-context: the breakdown before the first turn
+    @Test
+    fun `parity-context - the breakdown before the first turn`() {
+        val b2 = contextUsage(2)
+        assertTrue(b2.mcpTools.isEmpty())
+        assertEquals(10L, b2.categories.single { it.id == "messages" }.tokens)
+        assertEquals(30909L, b2.totalTokens)
+        assertEquals(3, b2.percentage)
+    }
+
+    // spec: parity-context: summary has no messages row and a deferred MCP row
+    @Test
+    fun `parity-context - summary has no messages row and a deferred MCP row`() {
+        val b18 = contextUsage(18)
+        assertTrue(b18.categories.none { it.id == "messages" })
+        val mcp = b18.categories.single { it.id == "mcp_tools_deferred" }
+        assertTrue(mcp.deferred)
+        assertEquals(120L, mcp.tokens)
+        assertEquals(42383L, b18.totalTokens)
+    }
+
+    // spec: parity-context: an unknown subtype is an error with the CLI's text
+    @Test
+    fun `parity-context - an unknown subtype is an error with the CLI's text`() {
+        val answer = response("parity-context", 19)
+        assertEquals(false, answer.isSuccess)
+        assertEquals("Unsupported control request subtype: get_context_breakdown", answer.error)
+        assertNull(ControlPayloads.contextUsage(answer.payload))
+    }
+
+    // spec: parity-usage: get_usage without the scan has the session and no history
+    @Test
+    fun `parity-usage - get_usage without the scan has the session and no history`() {
+        val u16 = usage(16)
+        val session = assertNotNull(u16.session)
+        assertEquals(0.1523063, session.totalCostUsd)
+        assertEquals(4192L, session.apiDurationMs)
+        assertEquals(7234L, session.wallDurationMs)
+        assertEquals(listOf("claude-haiku-5-5", "claude-sonnet-5-5"), session.models.map { it.first })
+        assertEquals(ModelTokens(2, 3, 0, 38037, 0.152182, webSearches = 0), session.models[1].second)
+        assertEquals(1173L, session.models[0].second.input)
+        assertEquals(0.0001243, session.models[0].second.costUsd)
+        assertNull(u16.history)
+    }
+
+    // spec: parity-usage: get_usage with the scan has both windows
+    @Test
+    fun `parity-usage - get_usage with the scan has both windows`() {
+        val u17 = usage(17)
+        val history = assertNotNull(u17.history)
+        val day = assertNotNull(history.day)
+        assertEquals(23, day.sessionCount)
+        assertEquals(8314, day.requestCount)
+        assertEquals(listOf("subagent_heavy", "cron", "workflow", "long_context", "large_tool_results"), day.behaviors.map { it.key })
+        assertEquals(listOf(100, 100, 80, 65, 11), day.behaviors.map { it.pct })
+        assertEquals(UsageTip("subagent_heavy", "Give simple subagents a cheaper model", null), day.tips[0])
+        assertEquals("some ran 8 hours or more", day.tips[1].detail)
+        assertEquals(listOf(UsageShare("workflow-subagent", 80)), day.agents)
+        assertTrue(day.skills.isEmpty())
+        assertTrue(day.plugins.isEmpty())
+        assertEquals(listOf(UsageShare("server-a", 2), UsageShare("server-b", 2)), day.mcpServers)
+        val week = assertNotNull(history.week)
+        assertEquals(88, week.sessionCount)
+        assertEquals(listOf(UsageShare("plugin-a", 1)), week.plugins)
+        assertEquals(listOf(UsageShare("workflow-subagent", 58), UsageShare("general-purpose", 19)), week.agents)
+        assertTrue(UsageBehavior("max_effort", 19) in week.behaviors)
+        assertEquals(9921L, assertNotNull(u17.session).wallDurationMs)
+    }
+
+    // spec: parity-usage: /usage and /cost run the usage command locally
+    @Test
+    fun `parity-usage - usage and cost run the usage command locally`() {
+        for ((line, uuid) in listOf(22 to "<uuid-28>", 28 to "<uuid-36>")) {
+            val assistant = assertIs<CliMessage.Assistant>(at("parity-usage", line))
+            assertEquals("usage", assertNotNull(assistant.localCommand).command)
+            assertNull(assistant.parentToolUseId)
+            assertEquals(uuid, assistant.uuid)
+        }
+        val usage = assertIs<CliMessage.Result>(at("parity-usage", 23))
+        assertEquals("usage", usage.localCommand)
+        assertEquals(0, usage.numTurns)
+        assertEquals("cost", assertIs<CliMessage.Result>(at("parity-usage", 29)).localCommand)
+    }
+
+    // spec: parity-add-dir: init lists plugins and additional directories
+    @Test
+    fun `parity-add-dir - init lists plugins and additional directories`() {
+        val first = init("parity-add-dir", 5)
+        assertEquals(4, first.plugins.size)
+        assertEquals(3, first.plugins.count { it.builtin })
+        assertEquals(PluginInfo("probe-kit", "<path>", "probe-kit@inline", "0.1.0"), first.plugins[0])
+        assertTrue(first.additionalDirectories.isEmpty())
+        assertEquals(listOf("<path>"), init("parity-add-dir", 17).additionalDirectories)
+    }
+
+    // spec: parity-add-dir: the catalogue names plugin commands with a prefix
+    @Test
+    fun `parity-add-dir - the catalogue names plugin commands with a prefix`() {
+        val byName = assertNotNull(ControlPayloads.initialize(response("parity-add-dir", 1).payload)).commands.associateBy { it.name }
+        assertEquals("(probe-kit) Says hello from a plugin command", byName.getValue("probe-kit:hello").description)
+        val greet = byName.getValue("probe-kit:greet")
+        assertEquals("(probe-kit) Greets the user by name in one short sentence.", greet.description)
+        assertEquals(listOf("greet"), greet.aliases)
+    }
+
+    // spec: parity-add-dir: init lists skills apart from commands
+    @Test
+    fun `parity-add-dir - init lists skills apart from commands`() {
+        val skills = init("parity-add-dir", 5).skills
+        assertEquals(35, skills.size)
+        assertTrue("probe-kit:greet" in skills)
+        assertTrue("probe-kit:hello" !in skills)
+        assertEquals("actions", skills.first())
+    }
 }

@@ -271,6 +271,30 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `added folders become --add-dir after --resume`() {
+        val base = listOf(
+            "claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
+            "--include-partial-messages", "--thinking-display", "summarized", "--permission-prompt-tool=stdio",
+        )
+        val disallowed = listOf("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit")
+        // "/b c" stays one argv element: no shell splits it.
+        assertEquals(
+            base + disallowed + listOf("--resume", "s2", "--add-dir", "/a", "--add-dir", "/b c"),
+            SessionConfig("claude", tmp, resumeSessionId = "s2", additionalDirectories = listOf("/a", "/b c")).argv(),
+        )
+        assertEquals(
+            base + disallowed + listOf("--session-id", "s1", "--add-dir", "/a"),
+            SessionConfig("claude", tmp, sessionId = "s1", additionalDirectories = listOf("/a")).argv(),
+        )
+        assertEquals(
+            base + disallowed + listOf("--resume", "s2", "--fork-session", "--session-id", "s3", "--add-dir", "/a"),
+            SessionConfig("claude", tmp, sessionId = "s3", resumeSessionId = "s2", forkSession = true, additionalDirectories = listOf("/a")).argv(),
+        )
+        assertTrue("--add-dir" !in SessionConfig("claude", tmp, resumeSessionId = "s2").argv())
+        assertTrue("--add-dir" !in SessionConfig("claude", tmp, sessionId = "s1").argv())
+    }
+
+    @Test
     fun `keep_alive and unknown lines advance lastFrameAt without a state emission`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val launcher = fakeCli("echo '{\"type\":\"keep_alive\"}'; sleep 0.2; echo '{\"type\":\"no_such_type\"}'; sleep 0.2")

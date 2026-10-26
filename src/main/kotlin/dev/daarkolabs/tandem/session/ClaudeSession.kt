@@ -98,6 +98,8 @@ data class SessionConfig(
     val permissionMode: PermissionMode? = null,
     /** With [resumeSessionId]: continue as a new session (`--fork-session`), leaving the original untouched. */
     val forkSession: Boolean = false,
+    /** Folders the CLI may read and edit besides [workingDirectory]: one `--add-dir` each, last in the argv. */
+    val additionalDirectories: List<String> = emptyList(),
 ) {
     init {
         require(!forkSession || resumeSessionId != null) { "A fork needs the resumeSessionId of the session it forks." }
@@ -123,6 +125,7 @@ data class SessionConfig(
             if (forkSession) add("--fork-session")
         }
         sessionId?.let { addAll(listOf("--session-id", it)) }
+        for (directory in additionalDirectories) addAll(listOf("--add-dir", directory))
     }
 }
 
