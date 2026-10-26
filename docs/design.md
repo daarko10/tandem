@@ -25,12 +25,17 @@ The existing options were studied in October 2026:
 ## Architecture
 
 ```
- Jewel tool window (ui/)  session sidebar, header (with the MCP servers button and its connected/total badge); the
-        │                 chat: a keyed list of rows (bubbles, Markdown, tool, thinking, shell (`! command`), notice,
-        │                 working and footer rows), a hover row under each reply (Copy, Fork from here, time), the
-        │                 permission / question / plan cards, the MCP servers sheet over the chat, the composer (the
-        │                 `+` attach button, the thumbnail strip, the text area with its `/` slash-command palette) and
-        │                 its footer: the mode control, the model · effort control and the context ring
+ Jewel tool window (ui/)  session sidebar, one tab per live session in the tool window's header (the selected one and
+        │                 any that needs the user, a status dot, a `+`, one shared chat panel under every tab), the
+        │                 header (with the MCP servers button and its connected/total badge); the
+        │                 chat: a keyed list of rows (bubbles, pending bubbles for messages sent while Claude works,
+        │                 Markdown, tool, thinking, shell (`! command`), notice, the `/usage` card, working (a light
+        │                 band sweeps its label beside the orbs) and footer rows), a hover row under every reply (Copy,
+        │                 Fork from here, time), the permission / question / plan cards, the MCP servers sheet over the
+        │                 chat, the composer (the paged `+` menu, the thumbnail strip with the folder pills, the text
+        │                 area with its `/` slash-command palette) and its footer: the mode control (Shift+Tab, the
+        │                 `Cycle Permission Mode` action, cycles it), the model · effort control and the context ring,
+        │                 which opens the context window's breakdown
         │  collects StateFlows, calls SessionManager
         ▼
  TandemSessions (ide/)  project service: owns the SessionManager in its coroutine scope, restores the open sessions
@@ -46,13 +51,17 @@ The existing options were studied in October 2026:
         │                   in to a session's MCP servers (the CLI's `mcp_*` control requests) and the sign-in poll
         ├─ ShellRunner  a `! command` in the user's login shell on Dispatchers.IO, never the EDT: stdin closed, stderr
         │               merged, the output polled (never a blocking read) and capped, the process tree killed on Stop
-        ├─ SessionHandle  one session's chat across processes: status, title, attention, prompt queue
+        ├─ SessionHandle  one session's chat across processes: status, title, attention, added folders. A message
+        │                 sent while Claude works goes to the CLI's own queue at once and shows as a pending bubble;
+        │                 Tandem holds a prompt only behind a shell escape
         │    └─ ClaudeSession  one live `claude` process, while the session has one
         │         • spawns `claude --input-format stream-json --output-format stream-json --verbose --include-partial-messages
-        │           … --session-id <id>` (or `--resume <id>`, or a fork: `--resume <id> --fork-session --session-id <new>`)
+        │           … --session-id <id>` (or `--resume <id>`, or a fork: `--resume <id> --fork-session --session-id <new>`, cut at a reply with
+        │           `--resume-session-at <uuid>`; `--add-dir <folder>` per added folder)
         │         • writer coroutine: intents → stdin NDJSON (user messages, control requests and responses)
         │         • reader coroutine: stdout NDJSON → protocol/ decode → reducer → ChatState
         │         • control channel: can_use_tool → permission prompt in the chat → control_response
+        │         • requests: get_context_usage (the ring's breakdown), get_usage (the /usage card), cancel_async_message
         └─ session/transcript/  the CLI's own `<config>/projects/<key>/<id>.jsonl` files (protocol.md 11)
              • TranscriptFolder  config directory and folder key
              • SessionIndex      lists the transcripts (cached, watched) as SessionSummary rows
@@ -122,6 +131,25 @@ Key choices:
    3, 4.4, 6.1, 11.2); docs only until a recording on a machine with claude.ai connectors (spec 11 item 1): the
    connectors themselves, the OAuth callback completing, and whether the CLI answers `mcp_*` requests while a turn runs.
    **Status: implemented on feat/mcp-controls.**
+
+   **Phase 2d, desktop parity** (specs docs/superpowers/specs/2026-10-22-desktop-parity-design.md, sections 2 to 18). The
+   context ring opens a breakdown of the context window by category (`get_context_usage`), with the MCP tools, memory files
+   and skills behind it. `/usage` and `/cost` draw a card with the session's cost, times and each model's tokens and share
+   of the cost, and what has used the plan's limits on this machine (`get_usage`, the CLI's own scan of its transcripts); the
+   ring leads to it. The `+` menu is paged and split by where each thing comes from, with an icon on each row: `Add files or
+   photos` (Ctrl+Alt+Shift+O, ⌘⌥⇧O), `Add folder` (the CLI's `--add-dir` on the next spawn: the session restarts when idle,
+   a folder is removed the same way), `Slash commands`, `Connectors` (a switch per claude.ai connector on the MCP panel's
+   own controller, `Browse connectors` and `Manage connectors`) and `Plugins`, each plugin under the name the CLI gives it
+   with its `Skills` apart from its `Commands`. While Claude works, Enter sends a message the CLI reads at its next step and
+   Ctrl+Enter (⌘↵) queues one for after the turn; each shows as a pending bubble with Edit and Cancel, Stop withdraws what
+   waits, and a message folded into a turn survives a reload. Every ended turn's reply can be forked, cut there with
+   `--resume-session-at`. Shift+Tab in the composer cycles the permission mode, and a light band sweeps the working row's
+   label beside the orbs, both under `Reduce motion`. The tool window's header gets one tab per live session. Deferred
+   (spec 2.2): the plan-limit bars (nothing decodes `rate_limits`), Manage and Browse plugins, connector icons and custom
+   servers among the connectors, every open session as a tab, tab reordering and split. Recorded with CLI 2.1.308 and 2.1.310
+   (`protocol.md` 1.1, 3, 4.4, 5.1, 6.1, 8, 11); unrecorded: the subscriber shapes of `get_usage`, a claude.ai connector's
+   row and switch, requests made while a turn runs, a message during a subagent, and the connectors address.
+   **Status: implemented on feat/desktop-parity; the manual pass in `runIde` is the owner's.**
 2. **IDE-native edits.** MCP edit tools, diff preview, undo.
 3. **Parity.** Slash commands, plan mode, AskUserQuestion, rewind, subagent status.
 4. **Hardening.** Windows/WSL, Remote Development, IDE matrix in CI, published benchmarks.

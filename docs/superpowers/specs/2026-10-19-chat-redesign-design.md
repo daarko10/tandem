@@ -291,6 +291,7 @@ Decision 7's six-glyph cycle is replaced. On the owner's Mac the glyphs came fro
 - **Drawing.** `ui/rows/Spark` draws the frame on a square as tall as a line of the row's text, each orb a disc of the tint, barely lighter up and to the left (a tenth of the way to white) and darker towards its edge, since the desktop app's orbs are flat coral discs with a soft edge and no highlight; the tint is `TandemColors.spark` while `RUNNING`.
 - **Frame loop and rate.** While animated, a `LaunchedEffect(animated)` loop writes the elapsed time at most about 30 times a second (`withFrameMillis`, then `delay(33)`), never every refresh of a 60 or 120 Hz display: the frame, its drawing and the panel's render all run on the EDT. Only the draw phase reads the time, so the row never recomposes, and the indicator draws in a `graphicsLayer` of its own, so that a frame re-records its small picture, not the chat list's. The loop ends when the row leaves the composition or stops animating; stopping sets the time back to 0, so a row that animates again (`WAITING` → `RUNNING` after a permission answer, `NOT_RESPONDING` → `RUNNING`) starts from the cycle's first frame. The EDT and CPU load during a long turn in a long chat is not measured: 10.7 item 2.
 - **Still.** Under `Reduce motion`, and while `WAITING` or `NOT_RESPONDING`, the indicator shows `OrbIndicator.STILL`, the ring of three tipped towards the viewer (one orb in front and low, two behind), in the row's colour: the spark coral, `text.warning` or `text.error`.
+- **Shimmer beside the orbs (docs/superpowers/specs/2026-10-22-desktop-parity-design.md 15).** A light band sweeps the working row's step text (not the elapsed time or the tokens) while `RUNNING`, and a streaming thinking row's whole label, as the desktop app's does: the first sweep 600 ms after the row appears, 900 ms eased, then one every 3 s, at most about 30 frames a second like the orbs. The orbs stay as shipped. `Reduce motion`, which stills the orbs, stills the band too (the label is drawn at rest), and so does `WAITING` or `NOT_RESPONDING`; a shimmering label changes neither the row's text nor its semantics from frame to frame.
 
 ### 4.10 Turn footer
 
@@ -430,13 +431,13 @@ Settings | Tools | Tandem gains a checkbox `Show thinking rows` (`TandemSettings
 
 | Key | Composer focused | Card open (card focused) | Transcript focused |
 |---|---|---|---|
-| Enter | send; nothing while `busy` (4.15) | card default: `Allow once` / `Submit answers` / `Approve and start coding` | toggle the focused row |
+| Enter | send; while `busy` it sends a message the CLI reads at its next step (docs/superpowers/specs/2026-10-22-desktop-parity-design.md 12.1) | card default: `Allow once` / `Submit answers` / `Approve and start coding` | toggle the focused row |
 | Shift+Enter | newline | — | — |
-| ⌘/Ctrl+Enter | no action in 2a (queue-for-later is 2b, ref §3.11) | `Always allow for session` (permission card, when offered) | — |
+| ⌘/Ctrl+Enter | while busy, queues the message for after the turn (docs/superpowers/specs/2026-10-22-desktop-parity-design.md 12.1); idle, sends | `Always allow for session` (permission card, when offered) | — |
 | Esc | with a card open: the card's Esc action (`Deny` / `Cancel` / `Keep planning`); else stop the turn when busy | `Deny` / `Cancel` / `Keep planning` | focus the composer |
 | 1–9 | typed | pick / toggle an option (question card, outside the `Other` field) | — |
 | ←/→ | caret | switch question tabs (strip focused) | — |
-| Tab / Shift+Tab | next / previous control inside the `chatFocus` group (`TandemToolWindow.kt` stays) | the card's buttons and rows (`focusGroup`) | rows with chevrons are focusable |
+| Tab / Shift+Tab | Tab moves the focus forward inside the `chatFocus` group (`TandemToolWindow.kt` stays); Shift+Tab is the `Cycle Permission Mode` action (docs/superpowers/specs/2026-10-22-desktop-parity-design.md 14), and moves the focus backward only when the action is unbound or the composer offers no modes | the card's buttons and rows (`focusGroup`); Shift+Tab goes back | rows with chevrons are focusable |
 | PageUp / Home | caret | — | scroll and pause following |
 | PageDown | caret | — | scroll; emits `ReachedBottom` when it lands on the bottom |
 | End / Ctrl+End | caret | — | jump to bottom and follow |

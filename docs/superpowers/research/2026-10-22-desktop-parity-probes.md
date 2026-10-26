@@ -316,8 +316,15 @@ The "+" menu:
 ### 3.5 Fixture tooling follow-ups (the redactor items done by D0; tracked files otherwise untouched)
 
 - `scripts/redact_fixture.py`: exempt `categories[].id` of `get_context_usage` from `ID_KEYS` (`id` is listed, so a re-run turns the 24 restored ids on `parity-context:2,17,18` back into `<id-N>`) (done: D0); add `submitUuid` to `ID_KEYS` (`transcripts/parity-add-dir.jsonl:3` reads `<leaked-1>`, as `mcp-slash` did) (done: main had added the key, D0 tests it); add a rule for the names in `get_usage.behaviors` (`agents`, `skills`, `plugins`, `mcp_servers`, recommendation details, fix messages), which were renamed by hand on `parity-usage:17` (done: D0); stop `PATH_RE` swallowing a trailing backtick and colon (the day window's fix message on `parity-usage:17` reads ``Add a rule to `<path> when you run``) (done: D0).
-- `docs/protocol.md` (read `docs/launch.md` first): 4.4 rows with the real shapes of `get_context_usage`, `get_usage`, `get_session_cost`, `reload_plugins`, `register_repo_root` (and its two limits) and `add_directory` (containers only); 5.1 `init.plugins`, `skills`, `agents`, `additional_directories`; 6.1 the assistant line's `context_usage`; 10 `rate_limit_event.unifiedWindows` already listed, plus `autocompactSource`, `first_request_input_tokens`; 11 the transcript's `contextUsage` and `cost-state`.
-- Recordings: `--add-dir` at spawn, on a `--resume` respawn, on a fork and left out of a later resume are recorded in 2.6 (done: D0). Still to make: a run with the default setting sources (user memory, user plugins, custom agents); a claude.ai-subscriber run on the owner's Mac for `usage_report`, `rate_limits` and the plan rows.
+- `docs/protocol.md` (read `docs/launch.md` first), each item written for a stranger:
+  - 4.4 rows with the real shapes of `get_context_usage` and `get_usage` (done: D7);
+  - 4.4 rows for `get_session_cost` (done: D7, one sentence: the same text as `/usage`, not sent by Tandem) and `register_repo_root` with its two limits (done: D7, in 1.1), and `reload_plugins` (not in this plan: spec 2.2);
+  - `add_directory`, containers only (done: D7, in 1.1);
+  - 5.1 `init.plugins`, `skills` and `additional_directories` (done: D7); `agents` (not in this plan: spec 2.2);
+  - 6.1 the assistant line's `context_usage` (done: D7);
+  - 10 `rate_limit_event.unifiedWindows` already listed, plus `autocompactSource` and `first_request_input_tokens` (done: D7);
+  - 11 the transcript's `contextUsage` (done: D7) and `cost-state` (not in this plan: spec 2.2).
+- Recordings: `--add-dir` at spawn, on a `--resume` respawn, on a fork and left out of a later resume are recorded in 2.6 (done: D0). A run with the default setting sources (user memory, user plugins, custom agents) is still to make (not in this plan: spec 2.2); a claude.ai-subscriber run on the owner's Mac for `usage_report`, `rate_limits` and the plan rows is still to make (not in this plan: spec 2.2).
 
 ---
 
