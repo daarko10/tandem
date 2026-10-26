@@ -6,6 +6,7 @@ import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.promptTitle
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -23,9 +25,29 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.InvalidPathException
+import java.nio.file.Path
 
 /** A session's id: the CLI's session UUID, which also names its transcript, `<id>.jsonl`. */
 typealias SessionId = String
+
+/** A folder added to a session (spec 3.4): its real [path], passed as `--add-dir` on each spawn, and what the CLI made of it. */
+data class AddedFolder(val path: String, val state: FolderState)
+
+/** Where an [AddedFolder] stands. */
+enum class FolderState {
+    /** Not yet passed to a process that reported its `system/init`: it applies with the next prompt. */
+    PENDING,
+
+    /** The init of the process spawned with it lists it. */
+    ACTIVE,
+
+    /** The process was spawned with it, but its init does not list it. */
+    MISSING,
+}
 
 /** What a session is doing, as the session list shows it. */
 enum class SessionStatus {
@@ -138,6 +160,18 @@ class SessionHandle internal constructor(
     private val mutableAttention = MutableStateFlow(false)
     private val mutableLastFrameAt = MutableStateFlow(0L)
 
+    private val mutableFolders = MutableStateFlow<List<AddedFolder>>(emptyList())
+
+    /** Folders removed from this session ([removeFolder]) and not added again: the CLI must not still list them. Guarded by [lock]. */
+    private val removedFolders = LinkedHashSet<String>()
+
+    /** The folders the last spawn passed ([foldersForSpawn]), in order. Guarded by [lock]. */
+    private var spawnFolders: List<String> = emptyList()
+
+    /** The folders this spawn's notices were raised for already, so that each is raised once per folder per spawn. Guarded by [lock]. */
+    private val warnedMissing = HashSet<String>()
+    private val warnedKept = HashSet<String>()
+
     /** A title set in Tandem ([rename], or a fork's) that the index does not list yet: it wins until the index lists the same. */
     private var titleOverride: String? = pendingTitle
 
@@ -177,6 +211,12 @@ class SessionHandle internal constructor(
      * value once the process is let go, until the next one is attached.
      */
     val lastFrameAtMillis: StateFlow<Long> = mutableLastFrameAt.asStateFlow()
+
+    /**
+     * The folders added to this session, in the order added (spec 3.4): each goes to the CLI as `--add-dir` on the next spawn. They
+     * live as long as this handle, across stops and resumes.
+     */
+    val folders: StateFlow<List<AddedFolder>> = mutableFolders.asStateFlow()
 
     /** The session's MCP servers as the chat knows them ([ChatState.mcp]): every `system/init`'s list, then every `mcp_status` answer. */
     val mcpServers: StateFlow<McpState> =
@@ -472,6 +512,84 @@ class SessionHandle internal constructor(
         scope.coroutineContext.job.cancelAndJoin()
     }
 
+    /**
+     * Adds [realPath] (checked by the caller on IO) as [FolderState.PENDING]; false when it is listed already (the same string). It
+     * is no longer a removed folder then.
+     */
+    internal fun addFolder(realPath: String): Boolean = synchronized(lock) {
+        if (mutableFolders.value.any { it.path == realPath }) return false
+        removedFolders.remove(realPath)
+        mutableFolders.value += AddedFolder(realPath, FolderState.PENDING)
+        true
+    }
+
+    /** Removes [realPath] and remembers it as removed, so that a CLI that still lists it is caught ([confirmFolders]); false if not listed. */
+    internal fun removeFolder(realPath: String): Boolean = synchronized(lock) {
+        val listed = mutableFolders.value
+        if (listed.none { it.path == realPath }) return false
+        mutableFolders.value = listed.filter { it.path != realPath }
+        removedFolders.add(realPath)
+        true
+    }
+
+    /** Takes [from]'s folders, all [FolderState.PENDING]: a fork's, before its first spawn. */
+    internal fun copyFolders(from: SessionHandle) {
+        val copied = from.folders.value.map { AddedFolder(it.path, FolderState.PENDING) }
+        synchronized(lock) { mutableFolders.value = copied }
+    }
+
+    /**
+     * The folders the next spawn passes, in the order added, remembered as that spawn's. Checked on [Dispatchers.IO]: one that is no
+     * longer a directory leaves the list, with a warning in the chat.
+     */
+    internal suspend fun foldersForSpawn(): List<String> {
+        val paths = folders.value.map { it.path }
+        val vanished = withContext(Dispatchers.IO) { paths.filterNot(::isDirectory).toSet() }
+        val passed = synchronized(lock) {
+            if (vanished.isNotEmpty()) mutableFolders.value = mutableFolders.value.filter { it.path !in vanished }
+            val current = mutableFolders.value.mapTo(HashSet()) { it.path }
+            spawnFolders = paths.filter { it !in vanished && it in current }
+            warnedMissing.clear()
+            warnedKept.clear()
+            spawnFolders
+        }
+        vanished.forEach { notice(NoticeLevel.WARNING, "The folder $it no longer exists, so it was not added.") }
+        return passed
+    }
+
+    /** Whether a live process runs whose spawn passed other folders than [folders] lists now: it has to be stopped and spawned again. */
+    internal fun spawnDiffers(): Boolean = synchronized(lock) {
+        liveLocked() != null && spawnFolders != mutableFolders.value.map { it.path }
+    }
+
+    /** Whether the inits of the attached process are checked against the folders: it was spawned with some, or one was removed. */
+    private fun foldersToConfirm(): Boolean = synchronized(lock) { spawnFolders.isNotEmpty() || removedFolders.isNotEmpty() }
+
+    /**
+     * Compares a `system/init`'s [listed] directories with the spawn's folders, on [Dispatchers.IO] (string equality, then
+     * [Files.isSameFile]): each found turns [FolderState.ACTIVE], each not found [FolderState.MISSING], with a warning once per folder
+     * per spawn (hard rule 5). A removed folder the spawn did not pass that [listed] still names gets its own warning, as often.
+     */
+    internal suspend fun confirmFolders(listed: List<String>) {
+        val (passed, removed) = synchronized(lock) { spawnFolders to removedFolders.filter { it !in spawnFolders } }
+        val (found, kept) = withContext(Dispatchers.IO) {
+            passed.filterTo(HashSet()) { listed.containsFolder(it) } to removed.filter { listed.containsFolder(it) }
+        }
+        val notices = ArrayList<String>()
+        synchronized(lock) {
+            mutableFolders.value = mutableFolders.value.map { folder ->
+                when (folder.path) {
+                    in found -> folder.copy(state = FolderState.ACTIVE)
+                    in passed -> folder.copy(state = FolderState.MISSING)
+                    else -> folder
+                }
+            }
+            passed.filter { it !in found && warnedMissing.add(it) }.forEach { notices += "The CLI did not add the folder $it." }
+            kept.filter { it in removedFolders && warnedKept.add(it) }.forEach { notices += "The CLI still lists the removed folder $it." }
+        }
+        notices.forEach { notice(NoticeLevel.WARNING, it) }
+    }
+
     /** Publishes [wait] as its server's sign-in wait, in place of any earlier one. */
     internal fun putMcpAuth(wait: McpAuthWait) {
         mutableMcpAuth.update { it + (wait.server to wait) }
@@ -536,6 +654,13 @@ class SessionHandle internal constructor(
         mirror = scope.launch {
             // A child of the mirror, so that it ends when the process is let go or handed over before its first system/init.
             launch { onFirstInit(session, session.reportedSessionId.filterNotNull().first()) }
+            // After each system/init of a process spawned with folders, or once a folder was removed (spec 3.4).
+            launch {
+                session.state.map { it.mcp.initCount to it.additionalDirectories }
+                    .distinctUntilChanged { a, b -> a.first == b.first }
+                    .filter { (count, _) -> count > 0 && foldersToConfirm() }
+                    .collect { (_, listed) -> confirmFolders(listed) }
+            }
             launch {
                 session.lastFrameAtMillis.collect { at ->
                     synchronized(lock) { if (attachment?.session === session) mutableLastFrameAt.value = at }
@@ -643,3 +768,20 @@ private fun ClaudeSession.deliver(outbound: Outbound) {
 }
 
 private fun List<SessionSummary>.titleOf(id: SessionId): String? = firstOrNull { it.id == id }?.title
+
+private fun isDirectory(path: String): Boolean = try {
+    Files.isDirectory(Path.of(path))
+} catch (_: InvalidPathException) {
+    false
+}
+
+/** Whether these listed directories name [folder]: the same string, or the same file ([Files.isSameFile]). */
+private fun List<String>.containsFolder(folder: String): Boolean = any { listed ->
+    listed == folder || try {
+        Files.isSameFile(Path.of(listed), Path.of(folder))
+    } catch (_: IOException) {
+        false
+    } catch (_: InvalidPathException) {
+        false
+    }
+}
