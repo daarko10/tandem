@@ -146,7 +146,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -277,15 +276,11 @@ internal fun PromptBar(
             busyRefusal(composer, shell = shellCommand(text) != null, cardOpen = composer.cardOpen)?.let { ui.composerNotice.value = it }
         }
     }
-    // Messages that came back without running (a withdraw's Edit, Stop, the process's end: spec 12.3, 12.5) go back in the composer,
-    // ahead of the draft, their images decoded off the EDT; then the session forgets them.
+    // Messages that came back without running (a withdraw's Edit, Stop, the process's end: spec 12.3, 12.5) go back in the composer
+    // once each, ahead of the draft; the session forgets them before their images, decoded off the EDT, are attached.
     LaunchedEffect(handle.id, presenter) {
-        presenter.composer.map { it.returned }.distinctUntilChanged().collect { returned ->
-            if (returned.isEmpty()) return@collect
-            val images = ArrayList<Pair<String, ByteArray>>()
-            restoreReturned(ui, returned) { mediaType, bytes -> images += mediaType to bytes }
-            images.forEachIndexed { i, (_, bytes) -> attach(ui, "Image ${i + 1}", bytes) }
-            manager.takeReturned(handle.id, returned.map { it.uuid })
+        restoreReturnedFrom(ui, presenter.composer.map { it.returned }, take = { manager.takeReturned(handle.id, it) }) { i, _, bytes ->
+            attach(ui, "Image ${i + 1}", bytes)
         }
     }
     // A shell escape that runs makes the composer busy, as a turn does (MCP spec 12.1).
@@ -329,7 +324,7 @@ internal fun PromptBar(
     val pickFrom = { shown: SlashPalette?, item: PaletteItem?, insert: Boolean ->
         if (shown != null) {
             val index = item?.let(shown.items::indexOf)?.takeIf { it >= 0 } ?: shown.selected
-            val outcome = pick(shown.copy(selected = index), insert, busy = busy || sending, composer.models, midTurn = composer.midTurnSends)
+            val outcome = pick(shown.copy(selected = index), insert, busy = composer.busy || sending, composer.models, midTurn = composer.midTurnSends)
             // A busy pick that does nothing says why (spec 12.2): the CLI is still starting, or takes no message while it works.
             if (outcome == PaletteOutcome.Ignored && !insert && composer.busy) busyRefusal(composer)?.let { ui.composerNotice.value = it }
             execute(outcome)

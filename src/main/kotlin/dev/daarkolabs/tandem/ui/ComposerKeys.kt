@@ -7,7 +7,11 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import dev.daarkolabs.tandem.chat.ScrollEvent
 import dev.daarkolabs.tandem.session.ReturnedSend
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import java.util.Base64
 
@@ -155,22 +159,55 @@ internal fun sendDraft(ui: ChatUiState, sender: ComposerSender, later: Boolean =
 }
 
 /**
- * Puts the messages that came back without running ([returned], desktop-parity spec 12.3, 12.5) back in [ui]'s composer: their texts
- * in order, joined by a blank line, ahead of the draft (a blank line between them and the draft, none when the draft is empty), the
- * cursor at the end; their images decoded from base64 on [Dispatchers.Default], then each attached once through [attach] on the
- * caller's context (the EDT: hard rule 1 keeps the decoding off it).
+ * Puts each message of [returned] that came back without running (desktop-parity spec 12.3, 12.5) back in [ui]'s composer exactly
+ * once (Review Focus 6), for as long as the session lists it: see [restoreReturned]. Collects [returned] until cancelled.
  */
-internal suspend fun restoreReturned(ui: ChatUiState, returned: List<ReturnedSend>, attach: (mediaType: String, bytes: ByteArray) -> Unit) {
-    if (returned.isEmpty()) return
-    val images = returned.flatMap { it.images }
-    val decoded = if (images.isEmpty()) {
-        emptyList()
-    } else {
-        withContext(Dispatchers.Default) {
-            images.mapNotNull { image -> runCatching { Base64.getDecoder().decode(image.base64) }.getOrNull()?.let { image.mediaType to it } }
+internal suspend fun restoreReturnedFrom(
+    ui: ChatUiState,
+    returned: Flow<List<ReturnedSend>>,
+    take: (uuids: List<String>) -> Unit,
+    attach: suspend (index: Int, mediaType: String, bytes: ByteArray) -> Unit,
+) {
+    returned.distinctUntilChanged().collect { restoreReturned(ui, it, take, attach) }
+}
+
+/**
+ * Puts the messages of [returned] that [ui] has not restored yet ([ChatUiState.restoredUuids]) back in its composer: their texts in
+ * order, joined by a blank line, ahead of the draft (a blank line between them and the draft, none when the draft is empty), the
+ * cursor at the end; then [take]s them from the session, before any image is attached; then their images, decoded from base64 on
+ * [Dispatchers.Default] (hard rule 1 keeps the decoding off the EDT), each attached once through [attach] on the caller's context,
+ * even should the caller be cancelled meanwhile, since the session no longer holds them.
+ *
+ * The session's list may lag behind (it is mapped off the EDT): a message listed again after it was restored, before the session
+ * has forgotten it, is not restored a second time, and a uuid the list no longer names is dropped from the record. A restore
+ * cancelled while its images decode, before anything was put back, is undone, so the next collection restores it.
+ */
+internal suspend fun restoreReturned(
+    ui: ChatUiState,
+    returned: List<ReturnedSend>,
+    take: (uuids: List<String>) -> Unit,
+    attach: suspend (index: Int, mediaType: String, bytes: ByteArray) -> Unit,
+) {
+    ui.restoredUuids.retainAll(returned.mapTo(HashSet()) { it.uuid })
+    val fresh = returned.filter { it.uuid !in ui.restoredUuids }
+    if (fresh.isEmpty()) return
+    val uuids = fresh.map { it.uuid }
+    // Recorded before the first suspension, so that a lagging list read meanwhile does not restore them again.
+    ui.restoredUuids += uuids
+    val images = fresh.flatMap { it.images }
+    val decoded = try {
+        if (images.isEmpty()) {
+            emptyList()
+        } else {
+            withContext(Dispatchers.Default) {
+                images.mapNotNull { image -> runCatching { Base64.getDecoder().decode(image.base64) }.getOrNull()?.let { image.mediaType to it } }
+            }
         }
+    } catch (e: CancellationException) {
+        ui.restoredUuids -= uuids.toSet()
+        throw e
     }
-    val texts = returned.map { it.text }.filter { it.isNotBlank() }.joinToString("\n\n")
+    val texts = fresh.map { it.text }.filter { it.isNotBlank() }.joinToString("\n\n")
     val draft = ui.draft.text.toString()
     val restored = when {
         texts.isEmpty() -> draft
@@ -178,7 +215,8 @@ internal suspend fun restoreReturned(ui: ChatUiState, returned: List<ReturnedSen
         else -> "$texts\n\n$draft"
     }
     if (restored != draft) ui.draft.setTextAndPlaceCursorAtEnd(restored)
-    decoded.forEach { (mediaType, bytes) -> attach(mediaType, bytes) }
+    take(uuids)
+    withContext(NonCancellable) { decoded.forEachIndexed { i, (mediaType, bytes) -> attach(i, mediaType, bytes) } }
 }
 
 /** What the composer does itself with an Enter that [composerKey] leaves to the text area (spec 4.15). */

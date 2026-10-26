@@ -109,6 +109,13 @@ internal class ChatUiState {
         if (draft != paletteDismissedFor.value) paletteDismissedFor.value = null
     }
 
+    /**
+     * The uuids of the returned messages already put back in the composer and still listed by the session (desktop-parity spec 12.3,
+     * 12.5): kept here, per session, so that neither a lagging list nor a restore cut short by a session switch puts one back twice
+     * (Review Focus 6). Written by `restoreReturned` only.
+     */
+    val restoredUuids: MutableSet<String> = HashSet()
+
     /** A footer menu that `/model`, `/permissions` or `/mode` asked to open; the control opens it and clears the request. */
     val menuRequest: MutableState<FooterMenu?> = mutableStateOf(null)
 
