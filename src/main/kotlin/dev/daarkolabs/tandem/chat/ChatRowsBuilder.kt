@@ -4,6 +4,7 @@ import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.ShellEnd
@@ -42,7 +43,8 @@ data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, va
  * Rows are cached per turn (a turn runs from one user message or shell escape to the next): a closed turn is built once more when it
  * closes and then kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the
  * last entry it holds and scans only the entries after it, so a long session costs no more per event than a short one. A later entry
- * that refers to a cached turn (a late result, a background agent's lines) opens that turn again; a state whose entries shrank (a
+ * that refers to a cached turn (a late result, a background agent's lines) opens that turn again, as does a new instance of a
+ * cached usage notice (its card's answer, a `Retry`); a state whose entries shrank (a
  * retraction) or whose working directory changed drops the cache. The rows and the calls of the open turns that equal the previous
  * build's keep their previous instance, a result's body is built once and a live call's body once per input instance, so unchanged
  * rows and calls compare by identity (polish spec 6).
@@ -58,6 +60,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
         val rowsBefore: PersistentList<ChatRow>,
         val rows: List<ChatRow>,
         val calls: List<String>,
+        val usageNotices: List<Pair<Int, ChatEntry.Notice>>,
     )
 
     /** A result's body and stats, built once per result entry for the call input it was built with. */
@@ -72,6 +75,9 @@ class ChatRowsBuilder(private val options: RowOptions) {
     private val frozen = ArrayList<Frozen>()
     private var frozenRows: PersistentList<ChatRow> = persistentListOf()
     private val frozenKeys = HashSet<String>()
+
+    /** The cached turns (indices into [frozen], ascending) that hold a usage notice: the only ones a card's answer reopens. */
+    private val usageTurns = ArrayList<Int>()
 
     /** The cached turn (index into [frozen]) that owns each call of the cached turns. */
     private val callOwner = HashMap<String, Int>()
@@ -243,17 +249,21 @@ class ChatRowsBuilder(private val options: RowOptions) {
             liveCalls = callsOf(rows.values)
         }
         frozen.clear()
+        usageTurns.clear()
         frozenRows = persistentListOf()
         frozenKeys.clear()
         callOwner.clear()
         bodies = IdentityHashMap()
     }
 
-    /** Opens the cached turns that entries after the cache refer to again, from the earliest; their rows keep their instances. */
+    /**
+     * Opens the cached turns that entries after the cache refer to again, from the earliest, and from the earliest cached turn whose
+     * usage notice changed (its card's answer came, or `Retry` was pressed, deviation 7); their rows keep their instances.
+     */
     private fun reopenReferencedTurns(entries: List<ChatEntry>) {
         var scanFrom = frozenEnd
         while (frozen.isNotEmpty()) {
-            var earliest = Int.MAX_VALUE
+            var earliest = changedUsageTurn(entries)
             for (index in scanFrom until entries.size) {
                 val entry = entries[index]
                 val parent = parentOf(entry)
@@ -275,8 +285,17 @@ class ChatRowsBuilder(private val options: RowOptions) {
             }
             live = rows
             liveCalls = callsOf(rows.values)
+            usageTurns.removeAll { it >= earliest }
             reopened.clear()
         }
+    }
+
+    /** The earliest cached turn with a usage notice that is no longer the same instance at its index; [Int.MAX_VALUE] for none. */
+    private fun changedUsageTurn(entries: List<ChatEntry>): Int {
+        for (t in usageTurns) {
+            if (frozen[t].usageNotices.any { (index, notice) -> entries[index] !== notice }) return t
+        }
+        return Int.MAX_VALUE
     }
 
     /**
@@ -298,8 +317,12 @@ class ChatRowsBuilder(private val options: RowOptions) {
         }
         for (t in 0 until cut) {
             val turn = turns[t]
-            val cached = Frozen(turn.first, turn.last + 1, region.entries[turn.last], frozenRows, turnRows[t], region.callsOf[t])
+            val usageNotices = turn.mapNotNull { index ->
+                (region.entries[index] as? ChatEntry.Notice)?.takeIf { it.usage != null }?.let { index to it }
+            }
+            val cached = Frozen(turn.first, turn.last + 1, region.entries[turn.last], frozenRows, turnRows[t], region.callsOf[t], usageNotices)
             frozen += cached
+            if (usageNotices.isNotEmpty()) usageTurns += frozen.lastIndex
             cached.calls.forEach { callOwner[it] = frozen.lastIndex }
             turnRows[t].forEach { frozenKeys += it.key }
             frozenRows = frozenRows.mutate { it.addAll(turnRows[t]) }
@@ -321,12 +344,25 @@ class ChatRowsBuilder(private val options: RowOptions) {
 
     /**
      * The row of notice [entry]. A local command's notice keeps its command; `/mcp`'s (the CLI ran `mcp`) gets the link to the panel in
-     * place of the CLI's terminal hint, removed by exact match only (spec 3.5).
+     * place of the CLI's terminal hint, removed by exact match only (spec 3.5); `/context`'s is Markdown (desktop-parity spec 3.1); a
+     * `/usage` notice of the stream carries its card, labelled with the session's [models] (spec 3.2).
      */
-    private fun noticeRow(entry: ChatEntry.Notice, gap: RowGap): NoticeRow {
-        val link = if (entry.kind == NoticeKind.LOCAL_COMMAND && entry.runCommand == "mcp") NoticeLink.OPEN_MCP else null
+    private fun noticeRow(entry: ChatEntry.Notice, gap: RowGap, region: Region): NoticeRow {
+        val local = entry.kind == NoticeKind.LOCAL_COMMAND
+        val link = if (local && entry.runCommand == "mcp") NoticeLink.OPEN_MCP else null
         val text = if (link == NoticeLink.OPEN_MCP) entry.text.removeSuffix(MCP_TERMINAL_HINT) else entry.text
-        return NoticeRow("n:${entry.id}", entry.level, text, gap, entry.kind, entry.command, link)
+        return NoticeRow(
+            "n:${entry.id}",
+            entry.level,
+            text,
+            gap,
+            entry.kind,
+            entry.command,
+            link,
+            usage = entry.usage?.let { usageCard(it, entry.text, region.models, region.activeModel) },
+            markdown = local && entry.runCommand == "context",
+            sourceUuid = entry.sourceUuid,
+        )
     }
 
     /** The previous build's instance of [row] when it is equal. */
@@ -404,7 +440,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
                 entry.kind == NoticeKind.INTERRUPTED ||
                     context.failureInFooter && entry.level == NoticeLevel.ERROR && saidByFooter(entry.text, context.end?.text.orEmpty()) ->
                     rows.add { footer(entry, context, it) }
-                else -> rows.add { noticeRow(entry, gap(Kind.NOTICE, it)) }
+                else -> rows.add { noticeRow(entry, gap(Kind.NOTICE, it), region) }
             }
             is ChatEntry.TurnEnded -> if (context.end?.entry === entry) rows.add { footer(entry, context, it) }
             is ChatEntry.Shell -> rows.add { shellRow(entry, gap(Kind.SHELL, it)) }
@@ -613,6 +649,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
     private class Region(state: ChatState, start: Int) {
         val entries: List<ChatEntry> = state.entries
         val cwd: String? = state.cwd
+        val models: List<ModelOption> = state.models
+        val activeModel: String? = state.activeModel
         val pending: Set<String> = state.pendingPermissions.mapNotNullTo(HashSet()) { it.toolUseId }
         val tasks: Map<String, TaskInfo> = state.tasks.values.filter { it.toolUseId != null }.associateBy { it.toolUseId!! }
         val turns = ArrayList<IntRange>()

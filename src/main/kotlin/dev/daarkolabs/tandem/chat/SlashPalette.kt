@@ -8,8 +8,8 @@ import kotlinx.collections.immutable.toImmutableList
 // The composer's `/` palette, what a pick does and what a sent command does
 // (docs/superpowers/specs/2026-10-21-mcp-controls-design.md 3.4, 4.3, 7): pure, cheap enough for every keystroke on the EDT.
 
-/** Where a command comes from, for the row's pill: nothing for a built-in. */
-enum class CommandScope { BUILTIN, PROJECT, USER, PLUGIN }
+/** Where a command comes from ([commandSource], spec 17.6), for the row's label: nothing for a built-in or [OTHER]. */
+enum class CommandScope { BUILTIN, PROJECT, USER, PLUGIN, CLAUDE_AI, MANAGED, CLI_FLAG, MCP, OTHER }
 
 /**
  * One row of the palette: `/<name>`, its [argumentHint] and [description] (scope suffix stripped). [via] is the alias the query
@@ -34,8 +34,6 @@ private val PALETTE_DRAFT: Regex = Regex("^/\\S*$")
 private const val NO_MATCH: String = "No matching command"
 private const val COMMANDS_LOADING: String = "Commands load when the session starts"
 private const val INTERNAL_PREFIX: String = "__"
-private const val PROJECT_SUFFIX: String = " (project)"
-private const val USER_SUFFIX: String = " (user)"
 
 /** Tandem's own rows, which replace the catalogue's entries of the same name and are appended when it lacks them. */
 private val TANDEM_ROWS: List<PaletteItem> = listOf(
@@ -55,12 +53,20 @@ private class Entry(val item: PaletteItem, val aliases: List<String>)
  * without the [terminal] names (never one of Tandem's four) and the `__` names, with Tandem's four rows in place or appended; with no
  * [commands] yet, Tandem's four rows and [fallbackNames] (`init.slash_commands`) under the same filters, and a footer saying the
  * commands load later, also when no row matches (the command may well exist). Rows rank exact name, name prefix, alias prefix,
- * substring, in catalogue order within a rank. [selected] is clamped into the rows.
+ * substring, in catalogue order within a rank. [selected] is clamped into the rows. Each row's scope and description are
+ * [commandSource]'s, with [plugins] the session's plugins ([pluginPrefixes]).
  */
-fun slashPalette(draft: String, commands: List<SlashCommand>, fallbackNames: List<String>, terminal: Set<String>, selected: Int = 0): SlashPalette? {
+fun slashPalette(
+    draft: String,
+    commands: List<SlashCommand>,
+    fallbackNames: List<String>,
+    terminal: Set<String>,
+    selected: Int = 0,
+    plugins: Set<String> = emptySet(),
+): SlashPalette? {
     if (!PALETTE_DRAFT.matches(draft)) return null
     val fallback = commands.isEmpty()
-    val catalogue = if (fallback) fallbackCatalogue(fallbackNames, terminal) else catalogue(commands, terminal)
+    val catalogue = if (fallback) fallbackCatalogue(fallbackNames, terminal, plugins) else catalogue(commands, terminal, plugins)
     val items = ranked(draft.drop(1), catalogue)
     val footer = when {
         fallback -> COMMANDS_LOADING
@@ -76,7 +82,8 @@ fun SlashPalette.moved(delta: Int): SlashPalette = copy(selected = clamp(selecte
 /**
  * The palette the composer shows (spec 4.4): null while the text area has no focus ([focused]) or after Esc on this very draft
  * ([dismissedFor]); else [slashPalette] with the stored [selection], which counts only for the draft it was made on (a mismatch reads
- * as 0, so an Enter right after a keystroke never picks by an index into the previous filter).
+ * as 0, so an Enter right after a keystroke never picks by an index into the previous filter). [plugins] are the session's plugins
+ * ([ComposerModel.pluginPrefixes]), which label its plugins' entries.
  */
 fun paletteFor(
     draft: String,
@@ -86,9 +93,10 @@ fun paletteFor(
     commands: List<SlashCommand>,
     fallbackNames: List<String>,
     terminal: Set<String>,
+    plugins: Set<String> = emptySet(),
 ): SlashPalette? {
     if (!focused || dismissedFor == draft) return null
-    return slashPalette(draft, commands, fallbackNames, terminal, selected = if (selection.first == draft) selection.second else 0)
+    return slashPalette(draft, commands, fallbackNames, terminal, selected = if (selection.first == draft) selection.second else 0, plugins = plugins)
 }
 
 /** [text] without the input method's [composition] in progress (spec 7, Palette and IME): the palette filters on committed text. */
@@ -200,43 +208,33 @@ private fun outsideBrackets(hint: String): String = buildString {
 private fun listed(name: String, terminal: Set<String>): Boolean =
     !name.startsWith(INTERNAL_PREFIX) && (name !in terminal || name in TANDEM_NAMES)
 
-private fun catalogue(commands: List<SlashCommand>, terminal: Set<String>): List<Entry> {
+private fun catalogue(commands: List<SlashCommand>, terminal: Set<String>, plugins: Set<String>): List<Entry> {
     val seen = HashSet<String>()
     val entries = ArrayList<Entry>(commands.size + TANDEM_ROWS.size)
     for (command in commands) {
         if (!listed(command.name, terminal) || !seen.add(command.name)) continue
         val tandem = TANDEM_ROWS.firstOrNull { it.name == command.name }
-        entries += Entry(tandem ?: itemOf(command), command.aliases)
+        entries += Entry(tandem ?: itemOf(command, plugins), command.aliases)
     }
     for (row in TANDEM_ROWS) if (seen.add(row.name)) entries += Entry(row, emptyList())
     return entries
 }
 
-private fun fallbackCatalogue(names: List<String>, terminal: Set<String>): List<Entry> {
+private fun fallbackCatalogue(names: List<String>, terminal: Set<String>, plugins: Set<String>): List<Entry> {
     val seen = HashSet(TANDEM_NAMES)
     val entries = TANDEM_ROWS.mapTo(ArrayList()) { Entry(it, emptyList()) }
     for (name in names) {
         if (!listed(name, terminal) || !seen.add(name)) continue
-        entries += Entry(PaletteItem(name, "", "", scopeOf(name, ""), via = null, intercepted = false), emptyList())
+        // A name alone: the plugin, claude.ai and MCP rules of [commandSource] apply, else it has no label.
+        val scope = commandSource(name, "", builtin = false, plugins).scope
+        entries += Entry(PaletteItem(name, "", "", scope, via = null, intercepted = false), emptyList())
     }
     return entries
 }
 
-private fun itemOf(command: SlashCommand): PaletteItem {
-    val scope = scopeOf(command.name, command.description)
-    val description = when (scope) {
-        CommandScope.PROJECT -> command.description.removeSuffix(PROJECT_SUFFIX)
-        CommandScope.USER -> command.description.removeSuffix(USER_SUFFIX)
-        else -> command.description
-    }
-    return PaletteItem(command.name, description, command.argumentHint, scope, via = null, intercepted = false)
-}
-
-private fun scopeOf(name: String, description: String): CommandScope = when {
-    description.endsWith(PROJECT_SUFFIX) -> CommandScope.PROJECT
-    description.endsWith(USER_SUFFIX) -> CommandScope.USER
-    ':' in name -> CommandScope.PLUGIN
-    else -> CommandScope.BUILTIN
+private fun itemOf(command: SlashCommand, plugins: Set<String>): PaletteItem {
+    val source = commandSource(command.name, command.description, command.builtin, plugins)
+    return PaletteItem(command.name, source.description, command.argumentHint, source.scope, via = null, intercepted = false)
 }
 
 /** The rows of [catalogue] that match [query], best rank first, catalogue order within a rank; every row for an empty query. */

@@ -2,6 +2,7 @@ package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ControlPayloads
+import dev.daarkolabs.tandem.protocol.PluginInfo
 import dev.daarkolabs.tandem.protocol.SlashCommand
 import dev.daarkolabs.tandem.session.ModelOption
 import org.junit.jupiter.api.Test
@@ -29,7 +30,7 @@ class SlashPaletteTest {
     private fun SlashPalette.item(name: String): PaletteItem = items.single { it.name == name }
 
     private fun stored(draft: String, selection: Pair<String, Int>, focused: Boolean = true, dismissedFor: String? = null): SlashPalette? =
-        paletteFor(draft, focused, dismissedFor, selection, catalogue, emptyList(), terminal)
+        paletteFor(draft, focused, dismissedFor, selection, catalogue, emptyList(), terminal, emptySet())
 
     @Test
     fun `closed unless the draft is one slash token`() {
@@ -114,13 +115,18 @@ class SlashPaletteTest {
         assertEquals(
             listOf(
                 Triple("mine", CommandScope.USER, "Mine"),
-                Triple("plug:do", CommandScope.PLUGIN, "Do it"),
+                // spec 17.6: a colon is no plugin by itself, and an entry without a builtin flag is no built-in.
+                Triple("plug:do", CommandScope.OTHER, "Do it"),
                 Triple("ours", CommandScope.PROJECT, "Ours"),
-                Triple("plain", CommandScope.BUILTIN, "Plain (team)"),
+                // spec 17.6
+                Triple("plain", CommandScope.OTHER, "Plain (team)"),
             ),
             items.take(4).map { Triple(it.name, it.scope, it.description) },
         )
         assertTrue(items.drop(4).all { it.scope == CommandScope.BUILTIN })
+        // spec 17.6: with the session's plugin "plug", its entry is a plugin's.
+        val withPlug = assertNotNull(slashPalette("/", synthetic, emptyList(), emptySet(), plugins = setOf("plug"))).items
+        assertEquals(CommandScope.PLUGIN, withPlug.single { it.name == "plug:do" }.scope)
     }
 
     @Test
@@ -293,8 +299,14 @@ class SlashPaletteTest {
         assertEquals(listed.size, listed.toSet().size)
         assertEquals(70, listed.size)
         val hello = fallback.item("hello")
-        assertEquals(PaletteItem("hello", "", "", CommandScope.BUILTIN, via = null, intercepted = false), hello)
-        assertEquals(CommandScope.PLUGIN, assertNotNull(slashPalette("/", emptyList(), listOf("plug:do"), emptySet())).item("plug:do").scope)
+        // spec 17.6: a name alone is no built-in.
+        assertEquals(PaletteItem("hello", "", "", CommandScope.OTHER, via = null, intercepted = false), hello)
+        // spec 17.6: a plugin only with the session's plugin.
+        assertEquals(CommandScope.OTHER, assertNotNull(slashPalette("/", emptyList(), listOf("plug:do"), emptySet())).item("plug:do").scope)
+        assertEquals(
+            CommandScope.PLUGIN,
+            assertNotNull(slashPalette("/", emptyList(), listOf("plug:do"), emptySet(), plugins = setOf("plug"))).item("plug:do").scope,
+        )
         // Filtering works the same way; no match still says the commands load later (the command may exist).
         val mo = assertNotNull(slashPalette("/mo", emptyList(), names, terminal))
         assertEquals(listOf("model", "mode"), mo.names().take(2))
@@ -334,5 +346,84 @@ class SlashPaletteTest {
         assertEquals(minOf(2, kept.items.lastIndex), kept.selected)
         assertEquals(2, kept.selected)
         assertEquals("/m", kept.query)
+    }
+
+    private fun source(name: String, description: String, builtin: Boolean = false, plugins: Set<String> = emptySet()): CommandSource =
+        commandSource(name, description, builtin, plugins)
+
+    // The entries below are built in probes 6.1's shapes with made-up names: the probe's run is not a fixture.
+
+    @Test
+    fun `a built-in keeps its own parentheses and loses only the dynamic-workflow tag`() {
+        assertEquals(CommandSource(CommandScope.BUILTIN, null, null, "Runs y"), source("flow-y", "Runs y (dynamic workflow)", builtin = true))
+        val clear = "Clear the conversation (resumable with /resume)"
+        assertEquals(CommandSource(CommandScope.BUILTIN, null, null, clear), source("clear", clear, builtin = true))
+        assertEquals(CommandSource(CommandScope.BUILTIN, null, null, "(removed) Manage agents"), source("agents", "(removed) Manage agents", builtin = true))
+        val item = assertNotNull(slashPalette("/", listOf(SlashCommand("flow-y", "Runs y (dynamic workflow)", builtin = true)), emptyList(), emptySet()))
+            .item("flow-y")
+        assertEquals(CommandScope.BUILTIN to "Runs y", item.scope to item.description)
+    }
+
+    // spec: claude.ai-synced skills are claude.ai, never built-in or plugin
+    @Test
+    fun `claude dot ai-synced skills are claude dot ai, never built-in or plugin`() {
+        val synced = listOf(
+            SlashCommand("skill-x", "Does x (claude.ai sync)", aliases = listOf("anthropic-skills:skill-x")),
+            SlashCommand("anthropic-skills:skill-y", "Does y (claude.ai sync)"),
+            SlashCommand("anthropic-skills:skill-z", "Does z"),
+        )
+        val prefixes = pluginPrefixes(null, synced)
+        assertTrue(prefixes.isEmpty())
+        val items = assertNotNull(slashPalette("/", synced, emptyList(), emptySet(), plugins = prefixes)).items
+        assertEquals(
+            listOf(
+                Triple("skill-x", CommandScope.CLAUDE_AI, "Does x"),
+                Triple("anthropic-skills:skill-y", CommandScope.CLAUDE_AI, "Does y"),
+                Triple("anthropic-skills:skill-z", CommandScope.CLAUDE_AI, "Does z"),
+            ),
+            items.take(3).map { Triple(it.name, it.scope, it.description) },
+        )
+        // The namespace is never a plugin prefix, even with a parenthesised description.
+        assertTrue(pluginPrefixes(null, listOf(SlashCommand("anthropic-skills:skill-y", "(anthropic-skills) Does y"))).isEmpty())
+    }
+
+    @Test
+    fun `a plugin's entry loses its display-name prefix, before an init and after`() {
+        val entry = SlashCommand("plugin-a:skill-one", "(Plugin-A) Use when x", aliases = listOf("skill-one"))
+        val before = pluginPrefixes(null, listOf(entry))
+        assertEquals(setOf("plugin-a"), before)
+        val expected = CommandSource(CommandScope.PLUGIN, "plugin-a", "Plugin-A", "Use when x")
+        assertEquals(expected, source(entry.name, entry.description, plugins = before))
+        val after = pluginPrefixes(listOf(PluginInfo("plugin-a", "/p", "plugin-a@m", "1.0")), listOf(entry))
+        assertEquals(expected, source(entry.name, entry.description, plugins = after))
+        val item = assertNotNull(slashPalette("/", listOf(entry), emptyList(), emptySet(), plugins = before)).item("plugin-a:skill-one")
+        assertEquals(CommandScope.PLUGIN to "Use when x", item.scope to item.description)
+        val f = pluginPrefixes(listOf(PluginInfo("plugin-f", null, "plugin-f@inline", null)), emptyList())
+        assertEquals(CommandSource(CommandScope.PLUGIN, "plugin-f", null, "Does f"), source("plugin-f:do", "Does f (plugin)", plugins = f))
+        assertEquals(CommandSource(CommandScope.PLUGIN, "plugin-f", null, "Does f"), source("plugin-f:do", "Does f (claude.ai sync)", plugins = f))
+        // Built-in plugins are no prefix.
+        assertTrue(pluginPrefixes(listOf(PluginInfo("core", "builtin", "core@builtin", null)), emptyList()).isEmpty())
+    }
+
+    @Test
+    fun `a colon is not a plugin by itself`() {
+        assertEquals(CommandSource(CommandScope.OTHER, null, null, "Does z"), source("team:z", "Does z"))
+        assertEquals(CommandSource(CommandScope.OTHER, null, null, "Does z"), source("team:", "Does z", plugins = setOf("team")))
+        val plug = assertNotNull(slashPalette("/", emptyList(), listOf("plug:do"), emptySet(), plugins = setOf("plug"))).item("plug:do")
+        assertEquals(CommandScope.PLUGIN, plug.scope)
+        assertEquals(CommandScope.OTHER, assertNotNull(slashPalette("/", emptyList(), listOf("plug:do"), emptySet())).item("plug:do").scope)
+    }
+
+    @Test
+    fun `each settings source has its label`() {
+        assertEquals(CommandSource(CommandScope.PROJECT, null, null, "Ours"), source("ours", "Ours (project)"))
+        assertEquals(CommandSource(CommandScope.PROJECT, null, null, "Ours"), source("ours", "Ours (project, gitignored)"))
+        assertEquals(CommandSource(CommandScope.USER, null, null, "Mine"), source("mine", "Mine (user)"))
+        assertEquals(CommandSource(CommandScope.MANAGED, null, null, "Org"), source("org", "Org (managed)"))
+        assertEquals(CommandSource(CommandScope.CLI_FLAG, null, null, "Flag"), source("flag", "Flag (cli flag)"))
+        assertEquals(CommandSource(CommandScope.OTHER, null, null, "Plain (team)"), source("plain", "Plain (team)"))
+        assertEquals(CommandScope.MCP, source("mcp__srv__prompt", "").scope)
+        assertEquals(CommandScope.OTHER, source("mcp__srv", "").scope)
+        assertEquals(CommandScope.MCP, assertNotNull(slashPalette("/", emptyList(), listOf("mcp__srv__prompt"), emptySet())).item("mcp__srv__prompt").scope)
     }
 }

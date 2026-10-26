@@ -118,7 +118,9 @@ data class ToolRow(
 /**
  * A notice of the chat (retries, fallbacks, errors, a local command's output), `n:<entry id>`. On a [NoticeKind.LOCAL_COMMAND]
  * notice, [command] is the command it answers (its accessibility name `Reply to /<command>`, `Command output` when null) and [link]
- * the action that replaces the CLI's terminal hint (`/mcp`'s [MCP_TERMINAL_HINT], removed from [text]).
+ * the action that replaces the CLI's terminal hint (`/mcp`'s [MCP_TERMINAL_HINT], removed from [text]). A `/usage` notice of the
+ * stream carries its card ([usage], drawn in place of [text]) and the uuid of the CLI's line ([sourceUuid], which its `Retry` names);
+ * `/context`'s notice is drawn as Markdown ([markdown], spec 3.1).
  */
 data class NoticeRow(
     override val key: String,
@@ -128,6 +130,9 @@ data class NoticeRow(
     val kind: NoticeKind = NoticeKind.GENERIC,
     val command: String? = null,
     val link: NoticeLink? = null,
+    val usage: UsageCardModel? = null,
+    val markdown: Boolean = false,
+    val sourceUuid: String? = null,
 ) : ChatRow
 
 /** An action at the end of a notice, with its label. */

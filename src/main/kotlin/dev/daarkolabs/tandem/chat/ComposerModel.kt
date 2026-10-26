@@ -24,6 +24,8 @@ internal const val DEFAULT_MODEL_ENTRY: String = "default"
  * entry resolves to; [effortLevels] and [autoSupported] are those of the shown model ([shownModel]); [modelSwitchPending] mirrors
  * [ChatState.modelSwitchPending]. [commands], [slashCommandNames] and [terminalCommands] feed the slash palette ([slashPalette]).
  * [shellRunning]: a shell escape runs (MCP spec 12.1); the composer is busy meanwhile, and Stop stops the command ([stopTarget]).
+ * [plugins] are the `+` menu's Plugins pages ([pluginMenu]); [pluginsKnown]: an init came, or the catalogue names a plugin's entry;
+ * [skills] the latest init's skills, null before an init; [pluginPrefixes] the session's plugins for the palette ([pluginPrefixes]).
  */
 data class ComposerModel(
     val busy: Boolean,
@@ -44,6 +46,10 @@ data class ComposerModel(
     val slashCommandNames: ImmutableList<String> = persistentListOf(),
     val terminalCommands: ImmutableSet<String> = persistentSetOf(),
     val shellRunning: Boolean = false,
+    val plugins: ImmutableList<PluginEntry> = persistentListOf(),
+    val pluginsKnown: Boolean = false,
+    val skills: ImmutableList<String>? = null,
+    val pluginPrefixes: ImmutableSet<String> = persistentSetOf(),
 )
 
 /**
@@ -51,7 +57,8 @@ data class ComposerModel(
  * any (it has none, as a restored session before its first prompt), the [known] ones another process listed
  * ([dev.daarkolabs.tandem.session.SessionManager.models]), else, before any process has, the CLI's own aliases ([CLI_MODEL_ALIASES]).
  * Its commands, and the terminal-only names the palette leaves out, are the session's own likewise, else those of [knownCommands]
- * ([dev.daarkolabs.tandem.session.SessionManager.commands]); the session's own replace them once its process offers them.
+ * ([dev.daarkolabs.tandem.session.SessionManager.commands]); the session's own replace them once its process offers them. The plugins
+ * come from those commands until the session's first `system/init`, then from its `plugins` (spec 3.3, 17.3, 17.6).
  */
 fun composerModel(
     state: ChatState,
@@ -60,6 +67,11 @@ fun composerModel(
 ): ComposerModel {
     val models = state.models.ifEmpty { known }.ifEmpty { CLI_MODEL_ALIASES }
     val shown = shownModel(models, state.requestedModel, state.activeModel, state.modelSwitchPending)
+    val commands = state.commands.ifEmpty { knownCommands.commands }
+    val initSeen = state.mcp.initCount > 0
+    val initPlugins = state.plugins.takeIf { initSeen }
+    val skills = state.skills.takeIf { initSeen }
+    val plugins = pluginMenu(initPlugins, commands, state.slashCommandNames, skills)
     return ComposerModel(
         busy = state.busy,
         ended = state.ended,
@@ -75,10 +87,14 @@ fun composerModel(
         effortLevels = shown?.effortLevels.orEmpty().toImmutableList(),
         autoSupported = shown?.supportsAutoMode == true,
         modelSwitchPending = state.modelSwitchPending,
-        commands = state.commands.ifEmpty { knownCommands.commands }.toImmutableList(),
+        commands = commands.toImmutableList(),
         slashCommandNames = state.slashCommandNames.toImmutableList(),
         terminalCommands = state.terminalCommands.ifEmpty { knownCommands.terminal }.toImmutableSet(),
         shellRunning = state.runningShell != null,
+        plugins = plugins,
+        pluginsKnown = initSeen || plugins.isNotEmpty(),
+        skills = skills?.toImmutableList(),
+        pluginPrefixes = pluginPrefixes(initPlugins, commands).toImmutableSet(),
     )
 }
 
@@ -168,6 +184,13 @@ object ContextFormat {
         val window = usage.window?.takeIf { it != 0L } ?: return null
         return (tokens.toFloat() / window).coerceIn(0f, 1f)
     }
+
+    /**
+     * The share of [max] that [tokens] are, to one decimal (`0.3%`, `0.0%` for a sliver), as the CLI's own `/context` table prints it
+     * (spec 3.1); `—` without a window.
+     */
+    fun percentOf(tokens: Long, max: Long): String =
+        if (max <= 0) "—" else String.format(Locale.ROOT, "%.1f%%", 100.0 * tokens / max)
 
     /** `200k` under a million; `1M`, `1.5M` from one, with one decimal only when it is not zero (where [formatTokens] gives `1.0m`). */
     fun formatWindow(window: Long): String =

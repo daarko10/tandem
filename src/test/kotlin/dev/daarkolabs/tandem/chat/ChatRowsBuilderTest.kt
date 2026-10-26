@@ -1,19 +1,23 @@
 package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.StreamEvent
+import dev.daarkolabs.tandem.protocol.UsageAnswer
 import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.McpResult
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.TurnEnd
+import dev.daarkolabs.tandem.session.UsagePart
 import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
@@ -1396,4 +1400,75 @@ class ChatRowsBuilderTest {
 
     private fun assistant(id: String, vararg blocks: AssistantBlock): ChatEntry.Assistant =
         ChatEntry.Assistant(id, id, parentToolUseId = null, model = null, blocks = blocks.toList(), completedBlocks = blocks.size, streaming = false, uuids = emptySet())
+
+    private val u17: UsageAnswer = ControlPayloads.usage((fixtureLine("parity-usage", 17) as CliMessage.ControlResponse).payload)!!
+
+    private fun noticeRows(rows: ChatRows): List<NoticeRow> = rows.rows.filterIsInstance<NoticeRow>()
+
+    private fun usageRow(rows: ChatRows): NoticeRow = rows.rows.filterIsInstance<NoticeRow>().single { it.sourceUuid == "<uuid-28>" }
+
+    @Test
+    fun `a usage notice row carries its card`() {
+        val (_, rows) = replay("parity-usage", prompt = "hi", lines = Fixtures.lines("parity-usage").take(22))
+        val row = usageRow(rows)
+        assertNotNull(row.usage)
+        assertFalse(row.markdown)
+        assertEquals(UsageSection.Loading, row.usage!!.facts)
+    }
+
+    @Test
+    fun `a context notice is markdown`() {
+        val (_, rows) = replay("parity-context", prompt = "hi", lines = Fixtures.lines("parity-context").take(24))
+        val row = noticeRows(rows).single { it.kind == NoticeKind.LOCAL_COMMAND }
+        assertTrue(row.markdown)
+        assertNull(row.usage)
+        assertNull(row.sourceUuid)
+    }
+
+    @Test
+    fun `other local notices stay plain`() {
+        val (_, rows) = replay("mcp-slash", prompt = "hi", lines = Fixtures.lines("mcp-slash").take(5))
+        val row = noticeRows(rows).single { it.kind == NoticeKind.LOCAL_COMMAND }
+        assertFalse(row.markdown)
+        assertNull(row.usage)
+    }
+
+    @Test
+    fun `a usage card in an older turn updates when its answer arrives`() {
+        // Review Focus 1: three turns, the first two cached.
+        val builder = ChatRowsBuilder(options)
+        val (state, rows) = replay("parity-usage", prompt = "hi", builder = builder)
+        assertEquals(UsageSection.Loading, usageRow(rows).usage!!.history)
+        val answered = reduce(state, SessionEvent.UsageFetched("<uuid-28>", UsagePart.HISTORY, McpResult.Ok(u17)))
+        assertIs<UsageSection.Shown<*>>(usageRow(builder.build(answered)).usage!!.history)
+    }
+
+    @Test
+    fun `Retry on an older card shows it loading again`() {
+        // Review Focus 1
+        val builder = ChatRowsBuilder(options)
+        val (state, _) = replay("parity-usage", prompt = "hi", builder = builder)
+        val answered = reduce(state, SessionEvent.UsageFetched("<uuid-28>", UsagePart.HISTORY, McpResult.Ok(u17)))
+        assertIs<UsageSection.Shown<*>>(usageRow(builder.build(answered)).usage!!.history)
+        val retried = reduce(answered, SessionEvent.UsageRetry("<uuid-28>", UsagePart.HISTORY))
+        assertEquals(UsageSection.Loading, usageRow(builder.build(retried)).usage!!.history)
+    }
+
+    @Test
+    fun `a usage card in an earlier frozen turn updates and later turns keep their rows`() {
+        // Review Focus 1, deviation 7: the card's turn is neither the last frozen turn nor ended by the card.
+        val builder = ChatRowsBuilder(options)
+        var (state, _) = replay("parity-usage", prompt = "hi", builder = builder)
+        state = replay("plain-reply", prompt = "hi", initial = state, builder = builder).first
+        val suffixed = Fixtures.lines("plain-reply").map { it.replace(Regex("\"(<(?:uuid|id)-\\d+>)\""), "\"$1-2\"") }
+        state = replay("plain-reply", prompt = "hi", initial = state, lines = suffixed, builder = builder).first
+        val rows = builder.build(state)
+        val at = rows.rows.indexOf(usageRow(rows))
+        assertTrue(rows.rows.size > at + 4, rows.rows.toString())
+        val after = builder.build(reduce(state, SessionEvent.UsageFetched("<uuid-28>", UsagePart.HISTORY, McpResult.Ok(u17))))
+        assertIs<UsageSection.Shown<*>>(usageRow(after).usage!!.history)
+        assertEquals(rows.rows.size, after.rows.size)
+        for (i in at + 1 until rows.rows.size) assertSame(rows.rows[i], after.rows[i], "row $i")
+        for (i in 0 until at) assertSame(rows.rows[i], after.rows[i], "row $i")
+    }
 }

@@ -203,6 +203,7 @@ internal fun PromptBar(
             composer.commands,
             composer.slashCommandNames,
             composer.terminalCommands,
+            composer.pluginPrefixes,
         )
     }
     val palette = remember(ui, presenter) { derivedStateOf { paletteOf(inputFocused.value) } }

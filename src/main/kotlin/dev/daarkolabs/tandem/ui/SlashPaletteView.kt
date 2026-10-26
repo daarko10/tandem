@@ -131,12 +131,17 @@ internal fun rowTrailing(item: PaletteItem, selected: Boolean): String = buildSt
     item.via?.let { append(" · via /").append(it) }
 }
 
-/** The scope's label (MCP spec 3.4), shown before the description; none for a built-in. */
+/** The scope's label (MCP spec 3.4, spec 17.6), shown before the description; none for a built-in or an entry of no known source. */
 internal fun scopeLabel(scope: CommandScope): String? = when (scope) {
     CommandScope.BUILTIN -> null
     CommandScope.PROJECT -> "project"
     CommandScope.USER -> "user"
     CommandScope.PLUGIN -> "plugin"
+    CommandScope.CLAUDE_AI -> "claude.ai"
+    CommandScope.MANAGED -> "managed"
+    CommandScope.CLI_FLAG -> "CLI flag"
+    CommandScope.MCP -> "MCP"
+    CommandScope.OTHER -> null
 }
 
 /**

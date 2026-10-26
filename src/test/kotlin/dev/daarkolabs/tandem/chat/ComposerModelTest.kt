@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.PermissionMode
@@ -248,5 +249,55 @@ class ComposerModelTest {
     fun `Stop stops the command while one runs, else the turn`() {
         assertEquals(StopTarget.Shell, stopTarget(true))
         assertEquals(StopTarget.Turn, stopTarget(false))
+    }
+
+    /** The catalogue of `parity-add-dir:1`, which names the plugin `probe-kit`'s skill and command. */
+    private val pluginCatalogue: List<SlashCommand> =
+        ControlPayloads.initialize((fixtureLine("parity-add-dir", 1) as CliMessage.ControlResponse).payload)!!.commands
+
+    @Test
+    fun `the composer lists the session's plugins from the catalogue, then from the init`() {
+        val beforeInit = ChatState(commands = pluginCatalogue)
+        val pre = composerModel(beforeInit)
+        val plugin = pre.plugins.single()
+        assertEquals("probe-kit", plugin.name)
+        assertNull(plugin.version)
+        assertEquals(listOf("greet"), plugin.skills.map { it.name })
+        assertEquals(listOf("hello"), plugin.commands.map { it.name })
+        assertTrue(pre.pluginsKnown)
+        assertNull(pre.skills)
+
+        val afterInit = composerModel(reduce(beforeInit, SessionEvent.Cli(fixtureLine("parity-add-dir", 5))))
+        assertEquals("0.1.0", afterInit.plugins.single().version)
+        assertEquals(35, afterInit.skills!!.size)
+        assertTrue(afterInit.pluginsKnown)
+
+        val empty = composerModel(ChatState())
+        assertTrue(empty.plugins.isEmpty())
+        assertFalse(empty.pluginsKnown)
+        val plain = composerModel(ChatState(commands = listOf(SlashCommand("hello", "Hi (project)"))))
+        assertTrue(plain.plugins.isEmpty())
+        assertFalse(plain.pluginsKnown)
+    }
+
+    @Test
+    fun `a restored session lists its plugins from the known catalogue`() {
+        // spec 17, PR #9
+        val restored = composerModel(ChatState(), knownCommands = CommandCatalogue(pluginCatalogue))
+        assertEquals("probe-kit", restored.plugins.single().name)
+        assertTrue(restored.pluginsKnown)
+    }
+
+    @Test
+    fun `the composer gives the palette the session's plugin prefixes`() {
+        // spec 17.6
+        val beforeInit = ChatState(commands = pluginCatalogue)
+        assertEquals(persistentSetOf("probe-kit"), composerModel(beforeInit).pluginPrefixes)
+        // The init lists three built-in plugins besides probe-kit: they are left out.
+        val afterInit = reduce(beforeInit, SessionEvent.Cli(fixtureLine("parity-add-dir", 5)))
+        assertEquals(4, afterInit.plugins.size)
+        assertEquals(persistentSetOf("probe-kit"), composerModel(afterInit).pluginPrefixes)
+        assertEquals(persistentSetOf("probe-kit"), composerModel(ChatState(), knownCommands = CommandCatalogue(pluginCatalogue)).pluginPrefixes)
+        assertTrue(composerModel(ChatState()).pluginPrefixes.isEmpty())
     }
 }
