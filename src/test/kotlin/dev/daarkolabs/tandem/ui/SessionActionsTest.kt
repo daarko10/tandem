@@ -234,7 +234,6 @@ class SessionActionsTest {
         assertEquals("Wait for the reply to finish", forkRefusal(ForkResult.Refused.BUSY))
     }
 
-
     // spec: closing the selected session selects the next tab, else the previous, else none, before the close
     @Test
     fun `closing the selected session selects the next tab, else the previous, else none, before the close`() = timeoutRunBlocking(60.seconds) {

@@ -110,6 +110,12 @@ internal class SessionTabsController(
 
         override fun contentRemoveQuery(event: ContentManagerEvent) {
             if (applying) return
+            if (event.content === placeholder) {
+                // `removeAllContents` skips no closeable check: a removed placeholder would leave the manager empty and the next apply
+                // selecting a content it no longer holds.
+                event.consume()
+                return
+            }
             val id = event.content.getUserData(SESSION_TAB) ?: return
             event.consume()
             LOG.debug("tab of session $id closed in the header")
@@ -193,9 +199,9 @@ internal class SessionTabsController(
         LOG.debug("tab of session ${content.getUserData(SESSION_TAB) ?: "none"} selected")
     }
 
-    /** The placeholder content, added when missing: an empty name, not closeable (spec 18.2). */
+    /** The placeholder content, added when missing or removed behind the controller's back: an empty name, not closeable (spec 18.2). */
     private fun ensurePlaceholder(): Content {
-        placeholder?.let { return it }
+        placeholder?.let { if (contentManager.getIndexOfContent(it) >= 0) return it }
         val content = ContentFactory.getInstance().createContent(panel, "", false).apply {
             setShouldDisposeContent(false)
             isCloseable = false

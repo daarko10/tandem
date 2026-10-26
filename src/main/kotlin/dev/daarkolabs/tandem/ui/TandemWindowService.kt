@@ -9,6 +9,7 @@ import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.SessionId
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -39,7 +40,7 @@ internal class TandemWindowService(private val project: Project) {
     }
 
     /** Forgets the request the tool window has just taken, so it is not replayed to a later collector. */
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @OptIn(ExperimentalCoroutinesApi::class)
     fun takeFocusRequest() {
         mutableFocusRequests.resetReplayCache()
     }

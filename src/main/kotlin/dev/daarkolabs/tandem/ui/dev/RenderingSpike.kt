@@ -7,6 +7,7 @@ import com.intellij.openapi.startup.ProjectActivity
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.openapi.wm.ex.ToolWindowEx
 import dev.daarkolabs.tandem.TandemProjectScope
+import dev.daarkolabs.tandem.ui.TOOL_WINDOW_ID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -31,7 +32,7 @@ internal class DevStartupActivity : ProjectActivity {
         val autoPrompt = !System.getProperty("tandem.autoPrompt").isNullOrBlank()
         if (!RenderingSpike.enabled && !autoPrompt) return
         withContext(Dispatchers.EDT) {
-            val window = ToolWindowManager.getInstance(project).getToolWindow("Tandem") ?: return@withContext
+            val window = ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID) ?: return@withContext
             window.show()
             (window as? ToolWindowEx)?.stretchWidth(600)
         }

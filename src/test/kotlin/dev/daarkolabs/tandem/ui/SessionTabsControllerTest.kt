@@ -419,8 +419,12 @@ class SessionTabsControllerTest {
         withContext(compute) { h.set(selected = null) }
         h.until("only the placeholder") { h.manager.contentCount == 1 && h.manager.contents.single().displayName == "" }
         withContext(Dispatchers.EDT) {
+            val placeholder = h.manager.contents.single()
             h.manager.removeAllContents(true)
             assertFalse(h.panel.disposed)
+            // The placeholder's removal is vetoed too, so the manager never empties.
+            assertSame(placeholder, h.manager.contents.singleOrNull())
+            assertSame(placeholder, h.manager.selectedContent)
         }
         h.controller.close()
         assertFalse(h.panel.disposed)
