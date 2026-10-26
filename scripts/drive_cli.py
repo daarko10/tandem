@@ -802,7 +802,14 @@ def run_fork(origin: Cli, spawn, session_id: str, cut: str, forbidden: tuple[str
         start = len(forked.lines)
         forked.user(FORK_QUESTION)
         forked.until(is_result, allow_tools(forked))
-        inits = [m for m in map(json.loads, forked.lines[start:]) if is_init(m)]
+        inits = []
+        for line in forked.lines[start:]:
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(msg, dict) and is_init(msg):
+                inits.append(msg)
         print(f"fork: the fork's init carries the id passed with --session-id: "
               f"{[m.get('session_id') for m in inits] == [fork_id] * len(inits) and bool(inits)}", file=sys.stderr)
         reply = reply_text(forked.lines[start:])

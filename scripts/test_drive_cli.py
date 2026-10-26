@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest import mock
@@ -874,6 +875,16 @@ class QueueStoryTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "used a tool"):
             drive_cli.fork_at(self.origin([], turn_one_tool=True), spawn=self.spawner([], []))
 
+    def test_a_non_json_line_from_the_fork_does_not_fail_the_recording(self):
+        def spawn(argv, first_id):
+            def react(cli, msg):
+                if msg["type"] == "user":
+                    cli.lines.append("not json")
+                    return [assistant("f1", "ALPHA"), {"type": "result", "subtype": "success"}]
+                return ok(msg)
+            return StoryCli("fork", react, argv, [], first_id)
+        drive_cli.fork_at(self.origin([]), spawn=spawn)
+
     def test_the_fork_at_scenario_fails_without_a_reply_line(self):
         def react(cli, msg):
             if msg["type"] == "user":
@@ -937,10 +948,18 @@ class QueueStoryTest(unittest.TestCase):
             return []
         return StoryCli("cli", react)
 
-    def test_queue_fold_and_later_send_at_task_started(self):
+    def test_queue_scenarios_send_at_task_started(self):
+        """task_started comes from a timer, after the frame that starts the turn has returned: a scenario that sends its
+        queued frame without waiting for it writes that frame before the emit, and the position checks fail."""
+        def started_later(cli):
+            timer = threading.Timer(0.05, cli.emit, (TASK_STARTED,))
+            timer.daemon = True
+            timer.start()
+            return []
+
         def reactions(cli, msg):
             if text_of(msg).startswith("Use the Bash"):
-                return [TASK_STARTED]
+                return started_later(cli)
             ids = [cli.users()[0]["uuid"], msg["uuid"]]
             return [{"type": "result", "user_message_uuids": ids}] + (
                 [{"type": "result", "user_message_uuids": [msg["uuid"]]}] if msg.get("priority") else [])
@@ -957,6 +976,37 @@ class QueueStoryTest(unittest.TestCase):
             self.assertEqual(positions(cli.events, "emit", "cli", lambda e: e[2] == "system")[0] + 1,
                              positions(cli.events, "send", "cli")[1], "the steer follows task_started")
         self.assertEqual(2, sum(m["type"] == "result" for m in map(json.loads, later.lines)))
+
+        def cancel_extra(cli, request):
+            return [{"type": "result"}] if request["subtype"] in ("cancel_async_message", "interrupt") else []
+
+        cancel = self.story(lambda c, m: started_later(c) if m.get("priority") is None else [], cancel_extra)
+        with mock.patch.object(drive_cli, "SETTLE_S", 0.05):
+            drive_cli.queue_cancel(cancel)
+        started = positions(cancel.events, "emit", "cli", lambda e: e[2] == "system")
+        sends = positions(cancel.events, "send", "cli")
+        self.assertEqual(2, len(started), "task_started answers P1 and P2 only")
+        self.assertLess(sends[0], started[0])
+        self.assertLess(started[0], sends[1], "F1 follows P1's task_started")
+        self.assertLess(sends[3], started[1])
+        self.assertLess(started[1], sends[4], "F2 follows P2's task_started")
+
+        def command_reactions(cli, msg):
+            if text_of(msg).startswith("Use the Bash"):
+                return started_later(cli)
+            if any(b["type"] == "image" for b in msg["message"]["content"]):
+                return [{"type": "result", "user_message_uuids": [msg["uuid"]]}]
+            return []
+
+        command = self.story(command_reactions)
+        with mock.patch.object(drive_cli, "SETTLE_S", 0.05):
+            drive_cli.queue_later_command(command)
+        started = positions(command.events, "emit", "cli", lambda e: e[2] == "system")
+        sends = positions(command.events, "send", "cli")
+        self.assertEqual("/context", text_of(command.users()[1]))
+        self.assertIn("image", [b["type"] for b in command.users()[2]["message"]["content"]])
+        self.assertLess(started[0], sends[1], "/context follows the first task_started")
+        self.assertLess(started[0], sends[2], "the image message follows the first task_started")
 
     def test_queue_cancel_sends_its_frames_in_order(self):
         def reactions(cli, msg):
@@ -1087,6 +1137,8 @@ class QueueStoryTest(unittest.TestCase):
         self.assertEqual(["allow"], [m["response"]["response"]["behavior"] for m in answers])
 
     def test_parity_requests_sends_its_requests_in_order(self):
+        """The frames parity_requests writes itself; main() sends initialize before any scenario runs, so the plan's
+        'after initialize' is main's, not this function's, and is not checked here."""
         cli = self.story(lambda c, m: [{"type": "result"}])
         drive_cli.parity_requests(cli)
         self.assertEqual(["Reply with the single word: one", "get_context_usage", "get_usage", "/usage"],
