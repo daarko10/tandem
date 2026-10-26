@@ -10,7 +10,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.layout.onSizeChanged
@@ -74,8 +73,10 @@ internal fun ChatPane(
     }
     // The chat pane's height, which caps the context popover's (desktop-parity spec 3.1: 60 % of the tool window).
     val density = LocalDensity.current
-    var paneHeight by remember { mutableStateOf<Dp?>(null) }
-    Column(Modifier.fillMaxSize().onSizeChanged { paneHeight = with(density) { it.height.toDp() } }) {
+    // Read only by the open popover (through the provider), so a resize recomposes neither the pane nor the prompt bar.
+    val paneHeight = remember { mutableStateOf<Dp?>(null) }
+    val paneHeightOf: () -> Dp? = remember(paneHeight) { { paneHeight.value } }
+    Column(Modifier.fillMaxSize().onSizeChanged { paneHeight.value = with(density) { it.height.toDp() } }) {
         Box(
             Modifier.weight(1f).fillMaxWidth()
                 // The dim of spec 4.12: a scrim drawn over the list, never an offscreen layer of it.
@@ -110,7 +111,7 @@ internal fun ChatPane(
                         ?.let { manager.answer(handle.id, card.requestId, it) }
                 }
             },
-            paneHeight = paneHeight,
+            paneHeight = paneHeightOf,
         )
     }
 }

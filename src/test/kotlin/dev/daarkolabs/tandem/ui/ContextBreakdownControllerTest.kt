@@ -15,6 +15,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,9 +25,12 @@ import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -183,14 +187,39 @@ class ContextBreakdownControllerTest {
         val b17 = ControlPayloads.contextUsage((fixtureLine("parity-context", 17) as CliMessage.ControlResponse).payload)!!
         val controller = controller()
         breakdown.value = b17
-        val full = controller.model.first { it.rows.isNotEmpty() }
+        val full = controller.model.first { it != null && it.rows.isNotEmpty() }!!
         assertEquals("38.0k / 1M (4%)", full.value)
         assertEquals(8, full.rows.size)
         breakdown.value = null
         ring.value = ContextUsage(38032, 1_000_000)
-        val ringOnly = controller.model.first { it.rows.isEmpty() && it.value != null }
+        val ringOnly = controller.model.first { it != null && it.rows.isEmpty() && it.value != null }!!
         assertEquals("38.0k / 1M (4%)", ringOnly.value)
         assertTrue(ringOnly.rows.isEmpty())
+    }
+
+    @Test
+    fun `a reopened popover has no model until its first build, then the kept answer`() = test {
+        val b17 = ControlPayloads.contextUsage((fixtureLine("parity-context", 17) as CliMessage.ControlResponse).payload)!!
+        breakdown.value = b17
+        // The build waits behind a held task on a single thread, so the seed is all the popover could draw meanwhile.
+        val executor = Executors.newSingleThreadExecutor()
+        val held = CountDownLatch(1)
+        executor.execute { held.await() }
+        try {
+            val controller = ContextBreakdownController(
+                SESSION, breakdown, ring, turnsEnded, status, controls, scope, home = null, projectRoot = null,
+                dispatcher = executor.asCoroutineDispatcher(),
+            )
+            assertNull(controller.model.value, "no frame is drawn from a seed without the kept rows")
+            held.countDown()
+            val first = controller.model.first { it != null }!!
+            assertEquals(8, first.rows.size)
+            assertEquals("38.0k / 1M (4%)", first.value)
+            controller.close()
+        } finally {
+            held.countDown()
+            executor.shutdownNow()
+        }
     }
 
     /**

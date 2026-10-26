@@ -747,6 +747,16 @@ class ToolWindowIdeTest {
             waitFor("Escape closed the popover and the ring has the focus", 30.seconds) {
                 !described("Context window breakdown").present() && ui.x("$RING[@focused='true']").present()
             }
+            // Enter on a button closes the popover from the keyboard too, so the ring takes the focus back (spec 3.5).
+            ui.keyboard { enter() }
+            waitFor("Enter reopened the popover", 30.seconds) { described("Context window breakdown").present() }
+            pressUntil("See detailed breakdown selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) {
+                ui.x("$DETAILED_ITEM[@focused='true']").present()
+            }
+            ui.keyboard { enter() }
+            waitFor("Enter on See detailed breakdown closed the popover and the ring has the focus", 30.seconds) {
+                !described("Context window breakdown").present() && ui.x("$RING[@focused='true']").present()
+            }
         }
     }
 
@@ -1417,6 +1427,10 @@ class ToolWindowIdeTest {
 
         /** The context popover's header row, the category list's toggle. */
         const val HEADER_ROW = "//div[@class='ComposeNode' and @contentdescription='Context window categories']"
+
+        /** The popover's `See detailed breakdown` item, its text merged into the menu item's node. */
+        const val DETAILED_ITEM =
+            "//div[@class='ComposeNode' and (contains(@visible_text, 'See detailed breakdown') or contains(@text, 'See detailed breakdown'))]"
 
         /** The popover's Messages category row, shown only while the category list is open. */
         const val MESSAGES_ROW = "//div[@class='ComposeNode' and starts-with(@contentdescription, 'Messages,')]"

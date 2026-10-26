@@ -155,7 +155,7 @@ internal fun PromptBar(
     focus: Boolean = false,
     onFocused: () -> Unit = {},
     onCardEscape: () -> Unit = {},
-    paneHeight: Dp? = null,
+    paneHeight: () -> Dp? = { null },
 ) {
     val composer by presenter.composer.collectAsState()
     val sending by sender.sending.collectAsState()
@@ -267,23 +267,24 @@ internal fun PromptBar(
         scrollToEnd()
     }
     // At most 60 % of the tool window's height (spec 3.1); before the pane is measured, a height that fits any tool window.
-    val popoverMaxHeight = paneHeight?.let { it * POPOVER_HEIGHT_SHARE } ?: POPOVER_FALLBACK_HEIGHT
-    val popover = remember(openPopover, popoverMaxHeight) {
+    // Providers, read only by the open popover: a resize recomposes the popover, not the prompt bar.
+    val popover = remember(openPopover, paneHeight) {
         ContextPopoverHost(
             open = openPopover,
             busy = presenter.busy,
-            maxHeight = popoverMaxHeight,
+            maxHeight = { paneHeight()?.let { it * POPOVER_HEIGHT_SHARE } ?: POPOVER_FALLBACK_HEIGHT },
             onDetailed = { sendFromPopover("/context") },
             onUsage = { sendFromPopover("/usage") },
         )
     }
     val density = LocalDensity.current
-    var columnWidth by remember { mutableStateOf<Dp?>(null) }
+    val columnWidth = remember { mutableStateOf<Dp?>(null) }
+    val columnWidthOf: () -> Dp? = remember(columnWidth) { { columnWidth.value } }
     val attachFiles: (List<Path>) -> Unit = { paths ->
         if (paths.isNotEmpty()) scope.launch { ComposerImages.readFiles(paths).forEach { (name, bytes) -> attach(ui, name, bytes) } }
     }
     // The box and the footer share the chat column's width less 16 dp each side, so the footer measures from the box's edges.
-    Column(Modifier.chatColumn().onSizeChanged { columnWidth = with(density) { it.width.toDp() } }.padding(horizontal = 16.dp)) {
+    Column(Modifier.chatColumn().onSizeChanged { columnWidth.value = with(density) { it.width.toDp() } }.padding(horizontal = 16.dp)) {
         ui.composerNotice.value?.let { notice ->
             InlineWarningBanner(
                 text = notice,
@@ -351,7 +352,7 @@ internal fun PromptBar(
                     menuRequest = ui.menuRequest,
                 )
             }
-            CompositionLocalProvider(LocalChatColumnWidth provides columnWidth) { ContextRing(presenter.context, popover) }
+            CompositionLocalProvider(LocalChatColumnWidth provides columnWidthOf) { ContextRing(presenter.context, popover) }
         }
     }
 }

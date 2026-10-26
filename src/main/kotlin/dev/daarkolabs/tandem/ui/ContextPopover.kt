@@ -59,19 +59,23 @@ import org.jetbrains.jewel.ui.component.separator
 
 /**
  * What the ring needs to open its popover (spec 3.1): [open] makes the controller of one open popover in the scope it is given, [busy]
- * disables the two buttons while a turn runs, the popover is at most [maxHeight] high, `See detailed breakdown` calls [onDetailed] and
- * `Show session usage` [onUsage] (spec 16.2), each after the popover closed.
+ * disables the two buttons while a turn runs, the popover is at most [maxHeight] high (a provider, read only by the open popover, so a
+ * resize recomposes nothing else), `See detailed breakdown` calls [onDetailed] and `Show session usage` [onUsage] (spec 16.2), each
+ * after the popover closed.
  */
 internal class ContextPopoverHost(
     val open: (CoroutineScope) -> ContextBreakdownController,
     val busy: StateFlow<Boolean>,
-    val maxHeight: Dp,
+    val maxHeight: () -> Dp,
     val onDetailed: () -> Unit,
     val onUsage: () -> Unit,
 )
 
-/** The chat column's width, as the prompt bar measures it; null where nothing measured it. */
-internal val LocalChatColumnWidth = compositionLocalOf<Dp?> { null }
+/**
+ * The chat column's width, as the prompt bar measures it; null where nothing measured it. A provider, read only by the open popover,
+ * so a resize recomposes nothing else.
+ */
+internal val LocalChatColumnWidth = compositionLocalOf<() -> Dp?> { { null } }
 
 /** The popover's width (spec 3.1): `min(360 dp, chat column − 32 dp)`, at least 280 dp; 360 dp without a measured column. */
 internal fun contextPopoverWidth(column: Dp?): Dp =
@@ -95,7 +99,9 @@ private fun chevron(expanded: Boolean): String = if (expanded) "⌄" else "›"
  * the groups, each group collapsed when the popover opens; then `See detailed breakdown` and `Show session usage`, disabled while
  * [host]'s turn runs. A click on the header, a group or `Retry` keeps the popover open through the close request Jewel makes after
  * every item's click (a hold-open flag, as a footer menu's page turn); a click on the ring itself ([anchorHovered]) closes it through
- * the ring. [onClose] closes it, saying whether a key (Esc) did, so the ring can take the focus back.
+ * the ring. [onClose] closes it, saying whether a key (Esc, or Enter on `See detailed breakdown` or `Show session usage`) did, so the
+ * ring can take the focus back (spec 3.5): the two buttons' actions wait for that close request, which carries Jewel's own input mode.
+ * Nothing is drawn until the controller's first build, so a reopened popover draws the kept answer at once (spec 3.1).
  *
  * Jewel's menu scrolls its own column under the height cap ([ContextPopoverHost.maxHeight], passed as the menu's modifier, which
  * `MenuContent` applies around its `verticalScroll` column), so every row stays a menu item and keeps Jewel's keys.
@@ -108,19 +114,22 @@ internal fun ContextPopover(
     anchorHovered: () -> Boolean,
     onClose: (byKeyboard: Boolean) -> Unit,
 ) {
-    val model by controller.model.collectAsState()
+    val built by controller.model.collectAsState()
     val fetch by controller.fetch.collectAsState()
     val rowsOpen by controller.rowsOpen.collectAsState()
     val busy by host.busy.collectAsState()
     var openGroups: PersistentSet<String> by remember { mutableStateOf(persistentSetOf()) }
     // Jewel asks to close the menu after every item's click; a toggle or a retry holds it open through that one request.
     val holdOpen = remember { mutableStateOf(false) }
+    // A button's action, run on the close request that follows its click, which says whether the click was a key (Enter).
+    val afterClose = remember { mutableStateOf<(() -> Unit)?>(null) }
+    val model = built ?: return
     val status = popoverStatus(fetch is FetchState.Loading, (fetch as? FetchState.Failed)?.text, fetch is FetchState.Stopped, model.rows.isNotEmpty())
     val palette = chatPalette()
     val dark = JewelTheme.isDark
     val errorColor = JewelTheme.globalColors.text.error
     val small = smallTextStyle()
-    val width = contextPopoverWidth(LocalChatColumnWidth.current)
+    val width = contextPopoverWidth(LocalChatColumnWidth.current())
     val header = (model.value ?: "") + (status.headerSuffix ?: "")
     val groups = openGroups
     PopupMenu(
@@ -134,12 +143,16 @@ internal fun ContextPopover(
                 mode == InputMode.Touch && anchorHovered() -> false
                 else -> {
                     onClose(mode == InputMode.Keyboard)
+                    afterClose.value?.let { action ->
+                        afterClose.value = null
+                        action()
+                    }
                     true
                 }
             }
         },
         popupPositionProvider = remember(gapPx) { AboveAnchor(alignEnd = true, gapPx = gapPx) },
-        modifier = Modifier.width(width).heightIn(max = host.maxHeight)
+        modifier = Modifier.width(width).heightIn(max = host.maxHeight())
             .testTag("context-popover")
             .semantics { contentDescription = "Context window breakdown" },
     ) {
@@ -155,8 +168,8 @@ internal fun ContextPopover(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Context window", style = small, color = palette.dim)
-                Spacer(Modifier.weight(1f).width(8.dp))
-                Text(header, style = small, maxLines = 1)
+                Spacer(Modifier.weight(1f))
+                Text(header, style = small, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 8.dp))
                 Text(chevron(rowsOpen), style = small, color = palette.dim, modifier = Modifier.padding(start = 6.dp))
             }
         }
@@ -192,14 +205,8 @@ internal fun ContextPopover(
             }
         }
         separator()
-        selectableItem(selected = false, enabled = !busy, onClick = {
-            onClose(false)
-            host.onDetailed()
-        }) { Text(if (busy) "See detailed breakdown (after this turn)" else "See detailed breakdown", style = small) }
-        selectableItem(selected = false, enabled = !busy, onClick = {
-            onClose(false)
-            host.onUsage()
-        }) { Text(if (busy) "Show session usage (after this turn)" else "Show session usage", style = small) }
+        selectableItem(selected = false, enabled = !busy, onClick = { afterClose.value = host.onDetailed }) { Text(if (busy) "See detailed breakdown (after this turn)" else "See detailed breakdown", style = small) }
+        selectableItem(selected = false, enabled = !busy, onClick = { afterClose.value = host.onUsage }) { Text(if (busy) "Show session usage (after this turn)" else "Show session usage", style = small) }
     }
 }
 

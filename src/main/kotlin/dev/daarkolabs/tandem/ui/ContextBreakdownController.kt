@@ -65,9 +65,12 @@ internal class ContextBreakdownController(
     private val job = SupervisorJob(scope.coroutineContext[Job])
     private val own = CoroutineScope(scope.coroutineContext + job + dispatcher + CoroutineName("Tandem context popover"))
 
-    /** The popover's contents; until the first build on [dispatcher], the ring's header alone (cheap: no categories). */
-    val model: StateFlow<ContextPopoverModel> = combine(breakdown, ring) { b, r -> contextPopover(b, r, home, projectRoot) }
-        .stateIn(own, SharingStarted.Eagerly, contextPopover(null, ring.value, home, projectRoot))
+    /**
+     * The popover's contents, built on [dispatcher]; null until the first build, so a reopened popover never draws a frame without the
+     * kept answer (spec 3.1).
+     */
+    val model: StateFlow<ContextPopoverModel?> = combine(breakdown, ring) { b, r -> contextPopover(b, r, home, projectRoot) }
+        .stateIn(own, SharingStarted.Eagerly, null)
 
     private val mutableFetch = MutableStateFlow<FetchState>(if (status.value == SessionStatus.STOPPED) FetchState.Stopped else FetchState.Idle)
 

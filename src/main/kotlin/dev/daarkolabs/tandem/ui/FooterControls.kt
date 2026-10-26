@@ -321,12 +321,23 @@ private fun RingControl(fraction: Float, value: String, popover: ContextPopoverH
         }
     }
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
+    // One controller per open popover: its requests stop when the popover closes (desktop-parity spec 3.1, 4.4).
+    val scope = rememberCoroutineScope()
+    val controller = if (open && popover != null) {
+        val opened = remember(popover.open) { popover.open(scope) }
+        DisposableEffect(opened) { onDispose { opened.close() } }
+        opened
+    } else {
+        null
+    }
+    // The ring reads the popover's header value (spec 3.7): the CLI's own total and percentage once a breakdown is held.
+    val stateValue = controller?.model?.collectAsState()?.value?.value ?: value
     Box(
         Modifier
             .semantics(mergeDescendants = true) {
                 role = Role.Button
                 contentDescription = "Context window"
-                stateDescription = value
+                stateDescription = stateValue
             }
             .focusRequester(ringFocus)
             .onPreviewKeyEvent { event ->
@@ -355,11 +366,7 @@ private fun RingControl(fraction: Float, value: String, popover: ContextPopoverH
                 drawArc(palette.accent, startAngle = -90f, sweepAngle = 360f * fraction, useCenter = false, topLeft = inset, size = arc, style = stroke)
             }
         }
-        if (open && popover != null) {
-            // One controller per open popover: its requests stop when the popover closes (desktop-parity spec 3.1, 4.4).
-            val scope = rememberCoroutineScope()
-            val controller = remember(popover.open) { popover.open(scope) }
-            DisposableEffect(controller) { onDispose { controller.close() } }
+        if (popover != null && controller != null) {
             val currentHovered by rememberUpdatedState(hovered)
             ContextPopover(popover, controller, gap, anchorHovered = { currentHovered }) { byKeyboard ->
                 open = false
