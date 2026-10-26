@@ -24,6 +24,8 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
                           without an mcp_reconnect is a guess at the unrecorded callback completion (probes open question 2)
   TANDEM_FAKE_EXTRA_NEEDS_AUTH  in an MCP fixture: the seeded server table gains a copy of the seeded needs-auth entry
                           under this name, served like it. Synthetic: a test-only knob for two sign-in waits at once
+  TANDEM_FAKE_QUEUED_DELAY_MS  in a `queue-` fixture (rule (m)): after a `queued` lifecycle line that bound a host frame, sleep
+                          this long (unset or 0: no sleep), so that a test sees the message wait before its `started` comes
 
 Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
 with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
@@ -81,6 +83,16 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
       is still answered by (a)): its answers were given to requests sent out of the recorded order. Any other host control
       request gets a bare success there, as in an MCP fixture (c).
   (k) `--add-dir` arguments are logged with the rest of the argv in `__spawn__`, nothing more.
+  (m) In a fixture whose name starts with `queue-`, the `<command_uuid-N>` placeholders stand for the host's own `user` frames:
+      a line naming one not yet bound (as `command_uuid`, or inside a `user_message_uuids` list) binds it to the oldest host
+      `user` frame read and not yet bound, waiting for the next one when there is none, and every bound placeholder in the line
+      is rewritten to that frame's `uuid`. A `command_lifecycle` `cancelled` line for a placeholder bound after the last `init` (a
+      message sent while the turn ran, not the turn's own prompt) first waits for the host's next `cancel_async_message` or
+      `interrupt`, and the `control_response` after it answers that request (`queue-cancel:24`-`:25`, `:55`-`:56`; the prompt's
+      own `cancelled` at `:61` does not wait); any other replayed `control_response` still pairs with the host's next
+      `control_request`. The wait before an `init` is met by a frame a line has named since the last `result` (bound then or
+      before: `queue-later:53` names F, bound at `:19`, ahead of the `init` at `:54`). Rule (g) is off for these fixtures.
+      `--resume-session-at` needs no rule: it is logged with the argv in `__spawn__`, like any other argument.
 """
 import copy
 import fcntl
@@ -105,6 +117,12 @@ SESSION_PLACEHOLDER = re.compile(r"<session_id-\d+>")
 SECRET_NAME_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH")
 UNKNOWN_SUBTYPE = "Unknown subtype"
 read_user_uuids = []  # rule (g): the uuids of the user frames read since the last result written
+queued_delay_ms = int(os.environ.get("TANDEM_FAKE_QUEUED_DELAY_MS") or 0)
+COMMAND_PLACEHOLDER = re.compile(r"<command_uuid-\d+>")
+unbound_frames = []  # rule (m): the uuids of the host's user frames read and not yet bound, oldest first
+bound = {}  # rule (m): placeholder -> the host frame's uuid
+bound_after_init = set()  # rule (m): the placeholders bound since the last init
+named_since_result = [False]  # rule (m): whether a line has named a bound placeholder since the last result
 
 
 def option(name):
@@ -163,6 +181,7 @@ def read_host():
             continue
         if isinstance(frame, dict) and frame.get("type") == "user" and isinstance(frame.get("uuid"), str):
             read_user_uuids.append(frame["uuid"])
+            unbound_frames.append(frame["uuid"])
         return frame
     return None
 
@@ -190,6 +209,12 @@ def wait_for_gate():
 
 
 def emit(message):
+    if queue_fixture:
+        line = SESSION_PLACEHOLDER.sub(lambda _: escaped_session_id, json.dumps(message, separators=(",", ":")))
+        line = COMMAND_PLACEHOLDER.sub(lambda m: bound.get(m.group(0), m.group(0)), line)
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+        return
     if message.get("type") == "result":
         message["user_message_uuids"] = list(read_user_uuids)
         del read_user_uuids[:]
@@ -342,6 +367,39 @@ def thin_list():
     return [{key: entry[key] for key in ("name", "status", "source") if key in entry} for entry in table]
 
 
+def named_placeholders(message):
+    """Rule (m): the placeholders a line names as `command_uuid` or inside a `user_message_uuids` list, in order."""
+    names = []
+    if isinstance(message.get("command_uuid"), str):
+        names.append(message["command_uuid"])
+    uuids = message.get("user_message_uuids")
+    if isinstance(uuids, list):
+        names.extend(u for u in uuids if isinstance(u, str))
+    return [name for name in names if COMMAND_PLACEHOLDER.fullmatch(name)]
+
+
+def bind_queue_line(message):
+    """Rule (m): binds the placeholders `message` names; returns the request id a replayed cancel answers, if it waited for one."""
+    newly = False
+    for name in named_placeholders(message):
+        if name not in bound:
+            while not unbound_frames:
+                wait_for(lambda m: m.get("type") == "user")
+            bound[name] = unbound_frames.pop(0)
+            bound_after_init.add(name)
+            newly = True
+        named_since_result[0] = True
+    if message.get("type") == "command_lifecycle":
+        name = message.get("command_uuid")
+        if message.get("state") == "queued" and newly and queued_delay_ms:
+            time.sleep(queued_delay_ms / 1000)
+        if message.get("state") == "cancelled" and name in bound_after_init:
+            request = wait_for(lambda m: m.get("type") == "control_request"
+                               and (m.get("request") or {}).get("subtype") in ("cancel_async_message", "interrupt"))
+            return request.get("request_id")
+    return None
+
+
 fixture = fixture_name(record_spawn())
 fixture_path = os.path.join(HERE, "fixtures", fixture + ".ndjson")
 if not os.path.isfile(fixture_path):
@@ -357,6 +415,7 @@ initialize_line = next((m for m in responses if "commands" in (payload_of(m) or 
 server_payloads = [payload_of(m) for m in responses if isinstance((payload_of(m) or {}).get("mcpServers"), list)]
 mcp_fixture = bool(server_payloads)
 parity_fixture = fixture.startswith("parity-")
+queue_fixture = fixture.startswith("queue-")
 
 
 def is_full_breakdown(payload):
@@ -394,15 +453,25 @@ if mcp_fixture or parity_fixture:
 else:
     replay = [message for message in lines if message is not initialize_line]
 
+cancel_request_id = None  # rule (m): the request a waited-for cancelled line's control_response answers
 for message in replay:
     kind = message.get("type")
     if kind == "system" and message.get("subtype") == "init":
-        wait_for(lambda m: m.get("type") == "user")
+        if not (queue_fixture and named_since_result[0]):
+            wait_for(lambda m: m.get("type") == "user")
+        if queue_fixture:
+            bound_after_init.clear()
         if mcp_fixture:
             message["mcp_servers"] = thin_list()
+    if queue_fixture:
+        cancel_request_id = bind_queue_line(message) or cancel_request_id
     if kind == "control_response":
-        request = wait_for(lambda m: m.get("type") == "control_request")
-        message["response"]["request_id"] = request.get("request_id")
+        if cancel_request_id is not None:
+            message["response"]["request_id"] = cancel_request_id
+            cancel_request_id = None
+        else:
+            request = wait_for(lambda m: m.get("type") == "control_request")
+            message["response"]["request_id"] = request.get("request_id")
     if kind == "control_request" and delay_ms:
         time.sleep(delay_ms / 1000)
     if kind == "control_request" and gate_file:
@@ -410,6 +479,8 @@ for message in replay:
     if kind == "stream_event" and line_delay_ms:
         time.sleep(line_delay_ms / 1000)
     emit(message)
+    if kind == "result":
+        named_since_result[0] = False
     if kind == "control_request":
         wait_for(lambda m: m.get("type") == "control_response"
                  and m.get("response", {}).get("request_id") == message.get("request_id"))

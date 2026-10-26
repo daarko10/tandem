@@ -1476,4 +1476,306 @@ class ClaudeSessionTest {
         assertEquals(1, run.stdin.readLines().count { "get_usage" in it })
         run.close()
     }
+
+    // --- Sending while Claude works (spec 12.3, 12.4, 9.7) ---
+
+    /** The lines [from]..[to] (1-based) of fixture [name] as written, with each placeholder of [uuids] rewritten to its value. */
+    private fun rewritten(name: String, from: Int, to: Int, uuids: Map<String, String> = emptyMap()): List<String> =
+        Fixtures.lines(name).subList(from - 1, to).map { line -> uuids.entries.fold(line) { acc, (k, v) -> acc.replace(k, v) } }
+
+    /** A session whose prompt's turn runs (its frame sent, then [name]'s lines 1..[through] written) and read. */
+    private suspend fun turnOpen(name: String = "queue-fold", through: Int = 6, mcpMillisPerSecond: Long = 1_000L): ScriptedSession {
+        val run = ScriptedSession(tmp, newSessionId, mcpMillisPerSecond = mcpMillisPerSecond)
+        run.session.start()
+        run.session.sendUserMessage("prompt")
+        run.written("\"type\":\"user\"")
+        rewritten(name, 1, through).forEach(run::write)
+        run.settled()
+        return run
+    }
+
+    private fun ChatState.stages(): List<Pair<String, PendingStage>> = pendingSends.map { it.uuid to it.stage }
+
+    /** The `user` frames once there are [count]. */
+    private suspend fun ScriptedSession.userFrames(count: Int): List<JsonObject> = withTimeout(10_000) {
+        while (userFrames().size < count) delay(20)
+        userFrames()
+    }
+
+    private fun JsonObject.uuid(): String = getValue("uuid").jsonPrimitive.content
+
+    private fun JsonObject.text(): String =
+        getValue("message").jsonObject.getValue("content").let { content ->
+            (content as? kotlinx.serialization.json.JsonPrimitive)?.content
+                ?: content.jsonArray.joinToString("") { it.jsonObject["text"]?.jsonPrimitive?.content.orEmpty() }
+        }
+
+    private suspend fun ScriptedSession.awaitState(predicate: (ChatState) -> Boolean): ChatState =
+        withTimeout(10_000) { session.state.first(predicate) }
+
+    @Test
+    fun `a message sent mid-turn goes out at once without priority`() = runBlocking {
+        val run = turnOpen(through = 18)
+        run.session.sendUserMessage("more")
+        val frame = run.userFrames(2)[1]
+        assertEquals("more", frame.text())
+        assertFalse("priority" in frame)
+        assertEquals(listOf(frame.uuid() to PendingStage.QUEUED), run.session.state.value.stages())
+        run.close()
+    }
+
+    @Test
+    fun `a later message carries priority later`() = runBlocking {
+        val run = turnOpen(through = 18)
+        run.session.sendUserMessage("more", later = true)
+        val line = run.written("\"type\":\"user\"", 2)[1]
+        val frame = Json.parseToJsonElement(line).jsonObject
+        assertTrue("\"uuid\":\"${frame.uuid()}\",\"priority\":\"later\"" in line, line)
+        assertTrue(run.session.state.value.pendingSends.single().later)
+        run.close()
+    }
+
+    @Test
+    fun `interrupt adds cancel_queued only when a message waits and the init lists the capability`() = runBlocking {
+        val run = turnOpen()
+        run.session.sendUserMessage("more")
+        val uuid = run.session.state.value.pendingSends.single().uuid
+        run.session.interrupt()
+        val request = run.requestOf("interrupt")
+        assertEquals(true, request.getValue("request").jsonObject["cancel_queued"]?.jsonPrimitive?.boolean)
+        // queue-cancel:56's payload, its uuid the send's.
+        run.success(request.getValue("request_id").jsonPrimitive.content, """{"still_queued":[],"cancelled":["$uuid"]}""")
+        val returned = run.awaitState { it.pendingSends.isEmpty() }
+        assertEquals(listOf(uuid), returned.returnedSends.map { it.uuid })
+        assertEquals(listOf("Not sent: \"more\". It is back in the composer."), returned.notices(NoticeLevel.INFO))
+        run.close()
+
+        // Nothing waiting: today's frame, byte for byte.
+        val idle = turnOpen()
+        idle.session.interrupt()
+        val plain = idle.requestOf("interrupt")
+        assertEquals(HostMessages.interrupt(plain.getValue("request_id").jsonPrimitive.content), plain)
+        idle.close()
+
+        // An init without the capability: today's frame, though a message waits.
+        val older = ScriptedSession(tmp, newSessionId)
+        older.session.start()
+        older.session.sendUserMessage("prompt")
+        older.written("\"type\":\"user\"")
+        val init = Json.parseToJsonElement(Fixtures.lines("plain-reply")[3]).jsonObject
+        val capabilities = init.getValue("capabilities").jsonArray.filter { it.jsonPrimitive.content != "interrupt_cancel_queued_v1" }
+        older.write(JsonObject(init + ("capabilities" to kotlinx.serialization.json.JsonArray(capabilities))).toString())
+        older.settled()
+        older.session.sendUserMessage("more")
+        assertEquals(1, older.session.state.value.pendingSends.size)
+        older.session.interrupt()
+        val without = older.requestOf("interrupt")
+        assertEquals(HostMessages.interrupt(without.getValue("request_id").jsonPrimitive.content), without)
+        older.close()
+    }
+
+    // spec: withdraw writes cancel_async_message; true removes; false, an error or a timeout refuses with the notice
+    @Test
+    fun `withdraw writes cancel_async_message, true removes, false, an error or a timeout refuses with the notice`() = runBlocking {
+        val refusal = "Claude had already taken \"more\"; it was not withdrawn."
+        val run = turnOpen()
+        run.session.sendUserMessage("more", later = true)
+        val uuid = run.session.state.value.pendingSends.single().uuid
+
+        run.session.withdraw(uuid, restore = true)
+        val request = run.requestOf("cancel_async_message")
+        assertEquals(
+            Json.parseToJsonElement("""{"subtype":"cancel_async_message","message_uuid":"$uuid"}"""),
+            request.getValue("request"),
+        )
+        assertEquals(listOf(uuid to PendingStage.WITHDRAWING), run.session.state.value.stages())
+        run.success(request.getValue("request_id").jsonPrimitive.content, """{"cancelled":true}""")
+        val gone = run.awaitState { it.pendingSends.isEmpty() }
+        assertEquals(listOf(uuid), gone.returnedSends.map { it.uuid })
+
+        run.session.sendUserMessage("more", later = true)
+        val second = run.session.state.value.pendingSends.single().uuid
+        run.session.withdraw(second, restore = false)
+        run.success(run.requestIdOf("cancel_async_message", 2), """{"cancelled":false}""")
+        val refused = run.awaitState { s -> s.notices(NoticeLevel.INFO).size == 1 }
+        assertEquals(listOf(second to PendingStage.QUEUED), refused.stages())
+        assertEquals(listOf(refusal), refused.notices(NoticeLevel.INFO))
+
+        run.session.withdraw(second, restore = false)
+        run.error(run.requestIdOf("cancel_async_message", 3), "boom")
+        val failed = run.awaitState { s -> s.notices(NoticeLevel.INFO).size == 2 }
+        assertEquals(listOf(second to PendingStage.QUEUED), failed.stages())
+        run.close()
+
+        // No answer: 5 s, scaled.
+        val slow = turnOpen(mcpMillisPerSecond = 10)
+        slow.session.sendUserMessage("more", later = true)
+        val waiting = slow.session.state.value.pendingSends.single().uuid
+        slow.session.withdraw(waiting, restore = true)
+        slow.requestOf("cancel_async_message")
+        val timedOut = slow.awaitState { s -> s.notices(NoticeLevel.INFO).isNotEmpty() }
+        assertEquals(listOf(waiting to PendingStage.QUEUED), timedOut.stages())
+        assertEquals(listOf(refusal), timedOut.notices(NoticeLevel.INFO))
+        slow.close()
+    }
+
+    @Test
+    fun `a prompt sent while a shell escape's output frame waits goes out right after it`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        val quiet = run.userFrames(1).single().uuid()
+        run.session.sendUserMessage("next")
+        delay(300)
+        assertEquals(1, run.userFrames().size, "the prompt waits")
+        val held = run.session.state.value.stages().single()
+        assertEquals(PendingStage.HELD, held.second)
+
+        lines("bash-mode-respond", 3, 7) { n, fields ->
+            if (n == 6) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$quiet\"]")
+        }.forEach(run::write)
+        val frames = run.userFrames(3)
+        assertEquals("<bash-input>echo hi</bash-input>", frames[0].content())
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", frames[1].content())
+        assertEquals("next", frames[2].text())
+        assertEquals(held.first, frames[2].uuid())
+        assertEquals(listOf(held.first to PendingStage.QUEUED), run.awaitState { it.stages().none { s -> s.second == PendingStage.HELD } }.stages())
+        run.close()
+    }
+
+    @Test
+    fun `a prompt sent while a ! command runs goes out after the escape's frames`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.event(SessionEvent.ShellStarted("s1", "echo hi", 0))
+        run.session.sendUserMessage("next")
+        delay(300)
+        assertEquals(0, run.userFrames().size, "no frame while the command runs")
+        val held = run.session.state.value.stages().single()
+        assertEquals(PendingStage.HELD, held.second)
+
+        run.session.sendShellEscape("s1", "echo hi", "hi\n", respond = true)
+        val quiet = run.userFrames(1).single().uuid()
+        assertEquals("<bash-input>echo hi</bash-input>", run.userFrames().single().content())
+        lines("bash-mode-respond", 3, 7) { n, fields ->
+            if (n == 6) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$quiet\"]")
+        }.forEach(run::write)
+        val frames = run.userFrames(3)
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", frames[1].content())
+        assertEquals("next", frames[2].text())
+        assertEquals(listOf(held.first to PendingStage.QUEUED), run.awaitState { it.stages().none { s -> s.second == PendingStage.HELD } }.stages())
+        run.close()
+    }
+
+    @Test
+    fun `a prompt held behind a ! that sends nothing goes out when it ends`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.event(SessionEvent.ShellStarted("s1", "nope", 0))
+        run.session.sendUserMessage("next")
+        delay(300)
+        assertEquals(0, run.userFrames().size)
+        val uuid = run.session.state.value.stages().single().also { assertEquals(PendingStage.HELD, it.second) }.first
+        run.session.shellUnsent("s1")
+        assertEquals("next", run.userFrames(1).single().text())
+        assertEquals(listOf(uuid to PendingStage.QUEUED), run.session.state.value.stages())
+        run.close()
+    }
+
+    @Test
+    fun `a held escape waits until no queued message remains`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendUserMessage("prompt")
+        val prompt = run.userFrames(1).single().uuid()
+        run.session.sendUserMessage("more", later = true)
+        val later = run.userFrames(2)[1].uuid()
+        val uuids = mapOf("<command_uuid-4>" to prompt, "<command_uuid-25>" to later)
+        rewritten("queue-later", 1, 18, uuids).forEach(run::write)
+        run.settled()
+        assertEquals(listOf(later to PendingStage.QUEUED), run.session.state.value.stages())
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+
+        rewritten("queue-later", 19, 51, uuids).forEach(run::write)
+        run.awaitState { it.turnsEnded == 1 }
+        delay(300)
+        assertEquals(2, run.userFrames().size, "the later message waits in the CLI's queue: no escape yet")
+
+        rewritten("queue-later", 52, 63, uuids).forEach(run::write)
+        val frames = run.userFrames(3)
+        assertEquals("<bash-input>echo hi</bash-input>", frames[2].content())
+        assertEquals(2, run.session.state.value.turnsEnded)
+        run.close()
+    }
+
+    @Test
+    fun `the process ending drops held prompts and returns them`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 60_000)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.userFrames(1)
+        run.session.sendUserMessage("next")
+        val uuid = run.session.state.value.stages().single().first
+        run.process.destroyForcibly()
+        val ended = run.awaitState { it.ended }
+        assertEquals(1, run.userFrames().size, "no prompt frame")
+        assertEquals(listOf(ReturnedSend(uuid, "next", emptyList())), ended.returnedSends)
+        assertTrue(ended.pendingSends.isEmpty())
+        assertEquals(
+            listOf("Not sent: \"next\": the CLI ended before reading it. It is back in the composer."),
+            ended.notices(NoticeLevel.WARNING).filter { it.startsWith("Not sent") },
+        )
+        run.close()
+    }
+
+    @Test
+    fun `a send the interrupt receipt names nowhere comes back with Stop's notice`() = runBlocking {
+        val run = turnOpen()
+        run.session.sendUserMessage("more")
+        val uuid = run.session.state.value.pendingSends.single().uuid
+        run.session.interrupt()
+        val request = run.requestOf("interrupt")
+        assertEquals(true, request.getValue("request").jsonObject["cancel_queued"]?.jsonPrimitive?.boolean)
+        run.success(request.getValue("request_id").jsonPrimitive.content, """{"still_queued":[],"cancelled":[]}""")
+        val returned = run.awaitState { it.pendingSends.isEmpty() }
+        assertEquals(listOf(ReturnedSend(uuid, "more", emptyList())), returned.returnedSends)
+        assertEquals(listOf("Not sent: \"more\". It is back in the composer."), returned.notices(NoticeLevel.INFO))
+        run.close()
+    }
+
+    @Test
+    fun `a prompt sent while a context-only escape's quiet result is due goes out after it`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.event(SessionEvent.ShellStarted("s1", "echo hi", 0))
+        run.session.sendUserMessage("next")
+        val uuid = run.session.state.value.stages().single().also { assertEquals(PendingStage.HELD, it.second) }.first
+        run.session.sendShellEscape("s1", "echo hi", "hi\n", respond = false)
+        val quiet = run.userFrames(1).single().uuid()
+        delay(300)
+        assertEquals(1, run.userFrames().size, "the prompt waits for the quiet result")
+        assertEquals(listOf(uuid to PendingStage.HELD), run.session.state.value.stages())
+        lines("bash-mode", 3, 8) { n, fields ->
+            if (n == 8) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$quiet\"]")
+        }.forEach(run::write)
+        val frames = run.userFrames(2)
+        assertTrue(frames[0].content().startsWith("<bash-input>echo hi</bash-input>"), frames[0].content())
+        assertEquals("next", frames[1].text())
+        assertEquals(listOf(uuid to PendingStage.QUEUED), run.awaitState { it.stages().none { s -> s.second == PendingStage.HELD } }.stages())
+        run.close()
+
+        // No command running: an ended command's context frame, then a prompt before its quiet result.
+        val again = ScriptedSession(tmp, newSessionId)
+        again.session.start()
+        again.session.sendShellEscape("s2", "echo hi", "hi\n", respond = false)
+        val second = again.userFrames(1).single().uuid()
+        again.session.sendUserMessage("next")
+        delay(300)
+        assertEquals(1, again.userFrames().size, "no prompt frame until the quiet result")
+        lines("bash-mode", 3, 8) { n, fields ->
+            if (n == 8) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$second\"]")
+        }.forEach(again::write)
+        assertEquals("next", again.userFrames(2)[1].text())
+        again.close()
+    }
 }

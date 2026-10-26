@@ -112,7 +112,68 @@ data class ChatState(
     val additionalDirectories: List<String> = emptyList(),
     /** The skills the latest `system/init` lists (`skills`); absent means none. */
     val skills: List<String> = emptyList(),
+    /**
+     * The messages sent while Claude worked that have not started yet, in send order: waiting in the CLI's queue, or held by Tandem
+     * behind a shell escape (spec 12.1, 12.4). Not chat entries: the CLI's lifecycle lines decide when each becomes one.
+     */
+    val pendingSends: List<PendingSend> = emptyList(),
+    /** Waiting messages that came back without running (a withdraw, Stop, the process's end), for the composer to take back. */
+    val returnedSends: List<ReturnedSend> = emptyList(),
+    /**
+     * The `capabilities` of the live process's latest `system/init`: null until one came (the CLI is still starting) and once the
+     * process ended or the chat was [settled]; empty for an init that lists none.
+     */
+    val cliCapabilities: Set<String>? = null,
 )
+
+/**
+ * A message sent while Claude worked, not started yet: its [text] and [images] are Tandem's own copy (the CLI never echoes it),
+ * [later] whether it was sent with `"priority":"later"`. [restoreOnWithdraw]: while [PendingStage.WITHDRAWING], whether it goes
+ * back to the composer (Edit) or is dropped (Cancel).
+ */
+data class PendingSend(
+    val uuid: String,
+    val text: String,
+    val images: List<UserImage>,
+    val sentAtMillis: Long,
+    val later: Boolean,
+    val stage: PendingStage,
+    val restoreOnWithdraw: Boolean = false,
+)
+
+/** Where a [PendingSend] stands. */
+enum class PendingStage {
+    /** Held by Tandem behind a shell escape's frames, not written yet. */
+    HELD,
+
+    /** Written, and waiting in the CLI's queue. */
+    QUEUED,
+
+    /** A `cancel_async_message` for it is out. */
+    WITHDRAWING,
+}
+
+/** A message that came back without running, for the composer to put back ahead of the draft. */
+data class ReturnedSend(val uuid: String, val text: String, val images: List<UserImage>)
+
+/** How many characters of a message's first line a notice quotes (spec 12.5). */
+private const val FIRST_LINE_LENGTH: Int = 60
+
+/** [text]'s first line, cut at 60 characters with `…` (spec 12.5): how a notice names a message. */
+internal fun firstLine(text: String): String {
+    val line = text.lineSequence().first()
+    return if (line.length <= FIRST_LINE_LENGTH) line else line.take(FIRST_LINE_LENGTH) + "…"
+}
+
+/** The notice of a message Stop or a stop gave back (spec 12.3, 12.5). */
+internal fun notSentText(text: String): String = "Not sent: \"${firstLine(text)}\". It is back in the composer."
+
+/** The notice of a message the process's end gave back (spec 12.5). */
+internal fun endedBeforeReadingText(text: String): String =
+    "Not sent: \"${firstLine(text)}\": the CLI ended before reading it. It is back in the composer."
+
+/** The notice of a refused withdraw (spec 12.3). */
+internal fun notWithdrawnText(text: String): String = "Claude had already taken \"${firstLine(text)}\"; it was not withdrawn."
 
 /**
  * The session's MCP servers: [servers] in the CLI's order; [detailed] once an `mcp_status` answer gave them (errors, config, tools),
@@ -218,12 +279,16 @@ data class UserImage(val id: String, val mediaType: String, val base64: String)
 sealed interface ChatEntry {
     val id: String
 
-    /** What the user sent; [sentAtMillis] is when, on the host's clock. [images] are its attachments, in the order sent. */
+    /**
+     * What the user sent; [sentAtMillis] is when, on the host's clock. [images] are its attachments, in the order sent. [folded]: sent
+     * while Claude worked and taken into the running turn (spec 12.1).
+     */
     data class User(
         override val id: String,
         val text: String,
         val sentAtMillis: Long? = null,
         val images: List<UserImage> = emptyList(),
+        val folded: Boolean = false,
     ) : ChatEntry
 
     /**
@@ -382,9 +447,13 @@ data class PendingPermission(
  * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming. No quiet send waits
  * for its result either: the process that owed it is gone, and the next one starts from this. A shell escape stays as it is (a
  * command runs on in Tandem's own process). A usage card's part still loading can no longer be answered: it reads
- * [McpError.Ended]. The context breakdown stays. A transcript loaded by `TranscriptReader` comes back settled.
+ * [McpError.Ended]. The context breakdown stays. A message still waiting goes back to the composer with an INFO notice (spec 12.5), and
+ * no process's capabilities count any more. A transcript loaded by `TranscriptReader` comes back settled.
  */
-internal fun ChatState.settled(): ChatState = copy(
+internal fun ChatState.settled(): ChatState = returnWaiting(NoticeLevel.INFO, ::notSentText).withNothingInProgress()
+
+/** [settled] once nothing waits any more: every field below is read from this state, the returned messages' notices included. */
+private fun ChatState.withNothingInProgress(): ChatState = copy(
     entries = entries.map {
         when {
             it is ChatEntry.Assistant && it.streaming -> it.copy(streaming = false)
@@ -401,7 +470,14 @@ internal fun ChatState.settled(): ChatState = copy(
     turnInterrupted = false,
     turn = null,
     quietSends = emptySet(),
+    cliCapabilities = null,
 )
+
+/**
+ * The history a fork starts from (spec 12.5): [settled] without the waiting and returned messages, so no `Not sent` notice is
+ * added: a waiting message stays the original's and still runs there.
+ */
+internal fun ChatState.forkHistory(): ChatState = copy(pendingSends = emptyList(), returnedSends = emptyList()).settled()
 
 /** This notice with each part of its usage card that is still loading turned [McpError.Ended]; the same instance when none is. */
 internal fun ChatEntry.Notice.withUsageEnded(): ChatEntry.Notice {

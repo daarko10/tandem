@@ -22,7 +22,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.io.BufferedReader
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -393,7 +395,28 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
                 state = reduce(state, SessionEvent.Cli(message, atMillis = (message as? CliMessage.Assistant)?.timestampMillis ?: 0L))
             }
             "system" -> if (raw.string("subtype") == "local_command" && !raw.isSet("isMeta") && !raw.isSet("isSidechain")) localCommand(raw)
+            "attachment" -> if (raw.isQueuedPrompt() && !raw.isSet("isMeta") && !raw.isSet("isSidechain")) queuedPrompt(raw)
         }
+    }
+
+    /**
+     * A message the CLI took into a running turn (a `queued_command` attachment, [isQueuedPrompt]): a folded prompt where the live one
+     * was, with the uuid it was sent with (`source_uuid`, else the line's), the text of its string prompt or of its text blocks, and
+     * its base64 `image` blocks (unrecorded).
+     */
+    private fun queuedPrompt(raw: JsonObject) {
+        val attachment = raw.obj("attachment") ?: return
+        val uuid = attachment.string("source_uuid") ?: raw.string("uuid") ?: "line-$lineCount"
+        val prompt = attachment["prompt"]
+        val blocks = (prompt as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        val text = (prompt as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: blocks.filter { it.string("type") == "text" }.mapNotNull { it.string("text") }.joinToString("\n")
+        val images = blocks.filter { it.string("type") == "image" }.mapNotNull { it.obj("source") }
+            .filter { it.string("type") == "base64" }
+            .mapNotNull { source -> source.string("media_type")?.let { type -> source.string("data")?.let { type to it } } }
+            .mapIndexed { i, (type, data) -> UserImage("$uuid#$i", type, data) }
+        if (text.isEmpty() && images.isEmpty()) return
+        state = reduce(state, SessionEvent.UserSent(uuid, text, timestampMillis(raw) ?: 0L, images, folded = true))
     }
 
     /**

@@ -38,8 +38,39 @@ sealed interface SessionEvent {
     /** [atMillis]: when the line came, on the host's clock (a loaded transcript passes the line's own timestamp); 0 when unknown. */
     data class Cli(val message: CliMessage, val atMillis: Long = 0L) : SessionEvent
 
-    /** A prompt the user sent: its [text] and the [images] attached to it. */
-    data class UserSent(val uuid: String, val text: String, val atMillis: Long = 0L, val images: List<UserImage> = emptyList()) : SessionEvent
+    /**
+     * A prompt the user sent: its [text] and the [images] attached to it. [live]: sent to a running process, which waits it in its
+     * queue while a turn is open or a message waits ([held]: Tandem holds it behind a shell escape's frames); [later]: sent with
+     * `"priority":"later"`. [folded]: a loaded transcript's message that the CLI took into a running turn (a `queued_command`).
+     */
+    data class UserSent(
+        val uuid: String,
+        val text: String,
+        val atMillis: Long = 0L,
+        val images: List<UserImage> = emptyList(),
+        val later: Boolean = false,
+        val live: Boolean = false,
+        val held: Boolean = false,
+        val folded: Boolean = false,
+    ) : SessionEvent
+
+    /** The held message [uuid] was written: [PendingStage.HELD] becomes [PendingStage.QUEUED]. */
+    data class SendReleased(val uuid: String) : SessionEvent
+
+    /** A `cancel_async_message` for [uuid] went out; [restore]: the message goes back to the composer once withdrawn. */
+    data class WithdrawRequested(val uuid: String, val restore: Boolean) : SessionEvent
+
+    /** [uuid] was withdrawn: it leaves the waiting messages, and with [restore] goes back to the composer (with [notice] when given). */
+    data class SendWithdrawn(val uuid: String, val restore: Boolean, val notice: String?) : SessionEvent
+
+    /**
+     * The CLI did not withdraw [uuid]: it answered `false`, an error ([reason]) or nothing in time. [text] is the message's, read when
+     * the withdraw started, for the notice.
+     */
+    data class WithdrawRefused(val uuid: String, val reason: String?, val text: String) : SessionEvent
+
+    /** The composer took the returned messages [uuids] back. */
+    data class ReturnedTaken(val uuids: List<String>) : SessionEvent
 
     /**
      * The user picked a model; null means the CLI default. With [requestId], the `set_model` request sent for it, whose error answer
@@ -127,12 +158,22 @@ internal fun CliMessage.Assistant.isUsageLine(): Boolean = localCommand?.command
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
 fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.Cli -> reduceCli(state, event.message, event.atMillis)
-    // A send opens a turn, replacing any still open: a loaded transcript sends again with no result between its turns.
-    is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images)).copy(
-        busy = true,
-        turnInterrupted = false,
-        turn = TurnProgress(event.uuid, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
-    )
+    is SessionEvent.UserSent -> reduceUserSent(state, event)
+    is SessionEvent.SendReleased -> state.updatePending(event.uuid) { if (it.stage == PendingStage.HELD) it.copy(stage = PendingStage.QUEUED) else it }
+    is SessionEvent.WithdrawRequested ->
+        state.updatePending(event.uuid) { it.copy(stage = PendingStage.WITHDRAWING, restoreOnWithdraw = event.restore) }
+    is SessionEvent.SendWithdrawn -> {
+        val send = state.pendingSends.firstOrNull { it.uuid == event.uuid }
+        when {
+            // Its cancelled line, or its start, came first (queue-cancel:24, :25): nothing waits any more.
+            send == null -> state
+            !event.restore -> state.copy(pendingSends = state.pendingSends - send)
+            else -> state.returnSend(send).let { next -> event.notice?.let { next.notice(NoticeLevel.INFO, it) } ?: next }
+        }
+    }
+    is SessionEvent.WithdrawRefused -> state.updatePending(event.uuid) { it.copy(stage = PendingStage.QUEUED, restoreOnWithdraw = false) }
+        .notice(NoticeLevel.INFO, notWithdrawnText(event.text))
+    is SessionEvent.ReturnedTaken -> state.copy(returnedSends = state.returnedSends.filter { it.uuid !in event.uuids })
     // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch. A refusal takes it back.
     is SessionEvent.ModelRequested -> {
         val change = ModelChange(event.model, state.requestedModel, state.modelSwitchPending, state.modelWarning)
@@ -250,6 +291,89 @@ private inline fun ChatState.updateShell(id: String, change: (ChatEntry.Shell) -
 }
 
 /**
+ * A prompt the user sent. A loaded transcript's folded message is a folded entry and nothing else. A message sent to a live process
+ * while a turn is open or another waits, or held behind a shell escape, waits ([ChatState.pendingSends]): the CLI's lifecycle lines
+ * decide when it becomes an entry. Any other send opens a turn, replacing any still open: a loaded transcript sends again with no
+ * result between its turns.
+ */
+private fun reduceUserSent(state: ChatState, event: SessionEvent.UserSent): ChatState = when {
+    event.folded -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images, folded = true))
+    event.live && (event.held || state.turn != null || state.pendingSends.isNotEmpty()) -> state.copy(
+        pendingSends = state.pendingSends + PendingSend(
+            uuid = event.uuid,
+            text = event.text,
+            images = event.images,
+            sentAtMillis = event.atMillis,
+            later = event.later,
+            stage = if (event.held) PendingStage.HELD else PendingStage.QUEUED,
+        ),
+    )
+    else -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images)).openTurn(event.uuid, event.atMillis)
+}
+
+/** This state with a turn opened for prompt [uuid] at [at]: busy, not interrupted. */
+private fun ChatState.openTurn(uuid: String, at: Long): ChatState = copy(
+    busy = true,
+    turnInterrupted = false,
+    turn = TurnProgress(uuid, at, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
+)
+
+/** This state with the waiting message [uuid] changed by [change]; the same instance when none waits. */
+private inline fun ChatState.updatePending(uuid: String, change: (PendingSend) -> PendingSend): ChatState {
+    val position = pendingSends.indexOfFirst { it.uuid == uuid }
+    if (position < 0) return this
+    val changed = change(pendingSends[position])
+    return if (changed == pendingSends[position]) this else copy(pendingSends = pendingSends.toMutableList().also { it[position] = changed })
+}
+
+/** This state with [send] no longer waiting, back for the composer ([ChatState.returnedSends]). */
+private fun ChatState.returnSend(send: PendingSend): ChatState =
+    copy(pendingSends = pendingSends - send, returnedSends = returnedSends + ReturnedSend(send.uuid, send.text, send.images))
+
+/**
+ * Every waiting message back for the composer, each with a notice of [level] saying so ([text] of its text): the process that
+ * would have run them is gone (spec 12.5). The same instance when none waits.
+ */
+internal fun ChatState.returnWaiting(level: NoticeLevel, text: (String) -> String): ChatState =
+    pendingSends.fold(this) { state, send -> state.returnSend(send).notice(level, text(send.text)) }
+
+/**
+ * The CLI's lifecycle line for a waiting message (spec 12.1): `started` makes it an entry, folded into the open turn or opening its
+ * own; `cancelled` takes it out, back to the composer with Stop's notice unless a withdraw asked for it (then quietly, or dropped on
+ * Cancel). `queued`, `completed`, other states and a uuid that does not wait (the turn's own prompt) change nothing.
+ */
+private fun reduceLifecycle(state: ChatState, message: CliMessage.CommandLifecycle, at: Long): ChatState {
+    val send = state.pendingSends.firstOrNull { it.uuid == message.commandUuid } ?: return state
+    return when (message.state) {
+        "started" -> {
+            val open = state.turn != null
+            val next = state.copy(pendingSends = state.pendingSends - send)
+                .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = open))
+            if (open) next else next.openTurn(send.uuid, at)
+        }
+        "cancelled" -> when {
+            send.stage == PendingStage.WITHDRAWING && !send.restoreOnWithdraw -> state.copy(pendingSends = state.pendingSends - send)
+            send.stage == PendingStage.WITHDRAWING -> state.returnSend(send)
+            else -> state.returnSend(send).notice(NoticeLevel.INFO, notSentText(send.text))
+        }
+        else -> state
+    }
+}
+
+/**
+ * Before a result's turn end: each waiting message the result names (`user_message_uuids`) was taken into that turn, though no
+ * lifecycle line said so (a CLI that sends none). It becomes a folded entry.
+ */
+private fun ChatState.foldNamed(result: CliMessage.Result): ChatState {
+    if (pendingSends.isEmpty() || result.userMessageUuids.isEmpty()) return this
+    val named = pendingSends.filter { it.uuid in result.userMessageUuids }
+    return named.fold(this) { state, send ->
+        state.copy(pendingSends = state.pendingSends - send)
+            .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = true))
+    }
+}
+
+/**
  * A process that exits during a turn ends that turn without its result: a failure, whatever its exit code, and the chat says so as
  * an error. One that Tandem itself ended at once (the IDE exits) ends it as interrupted, not failed, and says only how it exited.
  * One that exits between turns ends none. A Stop, close or eviction lets the process go before it ends, so this never sees it.
@@ -296,7 +420,10 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
         turn = null,
         // No process owes those results any more: none of them may keep the session from being idle.
         quietSends = emptySet(),
+        cliCapabilities = null,
     ).notice(if (event.isError || failedTurn) NoticeLevel.ERROR else NoticeLevel.INFO, said)
+        // Nothing reads them now: each goes back to the composer, and the chat says so (spec 12.5).
+        .returnWaiting(NoticeLevel.WARNING, ::endedBeforeReadingText)
 }
 
 /** The id of the [ChatEntry.TurnEnded] that ends the next turn of [state]: every turn end counts one, so it is never reused. */
@@ -315,6 +442,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         plugins = message.plugins,
         skills = message.skills,
         additionalDirectories = message.additionalDirectories,
+        cliCapabilities = message.capabilities.toSet(),
     ).checkModel(message.model)
     is CliMessage.SystemStatus -> state.copy(permissionMode = message.permissionMode ?: state.permissionMode)
     is CliMessage.ApiRetry -> state.notice(NoticeLevel.INFO, retryText(message))
@@ -329,7 +457,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
     is CliMessage.Assistant -> reduceAssistant(state, message, at)
     is CliMessage.User -> reduceUser(state, message, at)
     is CliMessage.StreamEvent -> reduceStream(state, message, at)
-    is CliMessage.Result -> reduceQuietOr(state, message)
+    is CliMessage.Result -> reduceQuietOr(state.foldNamed(message), message)
     is CliMessage.ControlRequest -> when (val request = message.request) {
         is InboundRequest.CanUseTool -> state.copy(
             pendingPermissions = state.pendingPermissions + PendingPermission(
@@ -404,7 +532,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         ).withUsage(message.usage)
     }
     is CliMessage.KeepAlive, is CliMessage.Unknown -> state
-    is CliMessage.CommandLifecycle -> state
+    is CliMessage.CommandLifecycle -> reduceLifecycle(state, message, at)
 }
 
 /** The `source` of a claude.ai connector's entry, which a `system/init` may leave out (probes 2.5). */

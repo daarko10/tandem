@@ -309,7 +309,8 @@ class SessionManager internal constructor(
         val file = withContext(Dispatchers.IO) { index.transcript(id) } ?: return null
         val original = handle(id)
         val (history, title) = if (original != null) {
-            original.state.value.settled() to original.title.value
+            // A message waiting in the original stays the original's (spec 12.5).
+            original.state.value.forkHistory() to original.title.value
         } else {
             val (loaded, loadedTitle) = load(id, file)
             loaded to (loadedTitle ?: id)
@@ -342,13 +343,27 @@ class SessionManager internal constructor(
     }
 
     /**
-     * Sends a prompt: [text] and the [images] attached to it, in order. A stopped session starts a process first, and gets the
-     * prompt once it is up.
+     * Sends a prompt: [text] and the [images] attached to it, in order, with `"priority":"later"` when [later]. A stopped session
+     * starts a process first, and gets the prompt once it is up.
      */
-    fun send(id: SessionId, text: String, images: List<ImageBlock> = emptyList()) {
+    fun send(id: SessionId, text: String, images: List<ImageBlock> = emptyList(), later: Boolean = false) {
         val handle = handle(id) ?: return
         handle.lastUsed = clock()
-        if (handle.sendOrQueue(Outbound.Prompt(text, images))) spawner.startInBackground(handle, forPrompts = true)
+        if (handle.sendOrQueue(Outbound.Prompt(text, images, later))) spawner.startInBackground(handle, forPrompts = true)
+    }
+
+    /**
+     * Withdraws the waiting message [uuid] of session [id] (spec 12.3): through its live process ([ClaudeSession.withdraw]). Without
+     * one nothing: the stopped chat gave every waiting message back already.
+     */
+    fun withdraw(id: SessionId, uuid: String, restore: Boolean) {
+        handle(id)?.liveSession()?.withdraw(uuid, restore)
+    }
+
+    /** The composer of session [id] took the returned messages [uuids] back: they leave the live process's state, or the stopped chat. */
+    fun takeReturned(id: SessionId, uuids: List<String>) {
+        val event = SessionEvent.ReturnedTaken(uuids)
+        handle(id)?.pick(live = { it.event(event) }, stopped = event)
     }
 
     /**
@@ -394,17 +409,24 @@ class SessionManager internal constructor(
                 // A closed session, a project that closes (its scope cancelled without a close) or the IDE's exit sends nothing.
                 if (!shuttingDown && !handle.isClosed && handle.scope.isActive) {
                     sendShellFrames(handle, shellId, command, withNote(soFar.toString(), "Stopped after ${elapsed(ms)}"))
+                } else {
+                    // Its place among the held frames goes: the prompts behind it are not held with nothing to release them.
+                    handle.liveSession()?.shellUnsent(shellId)
                 }
             }
             throw e
         } catch (e: Exception) {
             handle.shellEvent(SessionEvent.ShellEnded(shellId, ShellEnd.Failed(e.message ?: e.javaClass.simpleName), clock() - started))
             LOG.info("shell escape failed: ${e.javaClass.simpleName}")
+            handle.liveSession()?.shellUnsent(shellId)
             return
         }
         handle.shellEvent(SessionEvent.ShellEnded(shellId, result.end, result.durationMs))
         // Not started: nothing ran. Stopped here means killAllNow killed it (the IDE exits): no claude may start now.
-        if (result.end is ShellEnd.NotStarted || result.end is ShellEnd.Stopped || shuttingDown) return
+        if (result.end is ShellEnd.NotStarted || result.end is ShellEnd.Stopped || shuttingDown) {
+            handle.liveSession()?.shellUnsent(shellId)
+            return
+        }
         val output = if (result.end is ShellEnd.TimedOut) withNote(result.output, "Killed after 10 minutes") else result.output
         sendShellFrames(handle, shellId, command, output)
     }
@@ -930,8 +952,9 @@ class SessionManager internal constructor(
         }
         handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
             var ended = handle.turnsEndedAtStart
-            handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
-                if (count > ended) raiseAttentionUnlessSelected(handle)
+            // A turn that ends while a message waits to run, or as the next turn opens, raises nothing: the last one does (spec 12.5).
+            handle.state.map { it.turnsEnded to it.nothingNext() }.distinctUntilChanged { a, b -> a.first == b.first }.collect { (count, last) ->
+                if (count > ended && last) raiseAttentionUnlessSelected(handle)
                 ended = count
             }
         }
@@ -1076,3 +1099,9 @@ private fun elapsed(ms: Long): String {
         else -> "${seconds / 3_600}h ${seconds % 3_600 / 60}m"
     }
 }
+
+/**
+ * Whether nothing follows the turn that just ended: no message waits to run and no next turn has opened. Attention and the IDE
+ * notification for a turn's end wait for the last queued turn (spec 12.5).
+ */
+internal fun ChatState.nothingNext(): Boolean = pendingSends.isEmpty() && turn == null

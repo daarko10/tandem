@@ -373,7 +373,10 @@ class SessionManagerTest {
         handle.state.first { s -> !s.busy && s.entries.filterIsInstance<ChatEntry.Assistant>().size == 2 }
         assertEquals(listOf<String?>(seeded), spawns().map { it.valueOf("--resume") })
         val history = "Reply with the single word: pong" // the seeded transcript's prompt
-        assertEquals(listOf(history, "Reply with the single word: pong", "And once more"), handle.state.value.prompts())
+        // The second prompt reached the process while the first one's turn ran: it waits in the CLI's queue (spec 12.1), which the
+        // fake never runs, until its lifecycle lines make it an entry.
+        assertEquals(listOf(history, "Reply with the single word: pong"), handle.state.value.prompts())
+        assertEquals(listOf("And once more"), handle.state.value.pendingSends.map { it.text })
     }
 
     @Test
@@ -2524,5 +2527,97 @@ class SessionManagerTest {
         delay(500) // a process started now would have logged its spawn by then
         assertEquals(emptyList(), userFrames(), "no frame queued for a process")
         assertEquals(1, spawns().size, "no claude started during the IDE's exit")
+    }
+
+    // --- Sending while Claude works (spec 12, 9.7; the fake's rule (m)) ---
+
+    /** Whether the state shows the first Bash call's `tool_use` (`queue-later:14`, `queue-cancel:18`). */
+    private fun ChatState.hasToolCall(): Boolean =
+        entries.any { e -> e is ChatEntry.Assistant && e.blocks.any { it is AssistantBlock.ToolUse && it.input != null } }
+
+    @Test
+    fun `send passes later through to the process`() = test {
+        val manager = manager()
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "hi")
+        handle.state.first { it.turnsEnded == 1 }
+        manager.send(handle.id, "more", later = true)
+        awaitLog { userFrames().size == 2 }
+        val (first, second) = userFrames()
+        assertFalse("priority" in first)
+        assertEquals("later", second["priority"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `withdraw and takeReturned reach the live process, or the stopped chat`() = test {
+        val manager = manager(fixtures = "queue-cancel")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Run the command")
+        handle.state.first { it.hasToolCall() }
+        manager.send(handle.id, "Reply with only the word KIWI.", later = true)
+        val waiting = handle.state.first { it.pendingSends.isNotEmpty() }.pendingSends.single()
+        assertEquals(PendingStage.QUEUED, waiting.stage)
+
+        manager.withdraw(handle.id, waiting.uuid, restore = true)
+        awaitLog { frames().any { it.subtype() == "cancel_async_message" } }
+        val request = frames().single { it.subtype() == "cancel_async_message" }
+        assertEquals(waiting.uuid, request["request"]!!.jsonObject["message_uuid"]!!.jsonPrimitive.content)
+        val returned = handle.state.first { it.returnedSends.isNotEmpty() }
+        assertEquals(listOf(ReturnedSend(waiting.uuid, "Reply with only the word KIWI.", emptyList())), returned.returnedSends)
+        manager.takeReturned(handle.id, listOf(waiting.uuid))
+        handle.state.first { it.returnedSends.isEmpty() }
+
+        // The second turn, with a later message waiting when the session is stopped: settled() gives it back.
+        handle.state.first { it.turnsEnded == 1 }
+        manager.send(handle.id, "Run the second command")
+        handle.state.first { s -> s.entries.count { e -> e is ChatEntry.Assistant && e.blocks.any { it is AssistantBlock.ToolUse && it.input != null } } == 2 }
+        manager.send(handle.id, "Reply with only the word MANGO.", later = true)
+        val mango = handle.state.first { it.pendingSends.isNotEmpty() }.pendingSends.single()
+        manager.stop(handle.id)
+        val stopped = handle.status.await(SessionStatus.STOPPED).let { handle.state.value }
+        assertEquals(listOf(mango.uuid), stopped.returnedSends.map { it.uuid })
+        val before = frames().size
+        manager.withdraw(handle.id, mango.uuid, restore = true)
+        assertEquals(stopped, handle.state.value, "no process: nothing to withdraw")
+        manager.takeReturned(handle.id, listOf(mango.uuid))
+        assertTrue(handle.state.value.returnedSends.isEmpty())
+        assertEquals(before, frames().size)
+        assertEquals(1, spawns().size)
+    }
+
+    @Test
+    fun `no attention while a message waits, attention after the queued turn ends`() = test {
+        // The second turn streams slowly enough to look between the two results.
+        val manager = manager(fixtures = "queue-later", environment = mapOf("TANDEM_FAKE_LINE_DELAY_MS" to "150"))
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Run it")
+        handle.state.first { it.hasToolCall() }
+        manager.send(handle.id, "Also say the word KIWI at the end.", later = true)
+        handle.state.first { it.turnsEnded == 1 }
+        delay(300)
+        assertEquals(1, handle.state.value.turnsEnded, "the queued turn still runs")
+        assertFalse(handle.attention.value, "a message waited when the first turn ended")
+        handle.state.first { it.turnsEnded == 2 }
+        handle.attention.await(true)
+    }
+
+    @Test
+    fun `a whole fork while a message waits leaves it with the original`() = test {
+        seed(seeded)
+        // The fake holds the turn for a while once it has read F (rule (m)'s knob), so F still waits when the fork is made.
+        val manager = manager(fixtures = "queue-later", environment = mapOf("TANDEM_FAKE_QUEUED_DELAY_MS" to "5000"))
+        val original = manager.open(seeded)
+        manager.send(seeded, "Run it")
+        original.state.first { it.hasToolCall() }
+        manager.send(seeded, "Also say the word KIWI at the end.", later = true)
+        val waiting = original.state.first { it.pendingSends.isNotEmpty() }.pendingSends.single()
+        assertEquals(PendingStage.QUEUED, waiting.stage)
+
+        val fork = assertNotNull(manager.fork(seeded))
+        val forked = fork.state.value
+        assertTrue(forked.pendingSends.isEmpty())
+        assertTrue(forked.returnedSends.isEmpty())
+        assertTrue(forked.entries.none { it is ChatEntry.Notice && it.text.startsWith("Not sent") })
+        assertEquals(listOf(waiting.uuid), original.state.value.pendingSends.map { it.uuid })
     }
 }

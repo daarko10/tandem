@@ -28,7 +28,7 @@ typealias SessionId = String
 
 /** What a session is doing, as the session list shows it. */
 enum class SessionStatus {
-    /** A turn is in progress. */
+    /** A turn is in progress, or a message waits to run. */
     RUNNING,
 
     /** A permission request waits for the user. */
@@ -115,7 +115,8 @@ class SessionHandle internal constructor(
             get() = when {
                 !attached || chat.ended -> SessionStatus.STOPPED
                 chat.pendingPermissions.isNotEmpty() -> SessionStatus.WAITING
-                chat.busy -> SessionStatus.RUNNING
+                // A message waiting in the CLI's queue runs soon: no eviction or folder respawn until it has (spec 12.5).
+                chat.busy || chat.pendingSends.isNotEmpty() -> SessionStatus.RUNNING
                 else -> SessionStatus.IDLE
             }
     }
@@ -432,7 +433,10 @@ class SessionHandle internal constructor(
         }
     }
 
-    /** Whether a process runs and nothing is in progress: no turn, no pending permission, no prompt waiting to be sent. */
+    /**
+     * Whether a process runs and nothing is in progress: no turn, no pending permission, no prompt waiting to be sent, no message
+     * waiting in the CLI's queue.
+     */
     internal fun isIdle(): Boolean = synchronized(lock) { attachment?.session?.let(::idleLocked) ?: false }
 
     /**
@@ -497,7 +501,7 @@ class SessionHandle internal constructor(
     private fun idleLocked(session: ClaudeSession): Boolean {
         val chat = session.state.value
         return !chat.ended && !chat.busy && chat.pendingPermissions.isEmpty() && queued.isEmpty() &&
-            runningShellJob?.isActive != true && chat.quietSends.isEmpty()
+            runningShellJob?.isActive != true && chat.quietSends.isEmpty() && chat.pendingSends.isEmpty()
     }
 
     private fun flushLocked(live: ClaudeSession) {
@@ -602,8 +606,8 @@ private fun ChatEntry.asTitle(): String? = when (this) {
 
 /** What waits for a process, in order: a prompt, or a shell escape's frames. */
 internal sealed interface Outbound {
-    /** A prompt: [text] and the [images] attached to it. */
-    data class Prompt(val text: String, val images: List<ImageBlock> = emptyList()) : Outbound
+    /** A prompt: [text] and the [images] attached to it; [later]: sent with `"priority":"later"` (spec 12.1). */
+    data class Prompt(val text: String, val images: List<ImageBlock> = emptyList(), val later: Boolean = false) : Outbound
 
     /**
      * Shell escape [id]'s frames: its [command] and [output] (with Tandem's note for a stopped or capped one), and whether Claude
@@ -615,7 +619,7 @@ internal sealed interface Outbound {
 /** Hands [outbound] to this process: a prompt as a user message, a shell escape as its frames. */
 private fun ClaudeSession.deliver(outbound: Outbound) {
     when (outbound) {
-        is Outbound.Prompt -> sendUserMessage(outbound.text, outbound.images)
+        is Outbound.Prompt -> sendUserMessage(outbound.text, outbound.images, outbound.later)
         is Outbound.ShellEscape -> sendShellEscape(outbound.id, outbound.command, outbound.output, outbound.respond)
     }
 }
