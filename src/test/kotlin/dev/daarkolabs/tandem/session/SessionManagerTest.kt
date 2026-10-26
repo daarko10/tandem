@@ -2873,6 +2873,7 @@ class SessionManagerTest {
         assertEquals(listOf("--session-id", handle.id, "--add-dir", extra), spawns().last().takeLast(4))
         handle.state.first { it.turnsEnded == 1 && !it.busy }
         handle.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        assertEquals(0, handle.selfEnds.value, "the folder's stop is Tandem's own (spec 18.1)")
     }
 
     // spec: adding during a turn stops after the turn
