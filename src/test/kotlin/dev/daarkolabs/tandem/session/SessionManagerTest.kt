@@ -519,7 +519,9 @@ class SessionManagerTest {
         assertEquals(PermissionMode.PLAN, manager.cyclePermissionMode(handle.id, step))
         awaitLog { modeFrames().size == 2 }
         assertEquals(listOf("acceptEdits", "plan"), modeFrames())
-        assertEquals(PermissionMode.PLAN, handle.state.value.permissionMode)
+        // The process's own state holds both picks at once; the handle's follows it through its mirror, a coroutine, so it is awaited.
+        assertEquals(PermissionMode.PLAN, handle.liveSession()!!.state.value.permissionMode)
+        handle.state.first { it.permissionMode == PermissionMode.PLAN }
     }
 
     @Test
