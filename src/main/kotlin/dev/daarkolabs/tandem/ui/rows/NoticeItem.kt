@@ -20,6 +20,7 @@ import dev.daarkolabs.tandem.chat.NoticeRow
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.UsagePart
+import dev.daarkolabs.tandem.ui.ChatUiState
 import dev.daarkolabs.tandem.ui.LocalUrlHandler
 import dev.daarkolabs.tandem.ui.chatColumn
 import kotlinx.collections.immutable.ImmutableList
@@ -48,6 +49,7 @@ import org.jetbrains.jewel.ui.icons.AllIconsKeys
 @Composable
 internal fun NoticeItem(
     row: NoticeRow,
+    ui: ChatUiState,
     blocks: ImmutableList<MarkdownBlock>? = null,
     onOpenMcp: () -> Unit = {},
     onUsageRetry: (uuid: String, part: UsagePart) -> Unit = { _, _ -> },
@@ -58,7 +60,7 @@ internal fun NoticeItem(
     val uuid = row.sourceUuid
     if (usage != null && uuid != null) {
         Column(Modifier.chatColumn().padding(top = row.gap.dp.dp).semantics { contentDescription = description }) {
-            UsageCardView(usage, row.key) { part -> onUsageRetry(uuid, part) }
+            UsageCardView(usage, row.key, ui) { part -> onUsageRetry(uuid, part) }
         }
         return
     }

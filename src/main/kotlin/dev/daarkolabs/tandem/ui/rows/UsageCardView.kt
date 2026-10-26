@@ -15,9 +15,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +46,7 @@ import dev.daarkolabs.tandem.chat.WINDOW_EMPTY
 import dev.daarkolabs.tandem.chat.tipsTitle
 import dev.daarkolabs.tandem.chat.tipsToggle
 import dev.daarkolabs.tandem.session.UsagePart
+import dev.daarkolabs.tandem.ui.ChatUiState
 import dev.daarkolabs.tandem.ui.chatPalette
 import dev.daarkolabs.tandem.ui.smallTextStyle
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -61,12 +59,13 @@ import org.jetbrains.jewel.ui.component.Text
  * The /usage card (desktop-parity spec 3.2, 3.5, 3.7, 16) for [model], drawn in place of a usage notice's text: a bordered box in the
  * chat column (the polish cards' frame: 6 dp radius, 12 dp inside), its sections stacked and every line wrapping, so nothing sits side
  * by side and the card reads at the tool window's narrowest width. `Retry` asks again for one part through [onRetry]. What the card
- * remembers on screen (the window, the tips and `CLI output` disclosures) is per card, keyed by [key], and not saved. The box is
+ * remembers on screen (the window, the tips and `CLI output` disclosures) is per card, keyed by [key], and kept in the session's [ui]
+ * like an open row's state, so it survives the card scrolling out of view and back; it is not saved with the session. The box is
  * `Usage for this session` for assistive technology and is not merged, so its window control, each `Retry` and the disclosures stay
  * their own nodes; its text is selectable like a reply's. Nothing in it takes the focus by itself: it arrives while the user may type.
  */
 @Composable
-internal fun UsageCardView(model: UsageCardModel, key: String, onRetry: (UsagePart) -> Unit) {
+internal fun UsageCardView(model: UsageCardModel, key: String, ui: ChatUiState, onRetry: (UsagePart) -> Unit) {
     val shape = RoundedCornerShape(6.dp)
     Column(
         Modifier.fillMaxWidth()
@@ -78,8 +77,8 @@ internal fun UsageCardView(model: UsageCardModel, key: String, onRetry: (UsagePa
     ) {
         SessionSection(model, onRetry)
         if (model.models.isNotEmpty()) BreakdownSection(model.models)
-        HistorySection(model.history, key, onRetry)
-        CliOutput(model, key)
+        HistorySection(model.history, key, ui, onRetry)
+        CliOutput(model, key, ui)
     }
 }
 
@@ -127,22 +126,28 @@ private fun BreakdownSection(models: List<ModelBlock>) {
  * lines, its share rows and its tips; or the part's loading, failure or note line.
  */
 @Composable
-private fun HistorySection(history: UsageSection<Pair<UsageWindowModel?, UsageWindowModel?>>, key: String, onRetry: (UsagePart) -> Unit) {
+private fun HistorySection(
+    history: UsageSection<Pair<UsageWindowModel?, UsageWindowModel?>>,
+    key: String,
+    ui: ChatUiState,
+    onRetry: (UsagePart) -> Unit,
+) {
     Section("What's using your limits?") {
         when (history) {
             UsageSection.Loading -> Dim(HISTORY_LOADING)
             is UsageSection.Error -> Failure(history, onRetry = { onRetry(UsagePart.HISTORY) })
             is UsageSection.Note -> Dim(history.text)
             is UsageSection.Shown -> {
-                var chosen by remember(key) { mutableIntStateOf(0) }
+                // `24h` until `7d` is chosen.
+                var week by ui.expanded("$key:usage-7d")
                 SegmentedControl(
                     buttons = listOf("24h", "7d").mapIndexed { index, label ->
-                        SegmentedControlButtonData(selected = index == chosen, content = { Text(label) }, onSelect = { chosen = index })
+                        SegmentedControlButtonData(selected = (index == 1) == week, content = { Text(label) }, onSelect = { week = index == 1 })
                     },
                     modifier = Modifier.semantics { contentDescription = "Usage window" },
                 )
-                val window = if (chosen == 0) history.value.first else history.value.second
-                if (window == null) Dim(WINDOW_EMPTY) else WindowView(window, key)
+                val window = if (week) history.value.second else history.value.first
+                if (window == null) Dim(WINDOW_EMPTY) else WindowView(window, key, ui)
             }
         }
     }
@@ -150,7 +155,7 @@ private fun HistorySection(history: UsageSection<Pair<UsageWindowModel?, UsageWi
 
 /** One window: the caveat, the behaviour lines, the share rows with their bars, then the tips with their disclosure. */
 @Composable
-private fun WindowView(window: UsageWindowModel, key: String) {
+private fun WindowView(window: UsageWindowModel, key: String, ui: ChatUiState) {
     val palette = chatPalette()
     Dim(window.caveat)
     if (window.behaviors.isNotEmpty()) {
@@ -167,6 +172,7 @@ private fun WindowView(window: UsageWindowModel, key: String) {
             }
         }
     }
+    // Name, kind (dim), the bar, then the share (spec 3.2).
     for (share in window.shares) {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Selectable {
@@ -174,15 +180,15 @@ private fun WindowView(window: UsageWindowModel, key: String) {
                     buildAnnotatedString {
                         append(share.name)
                         withStyle(SpanStyle(color = palette.dim)) { append("  ${share.kind}") }
-                        append("  ${share.pct}")
                     },
                 )
             }
             ShareBar(share.fraction, palette.accent, palette.dim)
+            Selectable { Text(share.pct) }
         }
     }
     if (window.tips.isEmpty()) return
-    var open by remember(key) { mutableStateOf(false) }
+    var open by ui.expanded("$key:usage-tips")
     Text(tipsTitle(window.tips.size), fontWeight = FontWeight.SemiBold)
     Selectable {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -199,11 +205,13 @@ private fun WindowView(window: UsageWindowModel, key: String) {
 
 /** `CLI output`: a disclosure, open at first when the card says so, showing the notice's own text, plain, in the editor style. */
 @Composable
-private fun CliOutput(model: UsageCardModel, key: String) {
-    // A part that fails later opens it as well (spec 3.2), so the key follows the model's flag.
-    var open by remember(key, model.cliTextOpen) { mutableStateOf(model.cliTextOpen) }
+private fun CliOutput(model: UsageCardModel, key: String, ui: ChatUiState) {
+    // Whether the user flipped it from the model's default. A part that fails later opens it as well (spec 3.2), so the state follows
+    // the model's flag: a new flag starts unflipped.
+    var flipped by ui.expanded("$key:usage-cli:${model.cliTextOpen}")
+    val open = model.cliTextOpen != flipped
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Disclosure("CLI output", open, chevron = true) { open = !open }
+        Disclosure("CLI output", open, chevron = true) { flipped = !flipped }
         if (open) Selectable { Text(model.cliText, style = JewelTheme.editorTextStyle, color = chatPalette().secondary) }
     }
 }
