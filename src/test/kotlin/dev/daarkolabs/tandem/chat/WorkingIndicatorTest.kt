@@ -13,6 +13,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** The working indicator and the turn footer (spec 4.9, 4.10). */
@@ -202,6 +203,48 @@ class WorkingIndicatorTest {
         val view = WorkingIndicator.view(row(), now, now, reducedMotion = true)
         assertEquals(WorkingIndicator.Mode.RUNNING, view.mode)
         assertFalse(view.animated)
+    }
+
+    @Test
+    fun `the shimmer rests, sweeps 900 ms and repeats every 3 s`() {
+        assertNull(WorkingIndicator.shimmerProgress(0))
+        assertNull(WorkingIndicator.shimmerProgress(599))
+        assertEquals(0f, WorkingIndicator.shimmerProgress(600))
+        assertEquals(0.5f, assertNotNull(WorkingIndicator.shimmerProgress(1_050)), 0.01f)
+        assertTrue(assertNotNull(WorkingIndicator.shimmerProgress(1_499)) > 0.99f)
+        assertNull(WorkingIndicator.shimmerProgress(1_500))
+        assertEquals(0f, WorkingIndicator.shimmerProgress(3_600))
+        assertEquals(600L, WorkingIndicator.msToNextSweep(0))
+        assertEquals(2_100L, WorkingIndicator.msToNextSweep(1_500))
+        for (t in 0L..10_000L step 7) assertTrue(WorkingIndicator.msToNextSweep(t) >= 1, "at $t")
+    }
+
+    @Test
+    fun `the shimmer covers the step only`() {
+        val view = WorkingIndicator.view(row(), now, now)
+        assertEquals("Pondering… · 3s", view.text)
+        assertEquals(10, view.shimmerEnd)
+        assertEquals("Pondering…", view.text.substring(0, view.shimmerEnd))
+    }
+
+    @Test
+    fun `waiting and not responding neither animate nor shimmer`() {
+        val waiting = WorkingIndicator.view(row(waiting = true), now, now)
+        assertFalse(waiting.animated)
+        assertEquals(0, waiting.shimmerEnd)
+        val silent = WorkingIndicator.view(row(startedAt = now - 120_000), now, lastFrameAtMillis = now - 60_000)
+        assertEquals(WorkingIndicator.Mode.NOT_RESPONDING, silent.mode)
+        assertFalse(silent.animated)
+        assertEquals(0, silent.shimmerEnd)
+    }
+
+    @Test
+    fun `under reduced motion nothing animates or shimmers`() {
+        val reduced = WorkingIndicator.view(row(), now, now, reducedMotion = true)
+        assertEquals(WorkingIndicator.Mode.RUNNING, reduced.mode)
+        assertFalse(reduced.animated)
+        assertEquals(0, reduced.shimmerEnd)
+        assertEquals(WorkingIndicator.view(row(), now, now).text, reduced.text)
     }
 
     @Test

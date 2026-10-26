@@ -107,7 +107,7 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
             row {
                 checkBox("Reduce motion")
                     .bindSelected({ settings.state.reduceMotion }, { settings.state.reduceMotion = it })
-            }.rowComment("The spark beside Claude's working line stands still.")
+            }.rowComment("The orbs and the shimmer beside Claude's working line stand still.")
         }
         check()
         return page

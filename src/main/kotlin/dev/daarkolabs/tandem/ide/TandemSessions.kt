@@ -128,8 +128,8 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     )
 
     /**
-     * Tandem's `Reduce motion` setting, as last applied ([settingsChanged]): the working row's spark stands still. Apart from
-     * [rowOptions], which the rows are built from, so that toggling it rebuilds no chat's rows.
+     * Tandem's `Reduce motion` setting, as last applied ([settingsChanged]): the working row's orbs stand still and nothing
+     * shimmers. Apart from [rowOptions], which the rows are built from, so that toggling it rebuilds no chat's rows.
      */
     val reduceMotion: StateFlow<Boolean> = _reduceMotion.asStateFlow()
 

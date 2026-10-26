@@ -260,6 +260,8 @@ class ToolWindowIdeTest {
             waitFor("working row with elapsed", 1.minutes) {
                 node("Claude is working") { "contains($it, ' · ') and substring($it, string-length($it)) = 's'" }.present()
             }
+            // The only real-IDE view of the composed row: the orbs and the step (runTandem's own screenshot comes after the row is gone).
+            takeScreenshot("working-row")
             // A lone running call opens on its command (polish spec 2.1) while its permission request is still held back.
             described("Creating empty fixture file").click(Point(10, 10))
             waitFor("a lone running call opens on its command", 30.seconds) {
