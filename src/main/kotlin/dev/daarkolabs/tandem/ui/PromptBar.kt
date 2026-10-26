@@ -104,6 +104,8 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.constrainWidth
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.coerceAtLeast
 import androidx.compose.ui.unit.dp
@@ -585,91 +587,102 @@ private fun PromptBox(
                 target = dropTarget,
             ),
     ) {
-        // The session's added folders, at the top of the box, above the images (spec 3.4).
-        FolderStrip(folders, onRemoveFolder)
-        // The attached images, above the row, across the box's inner width (polish spec 2.7).
-        if (ui.attachments.isNotEmpty()) AttachmentStrip(ui.attachments)
-        Row(
-            // The text's ink starts about 42 dp inside the box (desktop-02): 8 dp, the 24 dp `+`, 5 dp, then the undecorated
-            // TextArea's own content padding (5 dp across, 4 dp down); 8 + 4 above and below the text, so 184 dp holds 8 lines of
-            // 20 dp. The `+` and the send glyph stay on the last line as the text grows.
-            Modifier.fillMaxWidth().heightIn(max = 184.dp).padding(start = 8.dp, end = 12.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            val density = LocalDensity.current
-            AddButton(
-                Modifier.padding(end = 5.dp, bottom = 10.dp),
-                plugins,
-                pluginsKnown,
-                width = plusMenuWidth(columnWidth() ?: UNMEASURED_COLUMN),
-                // The room above the box, as the palette measures it (MCP spec 14); none before the box is placed.
-                maxHeight = with(density) { (boxTop - 8.dp.roundToPx()).takeIf { it > 0 }?.toDp() },
-                // Keyed on the state alone: [onAdd] is a new lambda at every recomposition of PromptBar, and is read when picked.
-                actions = remember(ui) {
-                    PlusMenuActions(
-                        onAddFiles = { currentOnAdd() },
-                        // The text area takes the focus once the chooser has closed (spec 3.5).
-                        onAddFolder = { currentOnAddFolder { refocus++ } },
-                        onSlashCommands = {
-                            ui.openPalette()
-                            refocus++
-                        },
-                        onBrowseConnectors = { currentOnBrowse() },
-                        // The MCP panel, opened as a user action, after the menu closed (spec 17.2).
-                        onManageConnectors = { menu -> menu.openMcpFromMenu(ui) },
-                        onCommand = { command ->
-                            ui.draft.setTextAndPlaceCursorAtEnd(withCommand(ui.draft.text.toString(), command.command))
-                            refocus++
-                        },
-                    )
-                },
-                openMenus = ui.openMenus,
-                connectorController = connectorController,
-            )
-            // The text area, and over it `Type to filter` after a lone `/` while the palette is open (MCP spec 14): its own
-            // placeholder shows only while it is empty.
-            Box(Modifier.weight(1f)) {
-                TextArea(
-                    ui.draft,
-                    Modifier.fillMaxWidth().heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
-                        .focusRequester(inputFocus)
-                        .onFocusChanged { inputFocused.value = it.hasFocus }
-                        // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it: while
-                        // the clipboard holds images, the focused composer's paste provider takes the paste from the Compose text paste
-                        // (polish spec 2.7). Asked for only by a paste, so the clipboard's flavours are not queried on every action
-                        // update.
-                        .provideData {
-                            lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
-                                imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
-                            }
-                        }
-                        .onPreviewKeyEvent { event ->
-                            composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, interceptable, onAction)
-                        },
-                    lineLimits = TextFieldLineLimits.MultiLine(1, 8),
-                    undecorated = true,
-                    placeholder = { Text("Type / for commands", color = colors.text.info) },
+        val density = LocalDensity.current
+        // The text's ink starts about 42 dp inside the box (desktop-02): 8 dp, the 24 dp `+`, 5 dp, then the undecorated TextArea's
+        // own content padding (5 dp across, 4 dp down); 8 + 4 above and below the text, so 184 dp holds 8 lines of 20 dp. The `+`
+        // and the send glyph stay on the last line as the text grows.
+        ComposerBoxLayout(
+            start = 8.dp,
+            add = {
+                AddButton(
+                    Modifier.padding(end = 5.dp, bottom = 10.dp),
+                    plugins,
+                    pluginsKnown,
+                    width = plusMenuWidth(columnWidth() ?: UNMEASURED_COLUMN),
+                    // The room above the box, as the palette measures it (MCP spec 14); none before the box is placed.
+                    maxHeight = with(density) { (boxTop - 8.dp.roundToPx()).takeIf { it > 0 }?.toDp() },
+                    // Keyed on the state alone: [onAdd] is a new lambda at every recomposition of PromptBar, and is read when picked.
+                    actions = remember(ui) {
+                        PlusMenuActions(
+                            onAddFiles = { currentOnAdd() },
+                            // The text area takes the focus once the chooser has closed (spec 3.5).
+                            onAddFolder = { currentOnAddFolder { refocus++ } },
+                            onSlashCommands = {
+                                ui.openPalette()
+                                refocus++
+                            },
+                            onBrowseConnectors = { currentOnBrowse() },
+                            // The MCP panel, opened as a user action, after the menu closed (spec 17.2).
+                            onManageConnectors = { menu -> menu.openMcpFromMenu(ui) },
+                            onCommand = { command ->
+                                ui.draft.setTextAndPlaceCursorAtEnd(withCommand(ui.draft.text.toString(), command.command))
+                                refocus++
+                            },
+                        )
+                    },
+                    openMenus = ui.openMenus,
+                    connectorController = connectorController,
                 )
-                if (filterHint) FilterHint(top = 8.dp)
-            }
-            // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
-            val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
-            if (busy) {
-                IconButton(onClick = { onAction(ComposerAction.Stop) }, modifier = buttonModifier.semantics { contentDescription = "Stop" }) {
-                    Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
+            },
+            // The session's added folders, at the top of the box, above the images (spec 3.4), then the attached images,
+            // across the box's inner width (polish spec 2.7).
+            strips = {
+                Column(Modifier.fillMaxWidth()) {
+                    FolderStrip(folders, onRemoveFolder)
+                    if (ui.attachments.isNotEmpty()) AttachmentStrip(ui.attachments)
                 }
-            } else {
-                // Disabled, and dimmed, while the last prompt is still being encoded: the composer counts as busy (polish spec 2.7).
-                // sendDraft checks the sender's own flag again, so a click that races the encode still sends nothing.
-                IconButton(
-                    onClick = { onAction(ComposerAction.Send) },
-                    enabled = !sending,
-                    modifier = buttonModifier.semantics { contentDescription = "Send" },
-                ) {
-                    Text("↵", style = JewelTheme.editorTextStyle, color = if (sending) colors.text.disabled else colors.text.info)
+            },
+            input = {
+                Row(Modifier.heightIn(max = 184.dp).padding(end = 12.dp), verticalAlignment = Alignment.Bottom) {
+                    // The text area, and over it `Type to filter` after a lone `/` while the palette is open (MCP spec 14): its own
+                    // placeholder shows only while it is empty.
+                    Box(Modifier.weight(1f)) {
+                        TextArea(
+                            ui.draft,
+                            Modifier.fillMaxWidth().heightIn(min = 44.dp, max = 184.dp).padding(vertical = 8.dp)
+                                .focusRequester(inputFocus)
+                                .onFocusChanged { inputFocused.value = it.hasFocus }
+                                // In the IDE, Ctrl/Cmd+V is its Paste action, which takes the key before the handler below sees it:
+                                // while the clipboard holds images, the focused composer's paste provider takes the paste from the
+                                // Compose text paste (polish spec 2.7). Asked for only by a paste, so the clipboard's flavours are not
+                                // queried on every action update.
+                                .provideData {
+                                    lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
+                                        imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
+                                    }
+                                }
+                                .onPreviewKeyEvent { event ->
+                                    composerKeyEvent(event, busy || sending, cardOpen, ui, palette() != null, interceptable, onAction)
+                                },
+                            lineLimits = TextFieldLineLimits.MultiLine(1, 8),
+                            undecorated = true,
+                            placeholder = { Text("Type / for commands", color = colors.text.info) },
+                        )
+                        if (filterHint) FilterHint(top = 8.dp)
+                    }
+                    // Centred on the last line: 12 dp padding + half a 20 dp line − half the 24 dp button.
+                    val buttonModifier = Modifier.padding(start = 8.dp, bottom = 10.dp).size(24.dp)
+                    if (busy) {
+                        IconButton(
+                            onClick = { onAction(ComposerAction.Stop) },
+                            modifier = buttonModifier.semantics { contentDescription = "Stop" },
+                        ) {
+                            Icon(AllIconsKeys.Actions.Suspend, contentDescription = null, tint = colors.text.info)
+                        }
+                    } else {
+                        // Disabled, and dimmed, while the last prompt is still being encoded: the composer counts as busy (polish
+                        // spec 2.7). sendDraft checks the sender's own flag again, so a click that races the encode still sends nothing.
+                        IconButton(
+                            onClick = { onAction(ComposerAction.Send) },
+                            enabled = !sending,
+                            modifier = buttonModifier.semantics { contentDescription = "Send" },
+                        ) {
+                            Text("↵", style = JewelTheme.editorTextStyle, color = if (sending) colors.text.disabled else colors.text.info)
+                        }
+                    }
                 }
-            }
-        }
+            },
+        )
         // Placed in the box, so that the popup is anchored to the box's own edges.
         val shown = palette()
         if (shown != null && boxWidth > 0) {
@@ -1265,6 +1278,37 @@ internal fun MenuLabel(label: String, modifier: Modifier = Modifier, end: @Compo
 @Composable
 private fun DimLine(text: String, palette: ChatPalette, small: TextStyle) {
     Text(text, style = small, color = palette.dim, modifier = PASSIVE_INSET)
+}
+
+/**
+ * The composer box's content (spec 3.5): [strips] across the top, then [add] and [input] side by side along the bottom, [start] in
+ * from the box's edge, as a Row aligned to the bottom would place them, [input] taking the width [add] leaves. [add] is placed
+ * first and [strips] second: Compose's Tab order follows the order in which siblings are placed, so it runs `+`, the strips' `×`
+ * buttons, then the text area, although the strips sit above the `+`.
+ */
+@Composable
+private fun ComposerBoxLayout(start: Dp, add: @Composable () -> Unit, strips: @Composable () -> Unit, input: @Composable () -> Unit) {
+    Layout(contents = listOf(add, strips, input), modifier = Modifier.fillMaxWidth()) { (adds, stripRows, inputs), constraints ->
+        val left = start.roundToPx()
+        val width = constraints.maxWidth
+        val placedAdd = adds.map { it.measure(Constraints()) }
+        val addWidth = placedAdd.maxOfOrNull { it.width } ?: 0
+        val placedStrips = stripRows.map { it.measure(Constraints(maxWidth = width)) }
+        val stripsHeight = placedStrips.sumOf { it.height }
+        val inputWidth = (width - left - addWidth).coerceAtLeast(0)
+        val placedInput = inputs.map { it.measure(Constraints(minWidth = inputWidth, maxWidth = inputWidth)) }
+        val rowHeight = (placedAdd + placedInput).maxOfOrNull { it.height } ?: 0
+        val bottom = stripsHeight + rowHeight
+        layout(constraints.constrainWidth(width), constraints.constrainHeight(bottom)) {
+            placedAdd.forEach { it.place(left, bottom - it.height) }
+            var top = 0
+            placedStrips.forEach {
+                it.place(0, top)
+                top += it.height
+            }
+            placedInput.forEach { it.place(left + addWidth, bottom - it.height) }
+        }
+    }
 }
 
 /**

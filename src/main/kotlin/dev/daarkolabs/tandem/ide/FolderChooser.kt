@@ -30,7 +30,7 @@ fun interface FolderChooser {
 }
 
 /** Posts a task as an EDT event of its own, in the default modality, dropped once [project] is disposed. */
-fun laterOnEdt(project: Project): (Runnable) -> Unit = { task ->
+internal fun laterOnEdt(project: Project): (Runnable) -> Unit = { task ->
     ApplicationManager.getApplication().invokeLater(task, ModalityState.defaultModalityState(), project.disposed)
 }
 

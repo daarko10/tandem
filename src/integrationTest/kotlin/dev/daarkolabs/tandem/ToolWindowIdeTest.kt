@@ -908,6 +908,19 @@ class ToolWindowIdeTest {
             )
             plusItem("Add folder").click(Point(10, 10))
             waitFor("the folder's pill", 1.minutes) { described("Folder shared-lib").present() }
+            // The pill's × is a focus stop after the `+` and before the text area (spec 3.5), although the pill sits above them.
+            // Shift+Tab from the text area goes back round (D13b turns these two presses into Tab forward round the cycle).
+            focusPromptBox()
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("Shift+Tab from the text area reaches the pill's ×", 30.seconds) {
+                focusedIconButton("Remove folder shared-lib").present()
+            }
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("Shift+Tab again reaches the +", 30.seconds) { focusedIconButton("Add").present() }
+            ui.keyboard { key(KeyEvent.VK_TAB) }
+            waitFor("Tab from the + reaches the pill's ×", 30.seconds) { focusedIconButton("Remove folder shared-lib").present() }
+            ui.keyboard { key(KeyEvent.VK_TAB) }
+            waitFor("Tab from the × reaches the text area", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
             enterPrompt("hi")
             waitForTurnEnd()
             // Kept as a test artifact: the pill at the top of the composer box.
