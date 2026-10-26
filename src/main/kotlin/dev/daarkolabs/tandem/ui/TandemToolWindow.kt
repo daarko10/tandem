@@ -38,7 +38,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.intellij.openapi.project.Project
-import dev.daarkolabs.tandem.TandemProjectScope
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionId
@@ -83,7 +82,8 @@ private val SIDEBAR_WIDTH: Dp = 220.dp
 @Composable
 internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val manager = sessions.manager
-    val actions = remember(project) { SessionActions(project, manager, TandemProjectScope.get(project).scope) }
+    val window = remember(project) { TandemWindowService.get(project) }
+    val actions = window.actions
     val workspace = remember(project) { TandemWorkspaceState.getInstance(project) }
     val newSession = remember(workspace, manager) {
         NewSessionChoices(workspace) { manager.models.value.ifEmpty { workspace.knownModels() } }
@@ -123,6 +123,13 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val sessionShown: (SessionId) -> Unit = { id ->
         drawerOpen = false
         promptFocusFor = id
+    }
+    // The session tabs and the New Session action ask for a composer's focus through the window service (spec 18.2).
+    LaunchedEffect(window) {
+        window.focusRequests.collect { id ->
+            window.takeFocusRequest()
+            sessionShown(id)
+        }
     }
     // The selected session's MCP panel (MCP spec 3.2): its state lives in the session's ChatUiState.
     val mcpPanelOpen = selected?.let { presenters.ui(it.id).mcpPanelOpen }
@@ -240,7 +247,7 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
                     }.focusGroup()
                     if (selected == null) {
                         Box(Modifier.fillMaxSize().then(chatFocus), contentAlignment = Alignment.Center) {
-                            Text("Create a session with + or open the sidebar.")
+                            Text(NO_SESSION_HINT)
                         }
                     } else {
                         // Each session's chat is composed in its own key, so that its remembered panel state (the pin's bookkeeping,

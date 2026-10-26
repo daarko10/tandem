@@ -979,7 +979,8 @@ class SessionManager internal constructor(
      * Follows the session's status: every change counts as use, and a session that is not selected asks for attention when it
      * starts waiting for a permission, or when a turn ends ([ChatState.turnsEnded] grows: a count, which no conflation of the status
      * hides, and which a permission answered outside a turn or a Stop leaves alone), from [SessionHandle.turnsEndedAtStart] on: a
-     * turn that ended before this, as while a resumed-as-new session is taken over, still asks. The models its process lists become
+     * turn that ended before this, as while a resumed-as-new session is taken over, still asks; and when a process ends by itself
+     * ([SessionHandle.selfEnds] grows). The models its process lists become
      * [models], and the commands it offers [commands].
      */
     private fun watch(handle: SessionHandle) {
@@ -999,6 +1000,17 @@ class SessionManager internal constructor(
             handle.state.map { it.turnsEnded to it.nothingNext() }.distinctUntilChanged { a, b -> a.first == b.first }.collect { (count, last) ->
                 if (count > ended && last) raiseAttentionUnlessSelected(handle)
                 ended = count
+            }
+        }
+        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            // A process that ended by itself, not by a stop of Tandem's, asks for attention (desktop-parity spec 18.1).
+            var ends = handle.selfEnds.value
+            handle.selfEnds.collect { count ->
+                if (count > ends) {
+                    LOG.info("session ${handle.id}: its process ended by itself")
+                    raiseAttentionUnlessSelected(handle)
+                }
+                ends = count
             }
         }
         handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {

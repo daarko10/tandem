@@ -29,6 +29,7 @@
         <toolWindow id="Tandem"
                     anchor="right"
                     icon="AllIcons.Toolwindows.ToolWindowMessages"
+                    canCloseContents="true"
                     factoryClass="dev.daarkolabs.tandem.ui.TandemToolWindowFactory"/>
         <notificationGroup id="Tandem" displayType="BALLOON"/>
         <applicationConfigurable parentId="tools"
@@ -46,5 +47,10 @@
                 description="Switch the Tandem chat to the next permission mode: Manual, Accept edits, Plan, then Auto when the model supports it">
             <keyboard-shortcut keymap="$default" first-keystroke="shift TAB"/>
         </action>
+        <action id="Tandem.NewSession"
+                class="dev.daarkolabs.tandem.ui.NewSessionAction"
+                icon="AllIcons.General.Add"
+                text="New Session"
+                description="Start a new Tandem session with the last model, effort and permission mode"/>
     </actions>
 </idea-plugin>

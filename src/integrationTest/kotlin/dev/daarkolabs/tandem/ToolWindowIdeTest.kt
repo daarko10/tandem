@@ -1138,6 +1138,156 @@ class ToolWindowIdeTest {
         assertEquals(argv.indexOf("--resume-session-at") + 1, argv.indexOf("a1"), argv.toString())
     }
 
+    // spec: session tabs follow the sessions (desktop-parity spec 9.8 IDE test 3)
+    @Test
+    fun `session tabs follow the sessions`() {
+        // The platform's tab keys: $default's Alt+Left, Alt+Right and Alt+Down; the macOS keymap's Cmd+Shift+[ and Cmd+Shift+].
+        val previousTab = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_SHIFT, KeyEvent.VK_OPEN_BRACKET) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_LEFT)
+        val nextTab = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_SHIFT, KeyEvent.VK_CLOSE_BRACKET) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_RIGHT)
+        runChat("session-tabs", fixtures = listOf("plain-reply", "plain-reply", "plain-reply", "plain-reply")) {
+            // New Session from anywhere (as Find Action runs it) shows and activates the hidden tool window, and focuses the composer.
+            withContext(OnDispatcher.EDT) { tandemWindow().hide() }
+            waitFor("the tool window hidden", 30.seconds) { !withContext(OnDispatcher.EDT) { tandemWindow().isVisible() } }
+            invokeAction(NEW_SESSION_ACTION)
+            waitFor("the tool window shown and active, one New session tab, the composer focused", 1.minutes) {
+                withContext(OnDispatcher.EDT) { tandemWindow().isVisible() && tandemWindow().isActive() } &&
+                    tabLabels("New session").size == 1 && ui.x("$PROMPT_BOX[@focused='true']").present()
+            }
+
+            // Room for two tabs in the header, still too narrow to dock the sidebar (set once the window is shown again: hiding
+            // and showing it lays it out at its remembered width).
+            setToolWindowWidth(TWO_TABS_WIDTH)
+            waitFor("the tool window widened", 30.seconds) {
+                withContext(OnDispatcher.EDT) { tandemWindow().getComponent().getWidth() } >= TWO_TABS_WIDTH - 5
+            }
+
+            // The + after the tabs starts a second session, selected.
+            tabPlus().click()
+            waitFor("two New session tabs, the second selected", 30.seconds) {
+                tabLabels("New session").size == 2 && selectedTab() == ("New session" to 1)
+            }
+            enterPrompt("Tab two")
+            waitForTurnEnd()
+            waitFor("the tab takes the session's title", 30.seconds) { tabLabels("Tab two").size == 1 }
+            promptBox().keyboard { typeText("draft-two", 20) }
+            waitFor("the draft typed", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='draft-two']").present() }
+
+            // A tab click: the platform takes the shared panel out and puts it back; the composer gets the focus back.
+            tabLabels("New session").single().click(Point(10, 10))
+            waitFor("the first session's empty draft, focused", 30.seconds) {
+                ui.x("$PROMPT_BOX[@editabletext='' and @focused='true']").present()
+            }
+            ui.keyboard { typeText("a", 20) }
+            waitFor("the first session's draft", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='a']").present() }
+            openSidebar()
+            waitFor("its row selected", 30.seconds) { ui.x("$ROW[@selected='true' and not(contains(@text, 'Tab two'))]").present() }
+
+            // A sidebar pick selects the tab; the controller's selection keeps the panel, so the focus the pick gave stays.
+            row("Tab two").click(Point(10, 10))
+            waitFor("the Tab two tab selected with its draft", 30.seconds) {
+                selectedTab()?.first == "Tab two" && ui.x("$PROMPT_BOX[@editabletext='draft-two' and @focused='true']").present()
+            }
+            ui.keyboard { typeText("2", 20) }
+            waitFor("typed into Tab two's draft", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='draft-two2']").present() }
+
+            // The platform's tab keys work from the composer.
+            focusPromptBox()
+            ui.keyboard { hotKey(*previousTab) }
+            waitFor("PreviousTab shows the first session's draft", 30.seconds) {
+                selectedTab()?.first == "New session" && ui.x("$PROMPT_BOX[@editabletext='a' and @focused='true']").present()
+            }
+            ui.keyboard { typeText("x", 20) }
+            waitFor("typed into the first draft", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='ax']").present() }
+            ui.keyboard { hotKey(*nextTab) }
+            waitFor("NextTab shows Tab two's draft", 30.seconds) {
+                selectedTab()?.first == "Tab two" && ui.x("$PROMPT_BOX[@editabletext='draft-two2' and @focused='true']").present()
+            }
+
+            // ShowContent lists every tab; its pick selects the tab and the sidebar row.
+            ui.keyboard { hotKey(KeyEvent.VK_ALT, KeyEvent.VK_DOWN) }
+            waitFor("the content list", 30.seconds) { contentList().present() }
+            println("ShowContent list: " + contentList().getAllTexts().map { it.text })
+            assertTrue(contentList().getAllTexts().map { it.text }.containsAll(listOf("New session", "Tab two")))
+            contentList().getAllTexts().first { it.text == "New session" }.click()
+            waitFor("the first tab selected by ShowContent's pick", 30.seconds) {
+                selectedTab()?.first == "New session" && ui.x("$PROMPT_BOX[@editabletext='ax']").present()
+            }
+            openSidebar()
+            waitFor("its row selected", 30.seconds) { ui.x("$ROW[@selected='true' and not(contains(@text, 'Tab two'))]").present() }
+            ui.keyboard { escape() }
+            waitFor("the sidebar closed", 30.seconds) { !row("Tab two").present() }
+            takeScreenshot("session-tabs")
+
+            // Overflow: four live sessions in a narrow tool window.
+            for ((index, title) in listOf("Tab three", "Tab four").withIndex()) {
+                tabPlus().click()
+                waitFor("a new tab selected, last", 30.seconds) { selectedTab() == ("New session" to index + 2) }
+                enterPrompt(title)
+                waitForTurnEnd()
+                waitFor("the tab takes the title $title", 30.seconds) { selectedTab() == (title to index + 2) }
+            }
+            narrowToolWindow(350)
+            // A titled one, whose sidebar row names it (a new session's row shows its id).
+            waitFor("a titled tab out of the header", 30.seconds) { hiddenTabs().any { it != "New session" } }
+            val hidden = hiddenTabs().first { it != "New session" }
+            println("tabs out of the header: ${hiddenTabs()}")
+            // The header's overflow control lists the tabs that do not fit.
+            ui.x("//div[@class='ActionButton' and @accessiblename='Show Hidden Tabs']").click()
+            waitFor("the hidden tabs' list lists $hidden", 30.seconds) {
+                contentList().present() && contentList().getAllTexts().any { it.text == hidden }
+            }
+            contentList().getAllTexts().first { it.text == hidden }.click()
+            waitFor("the hidden tab selected", 30.seconds) { selectedTab()?.first == hidden }
+            openSidebar()
+            waitFor("its row selected", 30.seconds) { ui.x("$ROW[@selected='true' and contains(@text, '$hidden')]").present() }
+            ui.keyboard { escape() }
+            takeScreenshot("session-tabs-overflow")
+        }
+    }
+
+    // spec: closing a tab stops its session and keeps its transcript (desktop-parity spec 9.8 IDE test 4)
+    @Test
+    fun `closing a tab stops its session and keeps its transcript`() {
+        val configDir = Files.createTempDirectory("tandem-config")
+        val project = newProject()
+        val seeded = "88888888-8888-4888-8888-888888888888"
+        val transcript = configDir.resolve("projects").resolve(TranscriptFolder.key(project.toRealPath().toString())).createDirectories()
+            .resolve("$seeded.jsonl")
+        transcript.writeText(longTranscript(seeded, turns = 3))
+        val closeContent = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_W) else intArrayOf(KeyEvent.VK_CONTROL, KeyEvent.VK_F4)
+        runChat("tab-close", fixtures = listOf("plain-reply", "plain-reply"), configDir = configDir, project = project) {
+            openSidebar()
+            row("Seeded").click(Point(10, 10))
+            waitFor("the Seeded tab", 30.seconds) { tabLabels("Seeded").size == 1 }
+            enterPrompt("hi")
+            waitForTurnEnd()
+            tabPlus().click()
+            waitFor("a New session tab", 30.seconds) { tabLabels("New session").size == 1 }
+
+            // Its ×, drawn at the label's right end only for a closeable content of a tool window that can close its contents.
+            val label = tabLabels("New session").single()
+            val width = label.component.width
+            println("New session tab label width: $width")
+            label.click(Point(width - JB_CLOSE_INSET, 10))
+            waitFor("the New session tab closed", 30.seconds) { tabLabels("New session").isEmpty() }
+
+            // CloseContent on the last tab: the tool window stays, with the placeholder.
+            tabLabels("Seeded").single().click(Point(10, 10))
+            focusPromptBox()
+            ui.keyboard { hotKey(*closeContent) }
+            waitFor("the Seeded tab closed", 30.seconds) { tabLabels("Seeded").isEmpty() }
+            waitFor("the tool window still shown, the placeholder selected", 30.seconds) {
+                withContext(OnDispatcher.EDT) { tandemWindow().isVisible() } && selectedTab() == ("" to 0)
+            }
+            openSidebar()
+            // The dot's word is the row's own description: its semantics merge into the row.
+            waitFor("the row stopped", 30.seconds) { ui.x("$ROW[contains(@text, 'Seeded') and @contentdescription='stopped']").present() }
+            row("Seeded").click(Point(10, 10))
+            waitFor("the Seeded tab back", 30.seconds) { tabLabels("Seeded").size == 1 }
+        }
+        assertTrue(transcript.exists(), "the transcript stays")
+    }
+
     @Test
     fun `a wide tool window docks the sidebar, which stays collapsed in the next IDE run`() {
         val configDir = Files.createTempDirectory("tandem-config")
@@ -1333,6 +1483,52 @@ class ToolWindowIdeTest {
     }
 
     /** Makes the tool window wide enough to dock the sidebar: the IDE gives it less than 500 dp. */
+    /** The Tandem tool window. Call on the EDT. */
+    private fun Driver.tandemWindow(): ToolWindowRef =
+        service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")
+
+    /** Makes the Tandem tool window [width] pixels wide, or leaves it if it is narrower already. */
+    private fun Driver.narrowToolWindow(width: Int) {
+        withContext(OnDispatcher.EDT) {
+            val window = tandemWindow()
+            val now = window.getComponent().getWidth()
+            if (now > width) window.stretchWidth(width - now)
+        }
+    }
+
+    /** Makes the Tandem tool window [width] pixels wide. */
+    private fun Driver.setToolWindowWidth(width: Int) {
+        withContext(OnDispatcher.EDT) {
+            val window = tandemWindow()
+            window.stretchWidth(width - window.getComponent().getWidth())
+        }
+    }
+
+    /** The selected content's name and index in the Tandem tool window's content manager, null with none. */
+    private fun Driver.selectedTab(): Pair<String, Int>? = withContext(OnDispatcher.EDT) {
+        val manager = tandemWindow().getContentManager()
+        manager.getSelectedContent()?.let { it.getDisplayName() to manager.getIndexOfContent(it) }
+    }
+
+    /** The header's tab labels named [text]. */
+    private fun Driver.tabLabels(text: String): List<UiComponent> =
+        ui.xx("//div[@class='ContentTabLabel' and (@text='$text' or @visible_text='$text' or @accessiblename='$text')]").list()
+
+    /** The session tabs' names that have no room in the header: a label not showing, or no label at all. */
+    private fun Driver.hiddenTabs(): List<String> {
+        val names = withContext(OnDispatcher.EDT) {
+            val manager = tandemWindow().getContentManager()
+            (0 until manager.getContentCount()).map { manager.getContent(it)?.getDisplayName() ?: "" }.filter { it.isNotEmpty() }
+        }
+        return names.filter { name -> tabLabels(name).none { it.component.isShowing() && it.component.width > 0 } }
+    }
+
+    /** The `+` after the last tab: the New Session action's button in the header. */
+    private fun Driver.tabPlus(): UiComponent = ui.x("//div[@class='ActionButton' and contains(@myaction, 'New Session')]")
+
+    /** ShowContent's list of the tool window's contents. */
+    private fun Driver.contentList(): UiComponent = ui.x("//div[@class='MyList' or @class='JBList' or @class='ListWithFilter']")
+
     private fun Driver.widenToolWindow() {
         withContext(OnDispatcher.EDT) {
             val window = service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")
@@ -1759,6 +1955,15 @@ class ToolWindowIdeTest {
         /** The first attached or sent image: a thumbnail, or its placeholder while it decodes. */
         const val FIRST_IMAGE = "//div[@class='ComposeNode' and @contentdescription='[Image #1]']"
 
+        /** The New Session action (desktop-parity spec 18.2). */
+        const val NEW_SESSION_ACTION = "Tandem.NewSession"
+
+        /** A Tandem tool window wide enough for two session tabs in its header, narrower than the sidebar's 500 dp. */
+        const val TWO_TABS_WIDTH = 495
+
+        /** Where a tab label's × is, counted from the label's right end. */
+        const val JB_CLOSE_INSET = 12
+
         /** Whether the IDE runs on macOS, where paste is Cmd+V. */
         val isMac: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
 
@@ -1828,6 +2033,30 @@ interface ToolWindowRef {
     fun stretchWidth(value: Int)
 
     fun getComponent(): JComponentRef
+
+    fun hide()
+
+    fun isVisible(): Boolean
+
+    fun isActive(): Boolean
+
+    fun getContentManager(): ContentManagerRef
+}
+
+@Remote("com.intellij.ui.content.ContentManager")
+interface ContentManagerRef {
+    fun getSelectedContent(): ContentRef?
+
+    fun getContentCount(): Int
+
+    fun getContent(index: Int): ContentRef?
+
+    fun getIndexOfContent(content: ContentRef): Int
+}
+
+@Remote("com.intellij.ui.content.Content")
+interface ContentRef {
+    fun getDisplayName(): String
 }
 
 @Remote("javax.swing.JComponent")

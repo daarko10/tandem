@@ -2777,4 +2777,61 @@ class SessionManagerTest {
         assertTrue(forked.entries.none { it is ChatEntry.Notice && it.text.startsWith("Not sent") })
         assertEquals(listOf(waiting.uuid), original.state.value.pendingSends.map { it.uuid })
     }
+
+    // spec: a process that ends by itself raises attention unless selected
+    @Test
+    fun `a process that ends by itself raises attention unless selected`() = test {
+        // Each fake exits 1.5 s after its last line: time to look at a finished turn before its process ends by itself.
+        val manager = manager(environment = mapOf("TANDEM_FAKE_EXIT_AT_END" to "1500"))
+        val a = manager.create(NewSessionOptions())
+        val b = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 2 }
+        manager.select(a.id)
+        manager.send(a.id, "hi")
+        manager.send(b.id, "hi")
+        b.attention.await(true) // its turn ended while another was selected
+        manager.select(b.id)
+        manager.select(a.id)
+        assertFalse(b.attention.value)
+
+        b.status.await(SessionStatus.STOPPED)
+        b.attention.await(true)
+        b.selfEnds.await(1)
+        a.status.await(SessionStatus.STOPPED)
+        a.selfEnds.await(1)
+        delay(300) // time for a wrong badge to show
+        assertFalse(a.attention.value, "the selected session needs no badge")
+        assertEquals(1, b.selfEnds.value)
+    }
+
+    // spec: the stops Tandem makes raise none
+    @Test
+    fun `the stops Tandem makes raise none`() = test {
+        val manager = manager(maxLive = 1)
+        val stopped = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        stopped.status.await(SessionStatus.IDLE)
+        manager.select(null)
+        stopped.clearAttention()
+        manager.stop(stopped.id)
+        stopped.status.await(SessionStatus.STOPPED)
+        delay(300) // time for a wrong badge to show
+        assertFalse(stopped.attention.value)
+        assertEquals(0, stopped.selfEnds.value)
+
+        // The cap's stopIfIdle: a second session started at a cap of one stops the idle first.
+        val evicted = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 2 }
+        evicted.status.await(SessionStatus.IDLE)
+        manager.select(null)
+        val second = manager.create(NewSessionOptions())
+        evicted.status.await(SessionStatus.STOPPED)
+        awaitLog { spawns().size == 3 }
+        delay(300)
+        assertFalse(evicted.attention.value)
+        assertEquals(0, evicted.selfEnds.value)
+
+        manager.close(second.id)
+        assertEquals(0, second.selfEnds.value)
+    }
 }

@@ -172,6 +172,14 @@ class SessionHandle internal constructor(
     /** Whether the user should look at this session: it asked for permission or finished a turn while another one was selected. */
     val attention: StateFlow<Boolean> = mutableAttention.asStateFlow()
 
+    private val mutableSelfEnds = MutableStateFlow(0)
+
+    /**
+     * How many processes of this session ended by themselves (the CLI exited, crashed or was killed) while attached: counted where
+     * the process's own exit lets it go, never for a stop Tandem makes, which lets the process go first (desktop-parity spec 18.1).
+     */
+    internal val selfEnds: StateFlow<Int> = mutableSelfEnds.asStateFlow()
+
     /**
      * The attached process's [ClaudeSession.lastFrameAtMillis]: when it last wrote a line, 0 until it wrote one. Keeps the last
      * value once the process is let go, until the next one is attached.
@@ -548,25 +556,25 @@ class SessionHandle internal constructor(
         // A process that ends by itself (it exits, crashes or cannot start) leaves its last state, error notice included.
         scope.launch {
             process.running.join()
-            release(session)
+            synchronized(lock) {
+                if (releaseLocked(session) && !closed) mutableSelfEnds.value += 1
+            }
             session.close()
         }
     }
 
-    private fun release(ended: ClaudeSession, settle: Boolean = false) {
-        synchronized(lock) { releaseLocked(ended, settle) }
-    }
-
     /**
      * Lets [ended] go if it is still the attached process: its last state becomes the chat's, [settle]d if asked. A shell escape it
-     * still held is dropped first, with a notice that its output was not sent (a [stop] during the turn it waited for).
+     * still held is dropped first, with a notice that its output was not sent (a [stop] during the turn it waited for). Returns
+     * whether it let [ended] go.
      */
-    private fun releaseLocked(ended: ClaudeSession, settle: Boolean = false) {
-        if (attachment?.session !== ended) return
+    private fun releaseLocked(ended: ClaudeSession, settle: Boolean = false): Boolean {
+        if (attachment?.session !== ended) return false
         detachLocked()
         ended.letGoShellFrames()
         val last = ended.state.value
         publishLocked(if (settle) last.settled() else last, attached = false)
+        return true
     }
 
     /**

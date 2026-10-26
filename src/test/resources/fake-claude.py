@@ -26,6 +26,8 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
                           under this name, served like it. Synthetic: a test-only knob for two sign-in waits at once
   TANDEM_FAKE_QUEUED_DELAY_MS  in a `queue-` fixture (rule (m)): after a `queued` lifecycle line that bound a host frame, sleep
                           this long (unset or 0: no sleep), so that a test sees the message wait before its `started` comes
+  TANDEM_FAKE_EXIT_AT_END  after the last replayed line, sleep this many ms, then exit 0 (unset: read stdin until the host
+                          closes it, as below), so that a test sees a process end by itself
 
 Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
 with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
@@ -118,6 +120,7 @@ SECRET_NAME_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH")
 UNKNOWN_SUBTYPE = "Unknown subtype"
 read_user_uuids = []  # rule (g): the uuids of the user frames read since the last result written
 queued_delay_ms = int(os.environ.get("TANDEM_FAKE_QUEUED_DELAY_MS") or 0)
+exit_at_end = os.environ.get("TANDEM_FAKE_EXIT_AT_END")
 COMMAND_PLACEHOLDER = re.compile(r"<command_uuid-\d+>")
 unbound_frames = []  # rule (m): the uuids of the host's user frames read and not yet bound, oldest first
 bound = {}  # rule (m): placeholder -> the host frame's uuid
@@ -485,4 +488,7 @@ for message in replay:
         wait_for(lambda m: m.get("type") == "control_response"
                  and m.get("response", {}).get("request_id") == message.get("request_id"))
 
+if exit_at_end:
+    time.sleep(int(exit_at_end) / 1000)
+    sys.exit(0)
 wait_for(lambda m: False)
