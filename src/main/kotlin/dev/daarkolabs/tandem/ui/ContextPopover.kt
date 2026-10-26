@@ -84,8 +84,8 @@ internal fun contextPopoverWidth(column: Dp?): Dp =
 private val POPOVER_MAX_WIDTH = 360.dp
 private val POPOVER_MIN_WIDTH = 280.dp
 
-/** A passive item's content lines up with a selectable item's, which Jewel insets by its item padding (measured at 13 dp in 0.37). */
-private val PASSIVE_INSET: Modifier = Modifier.padding(horizontal = 13.dp)
+/** A passive menu item's content lines up with a selectable item's, which Jewel insets by its item padding (measured at 13 dp in 0.37). */
+internal val PASSIVE_INSET: Modifier = Modifier.padding(horizontal = 13.dp)
 
 /** What a disclosure reads to assistive technology. */
 private fun disclosure(expanded: Boolean): String = if (expanded) "Expanded" else "Collapsed"

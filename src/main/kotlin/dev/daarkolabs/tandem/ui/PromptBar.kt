@@ -16,10 +16,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.clearText
@@ -52,7 +56,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
@@ -65,9 +71,16 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.intellij.ide.PasteProvider
@@ -79,6 +92,8 @@ import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.Attachments
 import dev.daarkolabs.tandem.chat.PaletteItem
 import dev.daarkolabs.tandem.chat.PaletteOutcome
+import dev.daarkolabs.tandem.chat.PluginCommand
+import dev.daarkolabs.tandem.chat.PluginEntry
 import dev.daarkolabs.tandem.chat.ScrollEvent
 import dev.daarkolabs.tandem.chat.SlashIntercept
 import dev.daarkolabs.tandem.chat.SlashPalette
@@ -91,9 +106,11 @@ import dev.daarkolabs.tandem.chat.pick
 import dev.daarkolabs.tandem.chat.shellCommand
 import dev.daarkolabs.tandem.chat.slashIntercept
 import dev.daarkolabs.tandem.chat.stopTarget
+import dev.daarkolabs.tandem.chat.withCommand
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
+import kotlinx.collections.immutable.ImmutableList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -106,14 +123,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
+import org.jetbrains.jewel.foundation.LocalComponent
 import org.jetbrains.jewel.foundation.actionSystem.provideData
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Icon
 import org.jetbrains.jewel.ui.component.IconButton
 import org.jetbrains.jewel.ui.component.InlineWarningBanner
+import org.jetbrains.jewel.ui.component.MenuScope
 import org.jetbrains.jewel.ui.component.PopupMenu
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextArea
+import org.jetbrains.jewel.ui.component.separator
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
 import java.awt.datatransfer.DataFlavor
 import java.nio.file.Path
@@ -308,6 +328,9 @@ internal fun PromptBar(
             palette = { palette.value },
             interceptable = { intercepts(ui.draft.text.toString(), composer.models) },
             onPalettePick = { item -> pickFrom(paletteOf(true), item, false) },
+            plugins = composer.plugins,
+            pluginsKnown = composer.pluginsKnown,
+            columnWidth = columnWidthOf,
             onAdd = { ComposerImages.chooseImagesLater(project, onChosen = attachFiles) },
             onDrop = attachFiles,
             onAction = { action ->
@@ -386,6 +409,9 @@ private fun PromptBox(
     palette: () -> SlashPalette?,
     interceptable: () -> Boolean,
     onPalettePick: (PaletteItem) -> Unit,
+    plugins: ImmutableList<PluginEntry>,
+    pluginsKnown: Boolean,
+    columnWidth: () -> Dp?,
     onAdd: () -> Unit,
     onDrop: (List<Path>) -> Unit,
     onAction: (ComposerAction) -> Unit,
@@ -461,12 +487,28 @@ private fun PromptBox(
             Modifier.fillMaxWidth().heightIn(max = 184.dp).padding(start = 8.dp, end = 12.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
+            val density = LocalDensity.current
             AddButton(
                 Modifier.padding(end = 5.dp, bottom = 10.dp),
-                onAdd,
-                onSlashCommands = {
-                    ui.openPalette()
-                    refocus++
+                plugins,
+                pluginsKnown,
+                width = plusMenuWidth(columnWidth() ?: UNMEASURED_COLUMN),
+                // The room above the box, as the palette measures it (MCP spec 14); none before the box is placed.
+                maxHeight = with(density) { (boxTop - 8.dp.roundToPx()).takeIf { it > 0 }?.toDp() },
+                actions = remember(ui, onAdd) {
+                    PlusMenuActions(
+                        onAddFiles = onAdd,
+                        onSlashCommands = {
+                            ui.openPalette()
+                            refocus++
+                        },
+                        // Until the Connectors page (D15): the MCP panel, opened as a user action.
+                        onConnectors = { menu -> menu.openMcpFromMenu(ui) },
+                        onCommand = { command ->
+                            ui.draft.setTextAndPlaceCursorAtEnd(withCommand(ui.draft.text.toString(), command.command))
+                            refocus++
+                        },
+                    )
                 },
             )
             // The text area, and over it `Type to filter` after a lone `/` while the palette is open (MCP spec 14): its own
@@ -599,65 +641,269 @@ private fun composerKeyEvent(
 }
 
 /**
- * The `+` at the start of the composer box (polish spec 2.3, 2.7): a 24 dp icon button in the secondary tier, described as `Add`,
- * whose menu opens above it, left-aligned, with two items, `Add files or photos`, which calls [onAdd] once the menu has closed, and
- * `Slash commands` (MCP spec 3.4), which calls [onSlashCommands]. A click on the `+` while the menu is open closes it, as a footer
- * control's does.
+ * The `+` at the start of the composer box (polish spec 2.3, 2.7; desktop-parity spec 3.3, 3.5, 17.1, 17.3): a 24 dp icon button in
+ * the secondary tier, described as `Add`, whose paged menu ([PlusMenu]) opens above it, left-aligned, on a click, Enter or Space. A
+ * click on the `+` while the menu is open closes it, as a footer control's does. The menu's keys beyond Jewel's own (← back one page)
+ * come from AWT's key dispatch ([PagedMenuKeys], [plusMenuTurn]). A close by a key (Esc, or Enter on a row that does not hand the
+ * focus on) gives the focus back to the `+`; `Slash commands`, a plugin's command and `Connectors` hand it to the text area or the
+ * MCP panel instead. The menu is [width] wide at most and at least ([plusMenuWidth]) and at most [maxHeight] high.
  *
  * [modifier] (the button's padding in the row) goes on an outer box; the menu is placed in the inner, unpadded one, so that
  * [AboveAnchor] measures from the button's own edges, as `FooterControl` places its menu.
  */
 @Composable
-private fun AddButton(modifier: Modifier, onAdd: () -> Unit, onSlashCommands: () -> Unit) {
-    var open by remember { mutableStateOf(false) }
+private fun AddButton(
+    modifier: Modifier,
+    plugins: ImmutableList<PluginEntry>,
+    pluginsKnown: Boolean,
+    width: Pair<Dp, Dp>,
+    maxHeight: Dp?,
+    actions: PlusMenuActions,
+) {
+    val state = remember { PagedMenuState() }
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
+    val addFocus = remember { FocusRequester() }
+    var refocus by remember { mutableIntStateOf(0) }
+    LaunchedEffect(refocus) { if (refocus > 0) addFocus.requestFocus() }
+    // Set by a row that hands the focus on (the text area, the MCP panel), so its close does not bring it back to the `+`.
+    val handsFocus = remember { mutableStateOf(false) }
+    PagedMenuKeys(state, LocalComponent.current, ::plusMenuTurn)
+    val handing = remember(actions) {
+        PlusMenuActions(
+            onAddFiles = actions.onAddFiles,
+            onSlashCommands = {
+                handsFocus.value = true
+                actions.onSlashCommands()
+            },
+            onConnectors = {
+                handsFocus.value = true
+                actions.onConnectors(state)
+            },
+            onCommand = { command ->
+                handsFocus.value = true
+                actions.onCommand(command)
+            },
+        )
+    }
     Box(modifier) {
         Box {
             IconButton(
-                onClick = { open = !open },
-                modifier = Modifier.size(24.dp).hoverable(source).semantics { contentDescription = "Add" },
+                onClick = { if (state.open) state.close() else state.openAt(PLUS_MAIN) },
+                modifier = Modifier.size(24.dp)
+                    .focusRequester(addFocus)
+                    .onPreviewKeyEvent { event ->
+                        when {
+                            !state.open && event.type == KeyEventType.KeyDown &&
+                                (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.Spacebar) -> {
+                                handsFocus.value = false
+                                state.openAt(PLUS_MAIN)
+                                true
+                            }
+                            state.open && event.type == KeyEventType.KeyDown && event.key == Key.Escape -> {
+                                state.close()
+                                refocus++
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+                    .hoverable(source)
+                    .semantics { contentDescription = "Add" },
                 interactionSource = source,
             ) {
                 Icon(AllIconsKeys.General.Add, contentDescription = null, tint = chatPalette().secondary)
             }
-            if (open) {
-                PopupMenu(
+            if (state.open) {
+                PlusMenu(
+                    state,
+                    plugins,
+                    pluginsKnown,
+                    width,
+                    maxHeight,
+                    gap,
                     onDismissRequest = { mode ->
-                        // A click on the `+` itself closes the menu through the button (its click toggles it).
-                        if (mode == InputMode.Touch && hovered) {
-                            false
-                        } else {
-                            open = false
-                            true
+                        // A page turn holds the menu open through the close request after its click; a click on the `+` itself
+                        // closes the menu through the button (its click toggles it).
+                        val closed = state.dismiss(mode, hovered)
+                        if (closed) {
+                            if (mode == InputMode.Keyboard && !handsFocus.value) refocus++
+                            handsFocus.value = false
                         }
+                        closed
                     },
-                    popupPositionProvider = remember(gap) { AboveAnchor(alignEnd = false, gapPx = gap) },
-                ) {
-                    selectableItem(
-                        selected = false,
-                        iconKey = AllIconsKeys.Actions.Attach,
-                        onClick = {
-                            open = false
-                            onAdd()
-                        },
-                    ) {
-                        Text("Add files or photos")
-                    }
-                    selectableItem(
-                        selected = false,
-                        onClick = {
-                            open = false
-                            onSlashCommands()
-                        },
-                    ) {
-                        Text("Slash commands")
+                    actions = handing,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * What the `+` menu's rows do: [onAddFiles] the image chooser (after the menu closed), [onSlashCommands] `/` and the palette,
+ * [onConnectors] the MCP panel (until the Connectors page, D15, through [openMcpFromMenu]), and [onCommand] a plugin's command into
+ * the draft.
+ */
+internal class PlusMenuActions(
+    val onAddFiles: () -> Unit,
+    val onSlashCommands: () -> Unit,
+    val onConnectors: (PagedMenuState) -> Unit,
+    val onCommand: (PluginCommand) -> Unit,
+)
+
+/**
+ * The `+` menu (desktop-parity spec 3.3, 17.1, 17.3), [gapPx] above its anchor and left-aligned, on [state]'s page, every page
+ * between [width]'s bounds and at most [maxHeight] high (Jewel's menu scrolls its own column under the cap, passed as the menu's
+ * modifier, which `MenuContent` applies before its `width(IntrinsicSize.Max)` and around its `verticalScroll` column; a focused row is
+ * brought into view as the keys move the selection). Page [PLUS_MAIN]: `Add files or photos`, `Slash commands`, `Connectors ›` and
+ * `Plugins ›`, each with its icon. Page [PLUS_PLUGINS]: `‹ Plugins`, one row per plugin of [plugins] (or the line that says why there
+ * is none, [pluginsKnown]), the `/plugin` hint. Page [PLUS_FIRST_PLUGIN] + i: `‹ <label>`, then its skills and its commands under their
+ * headings; a pick closes the menu and calls [PlusMenuActions.onCommand]. Names and descriptions are config text: plain [Text].
+ */
+@Composable
+internal fun PlusMenu(
+    state: PagedMenuState,
+    plugins: ImmutableList<PluginEntry>,
+    pluginsKnown: Boolean,
+    width: Pair<Dp, Dp>,
+    maxHeight: Dp?,
+    gapPx: Int,
+    onDismissRequest: (InputMode) -> Boolean,
+    actions: PlusMenuActions,
+) {
+    val palette = chatPalette()
+    val small = smallTextStyle()
+    val page = state.page
+    val plugin = if (page >= PLUS_FIRST_PLUGIN) plugins.getOrNull(page - PLUS_FIRST_PLUGIN) else null
+    PopupMenu(
+        onDismissRequest = onDismissRequest,
+        popupPositionProvider = remember(gapPx) { AboveAnchor(alignEnd = false, gapPx = gapPx) },
+        modifier = Modifier.widthIn(min = width.first, max = width.second)
+            .then(if (maxHeight != null) Modifier.heightIn(max = maxHeight) else Modifier)
+            .testTag("plus-menu"),
+    ) {
+        when {
+            plugin != null -> pluginPage(state, plugin, palette, small, actions)
+            // A plugin's page whose plugin left the list (a new init) shows the Plugins page.
+            page == PLUS_PLUGINS || page >= PLUS_FIRST_PLUGIN -> pluginsPage(state, plugins, pluginsKnown, palette, small)
+            else -> mainPage(state, palette, actions)
+        }
+    }
+}
+
+/** The `+` menu's first page (spec 3.3, 17.1): four rows in the desktop's order, each with its icon. */
+private fun MenuScope.mainPage(state: PagedMenuState, palette: ChatPalette, actions: PlusMenuActions) {
+    selectableItem(selected = false, iconKey = AllIconsKeys.Actions.Attach, onClick = {
+        state.close()
+        actions.onAddFiles()
+    }) { MenuLabel("Add files or photos") }
+    selectableItem(selected = false, iconKey = AllIconsKeys.Nodes.Console, onClick = {
+        state.close()
+        actions.onSlashCommands()
+    }) { MenuLabel("Slash commands") }
+    selectableItem(selected = false, iconKey = AllIconsKeys.Webreferences.Server, onClick = { actions.onConnectors(state) }) {
+        MenuLabel("Connectors") { Text("›", color = palette.dim) }
+    }
+    selectableItem(selected = false, iconKey = AllIconsKeys.Nodes.Plugin, onClick = { state.show(PLUS_PLUGINS) }) {
+        MenuLabel("Plugins") { Text("›", color = palette.dim) }
+    }
+}
+
+/**
+ * The Plugins page (spec 3.3, 17.3): `‹ Plugins`, one row per plugin, `<label>` with `v<version>` and `›`, or `No commands or skills`
+ * for one with neither (that row opens nothing), then the `/plugin` hint.
+ */
+private fun MenuScope.pluginsPage(state: PagedMenuState, plugins: ImmutableList<PluginEntry>, known: Boolean, palette: ChatPalette, small: TextStyle) {
+    backItem("Plugins", palette) { state.show(PLUS_MAIN) }
+    separator()
+    when {
+        !known -> passiveItem { DimLine("Plugins show after the first prompt.", palette, small) }
+        plugins.isEmpty() -> passiveItem { DimLine("No plugins in this session.", palette, small) }
+        else -> plugins.forEachIndexed { index, plugin ->
+            val opens = plugin.skills.isNotEmpty() || plugin.commands.isNotEmpty()
+            // A plugin with neither opens nothing: its click turns to the page the menu is on, holding it open.
+            selectableItem(selected = false, onClick = { state.show(if (opens) PLUS_FIRST_PLUGIN + index else PLUS_PLUGINS) }) {
+                WithTooltip(plugin.source?.let { "${plugin.name} · $it" } ?: plugin.name) {
+                    MenuLabel(plugin.label, Modifier.semantics { contentDescription = "${plugin.label} plugin" }) {
+                        plugin.version?.let { Text("v$it", color = palette.dim, maxLines = 1) }
+                        if (opens) {
+                            if (plugin.version != null) Spacer(Modifier.width(6.dp))
+                            Text("›", color = palette.dim)
+                        } else {
+                            if (plugin.version != null) Spacer(Modifier.width(6.dp))
+                            Text("No commands or skills", style = small, color = palette.dim, maxLines = 1)
+                        }
                     }
                 }
             }
         }
     }
+    separator()
+    passiveItem { DimLine("Add or manage plugins with /plugin in a terminal.", palette, small) }
+}
+
+/** One plugin's page (spec 3.3, 17.3): `‹ <label>`, then `Skills` and its rows, then `Commands` and its rows, each only when not empty. */
+private fun MenuScope.pluginPage(state: PagedMenuState, plugin: PluginEntry, palette: ChatPalette, small: TextStyle, actions: PlusMenuActions) {
+    backItem(plugin.label, palette) { state.show(PLUS_PLUGINS) }
+    separator()
+    for ((title, rows) in listOf("Skills" to plugin.skills, "Commands" to plugin.commands)) {
+        if (rows.isEmpty()) continue
+        passiveItem {
+            Text(title, style = small, color = palette.dim, modifier = PASSIVE_INSET.semantics { heading() })
+        }
+        for (command in rows) {
+            selectableItem(selected = false, onClick = {
+                state.close()
+                actions.onCommand(command)
+            }) { CommandRow(command, palette, small) }
+        }
+    }
+}
+
+/** A plugin's skill or command (spec 3.3, 3.7): its name, under it its description in the footer size and the dim tier, two lines at most. */
+@Composable
+private fun CommandRow(command: PluginCommand, palette: ChatPalette, small: TextStyle) {
+    val row = @Composable {
+        Column(Modifier.fillMaxWidth().semantics { contentDescription = command.command }) {
+            Text(command.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (command.description.isNotBlank()) {
+                Text(command.description, style = small, color = palette.dim, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+    if (command.tooltip.isNotBlank()) WithTooltip(command.tooltip) { row() } else row()
+}
+
+/** A page's first row, `‹ <title>`, which turns the menu back with [back]. */
+private fun MenuScope.backItem(title: String, palette: ChatPalette, back: () -> Unit) {
+    selectableItem(selected = false, onClick = back) {
+        Text(
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = palette.dim)) { append("‹") }
+                append(" ")
+                append(title)
+            },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** A row's label, one line, ellipsised in the room [end] leaves at the row's end (spec 3.3, Size). */
+@Composable
+private fun MenuLabel(label: String, modifier: Modifier = Modifier, end: @Composable RowScope.() -> Unit = {}) {
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(12.dp))
+        end()
+    }
+}
+
+/** A passive dim line of a menu page. */
+@Composable
+private fun DimLine(text: String, palette: ChatPalette, small: TextStyle) {
+    Text(text, style = small, color = palette.dim, modifier = PASSIVE_INSET)
 }
 
 /**
@@ -756,6 +1002,9 @@ private suspend fun attach(ui: ChatUiState, name: String, bytes: ByteArray?) {
  */
 private fun committedText(ui: ChatUiState): String =
     committedDraft(ui.draft.text.toString(), ui.draft.composition?.let { it.min until it.max })
+
+/** The chat column's width before the prompt bar measured it: the `+` menu takes its widest bounds. */
+private val UNMEASURED_COLUMN: Dp = 376.dp
 
 /** The popover's share of the chat pane's height (desktop-parity spec 3.1). */
 private const val POPOVER_HEIGHT_SHARE: Float = 0.6f

@@ -83,7 +83,6 @@ import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.copyWithSize
 import org.jetbrains.jewel.ui.component.separator
 import java.awt.Component
-import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
 import java.awt.event.KeyEvent as AwtKeyEvent
 import java.beans.PropertyChangeListener
@@ -647,18 +646,13 @@ private fun FooterControl(
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
     val focused by source.collectIsFocusedAsState()
-    var open by remember { mutableStateOf(false) }
-    var page by remember { mutableStateOf(FIRST_PAGE) }
-    // Jewel asks to close the menu after every item's click; a page turn holds it open through that one request.
-    val turning = remember { mutableStateOf(false) }
+    // The open menu, its page and the hold-open flag of a page turn from a click (PagedMenuState, shared with the `+` menu).
+    val state = remember { PagedMenuState() }
     val currentPages by rememberUpdatedState(pages)
-    val currentDigitPick by rememberUpdatedState(digitPick)
     fun openMenu() {
-        page = FIRST_PAGE
-        turning.value = false
-        open = opens
+        if (opens) state.openAt(FIRST_PAGE) else state.close()
     }
-    val close = { open = false }
+    val close = { state.close() }
     // `/model`, `/permissions` or `/mode` asked for this control's menu (MCP spec 4.4): it opens as a click would, and the request
     // is cleared, so the same command opens it again next time. A menu with nothing to list does not open; the control takes the
     // focus instead (MCP spec 11 item 6), rather than the command vanishing without a trace.
@@ -670,37 +664,8 @@ private fun FooterControl(
             request.value = null
         }
     }
-    val show = { next: Int ->
-        page = next
-        turning.value = true
-    }
-    val panel = LocalComponent.current
-    if (open) {
-        DisposableEffect(panel) {
-            // Every event of a digit key in the panel is taken while the menu is open, so that its typed character lands nowhere; the
-            // press picks. An arrow's press is taken when it turns a page. A key in any other component is left alone.
-            val dispatcher = KeyEventDispatcher { event ->
-                if (!takesKey(event.component, panel)) return@KeyEventDispatcher false
-                val digit = digitOf(event)
-                if (digit != null) {
-                    if (event.id == AwtKeyEvent.KEY_PRESSED && page == FIRST_PAGE && currentDigitPick(digit)) open = false
-                    return@KeyEventDispatcher true
-                }
-                val next = pageTurn(event, page)?.takeIf { it in 0 until currentPages } ?: return@KeyEventDispatcher false
-                page = next
-                true
-            }
-            val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
-            // focusLeftListener, never a check of the new value alone: macOS sends a focus change on hover that moves nothing (focusLeft).
-            val focusListener = focusLeftListener(panel, focusManager::getFocusOwner) { open = false }
-            focusManager.addKeyEventDispatcher(dispatcher)
-            focusManager.addPropertyChangeListener("focusOwner", focusListener)
-            onDispose {
-                focusManager.removeKeyEventDispatcher(dispatcher)
-                focusManager.removePropertyChangeListener("focusOwner", focusListener)
-            }
-        }
-    }
+    // The digits and the arrows, from AWT's key dispatch while the menu is open (PagedMenuKeys): → and ← within the control's pages.
+    PagedMenuKeys(state, LocalComponent.current, turn = { event, page -> pageTurn(event, page)?.takeIf { it in 0 until currentPages } }, digitPick = digitPick)
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
     Box(
         Modifier
@@ -711,40 +676,28 @@ private fun FooterControl(
             .focusRequester(focusRequester)
             .onPreviewKeyEvent { event ->
                 when {
-                    !open && event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.Spacebar) -> {
+                    !state.open && event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.Spacebar) -> {
                         openMenu()
                         true
                     }
-                    open && event.type == KeyEventType.KeyDown && event.key == Key.Escape -> {
-                        open = false
+                    state.open && event.type == KeyEventType.KeyDown && event.key == Key.Escape -> {
+                        state.close()
                         true
                     }
                     else -> false
                 }
             }
             .hoverable(source)
-            .clickable(interactionSource = source, indication = null, role = Role.DropdownList) { if (open) open = false else openMenu() },
+            .clickable(interactionSource = source, indication = null, role = Role.DropdownList) { if (state.open) state.close() else openMenu() },
     ) {
-        Box(Modifier.footerPill(filled = hovered || open, focused = focused)) { label() }
-        if (open) {
+        Box(Modifier.footerPill(filled = hovered || state.open, focused = focused)) { label() }
+        if (state.open) {
             PopupMenu(
-                onDismissRequest = { mode ->
-                    when {
-                        // A page turn: the item's click asks to close, the menu stays on its new page.
-                        turning.value -> {
-                            turning.value = false
-                            false
-                        }
-                        // A click on the control itself closes the menu through the control (its click toggles it).
-                        mode == InputMode.Touch && hovered -> false
-                        else -> {
-                            open = false
-                            true
-                        }
-                    }
-                },
+                // A page turn holds the menu open through the close request after its click; a click on the control itself closes
+                // the menu through the control (its click toggles it).
+                onDismissRequest = { mode -> state.dismiss(mode, hovered) },
                 popupPositionProvider = remember(alignEnd, gap) { AboveAnchor(alignEnd, gap) },
-            ) { menu(FooterMenuHandle(page, close, show)) }
+            ) { menu(FooterMenuHandle(state.page, close, state::show)) }
         }
     }
 }

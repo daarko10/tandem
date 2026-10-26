@@ -783,6 +783,112 @@ class ToolWindowIdeTest {
         }
     }
 
+    // spec: the + menu inserts a plugin command
+    @Test
+    fun `the plus menu inserts a plugin command`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // Before any prompt: the fake answers initialize at spawn and sends no init until a turn starts (spec 3.3), so the Plugins
+        // page lists the catalogue's plugin, without a version.
+        val sent = runChat("plus-menu", fixtures = listOf("parity-add-dir"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            plusItem("Plugins").click(Point(10, 10))
+            waitFor("the catalogue's plugin row", 1.minutes) { described("probe-kit plugin").present() }
+            assertFalse(containing("v0.1.0").present(), "before an init the row has no version")
+            described("probe-kit plugin").click(Point(10, 10))
+            waitForText("Skills")
+            waitForText("Commands")
+            // Before an init greet is a skill by its alias, hello a command (spec 17.3), each under its heading in document order.
+            assertTrue(
+                ui.x(
+                    "//div[@class='ComposeNode' and @visible_text='Skills']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:greet']" +
+                        "/following::div[@class='ComposeNode' and @visible_text='Commands']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:hello']",
+                ).present(),
+                "Skills, /probe-kit:greet, Commands, /probe-kit:hello in document order",
+            )
+            // Kept as a test artifact: the plugin's page, its two headings and their rows.
+            takeScreenshot("plus-menu")
+            described("/probe-kit:greet").click(Point(10, 10))
+            waitFor("the command in the draft", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='/probe-kit:greet ']").present() }
+        }
+        assertTrue(sent.none { it.type == "user" }, "a pick sends nothing: ${sent.map { it.type }}")
+    }
+
+    // spec: the + menu works from the keyboard
+    @Test
+    fun `the plus menu works from the keyboard`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("plus-menu-keys", fixtures = listOf("parity-add-dir"), sentLog = log) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            // `+` comes before the text area (spec 3.5): Shift+Tab goes back to it. (D13b turns this into Tab forward.)
+            focusPromptBox()
+            pressUntil("+ focused", { ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) } }) { focusedIconButton("Add").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened page 1", 30.seconds) { plusItem("Plugins").present() }
+            // Page 1: exactly four rows, in the desktop's order (spec 3.3; Add folder joins in D6b).
+            assertEquals(4, ui.xx(MENU_ITEM).list().size, "page 1 has four rows")
+            assertTrue(
+                ui.x(
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                        "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
+                ).present(),
+                "Add files or photos, Slash commands, Connectors, Plugins in document order",
+            )
+            // Kept as a test artifact: page 1's four rows, each with its icon.
+            takeScreenshot("plus-menu-main")
+            // → is not bound in the + menu (deviation 23): still page 1.
+            ui.keyboard { key(KeyEvent.VK_RIGHT) }
+            assertTrue(runCatching { waitFor("→ turned a page", 3.seconds) { plusItem("‹ Plugins").present() } }.isFailure, "→ turns no page")
+            assertTrue(plusItem("Add files or photos").present(), "still page 1")
+            pressUntil("Plugins selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { focusedPlusItem("Plugins").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the Plugins page, the init's row with its version", 30.seconds) {
+                plusItem("‹ Plugins").present() && containing("v0.1.0").present()
+            }
+            pressUntil("the plugin selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { focusedDescribed("probe-kit plugin").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the plugin's page", 30.seconds) { plusItem("‹ probe-kit").present() }
+            ui.keyboard { key(KeyEvent.VK_LEFT) }
+            waitFor("← went back to the Plugins page", 30.seconds) { plusItem("‹ Plugins").present() && !plusItem("‹ probe-kit").present() }
+            pressUntil("the plugin selected again", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { focusedDescribed("probe-kit plugin").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the plugin's page again", 30.seconds) { plusItem("‹ probe-kit").present() }
+            pressUntil("greet selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { focusedDescribed("/probe-kit:greet").present() }
+            ui.keyboard { enter() }
+            waitFor("the menu gone, the command in the draft and the text area focused", 30.seconds) {
+                !plusItem("‹ probe-kit").present() && ui.x("$PROMPT_BOX[@editabletext='/probe-kit:greet ' and @focused='true']").present()
+            }
+            pressUntil("+ focused again", { ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) } }) { focusedIconButton("Add").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened page 1 again", 30.seconds) { plusItem("Plugins").present() }
+            ui.keyboard { escape() }
+            waitFor("Escape closed the menu and the + has the focus", 30.seconds) {
+                ui.xx(MENU_ITEM).list().isEmpty() && focusedIconButton("Add").present()
+            }
+        }
+        assertEquals(1, sent.count { it.type == "user" }, "only the first prompt went out: ${sent.map { it.type }}")
+    }
+
+    // spec: Connectors opens the MCP panel
+    @Test
+    fun `Connectors opens the MCP panel`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        runChat("plus-menu-connectors", fixtures = listOf("mcp-status"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Connectors").present() }
+            plusItem("Connectors").click(Point(10, 10))
+            waitFor("the MCP panel", 1.minutes) { described("MCP servers panel").present() }
+        }
+    }
+
     // spec: /usage shows a card
     @Test
     fun `usage shows a card`() {
@@ -1411,6 +1517,23 @@ class ToolWindowIdeTest {
         waitFor(what, 5.seconds) { done() }
     }
 
+    /** A menu item (a node with a `selected` state, not a sidebar tab) whose text contains [text]. */
+    private fun plusItemPath(text: String): String =
+        "$MENU_ITEM[contains(@visible_text,'$text') or contains(@text,'$text')]"
+
+    private fun Driver.plusItem(text: String): UiComponent = ui.x(plusItemPath(text))
+
+    /** The menu item whose text contains [text], if it is the keyboard's selection. */
+    private fun Driver.focusedPlusItem(text: String): UiComponent = ui.x("${plusItemPath(text)}[@focused='true']")
+
+    /** The node described as [description], if it has the keyboard focus. */
+    private fun Driver.focusedDescribed(description: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @contentdescription='$description' and @focused='true']")
+
+    /** Any node whose text contains [text]. */
+    private fun Driver.containing(text: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and (contains(@visible_text,'$text') or contains(@text,'$text'))]")
+
     private fun Driver.waitForText(text: String) {
         waitFor("'$text' rendered", 2.minutes) { text(text).present() }
     }
@@ -1513,6 +1636,9 @@ class ToolWindowIdeTest {
 
         /** The popover's Messages category row, shown only while the category list is open. */
         const val MESSAGES_ROW = "//div[@class='ComposeNode' and starts-with(@contentdescription, 'Messages,')]"
+
+        /** A menu's item: a node with a `selected` state that is not a sidebar row (a tab). */
+        const val MENU_ITEM = "//div[@class='ComposeNode' and @selected and not(@role='Tab')]"
 
         /** The most key presses a test makes to move the focus or a menu's selection to a control. */
         const val MAX_PRESSES = 40
