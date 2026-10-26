@@ -1142,9 +1142,11 @@ class ToolWindowIdeTest {
     // spec: session tabs follow the sessions (desktop-parity spec 9.8 IDE test 3)
     @Test
     fun `session tabs follow the sessions`() {
-        // The platform's tab keys: $default's Alt+Left, Alt+Right and Alt+Down; the macOS keymap's Cmd+Shift+[ and Cmd+Shift+].
+        // The platform's tab keys: $default's Alt+Left, Alt+Right and Alt+Down; the macOS keymap's Cmd+Shift+[, Cmd+Shift+] and
+        // Ctrl+Shift+Down.
         val previousTab = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_SHIFT, KeyEvent.VK_OPEN_BRACKET) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_LEFT)
         val nextTab = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_SHIFT, KeyEvent.VK_CLOSE_BRACKET) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_RIGHT)
+        val showContent = if (isMac) intArrayOf(KeyEvent.VK_CONTROL, KeyEvent.VK_SHIFT, KeyEvent.VK_DOWN) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_DOWN)
         val sent = runChat("session-tabs", fixtures = listOf("plain-reply", "plain-reply", "plain-reply", "plain-reply")) {
             // New Session from anywhere (as Find Action runs it) shows and activates the hidden tool window, and focuses the composer.
             withContext(OnDispatcher.EDT) { tandemWindow().hide() }
@@ -1205,7 +1207,7 @@ class ToolWindowIdeTest {
             }
 
             // ShowContent lists every tab; its pick selects the tab and the sidebar row.
-            ui.keyboard { hotKey(KeyEvent.VK_ALT, KeyEvent.VK_DOWN) }
+            ui.keyboard { hotKey(*showContent) }
             waitFor("the content list", 30.seconds) { contentList().present() }
             println("ShowContent list: " + contentList().getAllTexts().map { it.text })
             assertTrue(contentList().getAllTexts().map { it.text }.containsAll(listOf("New session", "Tab two")))
@@ -1285,7 +1287,7 @@ class ToolWindowIdeTest {
             val label = tabLabels("New session").single()
             val width = label.component.width
             println("New session tab label width: $width")
-            label.click(Point(width - JB_CLOSE_INSET, 10))
+            label.click(Point(width - TAB_CLOSE_INSET, 10))
             waitFor("the New session tab closed", 30.seconds) { tabLabels("New session").isEmpty() }
 
             // CloseContent on the last tab: the tool window stays, with the placeholder.
@@ -1979,7 +1981,7 @@ class ToolWindowIdeTest {
         const val TWO_TABS_WIDTH = 495
 
         /** Where a tab label's × is, counted from the label's right end. */
-        const val JB_CLOSE_INSET = 12
+        const val TAB_CLOSE_INSET = 12
 
         /** Whether the IDE runs on macOS, where paste is Cmd+V. */
         val isMac: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
