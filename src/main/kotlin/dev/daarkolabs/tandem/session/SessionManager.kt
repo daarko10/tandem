@@ -91,7 +91,8 @@ sealed interface ForkResult {
 
     /**
      * Nothing forked: [NO_TRANSCRIPT], there is no transcript to fork yet; [NOT_IN_HISTORY], the line asked for is no main-thread
-     * reply line of the session's history; [BUSY], a turn started before the original's idle process could stop (spec 13.1).
+     * reply line of the session's history; [BUSY], a turn started before the original's idle process could stop (spec 13.1). [BUSY] is reserved: the
+     * recorded `fork-at-live` and `fork-at-busy` stories fork beside a live original, so no path produces it today.
      */
     enum class Refused : ForkResult { NO_TRANSCRIPT, NOT_IN_HISTORY, BUSY }
 }

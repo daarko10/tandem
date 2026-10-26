@@ -1328,8 +1328,8 @@ runs (`transcripts/queue-later.jsonl:31`, a `user` line for it at `:32`) or `rem
 one `interrupt` withdrew (`transcripts/queue-cancel.jsonl:34`). A folded message has no `user` line: its text is in the
 `queued_command` attachment (`transcripts/queue-fold.jsonl:23`, with `source_uuid` and `delivery_id`). A withdrawn one leaves
 nothing but its `queue-operation` lines. `/context` and `/usage` are written as in the next paragraph; `/context`'s `system`
-line also carries the structured twin under `contextUsage` (`transcripts/parity-context.jsonl:30`), so a resumed session can
-redraw the card; the `get_context_usage` and `get_usage` requests leave no trace on disk.
+line also carries the structured twin under `contextUsage` (`transcripts/parity-context.jsonl:30`). Tandem records it but does
+not decode it: a reloaded `/context` is the notice's Markdown text, and the breakdown is not kept across a reload; the `get_context_usage` and `get_usage` requests leave no trace on disk.
 
 A local command (2.1.306, `transcripts/mcp-slash.jsonl`; on stdout, 6.1) is written as an `isMeta` user line with a
 `<local-command-caveat>` (`:3`, skipped as every `isMeta` line is), the `<command-name>/mcp</command-name>` user line (`:4`,
