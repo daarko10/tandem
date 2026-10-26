@@ -29,6 +29,8 @@ Reads --session-id <id>, --resume <id>, --fork-session and --add-dir <dir> from 
   TANDEM_FAKE_SKIP_ADD_DIR  rule (l): this `--add-dir` directory is left out of every replayed init, as a CLI that did not add it
   TANDEM_FAKE_KEEP_ADD_DIR  rule (l): this directory is listed in every replayed init, after the others and once, with or without
                           `--add-dir`, as a CLI that keeps a folder a resume left out
+  TANDEM_FAKE_EXIT_DELAY_MS  once the host closes stdin, sleep this long before exiting (unset or 0: exit at once), so that a
+                          test can hold a stop (the host waits for the exit) while something else happens
 
 Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
 with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
@@ -132,6 +134,7 @@ named_since_result = [False]  # rule (m): whether a line has named a bound place
 add_dirs = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--add-dir"]  # rule (l)
 skip_add_dir = os.environ.get("TANDEM_FAKE_SKIP_ADD_DIR") or None
 keep_add_dir = os.environ.get("TANDEM_FAKE_KEEP_ADD_DIR") or None
+exit_delay_ms = int(os.environ.get("TANDEM_FAKE_EXIT_DELAY_MS") or 0)
 
 
 def option(name):
@@ -192,6 +195,8 @@ def read_host():
             read_user_uuids.append(frame["uuid"])
             unbound_frames.append(frame["uuid"])
         return frame
+    if exit_delay_ms:
+        time.sleep(exit_delay_ms / 1000)
     return None
 
 

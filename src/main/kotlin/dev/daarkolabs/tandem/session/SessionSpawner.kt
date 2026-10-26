@@ -190,6 +190,7 @@ internal class SessionSpawner(
         val process = from.handOver(session) ?: return // stopped or ended meanwhile
         session.notice(NoticeLevel.WARNING, "Resumed as a new session $id")
         val handle = SessionHandle(id, scope, session.state.value, listing, clock())
+        handle.inheritFolders(from) // the process runs with from's --add-dir folders: the new row lists them and checks its inits
         // Nobody else knows the new handle yet, so it has no process of its own and takes this one.
         if (!handle.adopt(process) { adopted, reported -> firstInit(handle, adopted, reported) }) {
             // Cannot happen while the handle is new; should it, the process must not run on where no row shows it.

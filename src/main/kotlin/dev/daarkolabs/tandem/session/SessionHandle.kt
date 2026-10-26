@@ -539,6 +539,21 @@ class SessionHandle internal constructor(
     }
 
     /**
+     * Takes [from]'s folders, all [FolderState.PENDING], with what its last spawn passed and what was removed: before [adopt] of the
+     * process [from] spawned and handed over, so that this row lists the folders that process runs with and checks its inits.
+     */
+    internal fun inheritFolders(from: SessionHandle) {
+        val (spawned, removed) = synchronized(from.lock) { from.spawnFolders to from.removedFolders.toList() }
+        val copied = from.folders.value.map { AddedFolder(it.path, FolderState.PENDING) }
+        synchronized(lock) {
+            mutableFolders.value = copied
+            spawnFolders = spawned
+            removedFolders.clear()
+            removedFolders.addAll(removed)
+        }
+    }
+
+    /**
      * The folders the next spawn passes, in the order added, remembered as that spawn's. Checked on [Dispatchers.IO]: one that is no
      * longer a directory leaves the list, with a warning in the chat.
      */

@@ -2975,4 +2975,54 @@ class SessionManagerTest {
         delay(300)
         assertEquals(1, spawns().size, "the next send goes to the same process")
     }
+
+    // review: a folder added while the session's spawn is under way still reaches the CLI
+    @Test
+    fun `a folder added while the spawn is under way reaches the CLI`() = test {
+        val extra = outsideFolder()
+        // At most one live session, and a stop that takes a second: the second session's spawn reads its folders, then waits
+        // for room while the first one's process exits.
+        val manager = manager(maxLive = 1, environment = mapOf("TANDEM_FAKE_EXIT_DELAY_MS" to "1000"))
+        val first = manager.idle()
+        val second = manager.create(NewSessionOptions())
+        first.status.await(SessionStatus.STOPPED) // let go to make room: the second spawn has read its folders already
+        manager.addFolder(second.id, extra)
+        assertEquals(1, spawns().size, "the second spawn still waits for room")
+
+        // That spawn goes on without the folder. Its process is stopped at once (it may be gone before it even logs its spawn),
+        // or, should the prompt reach it first, after its turn: either way the folder reaches the CLI.
+        withTimeout(10_000) {
+            manager.send(second.id, "one")
+            second.state.first { it.turnsEnded == 1 && !it.busy }
+            if ("--add-dir" !in spawns().last()) {
+                // The prompt reached the process spawned without the folder: it is stopped after its turn.
+                second.status.await(SessionStatus.STOPPED)
+                manager.send(second.id, "two")
+                second.state.first { it.turnsEnded == 2 && !it.busy }
+            }
+            assertEquals(listOf("--add-dir", extra), spawns().last().takeLast(2))
+            second.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        }
+    }
+
+    // review: a resume that comes back as another session takes its folders to the new row
+    @Test
+    fun `a session taken over keeps the folders its process runs with`() = test {
+        seed(seeded)
+        val extra = outsideFolder()
+        val manager = manager(environment = mapOf("TANDEM_FAKE_SESSION_ID" to other))
+        val resumed = manager.open(seeded, spawn = false)
+        manager.addFolder(seeded, extra)
+        manager.send(seeded, "Reply with the single word: pong")
+
+        val taken = manager.sessions.first { it.size == 2 }.last()
+        assertEquals(other, taken.id)
+        assertEquals(listOf("--add-dir", extra), spawns().single().takeLast(2))
+        taken.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        taken.status.await(SessionStatus.IDLE)
+        delay(300)
+        assertEquals(listOf(AddedFolder(extra, FolderState.ACTIVE)), taken.folders.value)
+        assertEquals(1, spawns().size, "the row that took the process over does not stop it for its folders")
+        assertEquals(listOf(extra), resumed.folders.value.map { it.path }, "the old row keeps its own")
+    }
 }

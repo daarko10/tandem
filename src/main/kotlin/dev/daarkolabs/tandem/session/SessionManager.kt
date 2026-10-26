@@ -496,23 +496,37 @@ class SessionManager internal constructor(
 
     /**
      * Stops [handle]'s process once it is idle, while its spawn passed other folders than it has now, so that the next prompt
-     * spawns with them; one job per session. Each try that finds it busy waits for the next change of its chat. It ends once no
-     * process runs or the spawn no longer differs (a folder added and removed again stops nothing). Tandem's own stop: the next
-     * prompt resumes the session, and nothing asks for attention.
+     * spawns with them; one job per session. Each try that finds it busy waits for the next change of its chat; one that finds it
+     * idle but its spawn lock held (a start or a stop under way) waits for the lock. It ends once no process runs and none is being
+     * started, or the spawn no longer differs (a folder added and removed again stops nothing). A start under way may have read the
+     * folders before the change and attach a process without it, so the job outlives it and looks again. Tandem's own stop: the
+     * next prompt resumes the session, and nothing asks for attention.
      */
     private fun respawnWhenIdle(handle: SessionHandle) {
         synchronized(lock) {
             if (respawns[handle]?.isActive == true) return
             respawns[handle] = handle.scope.launch(CoroutineName("SessionManager.folderRespawn")) {
                 while (true) {
-                    // Decided under the lock that starts a job, so that a change made as this one ends starts the next.
-                    val differs = synchronized(lock) { handle.spawnDiffers().also { if (!it) respawns.remove(handle) } }
-                    if (!differs) return@launch
+                    // Decided under the lock that starts a job, so that a change made as this one ends starts the next. The spawn
+                    // lock is read first: a start that takes it after this read reads the folders after the change.
+                    val (differs, starting) = synchronized(lock) {
+                        val starting = handle.spawnLock.isLocked
+                        val differs = handle.spawnDiffers()
+                        if (!differs && !starting) respawns.remove(handle)
+                        differs to starting
+                    }
+                    if (!differs) {
+                        if (!starting) return@launch
+                        handle.spawnLock.withLock {}
+                        continue
+                    }
                     val before = handle.state.value
-                    if (handle.stopIfIdle()) {
-                        LOG.info("session ${handle.id}: stopped to spawn again with its added folders")
-                    } else {
-                        handle.state.first { it != before }
+                    when {
+                        handle.stopIfIdle() -> LOG.info("session ${handle.id}: stopped to spawn again with its added folders")
+                        // Idle, but a start or a stop holds the spawn lock (stopIfIdle never waits for it): no change of the chat
+                        // may follow, so wait for the lock instead and look again.
+                        handle.spawnLock.isLocked || handle.isIdle() -> handle.spawnLock.withLock {}
+                        else -> handle.state.first { it != before }
                     }
                 }
             }
