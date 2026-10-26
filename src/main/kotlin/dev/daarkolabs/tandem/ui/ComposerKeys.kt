@@ -55,6 +55,12 @@ internal enum class ComposerAction {
 
     /** An Enter that cannot send now: the composer notice says why ([dev.daarkolabs.tandem.chat.busyRefusal], spec 12.2). */
     BusyRefused,
+
+    /**
+     * Moves the focus to the next control: an unmodified Tab with the palette closed (desktop-parity spec 14.2), so the composer is
+     * no keyboard trap now that Shift+Tab cycles the permission mode. Shift+Tab is never handled here: the IDE's action takes it.
+     */
+    FocusNext,
 }
 
 /**
@@ -78,7 +84,9 @@ internal enum class ComposerAction {
  * While the MCP panel is open ([panelOpen]), Esc closes it before every other rule, so it never stops a turn (MCP spec 3.2, 4.4).
  * Then, while the slash palette is open ([paletteOpen]), Up and Down move its selection, Enter picks, Tab inserts and Esc closes it,
  * each without Shift, Alt or Ctrl/Cmd but Esc, before the card's and the turn's rules: Enter never sends through the palette, and
- * Shift+Enter stays a newline (MCP spec 3.4, 4.4). Call sites pass the parameters from [draftEmpty] on by name.
+ * Shift+Enter stays a newline (MCP spec 3.4, 4.4). With the palette closed, an unmodified Tab moves the focus forward
+ * ([ComposerAction.FocusNext], desktop-parity spec 14.2), busy or not and with a card open; Tab with any modifier, Shift+Tab included
+ * (the permission mode cycle's action), is left alone. Call sites pass the parameters from [draftEmpty] on by name.
  */
 internal fun composerKey(
     key: Key,
@@ -118,6 +126,7 @@ internal fun composerKey(
         }
         Key.V -> if (ctrlOrMeta && !shift && !alt && clipboardHasImage()) ComposerAction.PasteImage else null
         Key.Backspace -> if (draftEmpty && hasAttachments) ComposerAction.RemoveLastImage else null
+        Key.Tab -> if (shift || alt || ctrlOrMeta) null else ComposerAction.FocusNext
         else -> null
     }
 }

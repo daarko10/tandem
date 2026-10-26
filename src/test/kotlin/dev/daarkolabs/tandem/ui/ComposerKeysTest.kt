@@ -263,15 +263,30 @@ class ComposerKeysTest {
         assertEquals(ComposerAction.PalettePick, composer(enter, busy = true, paletteOpen = true))
         assertEquals(ComposerAction.PaletteInsert, composer(tab, busy = true, paletteOpen = true))
         assertEquals(ComposerAction.PaletteClose, composer(escape, busy = true, paletteOpen = true))
-        // Key releases, Shift+Tab (focus traversal) and the arrows with a modifier stay the text area's.
+        // Key releases, Shift+Tab (the mode cycle's action) and the arrows with a modifier stay the text area's.
         assertNull(composer(enter, type = KeyEventType.KeyUp, paletteOpen = true))
         assertNull(composer(tab, shift = true, paletteOpen = true))
         assertNull(composer(up, shift = true, paletteOpen = true))
         assertNull(composer(down, ctrlOrMeta = true, paletteOpen = true))
-        // Closed, the arrows and Tab are the text area's.
+        // Closed, the arrows are the text area's; Tab moves the focus on (desktop-parity spec 14.2).
         assertNull(composer(up))
         assertNull(composer(down))
-        assertNull(composer(tab))
+        assertEquals(ComposerAction.FocusNext, composer(tab))
+    }
+
+    // spec: Tab moves the focus forward and Shift+Tab is left to the IDE
+    @Test
+    fun `Tab moves the focus forward and Shift+Tab is left to the IDE`() {
+        assertEquals(ComposerAction.FocusNext, composer(tab))
+        assertEquals(ComposerAction.FocusNext, composer(tab, busy = true))
+        assertEquals(ComposerAction.FocusNext, composer(tab, cardOpen = true))
+        assertEquals(ComposerAction.FocusNext, composer(tab, busy = true, cardOpen = true, midTurn = true))
+        assertEquals(ComposerAction.PaletteInsert, composer(tab, paletteOpen = true))
+        assertNull(composer(tab, type = KeyEventType.KeyUp))
+        assertNull(composer(tab, shift = true))
+        assertNull(composer(tab, shift = true, busy = true, cardOpen = true))
+        assertNull(composer(tab, ctrlOrMeta = true))
+        assertNull(composer(tab, alt = true))
     }
 
     // spec: Enter sends when the palette is closed

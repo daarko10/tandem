@@ -3,7 +3,9 @@ package dev.daarkolabs.tandem.ui
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshots.SnapshotStateList
@@ -118,6 +120,12 @@ internal class ChatUiState {
 
     /** A footer menu that `/model`, `/permissions` or `/mode` asked to open; the control opens it and clears the request. */
     val menuRequest: MutableState<FooterMenu?> = mutableStateOf(null)
+
+    /**
+     * How many of the mode, model and effort menus, the ring's popover and the `+` menu are open: each counts itself in while open
+     * ([CountOpenMenu]), and the composer offers the permission mode cycle only while none is (desktop-parity spec 7, 14.1).
+     */
+    val openMenus: MutableIntState = mutableIntStateOf(0)
 
     /** The `+` menu's `Slash commands` (MCP spec 3.4): `/` in an empty draft, so the palette opens as typing it does; else nothing. */
     fun openPalette() {

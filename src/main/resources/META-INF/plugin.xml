@@ -38,4 +38,13 @@
         <!-- Development-only: does nothing unless -Dtandem.spike or -Dtandem.autoPrompt is set. -->
         <postStartupActivity implementation="dev.daarkolabs.tandem.ui.dev.DevStartupActivity"/>
     </extensions>
+
+    <actions>
+        <action id="Tandem.CyclePermissionMode"
+                class="dev.daarkolabs.tandem.ui.CyclePermissionModeAction"
+                text="Cycle Permission Mode"
+                description="Switch the Tandem chat to the next permission mode: Manual, Accept edits, Plan, then Auto when the model supports it">
+            <keyboard-shortcut keymap="$default" first-keystroke="shift TAB"/>
+        </action>
+    </actions>
 </idea-plugin>

@@ -734,10 +734,10 @@ class ToolWindowIdeTest {
             enterPrompt("hi")
             waitForTurnEnd()
             waitFor("the context ring", 1.minutes) { ui.x(RING).present() }
-            // Until the composer gives Tab to the focus (D13b), Tab types a tab character in the text area: Shift+Tab goes back round
-            // the panel's focus order to the footer's last control, the ring.
+            // Tab moves the focus forward from the text area (spec 14.2): Send or Stop, the mode, the model, then the ring. Shift+Tab
+            // in the text area cycles the permission mode, so it is not pressed there.
             focusPromptBox()
-            pressUntil("the ring focused", { ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) } }) { ui.x("$RING[@focused='true']").present() }
+            pressUntil("the ring focused", { ui.keyboard { key(KeyEvent.VK_TAB) } }, max = 10) { ui.x("$RING[@focused='true']").present() }
             ui.keyboard { enter() }
             waitFor("Enter opened the popover", 30.seconds) { described("Context window breakdown").present() }
             pressUntil("the header row selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { ui.x("$HEADER_ROW[@focused='true']").present() }
@@ -826,9 +826,10 @@ class ToolWindowIdeTest {
             newSession()
             enterPrompt("hi")
             waitForTurnEnd()
-            // `+` comes before the text area (spec 3.5): Shift+Tab goes back to it. (D13b turns this into Tab forward.)
+            // `+` comes before the text area (spec 3.5, 14.2): Tab goes forward from the text area round the focus cycle to it.
+            // Shift+Tab in the text area cycles the permission mode, so it is not pressed there.
             focusPromptBox()
-            pressUntil("+ focused", { ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) } }) { focusedIconButton("Add").present() }
+            pressUntil("+ focused", { ui.keyboard { key(KeyEvent.VK_TAB) } }, max = 40) { focusedIconButton("Add").present() }
             ui.keyboard { enter() }
             waitFor("Enter opened page 1", 30.seconds) { plusItem("Plugins").present() }
             // Page 1: exactly four rows, in the desktop's order (spec 3.3; Add folder joins in D6b).
@@ -864,7 +865,7 @@ class ToolWindowIdeTest {
             waitFor("the menu gone, the command in the draft and the text area focused", 30.seconds) {
                 !plusItem("‹ probe-kit").present() && ui.x("$PROMPT_BOX[@editabletext='/probe-kit:greet ' and @focused='true']").present()
             }
-            pressUntil("+ focused again", { ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) } }) { focusedIconButton("Add").present() }
+            pressUntil("+ focused again", { ui.keyboard { key(KeyEvent.VK_TAB) } }, max = 40) { focusedIconButton("Add").present() }
             ui.keyboard { enter() }
             waitFor("Enter opened page 1 again", 30.seconds) { plusItem("Plugins").present() }
             ui.keyboard { escape() }
@@ -873,6 +874,46 @@ class ToolWindowIdeTest {
             }
         }
         assertEquals(1, sent.count { it.type == "user" }, "only the first prompt went out: ${sent.map { it.type }}")
+    }
+
+    // spec: Shift+Tab in the composer cycles the mode and Tab leaves it
+    @Test
+    fun `Shift+Tab in the composer cycles the mode and Tab leaves it`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        fun modes(): List<String> = log.readLines().mapNotNull { line -> runCatching { Json.parseToJsonElement(line).jsonObject }.getOrNull() }
+            .filter { it.type == "control_request" }
+            .map { it["request"]!!.jsonObject }
+            .filter { it["subtype"]?.jsonPrimitive?.content == "set_permission_mode" }
+            .map { it["mode"]!!.jsonPrimitive.content }
+        runChat("mode-cycle", fixtures = listOf("permission-mode"), sentLog = log) {
+            // Before any prompt (deviation 17): the fake answers no set_permission_mode until its first turn, so both presses read
+            // Tandem's own picks, Manual → Accept edits → Plan.
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            focusPromptBox()
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("the first press picked Accept edits", 30.seconds) { picker("Permission mode", "Accept edits").present() }
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("the second press picked Plan", 30.seconds) { picker("Permission mode", "Plan").present() }
+            assertTrue(ui.x("$PROMPT_BOX[@focused='true']").present(), "Shift+Tab kept the focus in the prompt box")
+            // Kept as a test artifact: the footer's mode reads Plan.
+            takeScreenshot("mode-cycle")
+            waitFor("both picks reached the CLI", 30.seconds) { modes() == listOf("acceptEdits", "plan") }
+            // Tab leaves the text area (spec 14.2): a typed key no longer lands in it.
+            ui.keyboard { key(KeyEvent.VK_TAB) }
+            waitFor("Tab moved the focus out of the prompt box", 30.seconds) { !ui.x("$PROMPT_BOX[@focused='true']").present() }
+            ui.keyboard { typeText("x", 20) }
+            assertTrue(ui.x("$PROMPT_BOX[@editabletext='']").present(), "Tab typed no tab, and the typed x went elsewhere")
+            // In a chat, once the CLI has reported its mode: one press steps on from whatever it reported.
+            enterPrompt("hi")
+            waitForTurnEnd()
+            val labels = listOf("Manual", "Accept edits", "Plan", "Auto")
+            val before = labels.single { picker("Permission mode", it).present() }
+            focusPromptBox()
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("the press changed the mode from $before", 30.seconds) { !picker("Permission mode", before).present() }
+            waitFor("a third set_permission_mode reached the CLI", 30.seconds) { modes().size == 3 }
+        }
     }
 
     // spec: Connectors opens the MCP panel
@@ -1606,9 +1647,9 @@ class ToolWindowIdeTest {
     /** A `user` frame's `message.content`, a string in the shell escape frames. */
     private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
 
-    /** Presses [press] until [done], at most [MAX_PRESSES] times, and fails as [what] when it never is. */
-    private fun Driver.pressUntil(what: String, press: Driver.() -> Unit, done: Driver.() -> Boolean) {
-        repeat(MAX_PRESSES) { presses ->
+    /** Presses [press] until [done], at most [max] times, and fails as [what] when it never is. */
+    private fun Driver.pressUntil(what: String, press: Driver.() -> Unit, max: Int = MAX_PRESSES, done: Driver.() -> Boolean) {
+        repeat(max) { presses ->
             if (done()) return
             press()
             if (runCatching { waitFor(what, 2.seconds) { done() } }.isSuccess) {

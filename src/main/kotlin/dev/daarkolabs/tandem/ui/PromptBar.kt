@@ -40,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -61,6 +62,7 @@ import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.awtTransferable
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -90,6 +92,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -113,6 +116,7 @@ import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
 import dev.daarkolabs.tandem.chat.Attachments
+import dev.daarkolabs.tandem.chat.Modes
 import dev.daarkolabs.tandem.chat.PaletteItem
 import dev.daarkolabs.tandem.chat.PaletteOutcome
 import dev.daarkolabs.tandem.chat.PluginCommand
@@ -224,6 +228,16 @@ internal fun PromptBar(
     val composer by presenter.composer.collectAsState()
     val sending by sender.sending.collectAsState()
     val scope = rememberCoroutineScope()
+    // Shift+Tab's mode cycle (desktop-parity spec 14.1): the session's next mode, read and picked under its lock from its own state
+    // with the known models the footer reads too, then remembered for new sessions as a menu pick is.
+    val currentHandle by rememberUpdatedState(handle)
+    val modes = remember(manager, workspace) {
+        ComposerModes {
+            manager.cyclePermissionMode(currentHandle.id) { state -> Modes.cycleFrom(state, manager.models.value) }
+                ?.also { workspace.state.lastPermissionMode = it.wire }
+        }
+    }
+    val focusManager = LocalFocusManager.current
     val scrollToEnd: () -> Unit = {
         scope.launch {
             val last = ui.listState.layoutInfo.totalItemsCount - 1
@@ -397,6 +411,7 @@ internal fun PromptBar(
             palette = { palette.value },
             interceptable = { intercepts(ui.draft.text.toString(), composer.models) },
             onPalettePick = { item -> pickFrom(paletteOf(true), item, false) },
+            modes = modes,
             plugins = composer.plugins,
             pluginsKnown = composer.pluginsKnown,
             columnWidth = columnWidthOf,
@@ -420,6 +435,7 @@ internal fun PromptBar(
                     ComposerAction.PalettePick -> pickFrom(palette.value, null, false)
                     ComposerAction.PaletteInsert -> pickFrom(palette.value, null, true)
                     ComposerAction.PaletteClose -> palette.value?.let { ui.paletteDismissedFor.value = it.query }
+                    ComposerAction.FocusNext -> focusManager.moveFocus(FocusDirection.Next)
                 }
             },
         )
@@ -435,6 +451,7 @@ internal fun PromptBar(
                     workspace.state.lastPermissionMode = mode.wire
                 },
                 menuRequest = ui.menuRequest,
+                openMenus = ui.openMenus,
             )
             // Mode at the start, model and effort at the end; on a narrow pane the model label ellipsises, nothing wraps.
             Box(Modifier.weight(1f).padding(start = 8.dp), contentAlignment = Alignment.CenterEnd) {
@@ -449,9 +466,10 @@ internal fun PromptBar(
                         workspace.state.lastEffort = level
                     },
                     menuRequest = ui.menuRequest,
+                    openMenus = ui.openMenus,
                 )
             }
-            CompositionLocalProvider(LocalChatColumnWidth provides columnWidthOf) { ContextRing(presenter.context, popover) }
+            CompositionLocalProvider(LocalChatColumnWidth provides columnWidthOf) { ContextRing(presenter.context, popover, ui.openMenus) }
         }
     }
 }
@@ -487,6 +505,7 @@ private fun PromptBox(
     palette: () -> SlashPalette?,
     interceptable: () -> Boolean,
     onPalettePick: (PaletteItem) -> Unit,
+    modes: ComposerModes,
     plugins: ImmutableList<PluginEntry>,
     pluginsKnown: Boolean,
     columnWidth: () -> Dp?,
@@ -572,6 +591,7 @@ private fun PromptBox(
             val density = LocalDensity.current
             AddButton(
                 Modifier.padding(end = 5.dp, bottom = 10.dp),
+                ui.openMenus,
                 plugins,
                 pluginsKnown,
                 width = plusMenuWidth(columnWidth() ?: UNMEASURED_COLUMN),
@@ -610,6 +630,8 @@ private fun PromptBox(
                             lazy(PlatformDataKeys.PASTE_PROVIDER.name) {
                                 imagePaste.takeIf { ComposerImages.clipboardHasImage { CopyPasteManager.getInstance().contents?.transferDataFlavors.orEmpty().toList() } }
                             }
+                            // Shift+Tab's mode cycle, only while no footer menu, popover or `+` menu is open (desktop-parity spec 7, 14.1).
+                            composerModesFor(modes, ui.openMenus.intValue)?.let { set(COMPOSER_MODES.name, it) }
                         }
                         .onPreviewKeyEvent { event ->
                             composerKeyEvent(event, busy || sending, cardOpen, midTurn, shellOnly, ui, palette() != null, interceptable, onAction)
@@ -749,6 +771,7 @@ private fun composerKeyEvent(
 @Composable
 private fun AddButton(
     modifier: Modifier,
+    openMenus: MutableIntState,
     plugins: ImmutableList<PluginEntry>,
     pluginsKnown: Boolean,
     width: Pair<Dp, Dp>,
@@ -756,6 +779,8 @@ private fun AddButton(
     actions: PlusMenuActions,
 ) {
     val state = remember { PagedMenuState() }
+    // The open menu disables the mode cycle's action (desktop-parity spec 7, 14.1).
+    CountOpenMenu(state.open, openMenus)
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }

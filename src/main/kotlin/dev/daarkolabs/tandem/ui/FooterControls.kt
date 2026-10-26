@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -75,6 +76,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.StateFlow
+import com.intellij.openapi.keymap.KeymapUtil
 import org.jetbrains.jewel.foundation.LocalComponent
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.MenuScope
@@ -283,13 +285,13 @@ private fun Modifier.pillSurface(filled: Boolean, focused: Boolean): Modifier {
  * `message_start` recomposes the ring and nothing else of the footer.
  */
 @Composable
-internal fun ContextRing(context: StateFlow<ContextUsage?>, popover: ContextPopoverHost? = null) {
+internal fun ContextRing(context: StateFlow<ContextUsage?>, popover: ContextPopoverHost? = null, openMenus: MutableIntState? = null) {
     val usage by context.collectAsState()
     val current = usage ?: return
     val fraction = ContextFormat.fraction(current) ?: return
     val value = ContextFormat.value(current) ?: return
     Spacer(Modifier.width(5.dp))
-    WithTooltip("Context $value") { RingControl(fraction, value, popover) }
+    WithTooltip("Context $value") { RingControl(fraction, value, popover, openMenus) }
 }
 
 /**
@@ -298,12 +300,14 @@ internal fun ContextRing(context: StateFlow<ContextUsage?>, popover: ContextPopo
  * focus really leaves the tool window's panel ([focusLeftListener]), which it gets no click from.
  */
 @Composable
-private fun RingControl(fraction: Float, value: String, popover: ContextPopoverHost?) {
+private fun RingControl(fraction: Float, value: String, popover: ContextPopoverHost?, openMenus: MutableIntState?) {
     val palette = chatPalette()
     val source = remember { MutableInteractionSource() }
     val hovered by source.collectIsHoveredAsState()
     val focused by source.collectIsFocusedAsState()
     var open by remember { mutableStateOf(false) }
+    // The open popover disables the mode cycle's action (desktop-parity spec 14.1).
+    CountOpenMenu(open, openMenus)
     // Esc closed the popover: the focus goes back to the ring (desktop-parity spec 3.5).
     var refocus by remember { mutableStateOf(false) }
     val ringFocus = remember { FocusRequester() }
@@ -414,7 +418,12 @@ private fun RingControl(fraction: Float, value: String, popover: ContextPopoverH
  * (`/permissions`, `/mode`: MCP spec 3.4).
  */
 @Composable
-internal fun ModeControl(composer: ComposerModel, onPick: (PermissionMode) -> Unit, menuRequest: MutableState<FooterMenu?>? = null) {
+internal fun ModeControl(
+    composer: ComposerModel,
+    onPick: (PermissionMode) -> Unit,
+    menuRequest: MutableState<FooterMenu?>? = null,
+    openMenus: MutableIntState? = null,
+) {
     val palette = chatPalette()
     val items = remember(composer.permissionMode, composer.autoSupported) { modeMenu(composer) }
     val currentOnPick by rememberUpdatedState(onPick)
@@ -428,8 +437,19 @@ internal fun ModeControl(composer: ComposerModel, onPick: (PermissionMode) -> Un
         label = { Text(modeLabel(composer), style = smallTextStyle(), color = palette.secondary, maxLines = 1) },
         request = menuRequest,
         requestedAs = FooterMenu.MODE,
+        openMenus = openMenus,
     ) { menu ->
-        passiveItem { Text("Mode", style = smallTextStyle(), color = palette.dim) }
+        passiveItem {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Mode", style = smallTextStyle(), color = palette.dim)
+                // The cycle's shortcut, as the keymap has it now (desktop-parity spec 14.1); none without a shortcut.
+                modeMenuHint(KeymapUtil.getFirstKeyboardShortcutText(CYCLE_MODE_ACTION_ID))?.let { hint ->
+                    Spacer(Modifier.weight(1f))
+                    Spacer(Modifier.width(24.dp))
+                    Text(hint, style = smallTextStyle(), color = palette.dim, maxLines = 1)
+                }
+            }
+        }
         for (item in items) {
             selectableItem(selected = false, onClick = { menu.close(); pick(item) }) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -463,6 +483,7 @@ internal fun ModelControl(
     onPickModel: (String?) -> Unit,
     onPickEffort: (String) -> Unit,
     menuRequest: MutableState<FooterMenu?>? = null,
+    openMenus: MutableIntState? = null,
 ) {
     val palette = chatPalette()
     val models = remember(composer) { modelMenu(composer) }
@@ -484,6 +505,7 @@ internal fun ModelControl(
         label = { Text(text, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         request = menuRequest,
         requestedAs = FooterMenu.MODEL,
+        openMenus = openMenus,
     ) { menu ->
         if (efforts != null && menu.page == EFFORT_PAGE) {
             effortPage(efforts, palette, menu) { level -> currentOnPickEffort(level) }
@@ -586,6 +608,22 @@ private fun DefaultChip(palette: ChatPalette) {
     }
 }
 
+/** The mode menu header's hint (desktop-parity spec 14.1): the cycle's [shortcut] and ` to cycle`; null when it has none. */
+internal fun modeMenuHint(shortcut: String): String? = shortcut.takeIf { it.isNotBlank() }?.let { "$it to cycle" }
+
+/**
+ * Counts a menu, a popover or the `+` menu in [openMenus] ([ChatUiState.openMenus]) while it is [open], so the composer offers no
+ * permission mode cycle meanwhile (desktop-parity spec 7, 14.1); nothing without [openMenus].
+ */
+@Composable
+internal fun CountOpenMenu(open: Boolean, openMenus: MutableIntState?) {
+    if (openMenus == null) return
+    DisposableEffect(open, openMenus) {
+        if (open) openMenus.intValue++
+        onDispose { if (open) openMenus.intValue-- }
+    }
+}
+
 /** The page a footer menu opens on, the one its digits pick from. */
 private const val FIRST_PAGE: Int = 0
 
@@ -641,6 +679,7 @@ private fun FooterControl(
     label: @Composable () -> Unit,
     request: MutableState<FooterMenu?>? = null,
     requestedAs: FooterMenu? = null,
+    openMenus: MutableIntState? = null,
     menu: MenuScope.(FooterMenuHandle) -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
@@ -648,6 +687,8 @@ private fun FooterControl(
     val focused by source.collectIsFocusedAsState()
     // The open menu, its page and the hold-open flag of a page turn from a click (PagedMenuState, shared with the `+` menu).
     val state = remember { PagedMenuState() }
+    // The open menu disables the mode cycle's action (desktop-parity spec 14.1).
+    CountOpenMenu(state.open, openMenus)
     val currentPages by rememberUpdatedState(pages)
     fun openMenu() {
         if (opens) state.openAt(FIRST_PAGE) else state.close()

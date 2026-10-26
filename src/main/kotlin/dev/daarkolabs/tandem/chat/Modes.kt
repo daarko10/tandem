@@ -1,6 +1,8 @@
 package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.OFFERED_MODES
 import java.util.Locale
 
@@ -17,6 +19,38 @@ object Modes {
         val offered = OFFERED_MODES.filter { it != PermissionMode.AUTO || autoSupported || current == PermissionMode.AUTO }
         return if (current == null || current in offered) offered else offered + current
     }
+
+    /** The modes Shift+Tab cycles through, in the CLI's order, not the menu's (desktop-parity spec 14.1). */
+    val CYCLE: List<PermissionMode> = listOf(PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN, PermissionMode.AUTO)
+
+    /**
+     * The mode after [current] in [CYCLE] (desktop-parity spec 14.1): walks it from [current]'s slot, wrapping, and returns the first
+     * allowed mode, [PermissionMode.AUTO] only with [autoSupported] and never one of [rejected]; else Manual. A mode of the cycle starts
+     * at its own slot, bypassPermissions at Plan's, dontAsk at Auto's and no mode yet at Manual's (the CLI's own start), so the first
+     * press asks for Accept edits. Never bypassPermissions or dontAsk.
+     */
+    fun next(current: PermissionMode?, autoSupported: Boolean, rejected: Set<PermissionMode> = emptySet()): PermissionMode {
+        val start = CYCLE.indexOf(
+            when (current) {
+                null -> PermissionMode.DEFAULT
+                PermissionMode.BYPASS_PERMISSIONS -> PermissionMode.PLAN
+                PermissionMode.DONT_ASK -> PermissionMode.AUTO
+                else -> current
+            },
+        )
+        for (step in 1..CYCLE.size) {
+            val mode = CYCLE[(start + step) % CYCLE.size]
+            if ((mode != PermissionMode.AUTO || autoSupported) && mode !in rejected) return mode
+        }
+        return PermissionMode.DEFAULT
+    }
+
+    /**
+     * The mode Shift+Tab picks next for [state]: [next] from its mode, with `auto` when the shown model supports it, read as the footer
+     * reads it ([composerModel] with the [known] models), so the cycle offers the modes the mode menu lists, and its refused modes.
+     */
+    fun cycleFrom(state: ChatState, known: List<ModelOption> = emptyList()): PermissionMode =
+        next(state.permissionMode, autoSupported(state, known), state.rejectedPermissionModes)
 
     /** What the footer and the popup call [mode]. */
     fun label(mode: PermissionMode): String = when (mode) {

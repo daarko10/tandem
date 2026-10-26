@@ -75,7 +75,7 @@ fun composerModel(
     known: List<ModelOption> = emptyList(),
     knownCommands: CommandCatalogue = CommandCatalogue(),
 ): ComposerModel {
-    val models = state.models.ifEmpty { known }.ifEmpty { CLI_MODEL_ALIASES }
+    val models = composerModels(state, known)
     val shown = shownModel(models, state.requestedModel, state.activeModel, state.modelSwitchPending)
     val commands = state.commands.ifEmpty { knownCommands.commands }
     val initSeen = state.mcp.initCount > 0
@@ -110,6 +110,14 @@ fun composerModel(
         returned = state.returnedSends.toImmutableList(),
     )
 }
+
+/** The models the composer offers for [state]: its own, else the [known] ones, else the CLI's own aliases ([composerModel]). */
+private fun composerModels(state: ChatState, known: List<ModelOption>): List<ModelOption> =
+    state.models.ifEmpty { known }.ifEmpty { CLI_MODEL_ALIASES }
+
+/** Whether the model the footer shows for [state] supports the `auto` mode, as [ComposerModel.autoSupported] reads it. */
+internal fun autoSupported(state: ChatState, known: List<ModelOption> = emptyList()): Boolean =
+    shownModel(composerModels(state, known), state.requestedModel, state.activeModel, state.modelSwitchPending)?.supportsAutoMode == true
 
 /** A draft that is a shell escape: `!` as its first non-blank character, then a command that is not blank. */
 private val SHELL_ESCAPE = Regex("^\\s*!\\s*\\S")

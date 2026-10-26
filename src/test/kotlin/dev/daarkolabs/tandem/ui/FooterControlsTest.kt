@@ -402,4 +402,13 @@ class FooterControlsTest {
             frame.dispose()
         }
     }
+
+    // spec: the mode menu hint names the shortcut
+    @Test
+    fun `the mode menu hint names the shortcut`() {
+        assertEquals("⇧⇥ to cycle", modeMenuHint("⇧⇥"))
+        assertEquals("Shift+Tab to cycle", modeMenuHint("Shift+Tab"))
+        assertNull(modeMenuHint(""))
+        assertNull(modeMenuHint(" "))
+    }
 }
