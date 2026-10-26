@@ -70,6 +70,10 @@ import dev.daarkolabs.tandem.chat.modelDisplayName
 import dev.daarkolabs.tandem.chat.shownModel
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.ContextUsage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.StateFlow
 import org.jetbrains.jewel.foundation.LocalComponent
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -321,11 +325,19 @@ private fun RingControl(fraction: Float, value: String, popover: ContextPopoverH
         }
     }
     val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
-    // One controller per open popover: its requests stop when the popover closes (desktop-parity spec 3.1, 4.4).
+    // One controller per open popover, in a scope of its own under the ring's: everything open() starts in it, the controller's
+    // requests and the flows it maps off the EDT alike, ends when the popover closes (desktop-parity spec 3.1, 4.4), so no collector
+    // of the session's state outlives the popover.
     val scope = rememberCoroutineScope()
     val controller = if (open && popover != null) {
-        val opened = remember(popover.open) { popover.open(scope) }
-        DisposableEffect(opened) { onDispose { opened.close() } }
+        val popoverScope = remember(popover.open) { CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job])) }
+        val opened = remember(popover.open) { popover.open(popoverScope) }
+        DisposableEffect(opened) {
+            onDispose {
+                opened.close()
+                popoverScope.cancel()
+            }
+        }
         opened
     } else {
         null

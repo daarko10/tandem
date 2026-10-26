@@ -728,7 +728,8 @@ class ToolWindowIdeTest {
     // spec: the context popover works from the keyboard
     @Test
     fun `the context popover works from the keyboard`() {
-        runChat("context-popover-keys", fixtures = listOf("parity-context")) {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        runChat("context-popover-keys", fixtures = listOf("parity-context"), sentLog = log) {
             newSession()
             enterPrompt("hi")
             waitForTurnEnd()
@@ -756,6 +757,11 @@ class ToolWindowIdeTest {
             ui.keyboard { enter() }
             waitFor("Enter on See detailed breakdown closed the popover and the ring has the focus", 30.seconds) {
                 !described("Context window breakdown").present() && ui.x("$RING[@focused='true']").present()
+            }
+            // The button's action runs after the close: the prompt reaches the CLI (spec 3.1).
+            waitFor("/context reached the CLI", 30.seconds) {
+                log.readLines().mapNotNull { line -> runCatching { Json.parseToJsonElement(line).jsonObject }.getOrNull() }
+                    .any { it.type == "user" && "/context" in it["message"]?.jsonObject?.get("content").toString() }
             }
         }
     }

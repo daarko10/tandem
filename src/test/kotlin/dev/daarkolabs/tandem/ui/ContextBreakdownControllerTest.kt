@@ -4,6 +4,7 @@ import dev.daarkolabs.tandem.chat.fixtureLine
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ControlPayloads
+import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ContextControls
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ControlResult
@@ -14,6 +15,7 @@ import dev.daarkolabs.tandem.session.SessionStatus
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
@@ -72,6 +74,34 @@ class ContextBreakdownControllerTest {
     fun `one request on start`() = test {
         controller()
         settleAt(1)
+    }
+
+    @Test
+    fun `close ends every collector of the controller's flows`() = test {
+        val controller = controller()
+        settleAt(1)
+        waitUntil { turnsEnded.subscriptionCount.value == 1 && status.subscriptionCount.value == 1 && breakdown.subscriptionCount.value == 1 }
+        controller.close()
+        waitUntil {
+            turnsEnded.subscriptionCount.value == 0 && status.subscriptionCount.value == 0 &&
+                breakdown.subscriptionCount.value == 0 && ring.subscriptionCount.value == 0
+        }
+    }
+
+    @Test
+    fun `a closed popover leaves no collector on the session's state`() = test {
+        // The prompt bar's wiring, in the popover's own scope as RingControl gives it: close() and the scope's cancel end everything
+        // open() started, the two mapped collectors of the session's state included (round 2's leak: two more per open).
+        val state = MutableStateFlow(ChatState())
+        val popoverScope = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
+        val controller = contextPopoverController(popoverScope, SESSION, state, ring, status, controls, home = null, projectRoot = null)
+        settleAt(1)
+        waitUntil { state.subscriptionCount.value == 2 }
+        controller.close()
+        waitUntil { turnsEnded.subscriptionCount.value == 0 && status.subscriptionCount.value == 0 }
+        assertEquals(2, state.subscriptionCount.value, "close() alone leaves the mapped flows' collectors: the scope's cancel ends them")
+        popoverScope.cancel()
+        waitUntil { state.subscriptionCount.value == 0 && ring.subscriptionCount.value == 0 }
     }
 
     @Test

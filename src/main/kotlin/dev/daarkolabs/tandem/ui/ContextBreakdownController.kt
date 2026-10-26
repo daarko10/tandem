@@ -4,6 +4,7 @@ import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.chat.ContextPopoverModel
 import dev.daarkolabs.tandem.chat.contextPopover
 import dev.daarkolabs.tandem.protocol.ContextBreakdown
+import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ContextControls
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.McpError
@@ -23,8 +24,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
 
 // The context popover's controller (docs/superpowers/specs/2026-10-22-desktop-parity-design.md 3.1, 4.4): its requests and their
 // outcome, off the EDT. The popover only draws what it exposes.
@@ -154,4 +158,33 @@ internal class ContextBreakdownController(
         triggers.close()
         job.cancel()
     }
+}
+
+/**
+ * The controller of one open popover over session [id]'s flows (spec 3.1), as `PromptBar` builds it: [state]'s breakdown and turn
+ * count are mapped on `Dispatchers.Default` into [scope], the popover's own, which `RingControl` cancels when the popover closes, so
+ * the two collectors of [state] end with the controller instead of living on in the ring's scope, two more per open.
+ */
+internal fun contextPopoverController(
+    scope: CoroutineScope,
+    id: SessionId,
+    state: StateFlow<ChatState>,
+    ring: StateFlow<ContextUsage?>,
+    status: StateFlow<SessionStatus>,
+    controls: ContextControls,
+    home: String?,
+    projectRoot: String?,
+): ContextBreakdownController {
+    val background = scope + Dispatchers.Default
+    return ContextBreakdownController(
+        id,
+        state.map { it.contextBreakdown }.distinctUntilChanged().stateIn(background, SharingStarted.Eagerly, state.value.contextBreakdown),
+        ring,
+        state.map { it.turnsEnded }.distinctUntilChanged().stateIn(background, SharingStarted.Eagerly, state.value.turnsEnded),
+        status,
+        controls,
+        scope,
+        home,
+        projectRoot,
+    )
 }

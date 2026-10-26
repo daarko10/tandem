@@ -26,6 +26,7 @@ import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
@@ -95,9 +96,11 @@ import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
@@ -243,23 +246,25 @@ internal fun PromptBar(
         }
     }
     // The ring's popover (desktop-parity spec 3.1): one controller per open popover, over the session's flows mapped off the EDT, in
-    // the popover's own scope. Its two buttons send `/context` and `/usage` as prompts; the draft and the attachments stay as they are.
+    // the popover's own scope (the ring cancels it on close). Its two buttons send `/context` and `/usage` as prompts; the draft and
+    // the attachments stay as they are.
     val openPopover = remember(handle, manager, presenter, project) {
         { popoverScope: CoroutineScope ->
-            val background = popoverScope + Dispatchers.Default
-            ContextBreakdownController(
-                handle.id,
-                handle.state.map { it.contextBreakdown }.distinctUntilChanged()
-                    .stateIn(background, SharingStarted.Eagerly, handle.state.value.contextBreakdown),
-                presenter.context,
-                handle.state.map { it.turnsEnded }.distinctUntilChanged().stateIn(background, SharingStarted.Eagerly, handle.state.value.turnsEnded),
-                handle.status,
-                manager,
-                popoverScope,
-                System.getProperty("user.home"),
-                project.basePath,
+            contextPopoverController(
+                popoverScope, handle.id, handle.state, presenter.context, handle.status, manager, System.getProperty("user.home"), project.basePath,
             )
         }
+    }
+    // The popover's buttons are disabled while a turn runs and while a captured prompt is still being encoded, as the composer is
+    // busy then: a `/context` sent meanwhile would reach the CLI ahead of that prompt. Combined off the EDT, in a scope of its own
+    // under the bar's, ended when the bar leaves or shows another session, so one collector of each flow runs at a time.
+    val busyScope = remember(presenter, sender) {
+        CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]) + Dispatchers.Default)
+    }
+    DisposableEffect(busyScope) { onDispose { busyScope.cancel() } }
+    val popoverBusy = remember(busyScope) {
+        combine(presenter.busy, sender.sending) { turn, send -> turn || send }
+            .stateIn(busyScope, SharingStarted.Eagerly, presenter.busy.value || sender.sending.value)
     }
     val sendFromPopover = { text: String ->
         manager.send(handle.id, text)
@@ -271,7 +276,7 @@ internal fun PromptBar(
     val popover = remember(openPopover, paneHeight) {
         ContextPopoverHost(
             open = openPopover,
-            busy = presenter.busy,
+            busy = popoverBusy,
             maxHeight = { paneHeight()?.let { it * POPOVER_HEIGHT_SHARE } ?: POPOVER_FALLBACK_HEIGHT },
             onDetailed = { sendFromPopover("/context") },
             onUsage = { sendFromPopover("/usage") },
