@@ -76,41 +76,43 @@ internal fun ChatPane(
     // Read only by the open popover (through the provider), so a resize recomposes neither the pane nor the prompt bar.
     val paneHeight = remember { mutableStateOf<Dp?>(null) }
     val paneHeightOf: () -> Dp? = remember(paneHeight) { { paneHeight.value } }
-    Column(
+    ChatPaneColumn(
         Modifier.fillMaxSize().onSizeChanged { paneHeight.value = with(density) { it.height.toDp() } }
             // `Tandem.AddFilesOrPhotos` (spec 17.4): wherever the focus is in this pane, while none of the composer's menus is open.
             .provideData { composerAttachFor(ui.attach, ui.openMenus.intValue)?.let { set(COMPOSER_ATTACH.name, it) } },
-    ) {
-        Box(
-            Modifier.weight(1f).fillMaxWidth()
-                // The dim of spec 4.12: a scrim drawn over the list, never an offscreen layer of it.
-                .thenIf(pending.card is PermissionCard) {
-                    drawWithContent {
-                        drawContent()
-                        drawRect(panel.copy(alpha = 0.5f))
-                    }
-                },
-        ) {
-            val emptyText = if (composer.ended) {
-                "This session's claude process has stopped. Send a prompt to start it again."
-            } else {
-                "Ask Claude anything about this project."
+        chat = { chatModifier ->
+            Box(
+                chatModifier
+                    // The dim of spec 4.12: a scrim drawn over the list, never an offscreen layer of it.
+                    .thenIf(pending.card is PermissionCard) {
+                        drawWithContent {
+                            drawContent()
+                            drawRect(panel.copy(alpha = 0.5f))
+                        }
+                    },
+            ) {
+                val emptyText = if (composer.ended) {
+                    "This session's claude process has stopped. Send a prompt to start it again."
+                } else {
+                    "Ask Claude anything about this project."
+                }
+                ChatPanel(
+                    project,
+                    presenter,
+                    ui,
+                    emptyText,
+                    handle.lastFrameAtMillis,
+                    onFocusComposer,
+                    reply,
+                    onOpenMcp,
+                    onStop,
+                    onUsageRetry,
+                    onWithdraw = { uuid, restore -> manager.withdraw(handle.id, uuid, restore) },
+                )
             }
-            ChatPanel(
-                project,
-                presenter,
-                ui,
-                emptyText,
-                handle.lastFrameAtMillis,
-                onFocusComposer,
-                reply,
-                onOpenMcp,
-                onStop,
-                onUsageRetry,
-                onWithdraw = { uuid, restore -> manager.withdraw(handle.id, uuid, restore) },
-            )
-        }
-        pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) }
+        },
+        card = { pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) } },
+    ) {
         PromptBar(
             project,
             handle,
@@ -129,5 +131,27 @@ internal fun ChatPane(
             },
             paneHeight = paneHeightOf,
         )
+    }
+}
+
+/**
+ * The chat pane's column: [chat] over the docked [card] over [promptBar]. The prompt bar keeps its height, the card is given at most
+ * what is left (it scrolls its own content in that, spec 4.12), and the chat, laid out with the modifier it is passed, takes the rest:
+ * none when the card needs it all, so a short tool window never pushes the card's buttons or the prompt bar off the pane.
+ */
+@Composable
+internal fun ChatPaneColumn(
+    modifier: Modifier,
+    chat: @Composable (Modifier) -> Unit,
+    card: @Composable () -> Unit,
+    promptBar: @Composable () -> Unit,
+) {
+    // A column measures its unweighted children first: the prompt bar here, then the card in the inner column.
+    Column(modifier) {
+        Column(Modifier.weight(1f).fillMaxWidth()) {
+            chat(Modifier.weight(1f).fillMaxWidth())
+            card()
+        }
+        promptBar()
     }
 }
