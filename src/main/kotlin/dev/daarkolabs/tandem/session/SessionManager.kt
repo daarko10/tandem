@@ -26,6 +26,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -44,10 +45,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.nio.file.Path
 import java.time.Instant
@@ -141,8 +142,11 @@ class SessionManager internal constructor(
     private val deleteFiles: (transcript: Path) -> Unit = TranscriptFiles::delete,
     /** How often a sign-in wait asks for the servers ([startMcpAuth]). */
     private val mcpAuthEvery: Duration = 2.seconds,
-    /** How long a sign-in wait lasts at most. */
-    private val mcpAuthTimeout: Duration = 3.minutes,
+    /**
+     * Returns when a sign-in wait has lasted as long as it may: 3 minutes. Tests pass one that returns once the poll has asked enough
+     * times, so that what they check does not depend on how fast the machine runs.
+     */
+    private val mcpAuthTimeout: suspend () -> Unit = { delay(3.minutes) },
     /** Whether Claude replies to a shell escape's output (the setting), read when each command ends. */
     private val respondToShell: () -> Boolean = { true },
     /** Runs the shell escapes ([runShell]). */
@@ -898,10 +902,23 @@ class SessionManager internal constructor(
         }
     }
 
-    /** Waits for [server] to connect: its status every [mcpAuthEvery], for up to [mcpAuthTimeout]. */
+    /**
+     * Waits for [server] to connect: its status every [mcpAuthEvery], until [mcpAuthTimeout] returns. The scope returns once both
+     * the poll and the time limit have ended, so [lastError] is read after the poll's last write.
+     */
     private suspend fun pollSignIn(id: SessionId, server: String): McpAuthOutcome {
         var lastError: McpError? = null
-        val settled = withTimeoutOrNull(mcpAuthTimeout) { pollUntilSettled(id, server) { lastError = it } }
+        val settled = coroutineScope {
+            val poll = async { pollUntilSettled(id, server) { lastError = it } }
+            val limit = async { mcpAuthTimeout() }
+            select<McpAuthOutcome?> {
+                poll.onAwait { it }
+                limit.onAwait { null }
+            }.also {
+                poll.cancel()
+                limit.cancel()
+            }
+        }
         return settled ?: lastError?.let { McpAuthOutcome.Failed(it) } ?: McpAuthOutcome.StillNeedsAuth
     }
 

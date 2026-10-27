@@ -132,7 +132,7 @@ class SessionManagerTest {
         /** More variables for every process, such as `TANDEM_FAKE_SESSION_ID`. */
         environment: Map<String, String> = emptyMap(),
         mcpAuthEvery: Duration = 2.seconds,
-        mcpAuthTimeout: Duration = 3.minutes,
+        mcpAuthTimeout: suspend () -> Unit = { delay(3.minutes) },
         respondToShell: () -> Boolean = { true },
         shell: ShellRunner = ShellRunner(environment = { mapOf("SHELL" to "/bin/sh") }),
     ): SessionManager {
@@ -1912,7 +1912,7 @@ class SessionManagerTest {
     private suspend fun mcpSession(
         environment: Map<String, String> = emptyMap(),
         every: Duration = 2.seconds,
-        timeout: Duration = 3.minutes,
+        timeout: suspend () -> Unit = { delay(3.minutes) },
     ): Pair<SessionManager, SessionHandle> {
         val manager = manager(fixtures = "mcp-status", environment = environment, mcpAuthEvery = every, mcpAuthTimeout = timeout)
         val handle = manager.started()
@@ -2123,14 +2123,16 @@ class SessionManagerTest {
 
     @Test
     fun `the sign-in poll times out while the server still needs auth`() = test {
-        val (manager, handle) = mcpSession(every = 50.milliseconds, timeout = 300.milliseconds)
+        // The time limit runs out once the fake has read the poll's second mcp_status, however fast the machine is.
+        val asked = { framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } }
+        val (manager, handle) = mcpSession(every = 50.milliseconds, timeout = { awaitLog { asked() >= 2 } })
 
         manager.startMcpAuth(handle.id, "authy") {}.ok()
 
         assertEquals(McpAuthOutcome.StillNeedsAuth, handle.awaitOutcome("authy"))
         val chat = handle.state.first { it.notices(NoticeLevel.WARNING).isNotEmpty() }
         assertEquals(listOf("Sign-in to authy did not complete within 3 minutes."), chat.notices(NoticeLevel.WARNING))
-        assertTrue(framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } >= 2, "the poll asked more than once")
+        assertTrue(asked() >= 2, "the poll asked more than once")
     }
 
     // MCP spec 3.3 steps 3 and 5: a pending server (reconnecting after the callback, unrecorded) keeps the wait going, and every
