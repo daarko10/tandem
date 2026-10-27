@@ -1426,8 +1426,14 @@ class SessionManagerTest {
         val manager = manager(maxLive = 2)
         // Created in one go: their starts make room one after the other, so the third stops an idle one first.
         val created = List(3) { manager.create(NewSessionOptions()) }
-        awaitLog { spawns().size == 3 }
+        // Each start holds its session's spawn lock from create on: once none is held, the three starts, and the stop that made
+        // room, are over. Not a count of spawns: the stopped session may have been stopped before its process launched.
+        awaitLog { created.none { it.spawnLock.isLocked } }
         awaitLog { created.count { it.status.value == SessionStatus.STOPPED } == 1 } // polled: a status change alone re-checks it
+        val live = created.filter { it.liveSession() != null }
+        assertEquals(2, live.size)
+        awaitLog { live.all { handle -> spawns().any { argv -> argv.zipWithNext().contains("--session-id" to handle.id) } } }
+        assertTrue(spawns().size in 2..3, "one process per start at most")
         val deadline = System.nanoTime() + 10_000_000_000L
         while (ownFakeProcesses().size > 2 && System.nanoTime() < deadline) delay(20)
         assertEquals(2, ownFakeProcesses().size)
