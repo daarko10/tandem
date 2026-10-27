@@ -203,7 +203,11 @@ class ChatPresenterTest {
             withTimeout(TIMEOUT) { presenter.chat.first { chat -> chat.rows.any { it.row is TurnEndRow } } }
             delay(PUSH_MS)
             collector.cancel()
-            val later = emissions.toList().dropWhile { it !== opened }
+            // The collector reads a conflating StateFlow, so it can miss the very value `opened` saw: start from the first emission
+            // that shows the nested text open, whichever it is.
+            val later = emissions.toList().dropWhile { chat ->
+                chat.rows.firstOrNull { it.row.key == agentKey }?.bodies?.get(childKey) == null
+            }
             assertTrue(later.size > 1, "the pushes after line 38 emitted")
             later.forEach { chat -> assertSame(blocks, chat.rows.first { it.row.key == agentKey }.bodies[childKey]) }
 
