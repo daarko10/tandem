@@ -140,7 +140,10 @@ jobs:
       # The fake CLI the tests run is a Python 3 script; the runner image has Python 3.
       - name: Test
         shell: bash
-        run: python3 --version && set -o pipefail && ./gradlew check 2>&1 | tee check.log
+        run: |
+          # If the tests are still running after 20 minutes, something hangs: print the test JVM's threads into this log.
+          ( sleep 1200; for pid in $(pgrep -f 'Gradle Test Executor'); do echo "::group::jstack $pid"; jstack "$pid"; echo "::endgroup::"; done ) &
+          python3 --version && set -o pipefail && ./gradlew check 2>&1 | tee check.log
       - name: Report build problems
         if: ${{ failure() }}
         shell: bash
