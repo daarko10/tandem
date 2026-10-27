@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -71,7 +70,7 @@ private const val MAX_ROWS: Int = 10
 private val MIN_LIST_WIDTH: Dp = 200.dp
 
 /** The description box beside the list is at most this wide, and goes under the list when less than [MIN_DESCRIPTION_WIDTH] is left. */
-private val MAX_DESCRIPTION_WIDTH: Dp = 260.dp
+private val MAX_DESCRIPTION_WIDTH: Dp = 360.dp
 private val MIN_DESCRIPTION_WIDTH: Dp = 140.dp
 
 /** Between the list and the description box, and between the popup and the composer box. */
@@ -85,10 +84,10 @@ private val TEXT_INSET: Dp = 10.dp
 /** Above the first row and under the last (or the footer), inside the list's frame. */
 private val FRAME_PADDING: Dp = 4.dp
 
-/** The description box's padding; it shows at most this many lines. */
+/** The description box's padding; it wraps to as many lines as the description needs, at most this many before an ellipsis. */
 private val DESCRIPTION_PADDING_X: Dp = 8.dp
 private val DESCRIPTION_PADDING_Y: Dp = 6.dp
-private const val DESCRIPTION_LINES: Int = 2
+private const val DESCRIPTION_LINES: Int = 8
 
 /** The composer's text after a lone `/` while the palette is open (MCP spec 14). */
 internal const val FILTER_HINT: String = "Type to filter"
@@ -200,9 +199,9 @@ internal fun filterHintShown(text: CharSequence, palette: SlashPalette?): Boolea
  * and the rows thin out. One line per command, its name
  * without the slash, the highlighted row's argument hint after it, dimmed, and ` · via /<alias>` on a row only an alias matched. It
  * shows 10 rows and scrolls past that, its selected row scrolled into view; the footer (`No matching command`, `Commands load when
- * the session starts`) is its last line. The highlighted row's description, the scope first, sits in a small box beside the list,
- * level with the row, when the box leaves room for it, else under the list, where it keeps two lines' height so the list does not
- * move as the selection does; one or two lines, then an ellipsis.
+ * the session starts`) is its last line. The highlighted row's description, the scope first, sits in a box beside the list, level
+ * with the row and up to 360 dp wide, when the box leaves room for it, else under the list, as wide as the list and as tall as its
+ * text; it shows the whole description, wrapped to as many lines as it needs, up to 8 before an ellipsis.
  *
  * The popup never takes the focus and no click outside dismisses it, so every key still reaches the text area and a press outside
  * goes to what it lands on; it has no dismiss rule of its own, the composer shows it while the palette is open. It is at most
@@ -289,12 +288,10 @@ internal fun SlashPaletteView(palette: SlashPalette, boxWidthPx: Int, maxHeightP
                 ListFrame(palette, listState, listPx, rowHeight, scrollbarPadding, Modifier.weight(1f, fill = false).fillMaxWidth()) {
                     currentOnPick(it)
                 }
-                // Two lines' height whichever row is highlighted, with or without a description: the list never moves with the selection.
-                if (palette.items.any(::hasDescription)) {
+                // As tall as the highlighted row's whole description (up to 8 lines); the list, weighted, gives way when space is short.
+                if (selected != null) {
                     Spacer(Modifier.height(GAP))
-                    Box(Modifier.fillMaxWidth().height(lineHeight(nameStyle) * DESCRIPTION_LINES + DESCRIPTION_PADDING_Y * 2)) {
-                        if (selected != null) DescriptionBox(selected, Modifier.fillMaxSize())
-                    }
+                    DescriptionBox(selected, Modifier.fillMaxWidth())
                 }
             }
         }
@@ -405,7 +402,7 @@ private fun PaletteRow(item: PaletteItem, selected: Boolean, height: Dp, scrollb
     }
 }
 
-/** The highlighted row's [descriptionText] in a small framed box: one or two lines, then an ellipsis. */
+/** The highlighted row's [descriptionText] in a small framed box, wrapped to as many lines as it needs: at most 8, then an ellipsis. */
 @Composable
 private fun DescriptionBox(item: PaletteItem, modifier: Modifier) {
     val colors = JewelTheme.globalColors
