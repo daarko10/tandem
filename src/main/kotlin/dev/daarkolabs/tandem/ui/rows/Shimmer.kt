@@ -3,9 +3,11 @@ package dev.daarkolabs.tandem.ui.rows
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
@@ -22,13 +24,23 @@ import kotlinx.coroutines.delay
 /** Half the width of the shimmer's light band (spec 15.1). */
 private val BAND_HALF_WIDTH = 32.dp
 
+/** The motion loops' pause outside tests: real time. */
+private val realPause: suspend (Long) -> Unit = { delay(it) }
+
+/**
+ * The pause between the motion loops' frames, the shimmer's ([rememberShimmer]) and the orbs' ([Spark]): `delay`, real time. A test
+ * that renders frames at chosen times provides a pause on frame time (`{ withFrameMillis { } }`), so that what it draws depends on
+ * the frames it renders, never on the wall clock.
+ */
+internal val LocalMotionPause: ProvidableCompositionLocal<suspend (Long) -> Unit> = staticCompositionLocalOf { realPause }
+
 /**
  * The shimmer's progress while [active] ([WorkingIndicator.shimmerProgress]): null at rest, else where the band is, 0 to 1. Its loop
- * ([runShimmer]) starts when the caller enters the composition or [active] changes, and ends when it leaves; [pause] is `delay`
- * outside tests. Read the state only in draw ([shimmer]), so a frame redraws the layer and recomposes nothing.
+ * ([runShimmer]) starts when the caller enters the composition or [active] changes, and ends when it leaves; [pause] is
+ * [LocalMotionPause]'s, `delay` outside tests. Read the state only in draw ([shimmer]), so a frame redraws the layer and recomposes nothing.
  */
 @Composable
-internal fun rememberShimmer(active: Boolean, pause: suspend (Long) -> Unit = { delay(it) }): State<Float?> {
+internal fun rememberShimmer(active: Boolean, pause: suspend (Long) -> Unit = LocalMotionPause.current): State<Float?> {
     val progress: MutableState<Float?> = remember { mutableStateOf(null) }
     LaunchedEffect(active) { runShimmer(active, { progress.value = it }, pause) }
     return progress

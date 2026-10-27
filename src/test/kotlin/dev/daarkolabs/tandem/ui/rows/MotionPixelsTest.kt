@@ -25,18 +25,14 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.EDT
 import com.intellij.testFramework.common.ThreadLeakTracker
-import com.intellij.testFramework.common.timeoutRunBlocking
 import com.intellij.testFramework.junit5.TestApplication
 import dev.daarkolabs.tandem.chat.RowGap
 import dev.daarkolabs.tandem.chat.ThinkingRow
 import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.ui.ChatUiState
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import dev.daarkolabs.tandem.ui.onEdtWithin
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.bridge.theme.SwingBridgeTheme
 import org.jetbrains.jewel.foundation.theme.LocalTextStyle
 import org.jetbrains.skia.Bitmap
@@ -102,7 +98,7 @@ class MotionPixelsTest {
             val now = System.currentTimeMillis()
             val row = WorkingRow(turnUuid = "u1", startedAtMillis = now - 3_000, step = "Pondering", outputTokens = 0, waiting = false)
             val view = workingView(row, now, now, agentExpanded = false)
-            val s = rememberShimmer(view.shimmerEnd > 0) { withFrameMillis { } }
+            val s = rememberShimmer(view.shimmerEnd > 0)
             val end = with(LocalDensity.current) { 100.dp.toPx() }
             Row(Modifier.background(Color.White)) {
                 Box(Modifier.size(24.dp)) { Spark(view.animated, Color.Black) }
@@ -113,15 +109,14 @@ class MotionPixelsTest {
     }) { render, _ ->
         val orbs = Rect(0f, 0f, 48f, 48f)
         val box = Rect(64f, 0f, 304f, 40f)
-        val at0 = render(0L, 0L)
-        val at1000 = render(1_000L, 0L)
-        val at1050 = render(1_050L, 0L)
+        val at0 = render(0L)
+        val at1000 = render(1_000L)
+        val at1050 = render(1_050L)
         listOf(region(at0, orbs), region(at1000, orbs), region(at0, box), region(at1050, box))
     }
 
     /**
-     * [WorkingRowItem] on a running row and [ThinkingRowItem] on a streaming one themselves, under the bridge theme, with their real
-     * `delay`s: the orbs' square of the working row at 0 and 1 000 ms, its step and the thinking row's label at 0 and 1 050 ms.
+     * [WorkingRowItem] on a running row and [ThinkingRowItem] on a streaming one themselves, under the bridge theme: the orbs' square of the working row at 0 and 1 000 ms, its step and the thinking row's label at 0 and 1 050 ms.
      */
     private fun themedRows(reduce: Boolean): List<Region> {
         val now = System.currentTimeMillis()
@@ -138,16 +133,15 @@ class MotionPixelsTest {
                 }
             }
         }) { render, scene ->
-            val first = render(0L, 0L)
+            val first = render(0L)
             val workingRow = bounds(scene) { it.config.getOrNull(SemanticsProperties.TestTag) == "working-row" }
             val thinkingRow = bounds(scene) { "Claude, thinking" in it.config.getOrNull(SemanticsProperties.ContentDescription).orEmpty() }
             val side = workingRow.height
             val orbs = Rect(workingRow.left, workingRow.top, workingRow.left + side, workingRow.bottom)
             val step = Rect(workingRow.left + side + 8 * density, workingRow.top, workingRow.left + side + 48 * density, workingRow.bottom)
             val label = Rect(thinkingRow.left, thinkingRow.top, thinkingRow.left + 40 * density, thinkingRow.bottom)
-            val at1000 = render(1_000L, 0L)
-            // The shimmers' first sweep starts after a real delay of 600 ms here: wait for it before the mid-sweep frame.
-            val at1050 = render(1_050L, 700L)
+            val at1000 = render(1_000L)
+            val at1050 = render(1_050L)
             listOf(
                 region(first, orbs), region(at1000, orbs),
                 region(first, step), region(at1050, step),
@@ -157,34 +151,28 @@ class MotionPixelsTest {
     }
 
     /**
-     * Composes [content] in a [width] by [height] px scene at [density] on the EDT and runs [check] with a `render(t, waitMs)` that
-     * waits [waitMs] of real time, then renders frame time t three times with 50 ms of real time before each ([Spark] keeps its own
-     * real `delay(33)`), and returns the last frame.
+     * Composes [content] in a [width] by [height] px scene at [density] on the EDT, with the motion loops pausing on frame time
+     * ([LocalMotionPause]: one frame, not real milliseconds), and runs [check] with a `render(t)` that renders frame time t three times
+     * and returns the last frame: no real time passes into what is drawn, and the EDT's work fails the test after 60 s instead of
+     * hanging it ([onEdtWithin]).
      */
-    private fun <T> scene(width: Int, height: Int, content: @Composable () -> Unit, check: suspend (suspend (Long, Long) -> Image, ImageComposeScene) -> T): T {
-        var result: T? = null
-        timeoutRunBlocking(60.seconds) {
-            // Skia's reference cleaner and Java2D's disposer start with the first rendered scene and live as long as the JVM.
-            ThreadLeakTracker.longRunningThreadCreated(ApplicationManager.getApplication(), "Reference Cleaner", "Java2D Disposer")
-            withContext(Dispatchers.EDT) {
-                val scene = ImageComposeScene(width, height, Density(density), content = content)
-                try {
-                    result = check({ ms, waitMs ->
-                        delay(waitMs)
-                        var image: Image? = null
-                        repeat(3) {
-                            delay(50)
-                            image = scene.render(ms * 1_000_000)
-                        }
-                        image!!
-                    }, scene)
-                } finally {
-                    scene.close()
-                }
+    private fun <T> scene(width: Int, height: Int, content: @Composable () -> Unit, check: ((Long) -> Image, ImageComposeScene) -> T): T {
+        // Skia's reference cleaner and Java2D's disposer start with the first rendered scene and live as long as the JVM.
+        ThreadLeakTracker.longRunningThreadCreated(ApplicationManager.getApplication(), "Reference Cleaner", "Java2D Disposer")
+        return onEdtWithin(60.seconds) {
+            val scene = ImageComposeScene(width, height, Density(density)) {
+                CompositionLocalProvider(LocalMotionPause provides { withFrameMillis { } }, content = content)
+            }
+            try {
+                check({ ms ->
+                    var image: Image? = null
+                    repeat(3) { image = scene.render(ms * 1_000_000) }
+                    image!!
+                }, scene)
+            } finally {
+                scene.close()
             }
         }
-        @Suppress("UNCHECKED_CAST")
-        return result as T
     }
 
     /** The ARGB pixels of [image] inside [rect]. */
