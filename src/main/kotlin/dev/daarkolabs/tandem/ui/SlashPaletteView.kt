@@ -5,6 +5,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
+import org.jetbrains.jewel.ui.component.VerticalScrollbar
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -84,7 +88,7 @@ private val TEXT_INSET: Dp = 10.dp
 /** Above the first row and under the last (or the footer), inside the list's frame. */
 private val FRAME_PADDING: Dp = 4.dp
 
-/** The description box's padding; it wraps to as many lines as the description needs, at most this many before an ellipsis. */
+/** The description box's padding; it wraps to as many lines as the description needs, at most this many, then scrolls to the rest. */
 private val DESCRIPTION_PADDING_X: Dp = 8.dp
 private val DESCRIPTION_PADDING_Y: Dp = 6.dp
 private const val DESCRIPTION_LINES: Int = 8
@@ -402,17 +406,29 @@ private fun PaletteRow(item: PaletteItem, selected: Boolean, height: Dp, scrollb
     }
 }
 
-/** The highlighted row's [descriptionText] in a small framed box, wrapped to as many lines as it needs: at most 8, then an ellipsis. */
+/**
+ * The highlighted row's [descriptionText] in a small framed box, wrapped to as many lines as it needs: at most 8 show, and a longer
+ * one scrolls (mouse wheel or the scrollbar) instead of being cut. Each item starts at its top.
+ */
 @Composable
 private fun DescriptionBox(item: PaletteItem, modifier: Modifier) {
     val colors = JewelTheme.globalColors
     val shape = RoundedCornerShape(6.dp)
+    val scroll = remember(item) { ScrollState(0) }
     Box(
         modifier.background(colors.panelBackground, shape)
             .border(1.dp, colors.borders.normal, shape)
             .padding(horizontal = DESCRIPTION_PADDING_X, vertical = DESCRIPTION_PADDING_Y),
     ) {
-        Text(descriptionText(item, colors.text.info), maxLines = DESCRIPTION_LINES, overflow = TextOverflow.Ellipsis)
+        Box(Modifier.heightIn(max = lineHeight(JewelTheme.defaultTextStyle) * DESCRIPTION_LINES)) {
+            Text(
+                descriptionText(item, colors.text.info),
+                Modifier.verticalScroll(scroll).padding(end = if (scroll.maxValue > 0) scrollbarContentSafePadding() else 0.dp),
+            )
+            if (scroll.maxValue > 0) {
+                Box(Modifier.matchParentSize()) { VerticalScrollbar(scroll, Modifier.align(Alignment.TopEnd).fillMaxHeight()) }
+            }
+        }
     }
 }
 

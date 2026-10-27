@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.ScrollAxisRange
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
@@ -20,6 +21,7 @@ import com.intellij.openapi.application.EDT
 import com.intellij.testFramework.common.ThreadLeakTracker
 import com.intellij.testFramework.common.timeoutRunBlocking
 import com.intellij.testFramework.junit5.TestApplication
+import dev.daarkolabs.tandem.chat.SlashPalette
 import dev.daarkolabs.tandem.chat.slashPalette
 import dev.daarkolabs.tandem.protocol.SlashCommand
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +51,20 @@ class SlashPaletteDescriptionTest {
     }
 
     @Test
+    fun `a description longer than the box scrolls instead of being cut`() {
+        val long = List(12) { description }.joinToString(" ")
+        val longPalette = slashPalette("/", listOf(SlashCommand("review", long)), emptyList(), emptySet())!!
+        // The list (one row here) has a vertical scroll range too; the description's is the one that can move.
+        var ranges: List<ScrollAxisRange> = emptyList()
+        val layout = drawnDescription(boxWidthPx = 780, palette = longPalette, text = long) { nodes ->
+            ranges = nodes.mapNotNull { it.config.getOrNull(SemanticsProperties.VerticalScrollAxisRange) }
+        }
+        assertTrue(layout.lineCount > 8, "longer than the box: ${layout.lineCount} lines")
+        assertFalse(layout.hasVisualOverflow, "laid out whole, not cut with an ellipsis: ${layout.lineCount} lines")
+        assertTrue(ranges.any { it.maxValue() > 0f }, "the box scrolls to the rest: ${ranges.map { it.maxValue() }}")
+    }
+
+    @Test
     fun `under the list a long description shows more than two lines`() {
         val layout = drawnDescription(boxWidthPx = 300)
         assertTrue(layout.lineCount > 2, "more than two lines: ${layout.lineCount}")
@@ -56,7 +72,12 @@ class SlashPaletteDescriptionTest {
     }
 
     /** The description's text layout in the palette drawn above a composer box [boxWidthPx] wide, in an 800 × 400 px scene. */
-    private fun drawnDescription(boxWidthPx: Int): TextLayoutResult {
+    private fun drawnDescription(
+        boxWidthPx: Int,
+        palette: SlashPalette = this.palette,
+        text: String = description,
+        inspect: (List<SemanticsNode>) -> Unit = {},
+    ): TextLayoutResult {
         var result: TextLayoutResult? = null
         timeoutRunBlocking(60.seconds) {
             // Skia's reference cleaner and Java2D's disposer start with the first rendered scene and live as long as the JVM.
@@ -74,8 +95,9 @@ class SlashPaletteDescriptionTest {
                 try {
                     scene.render()
                     scene.render(16_000_000L)
+                    inspect(nodes(scene))
                     val node = nodes(scene).first { node ->
-                        node.config.getOrNull(SemanticsProperties.Text).orEmpty().any { description in it.text }
+                        node.config.getOrNull(SemanticsProperties.Text).orEmpty().any { text in it.text }
                     }
                     val layouts = mutableListOf<TextLayoutResult>()
                     node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
