@@ -167,6 +167,8 @@ tasks {
         // platform's default of 2 GB that alone took 18 s of the close's 20 s on a 2-CPU CI runner. The tests need far less: the
         // heap holds about 150 MB live and grows to about 600 MB during a run.
         maxHeapSize = "1g"
+        // On CI, name each test as it starts, so a test that hangs (as one did on macOS) is the last name in the log.
+        if (providers.environmentVariable("CI").isPresent) testLogging { events("started", "skipped", "failed") }
     }
 
     register<Test>("integrationTest") {
