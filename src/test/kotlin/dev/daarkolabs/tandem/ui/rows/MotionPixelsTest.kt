@@ -17,9 +17,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -29,6 +31,7 @@ import com.intellij.testFramework.common.ThreadLeakTracker
 import com.intellij.testFramework.junit5.TestApplication
 import dev.daarkolabs.tandem.chat.RowGap
 import dev.daarkolabs.tandem.chat.ThinkingRow
+import dev.daarkolabs.tandem.chat.WorkingIndicator
 import dev.daarkolabs.tandem.chat.WorkingRow
 import dev.daarkolabs.tandem.ui.ChatUiState
 import dev.daarkolabs.tandem.ui.onEdtWithin
@@ -116,7 +119,10 @@ class MotionPixelsTest {
     }
 
     /**
-     * [WorkingRowItem] on a running row and [ThinkingRowItem] on a streaming one themselves, under the bridge theme: the orbs' square of the working row at 0 and 1 000 ms, its step and the thinking row's label at 0 and 1 050 ms.
+     * [WorkingRowItem] on a running row and [ThinkingRowItem] on a streaming one themselves, under the bridge theme: the orbs' square
+     * of the working row at 0 and 1 000 ms, its step and the thinking row's label at 0 and 1 050 ms. Mid-sweep the band is centred on
+     * what it crosses and fades out 32 dp to each side, so a region at a fixed offset from the row can miss it where the platform's
+     * fonts make the text wider: the step and the label are measured from their own laid-out text.
      */
     private fun themedRows(reduce: Boolean): List<Region> {
         val now = System.currentTimeMillis()
@@ -135,11 +141,14 @@ class MotionPixelsTest {
         }) { render, scene ->
             val first = render(0L)
             val workingRow = bounds(scene) { it.config.getOrNull(SemanticsProperties.TestTag) == "working-row" }
-            val thinkingRow = bounds(scene) { "Claude, thinking" in it.config.getOrNull(SemanticsProperties.ContentDescription).orEmpty() }
             val side = workingRow.height
             val orbs = Rect(workingRow.left, workingRow.top, workingRow.left + side, workingRow.bottom)
-            val step = Rect(workingRow.left + side + 8 * density, workingRow.top, workingRow.left + side + 48 * density, workingRow.bottom)
-            val label = Rect(thinkingRow.left, thinkingRow.top, thinkingRow.left + 40 * density, thinkingRow.bottom)
+            // The step and the label where their own Text laid them out, whatever the platform's fonts: the band crosses the step up to
+            // its end (`Pondering…`, never the elapsed time) and the whole thinking label, so these regions are where it runs.
+            val (stepNode, stepLayout) = textNode(scene, "Pondering")
+            val stepEnd = stepLayout.getHorizontalPosition(WorkingIndicator.view(working, now, now).shimmerEnd, usePrimaryDirection = true)
+            val step = stepNode.boundsInRoot.let { Rect(it.left, it.top, it.left + stepEnd, it.bottom) }
+            val label = textNode(scene, "Thinking").first.boundsInRoot
             val at1000 = render(1_000L)
             val at1050 = render(1_050L)
             listOf(
@@ -187,8 +196,19 @@ class MotionPixelsTest {
     }
 
     /** Where the first node that matches [which] is laid out, in px. */
-    private fun bounds(scene: ImageComposeScene, which: (SemanticsNode) -> Boolean): Rect {
+    private fun bounds(scene: ImageComposeScene, which: (SemanticsNode) -> Boolean): Rect = node(scene, which).boundsInRoot
+
+    /** The first node of [scene]'s unmerged semantics that matches [which]. */
+    private fun node(scene: ImageComposeScene, which: (SemanticsNode) -> Boolean): SemanticsNode {
         fun all(node: SemanticsNode): List<SemanticsNode> = listOf(node) + node.children.flatMap(::all)
-        return scene.semanticsOwners.flatMap { all(it.unmergedRootSemanticsNode) }.first(which).boundsInRoot
+        return scene.semanticsOwners.flatMap { all(it.unmergedRootSemanticsNode) }.first(which)
+    }
+
+    /** The Text node whose text starts with [prefix], and its text layout. */
+    private fun textNode(scene: ImageComposeScene, prefix: String): Pair<SemanticsNode, TextLayoutResult> {
+        val text = node(scene) { node -> node.config.getOrNull(SemanticsProperties.Text).orEmpty().any { it.text.startsWith(prefix) } }
+        val layouts = mutableListOf<TextLayoutResult>()
+        assertTrue(text.config[SemanticsActions.GetTextLayoutResult].action?.invoke(layouts) == true, "the $prefix text is laid out")
+        return text to layouts.single()
     }
 }
