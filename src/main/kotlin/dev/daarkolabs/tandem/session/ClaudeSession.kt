@@ -389,7 +389,8 @@ class ClaudeSession(
 
     /**
      * Sends a prompt: the [context] blocks first (the bubble shows them as [chips], spec 3.5), then [text], then the [images] attached
-     * to it, in order, with `"priority":"later"` when [later]. Each image's id is the
+     * to it, in order, with `"priority":"later"` when [later]. [typed] is the draft as typed (a dirty mention keeps its `@` there),
+     * which a withdrawn send restores. Each image's id is the
      * prompt's uuid and its index. Blank text is left off the wire, so the entry's text is `""` then, as the reloaded line gives it.
      *
      * Written at once, also while a turn runs: the CLI queues it and its lifecycle lines tell the rest ([reduce]). Held instead, in
@@ -402,6 +403,7 @@ class ClaudeSession(
         later: Boolean = false,
         context: List<ContextBlock> = emptyList(),
         chips: List<ContextChip> = emptyList(),
+        typed: String = text,
     ) {
         val uuid = UUID.randomUUID().toString()
         val shown = images.mapIndexed { i, image -> UserImage("$uuid#$i", image.mediaType, image.base64) }
@@ -410,10 +412,10 @@ class ClaudeSession(
         synchronized(shellLock) {
             if (held.isNotEmpty() || pendingOutput != null || _state.value.quietSends.isNotEmpty()) {
                 held.addLast(Held.Prompt(uuid, frame))
-                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true, held = true, context = chips))
+                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true, held = true, context = chips, typed = typed))
                 LOG.info("prompt $uuid held behind shell frames")
             } else {
-                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true, context = chips))
+                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true, context = chips, typed = typed))
                 send(frame)
             }
         }

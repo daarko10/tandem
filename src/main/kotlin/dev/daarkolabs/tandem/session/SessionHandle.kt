@@ -780,7 +780,7 @@ private fun ChatEntry.asTitle(): String? = when (this) {
 internal sealed interface Outbound {
     /**
      * A prompt: [text] and the [images] attached to it; [later]: sent with `"priority":"later"` (spec 12.1); [context]: the blocks
-     * sent before its text, which its bubble shows as [chips] (spec 3.5).
+     * sent before its text, which its bubble shows as [chips] (spec 3.5); [typed]: the draft as typed, restored when it is withdrawn.
      */
     data class Prompt(
         val text: String,
@@ -788,6 +788,7 @@ internal sealed interface Outbound {
         val later: Boolean = false,
         val context: List<ContextBlock> = emptyList(),
         val chips: List<ContextChip> = emptyList(),
+        val typed: String = text,
     ) : Outbound
 
     /**
@@ -800,7 +801,7 @@ internal sealed interface Outbound {
 /** Hands [outbound] to this process: a prompt as a user message, a shell escape as its frames. */
 private fun ClaudeSession.deliver(outbound: Outbound) {
     when (outbound) {
-        is Outbound.Prompt -> sendUserMessage(outbound.text, outbound.images, outbound.later, outbound.context, outbound.chips)
+        is Outbound.Prompt -> sendUserMessage(outbound.text, outbound.images, outbound.later, outbound.context, outbound.chips, outbound.typed)
         is Outbound.ShellEscape -> sendShellEscape(outbound.id, outbound.command, outbound.output, outbound.respond)
     }
 }

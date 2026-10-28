@@ -30,7 +30,8 @@ internal class CapturedPrompt(val text: String, val images: List<CapturedImage>,
 
 /**
  * A prompt ready for `manager.send`: its [text], its encoded [images], its `later` flag, and the [context] blocks sent before its
- * text, which its bubble shows as [chips] (spec 3.5).
+ * text, which its bubble shows as [chips] (spec 3.5). [typed] is the draft as captured, where [text] holds a dirty mention's bare
+ * path: what the composer gets back when the send is withdrawn.
  */
 internal data class OutgoingPrompt(
     val text: String,
@@ -38,6 +39,7 @@ internal data class OutgoingPrompt(
     val later: Boolean = false,
     val context: List<ContextBlock> = emptyList(),
     val chips: List<ContextChip> = emptyList(),
+    val typed: String = text,
 )
 
 /**
@@ -49,7 +51,8 @@ internal data class OutgoingPrompt(
  *
  * It runs in [scope] (the session's job in [ChatPresenters]) until that is cancelled, when the session closes. A prompt not yet sent
  * then, queued or still encoding, is not dropped silently: [dropped] gets `This prompt was not sent before the session closed` for
- * each, as does a prompt captured after it stopped.
+ * each, as does a prompt captured after it stopped. The same callback carries the notice of a buffer lookup that failed (the chat's
+ * WARNING): the mention then goes as typed and the CLI reads the disk, which the user is told (hard rule 5).
  */
 internal class ComposerSender(
     scope: CoroutineScope,
@@ -85,7 +88,7 @@ internal class ComposerSender(
                     try {
                         val (text, context) = swap
                         val chips = context.mapNotNull { ContextBlocks.chipOf(it.firstLine) }
-                        send(OutgoingPrompt(text, blocks, prompt.later, context, chips))
+                        send(OutgoingPrompt(text, blocks, prompt.later, context, chips, typed = prompt.text))
                     } finally {
                         done()
                     }
@@ -131,8 +134,8 @@ internal class ComposerSender(
     }
 
     /**
-     * [unsaved] for [file], or null (a clean file: the mention goes as typed) when it fails: a prompt is never lost to the lookup.
-     * Only the exception's class is logged.
+     * [unsaved] for [file], or null (a clean file: the mention goes as typed) when it fails: a prompt is never lost to the lookup, and
+     * the user is told through [dropped] that the CLI reads the disk. Only the exception's class is logged.
      */
     private suspend fun bufferOf(file: String): String? =
         try {
@@ -141,6 +144,7 @@ internal class ComposerSender(
             throw e
         } catch (e: Exception) {
             LOG.warn("Unsaved-buffer lookup failed: ${e.javaClass.name}")
+            dropped(lookupFailedText(file))
             null
         }
 
@@ -169,12 +173,16 @@ internal class ComposerSender(
         }
     }
 
-    private companion object {
+    internal companion object {
         private val LOG = logger<ComposerSender>()
 
         /** The file of a mention's path, less a `#…` line suffix. */
         fun fileOf(path: String): String = path.substringBefore('#')
 
         const val NOT_SENT = "This prompt was not sent before the session closed"
+
+        /** The notice of a buffer lookup that failed for [file]: the mention went as typed, so the CLI reads the disk. */
+        fun lookupFailedText(file: String): String =
+            "Could not read the unsaved changes of ${file.substringAfterLast('/')}; Claude reads the file from the disk"
     }
 }

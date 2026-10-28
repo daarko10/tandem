@@ -37,7 +37,7 @@ internal fun rememberChatPresenters(
             scope,
             options,
             manager.models,
-            { id, prompt -> manager.send(id, prompt.text, prompt.images, prompt.later, prompt.context, prompt.chips) },
+            { id, prompt -> manager.send(id, prompt.text, prompt.images, prompt.later, prompt.context, prompt.chips, prompt.typed) },
             manager.commands,
             unsaved,
         )

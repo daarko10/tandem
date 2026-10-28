@@ -2274,6 +2274,30 @@ class ReducerTest {
         // Without chips, none.
         assertEquals(emptyList(), reduce(ChatState(), SessionEvent.UserSent("u4", "plain")).entries.filterIsInstance<ChatEntry.User>().single().context)
     }
+
+    // spec 3.5: a withdrawn send comes back as typed, so the next send swaps against the buffer as it is then
+    @Test
+    fun `a cancelled send with context comes back to the composer as typed`() {
+        val chip = ContextChip(ContextChipKind.UNSAVED_FILE, "A.kt (unsaved)", "src/A.kt")
+        val busy = reduce(ChatState(), SessionEvent.UserSent("u1", "first", live = true))
+        val waiting = reduce(busy, SessionEvent.UserSent("u2", "fix src/A.kt", live = true, context = listOf(chip), typed = "fix @src/A.kt"))
+        assertEquals("fix @src/A.kt", waiting.pendingSends.single().typed)
+        // Edit withdraws it through command_lifecycle: the composer gets the `@` back, not the bare path the CLI was sent.
+        val asked = reduce(waiting, SessionEvent.WithdrawRequested("u2", restore = true))
+        val cancelled = reduce(asked, cli("""{"type":"command_lifecycle","command_uuid":"u2","state":"cancelled"}"""))
+        assertTrue(cancelled.pendingSends.isEmpty())
+        assertEquals(listOf(ReturnedSend("u2", "fix @src/A.kt", emptyList())), cancelled.returnedSends)
+        // Stop's cancelled line, with no withdraw asked, returns it as typed too; its notice quotes what was sent.
+        val stopped = reduce(waiting, cli("""{"type":"command_lifecycle","command_uuid":"u2","state":"cancelled"}"""))
+        assertEquals(listOf(ReturnedSend("u2", "fix @src/A.kt", emptyList())), stopped.returnedSends)
+        assertEquals(listOf(notSentText("fix src/A.kt")), stopped.noticeTexts(NoticeLevel.INFO))
+        // A send without a dirty mention has the same text both ways.
+        val plain = reduce(busy, SessionEvent.UserSent("u3", "again", live = true))
+        assertEquals("again", plain.pendingSends.single().typed)
+        // One that starts keeps the sent text in its entry.
+        val started = reduce(waiting, cli("""{"type":"command_lifecycle","command_uuid":"u2","state":"started"}"""))
+        assertEquals("fix src/A.kt", started.entries.filterIsInstance<ChatEntry.User>().last().text)
+    }
 }
 
 /** A complete main-thread `assistant` line with one text block. */

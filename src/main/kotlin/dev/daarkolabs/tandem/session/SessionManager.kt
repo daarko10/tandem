@@ -393,7 +393,8 @@ class SessionManager internal constructor(
 
     /**
      * Sends a prompt: [text] and the [images] attached to it, in order, with `"priority":"later"` when [later], after the [context]
-     * blocks, which its bubble shows as [chips] (spec 3.5). A stopped session starts a process first, and gets the prompt once it is up.
+     * blocks, which its bubble shows as [chips] (spec 3.5); [typed] is the draft as typed, which a withdrawn send restores. A stopped
+     * session starts a process first, and gets the prompt once it is up.
      */
     fun send(
         id: SessionId,
@@ -402,10 +403,11 @@ class SessionManager internal constructor(
         later: Boolean = false,
         context: List<ContextBlock> = emptyList(),
         chips: List<ContextChip> = emptyList(),
+        typed: String = text,
     ) {
         val handle = handle(id) ?: return
         handle.lastUsed = clock()
-        if (handle.sendOrQueue(Outbound.Prompt(text, images, later, context, chips))) spawner.startInBackground(handle, forPrompts = true)
+        if (handle.sendOrQueue(Outbound.Prompt(text, images, later, context, chips, typed))) spawner.startInBackground(handle, forPrompts = true)
     }
 
     /**

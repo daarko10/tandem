@@ -144,6 +144,8 @@ class ComposerSenderTest {
             val prompt = sent.single()
             // The dirty file loses its `@` everywhere (the CLI would read the stale disk); the clean one keeps it.
             assertEquals("fix src/A.kt, then src/A.kt and @b.kt", prompt.text)
+            // The draft as typed travels with it: a withdrawn send puts the `@` back (ReducerTest).
+            assertEquals("fix @src/A.kt, then @src/A.kt and @b.kt", prompt.typed)
             assertEquals(listOf(ContextBlock("src/A.kt as open in the IDE, with unsaved changes (2 lines):", "x\ny\n")), prompt.context)
             assertEquals(listOf(ContextChip(ContextChipKind.UNSAVED_FILE, "A.kt (unsaved)", "src/A.kt")), prompt.chips)
             // On the wire the block goes before the prompt's own text.
@@ -181,7 +183,15 @@ class ComposerSenderTest {
             sender.submit(CapturedPrompt("then @b.kt", emptyList()))
             withTimeout(TIMEOUT) { sender.sending.first { !it } }
             assertEquals(listOf("read @a.kt", "then @b.kt"), sent.map { it.text })
-            assertEquals(emptyList(), dropped)
+            // The user is told each time that the CLI read the disk (hard rule 5); the file is named, not the path.
+            assertEquals(
+                listOf(
+                    "Could not read the unsaved changes of a.kt; Claude reads the file from the disk",
+                    "Could not read the unsaved changes of b.kt; Claude reads the file from the disk",
+                ),
+                dropped,
+            )
+            assertEquals("Could not read the unsaved changes of A.kt; Claude reads the file from the disk", ComposerSender.lookupFailedText("src/A.kt"))
         } finally {
             scope.cancel()
         }
@@ -207,12 +217,14 @@ class ComposerSenderTest {
     }
 
     // spec: a context-only message is refused as an empty draft
+    // In B1 a context block can only come from a mention inside the text, so a blank draft has none: this checks that the composer's
+    // empty-draft rule stands in front of the sender. The real context-only case (the selection chip with a blank draft) comes in B2.
     @Test
     fun `a context-only message is refused as an empty draft`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob())
         try {
             val sent: MutableList<OutgoingPrompt> = Collections.synchronizedList(ArrayList())
-            val sender = ComposerSender(scope, { sent += it }, {}, unsaved = { "buffer" })
+            val sender = ComposerSender(scope, { sent += it }, {})
             val ui = ChatUiState()
             ui.draft.setTextAndPlaceCursorAtEnd("  ")
             assertFalse(sendDraft(ui, sender), "a blank draft sends nothing, whatever context there is")
