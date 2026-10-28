@@ -1,12 +1,15 @@
 package dev.daarkolabs.tandem.ide
 
+import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.components.serviceIfCreated
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.RowOptions
+import dev.daarkolabs.tandem.ide.edits.TandemEdits
 import dev.daarkolabs.tandem.session.DefaultProcessLauncher
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.ProcessLauncher
@@ -40,6 +43,9 @@ private val LOG = logger<TandemSessions>()
 
 /** Test hook: the CLI's config directory to find transcripts in, in place of `$CLAUDE_CONFIG_DIR` or `~/.claude`. */
 private const val CONFIG_DIR_PROPERTY: String = "tandem.configDir"
+
+/** The plugin's id, as `plugin.xml` declares it. */
+private const val PLUGIN_ID: String = "dev.daarkolabs.tandem"
 
 /** Development hook: a prompt that a new session is sent once the sessions start (`./gradlew runIde -Ptandem.autoPrompt=…`). */
 private const val AUTO_PROMPT_PROPERTY: String = "tandem.autoPrompt"
@@ -120,6 +126,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         respondToShell = { TandemSettings.getInstance().state.respondToShellOutput },
         // A shell escape runs with the login shell's environment, as the CLI does; read on IO, where waiting for the platform is fine.
         shell = ShellRunner(environment = ShellEnvironment::get),
+        // Tandem's edit tools for every session's process, and the version its server names itself with (spec 4.2).
+        hostTools = project.service<TandemEdits>(),
+        hostVersion = PluginManagerCore.getPlugin(PluginId.getId(PLUGIN_ID))?.version ?: "dev",
     )
 
     /** Opens an MCP server's sign-in page in the system browser (spec 3.3, 4.4); tests swap in a log line (`tandem.browserOpener`). */

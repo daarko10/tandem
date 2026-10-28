@@ -69,6 +69,8 @@ class IdeEditTools(
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DiffNotOpened) {
+            EditResults.refused(args.filePath, e.reason) // its notice is shown already
         } catch (e: Exception) {
             LOG.warn("tools/call ${call.name} request ${call.requestId} failed: ${e.javaClass.simpleName}")
             val reason = reasonOf(e)
