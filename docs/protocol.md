@@ -79,7 +79,7 @@ A row that cites a fixture was recorded (versions in Sources); the others come f
 | Batched and merged sends | The CLI batches the user frames queued before it starts processing (`bash-mode.ndjson:3-6`: both queued, then both started) and merges quiet ones (`shouldQuery:false`) into one transcript line with `mergedSendUuids` (`transcripts/bash-mode.jsonl:5`), answered by one zero-turn `result` naming both (`bash-mode.ndjson:8`, 2.1.306). A `result` can end several sends: read `user_message_uuids` (section 3, 7). |
 | `mcp_status` before the first prompt | The stdio servers are still `pending` (`mcp-status.ndjson:2`, 2.1.306); the first `init` already has settled states (`:6`). Ask again later (4.4). |
 | `mcp_set_servers` | Replaces only the servers it added itself, though every server of `--mcp-config` reports `source:"dynamic"` too: `{}` removes `echo2` alone (`mcp-status.ndjson:44`) and `echo`, `broken`, `authy` stay (`:45`, 2.1.306). The source does not tell the two apart (4.4). |
-| SDK MCP server | A host's own tools reach the CLI as `initialize.sdkMcpServers` plus `mcp_message` control requests, not as a `--mcp-config` entry (4.5). The CLI connects the server lazily: an `mcp_status` before the first prompt lists no row for it (`ide-edit:3`), and the server's `initialize` request arrives before the CLI answers the host's own `initialize` (`ide-edit:1`, then `:2`). A call the user has not answered when `interrupt` arrives is withdrawn with `notifications/cancelled`; an answer to it is ignored (`ide-edit-stop:42`). Every `mcp_message` needs exactly one answer or the CLI waits, except a `tools/call` the CLI withdrew with `notifications/cancelled`, which gets none. |
+| SDK MCP server | A host's own tools reach the CLI as `initialize.sdkMcpServers` plus `mcp_message` control requests, not as a `--mcp-config` entry (4.5). The CLI connects the server lazily: an `mcp_status` before the first prompt lists no row for it (`ide-edit:3`), and the server's `initialize` request arrives before the CLI answers the host's own `initialize` (`ide-edit:1`, then `:2`). A call the user has not answered when `interrupt` arrives is withdrawn with `notifications/cancelled`; the host sends no answer (`ide-edit-stop:42`). Every `mcp_message` request needs exactly one answer or the CLI waits (a held `tools/call` waited 3 s in `ide-edit-stop`; that the CLI waits without limit is **inferred**), except a `tools/call` the CLI withdrew with `notifications/cancelled`, which gets none. |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
 | Ordering | complete `assistant` precedes `content_block_stop` (`plain-reply.ndjson:10,11`; section 6.4). |
 | stdin close | Closing stdin = end of input. The SDK only calls `endInput()` after the last result when no bidirectional needs (permissions, hooks, MCP) remain. **Keep stdin open for the whole session**; close it to shut down gracefully, then wait for exit. |
@@ -850,9 +850,10 @@ On `interrupt` the CLI withdraws the call (`ide-edit-stop`):
 3. a synthetic `user` tool result for the call (`:44`, 6.2) and the text `[Request interrupted by user for tool use]` (`:45`);
 4. a `result` with `subtype:"error_during_execution"`, `is_error:true` and `terminal_reason:"aborted_tools"` (`:46`).
 
-No `control_cancel_request` arrives for the `mcp_message` request. A host answer sent after the receipt produced nothing (no
-second result, no error): the withdrawal is `notifications/cancelled`, keyed by the JSON-RPC `requestId`, so a host closes
-whatever it showed for the call and sends no reply.
+No `control_cancel_request` arrives for the `mcp_message` request. The withdrawal is `notifications/cancelled`, keyed by the
+JSON-RPC `requestId`, so a host closes whatever it showed for the call and sends no reply: `ide-edit-stop`'s driver sends
+none. What a late host answer does is **unrecorded in the fixtures**: it was tried only in an uncommitted probe on CLI
+2.1.312, where it produced nothing (no second result, no error) **(inferred)**.
 
 **A configured server with the same name.** Recorded only with a server passed through `--mcp-config` and named `tandem` (a
 probe, not committed): the SDK server wins dispatch, `init.tools` lists `mcp__tandem__edit_file` and `mcp__tandem__write_file`
