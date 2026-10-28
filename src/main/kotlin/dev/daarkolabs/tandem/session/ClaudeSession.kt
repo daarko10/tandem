@@ -882,14 +882,20 @@ class ClaudeSession(
         job.start()
     }
 
-    /** [hostTools]' answer to the call [name] with [arguments]; a host that fails answers an error, so the CLI never waits. */
+    /**
+     * [hostTools]' answer to the call [name] with [arguments]; a host that fails answers an error, so the CLI never waits. A
+     * [CancellationException] the host throws while this call's own job is active (a diff disposed, a timeout inside the IDE) is
+     * such a failure: only the job's own cancellation (a withdrawn call) goes on and leaves the call unanswered.
+     */
     private suspend fun callHostTools(name: String, arguments: JsonObject, toolUseId: String?, id: JsonElement?): ToolReply? {
         val tools = hostTools ?: return ToolReply(NO_HOST_TOOLS_TEXT, isError = true)
         val requestId = id ?: return null
         return try {
             tools.call(ToolCall(name, arguments, toolUseId, requestId, sessionKey()))
         } catch (e: CancellationException) {
-            throw e
+            currentCoroutineContext().ensureActive() // the call's own cancellation goes on: no reply for a withdrawn call
+            LOG.warn("tools/call $name id=$requestId tool_use=$toolUseId: the IDE cancelled it: ${e.javaClass.name}")
+            ToolReply("Tandem could not run $name: ${e.javaClass.simpleName}.", isError = true)
         } catch (e: Throwable) {
             // The class only: an IDE file API puts the file's path in its message (NoSuchFileException, AccessDeniedException).
             LOG.warn("tools/call $name id=$requestId tool_use=$toolUseId failed in the IDE: ${e.javaClass.name}")

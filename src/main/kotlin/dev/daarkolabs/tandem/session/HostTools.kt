@@ -32,7 +32,9 @@ data class ToolCall(
 
 /**
  * What serves Tandem's tools in the IDE (the project's `TandemEdits`). [ClaudeSession] runs [call] in a child job of its own, off the
- * reader, and sends what it returns; [cancel] says the CLI withdrew the call [requestId] of [session] (`notifications/cancelled`),
+ * reader, and sends what it returns. [call] may throw a `CancellationException` only when it is itself cancelled (its job, through
+ * [cancel] or [cancelAll]): one thrown while the job is active (a diff disposed, a timeout inside the IDE) is answered as a failure,
+ * an error reply, so the CLI never waits. [cancel] says the CLI withdrew the call [requestId] of [session] (`notifications/cancelled`),
  * whose job is cancelled too and whose reply is never sent; [cancelAll] says [session]'s process is over (stopped, closed or ended).
  */
 interface HostTools {

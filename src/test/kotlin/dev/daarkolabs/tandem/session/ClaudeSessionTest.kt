@@ -1953,7 +1953,7 @@ class ClaudeSessionTest {
         run.close()
     }
 
-    // spec: a tools call whose JSON-RPC id is still open withdraws the older call
+    // round-1 review: the CLI reused an open JSON-RPC id
     @Test
     fun `a tools call whose id is still open withdraws the older call and only the newer one answers`() = runBlocking {
         val seen = AtomicInteger()
@@ -1985,7 +1985,7 @@ class ClaudeSessionTest {
         run.close()
     }
 
-    // spec: a host that fails answers an error, so the CLI never waits
+    // round-1 review: a host that fails answers an error, so the CLI never waits (callHostTools' contract, not a spec-named test)
     @Test
     fun `a host that throws an Error still answers the call with an error`() = runBlocking {
         val run = ScriptedSession(tmp, newSessionId, hostTools = FakeHostTools { throw NotImplementedError("lane A") })
@@ -1997,6 +1997,24 @@ class ClaudeSessionTest {
             "Tandem could not run edit_file: NotImplementedError.",
             failed["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content,
         )
+        run.close()
+    }
+
+    // round-2 review: a CancellationException from the host while the call's own job is active is a failure, not a withdrawal
+    @Test
+    fun `a host that throws a CancellationException of its own still answers the call with an error`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, hostTools = FakeHostTools { throw CancellationException("host") })
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit")[38 - 1])
+        val failed = run.mcpResponse(requestIdAt("ide-edit", 38))["result"]!!.jsonObject
+        assertEquals(true, failed["isError"]!!.jsonPrimitive.boolean)
+        assertEquals(
+            "Tandem could not run edit_file: CancellationException.",
+            failed["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content,
+        )
+        run.drained()
+        val callId = requestIdAt("ide-edit", 38)
+        assertEquals(1, run.stdin.readLines().count { "mcp_response" in it && "\"request_id\":\"$callId\"" in it }, "exactly one reply")
         run.close()
     }
 
@@ -2076,7 +2094,7 @@ class ClaudeSessionTest {
         assertFalse(run.stdin.readLines().any { "mcp_response" in it }, "nobody reads a reply any more")
     }
 
-    // spec: the process ending by itself cancels the open calls (stop, close and the process's end)
+    // the process ending by itself: the spec names stop, close and the process's end as the cancelAll cases
     @Test
     fun `a process that ends by itself with a call open cancels it with no reply`() = runBlocking {
         val tools = FakeHostTools()
