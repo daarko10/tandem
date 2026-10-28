@@ -93,7 +93,7 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
 
     init {
         scope.launch(CoroutineName("TandemEdits.diffs")) {
-            queue.open.collect { proposal -> if (proposal != null) present(proposal) }
+            queue.open.collect { proposal -> if (proposal != null) presentOrFail(proposal) }
         }
     }
 
@@ -125,6 +125,8 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
         val decided = reviewed.get()
         when {
             decided != null -> done(call, outcomeOf(decided.first, decided.second, reply))
+            // The review was entered but ended without a decision (the diff could not be opened): the row leaves OPEN.
+            inReview.get() -> done(call, null)
             auto != null && !reply.isError -> done(call, EditOutcome.AUTO)
         }
         return reply
@@ -168,6 +170,21 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
         return decided
     }
 
+    /**
+     * [present], and when it fails for any reason, [proposal] fails with [DiffNotOpened] instead of ending the collector: a call
+     * that waits forever, and every later one behind it, would be a silent failure (hard rule 5).
+     */
+    private suspend fun presentOrFail(proposal: EditProposal) {
+        try {
+            present(proposal)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            LOG.warn("tools/call request ${proposal.call.requestId}: showing the diff failed: ${e.javaClass.simpleName}", e)
+            queue.fail(proposal, DiffNotOpened(reasonOf(e)))
+        }
+    }
+
     /** Shows [proposal], the open one, until its decision completes: from the diff, or from a cancel, which closes the diff. */
     private suspend fun present(proposal: EditProposal) {
         val decision = queue.decisionOf(proposal) ?: return
@@ -178,11 +195,11 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
                     presenter.show(proposal)
                 } catch (e: CancellationException) {
                     throw e
-                } catch (e: Exception) {
-                    val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                } catch (e: Throwable) {
+                    val reason = reasonOf(e)
                     LOG.warn("tools/call request ${proposal.call.requestId}: the diff could not be opened: ${e.javaClass.simpleName}")
-                    sessions.notice(proposal.call.session, "The diff could not be opened: $reason")
                     queue.fail(proposal, DiffNotOpened(reason))
+                    sessions.notice(proposal.call.session, "The diff could not be opened: $reason")
                     return@launch
                 }
                 queue.resolve(proposal, decided)
@@ -242,6 +259,8 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
 /** The diff of a proposal could not be opened ([reason]): the call is refused, and the notice is shown already. */
 class DiffNotOpened(val reason: String) : RuntimeException(reason)
 
+private fun reasonOf(e: Throwable): String = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+
 /** The file name a call's `file_path` names, as the rows show it; the whole value when it has no separator. */
 private fun fileNameOf(call: ToolCall): String {
     val given = (call.arguments["file_path"] as? JsonPrimitive)?.content.orEmpty()
@@ -260,9 +279,13 @@ private class ManagerSessions(private val project: Project) : EditSessions {
 
     override fun state(id: SessionId): ChatState? = handle(id)?.state?.value
 
+    /**
+     * The folders the live process has, as its `system/init` lists them (spec 7 item 4: "as the CLI's own tools have"), not the
+     * folders added in the UI that the process has not been spawned with yet. A tool call comes after an init, so the list is there.
+     */
     override fun roots(id: SessionId): List<Path> {
         val handle = handle(id) ?: return emptyList()
-        return (handle.folders.value.map { it.path } + handle.state.value.additionalDirectories).distinct().mapNotNull {
+        return handle.state.value.additionalDirectories.distinct().mapNotNull {
             try {
                 Path.of(it)
             } catch (_: InvalidPathException) {

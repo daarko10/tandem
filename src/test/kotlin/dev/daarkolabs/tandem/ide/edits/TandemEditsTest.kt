@@ -4,6 +4,8 @@ import com.intellij.testFramework.common.timeoutRunBlocking
 import com.intellij.testFramework.junit5.TestApplication
 import com.intellij.testFramework.junit5.fixture.projectFixture
 import com.intellij.testFramework.junit5.fixture.tempPathFixture
+import dev.daarkolabs.tandem.protocol.Fixtures
+import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.ToolReply
 import dev.daarkolabs.tandem.session.ChatState
@@ -64,8 +66,12 @@ class TandemEditsTest {
 
     private val shows = Channel<Showing>(Channel.UNLIMITED)
 
+    /** The proposals whose show throws this, as a diff that cannot be opened does. */
+    private val failing = ConcurrentHashMap<String, Throwable>()
+
     private val presenter = object : DiffPresenter {
         override suspend fun show(proposal: EditProposal): Decision {
+            failing[proposal.call.toolUseId]?.let { throw it }
             val showing = Showing(proposal, CompletableDeferred(), CompletableDeferred())
             shows.send(showing)
             try {
@@ -82,6 +88,7 @@ class TandemEditsTest {
 
     private val chats = ConcurrentHashMap<SessionId, ChatState>()
     private val events = CopyOnWriteArrayList<Pair<SessionId, SessionEvent.EditEvent>>()
+    private val notices = CopyOnWriteArrayList<Pair<SessionId, String>>()
 
     private val sessions = object : EditSessions {
         override fun state(id: SessionId): ChatState? = chats[id]
@@ -93,7 +100,9 @@ class TandemEditsTest {
             chats.computeIfPresent(id) { _, state -> reduce(state, event) }
         }
 
-        override fun notice(id: SessionId, text: String) = Unit
+        override fun notice(id: SessionId, text: String) {
+            notices += id to text
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -203,7 +212,9 @@ class TandemEditsTest {
             assertTrue(other.await().isError)
 
             // The turn's result resets the chat's flag (the reducer's rule), and the next turn's call opens a diff again.
-            chats.computeIfPresent("s1") { _, state -> state.copy(acceptAll = false) }
+            val result = SessionEvent.Cli(Ndjson.decode(Fixtures.lines("ide-edit")[71 - 1]))
+            chats.computeIfPresent("s1") { _, state -> reduce(state, result) }
+            assertFalse(chats.getValue("s1").acceptAll, "the result line of ide-edit:71 ends it")
             val next = start(editCall(hello("d.txt"), "t4"))
             val shown = nextShow()
             assertEquals("t4", shown.proposal.call.toolUseId)
@@ -259,4 +270,28 @@ class TandemEditsTest {
         assertTrue(phases("t2").isEmpty())
     }
 
+    @Test
+    fun `a diff that cannot be opened refuses the call, says so and lets the next one open`() = timeoutRunBlocking(30.seconds) {
+        chats["s1"] = ChatState()
+        failing["t1"] = IllegalStateException("the IDE opened no editor for it")
+        val first = hello("one.txt")
+        val second = hello("two.txt")
+        val a = start(editCall(first, "t1"))
+        val refused = a.await()
+        assertTrue(refused.isError, refused.text)
+        assertEquals(EditReview("one.txt", EditPhase.DONE, null), phases("t1").last())
+        assertEquals(listOf("s1" to "The diff could not be opened: the IDE opened no editor for it"), notices)
+        assertEquals(HELLO, Files.readString(first))
+
+        // A throwable that is not an Exception does not stop the diffs either.
+        failing["t2"] = AssertionError("platform assertion")
+        val b = start(editCall(second, "t2")).await()
+        assertTrue(b.isError, b.text)
+        assertEquals(EditReview("two.txt", EditPhase.DONE, null), phases("t2").last())
+
+        val c = start(editCall(hello("three.txt"), "t3"))
+        nextShow().answer.complete(Decision.Accepted("beta\nline two\n", all = false))
+        assertFalse(c.await().isError)
+        assertEquals(EditReview("three.txt", EditPhase.DONE, EditOutcome.ACCEPTED), phases("t3").last())
+    }
 }
