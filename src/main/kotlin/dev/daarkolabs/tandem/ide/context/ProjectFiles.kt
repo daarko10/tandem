@@ -17,7 +17,9 @@ import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
-import com.intellij.openapi.vfs.newvfs.events.VFileContentChangeEvent
+import com.intellij.openapi.vfs.newvfs.events.VFileCopyEvent
+import com.intellij.openapi.vfs.newvfs.events.VFileCreateEvent
+import com.intellij.openapi.vfs.newvfs.events.VFileDeleteEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileMoveEvent
 import com.intellij.openapi.vfs.newvfs.events.VFilePropertyChangeEvent
@@ -25,17 +27,23 @@ import com.intellij.psi.codeStyle.NameUtil
 import org.jetbrains.annotations.VisibleForTesting
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The project's files for the `@` palette (spec 3.5): their paths relative to the project's base directory, `/`-separated, read in a
  * `readAction` off the EDT from the base directory and the content roots under it (excluded and ignored folders, and `.idea`, left
- * out), and kept until a file is created, deleted, moved or renamed. [matching] ranks them with the IDE's own matcher
- * (`NameUtil.buildMatcher`); [known] holds the last list read, for the bubble's chips.
+ * out), and kept until a file is created, deleted, moved or renamed in a listed folder: a change under an excluded or ignored one
+ * (`build/` during a build, `.git/` during a commit) is not a change of the list. The re-reads run one at a time, with at most one
+ * more waiting ([rereads] is conflated), however many event batches come while one runs. [matching] ranks them with the IDE's own
+ * matcher (`NameUtil.buildMatcher`); [known] holds the last list read, for the bubble's chips.
  */
 @Service(Service.Level.PROJECT)
 class ProjectFiles(private val project: Project, private val scope: CoroutineScope) {
@@ -57,26 +65,62 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
     /** The paths of the last list read; empty until the first, which starts with the service, off the EDT. */
     val known: StateFlow<Set<String>> = mutableKnown.asStateFlow()
 
+    /** A re-read asked for by a change; conflated, so one runs and at most one more waits. */
+    private val rereads = Channel<Unit>(Channel.CONFLATED)
+
+    /** How many times the files were walked; tests read it. */
+    @VisibleForTesting
+    internal val reads: AtomicInteger = AtomicInteger()
+
+    /** How many reads run now; [settle] waits for none. */
+    private val busy = MutableStateFlow(0)
+
+    /** Returns once no read runs: a test's point of rest. Bounded by the caller. */
+    @VisibleForTesting
+    internal suspend fun settle() {
+        busy.first { it == 0 }
+    }
+
     init {
         project.messageBus.connect(scope).subscribe(
             VirtualFileManager.VFS_CHANGES,
             object : BulkFileListener {
                 override fun after(events: List<VFileEvent>) {
-                    // A content change keeps the list; anything else (create, delete, move, rename, copy) under the project may
-                    // change it. Whether the list is cached or still being read, it is read again.
+                    // A content change keeps the list; a create, delete, move, rename or copy in a listed folder may change it.
+                    // Whether the list is cached or still being read, it is read again.
                     val walked = roots
-                    if (events.any { it !is VFileContentChangeEvent && (walked.isEmpty() || touches(it, walked)) }) {
+                    if (events.any { walked.isEmpty() || listed(it, walked) }) {
                         synchronized(lock) {
                             generation++
                             cache = null
                         }
-                        scope.launch { candidates() }
+                        rereads.trySend(Unit)
                     }
                 }
             },
         )
+        scope.launch { for (unit in rereads) candidates() }
         // The bubbles draw `@path` chips from [known]: read the list now rather than at the first `@` typed.
         scope.launch { candidates() }
+    }
+
+    /**
+     * Whether [event] may change the list: a file or folder created, deleted, moved, renamed or copied in a folder of [roots] that
+     * [collect] walks into, so one under no excluded or ignored folder (nor `.idea`). Under the VFS's write action, so with read
+     * access for the index.
+     */
+    private fun listed(event: VFileEvent, roots: List<String>): Boolean {
+        val folders: List<VirtualFile?> = when (event) {
+            is VFileCreateEvent -> listOf(event.parent)
+            is VFileDeleteEvent -> listOf(event.file.parent)
+            is VFileCopyEvent -> listOf(event.newParent)
+            is VFileMoveEvent -> listOf(event.oldParent, event.newParent)
+            is VFilePropertyChangeEvent -> if (event.isRename) listOf(event.file.parent) else return false
+            else -> return false
+        }
+        val index = ProjectFileIndex.getInstance(project)
+        val types = FileTypeManager.getInstance()
+        return folders.any { folder -> folder != null && walkedInto(folder, roots, index, types) }
     }
 
     /** Every file of the project, relative to its base directory; read once, then from the cache until the files change. */
@@ -87,7 +131,12 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
                 cache?.let { return it }
                 generation
             }
-            read = readAction { collect() }
+            busy.update { it + 1 }
+            try {
+                read = readAction { collect() }
+            } finally {
+                busy.update { it - 1 }
+            }
             synchronized(lock) {
                 if (generation == started) {
                     cache = read
@@ -145,15 +194,18 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
         val base = project.guessProjectDir() ?: return emptyList()
         val index = ProjectFileIndex.getInstance(project)
         val types = FileTypeManager.getInstance()
-        val roots = (listOf(base) + ProjectRootManager.getInstance(project).contentRoots).distinct()
+        // A content root outside the base holds no listable file ([relativePath] is null for all of it): it is not walked.
+        val roots = (listOf(base) + ProjectRootManager.getInstance(project).contentRoots.filter { VfsUtilCore.isAncestor(base, it, false) })
+            .distinct()
         this.roots = roots.map { it.path }
+        reads.incrementAndGet()
         val out = LinkedHashSet<String>()
         for (root in roots) {
             VfsUtilCore.iterateChildrenRecursively(
                 root,
                 { file ->
                     ProgressManager.checkCanceled()
-                    !file.isDirectory || !(file.name == ".idea" || index.isExcluded(file) || types.isFileIgnored(file))
+                    !file.isDirectory || !hidden(file, index, types)
                 },
                 { file ->
                     if (!file.isDirectory) relativePath(file, base)?.let(out::add)
@@ -168,14 +220,23 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
         /** A read the files changed under is retried at most this many times in all. */
         private const val MAX_READS = 3
 
-        /** Whether [event] (or, for a move or rename, its old place) is in one of [roots], VFS paths. */
-        private fun touches(event: VFileEvent, roots: List<String>): Boolean {
-            val paths = when (event) {
-                is VFileMoveEvent -> listOf(event.oldPath, event.newPath)
-                is VFilePropertyChangeEvent -> listOf(event.oldPath, event.newPath)
-                else -> listOf(event.path)
+        /** Whether [collect] stops at the folder [file]: `.idea`, excluded or ignored. */
+        private fun hidden(file: VirtualFile, index: ProjectFileIndex, types: FileTypeManager): Boolean =
+            file.name == ".idea" || index.isExcluded(file) || types.isFileIgnored(file)
+
+        /**
+         * Whether [collect] walks into [folder]: it is one of [roots] (VFS paths), or lies under one with no [hidden] folder between
+         * (the root itself included).
+         */
+        private fun walkedInto(folder: VirtualFile, roots: List<String>, index: ProjectFileIndex, types: FileTypeManager): Boolean {
+            var at: VirtualFile? = folder
+            while (at != null) {
+                val here = at
+                if (here.path in roots) return true
+                if (hidden(here, index, types) || roots.none { root -> FileUtil.isAncestor(root, here.path, true) }) return false
+                at = here.parent
             }
-            return paths.any { path -> roots.any { root -> FileUtil.isAncestor(root, path, false) } }
+            return false
         }
 
         /** No more files than this are listed: a huge project's palette still opens at once. */

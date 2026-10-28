@@ -19,6 +19,7 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
@@ -79,9 +80,32 @@ class ProjectFilesTest {
         }
     }
 
+    // spec: a change under an ignored folder keeps the list
+    @Test
+    fun `a change under an ignored folder keeps the list and no walk starts`() = timeoutRunBlocking(30.seconds) {
+        write("e.txt" to "e\n", ".git/HEAD" to "ref: main\n")
+        val files = ProjectFiles.getInstance(project.get())
+        val before = files.candidates()
+        assertTrue("e.txt" in before && before.none { it.startsWith(".git/") }, before.toString())
+        // The reads the writes above asked for are done before the count is taken.
+        files.settle()
+        val read = files.candidates()
+        val reads = files.reads.get()
+        // A commit writes under .git: the cached list stands (the same instance), and no walk starts.
+        write(".git/index" to "i")
+        assertSame(read, files.candidates())
+        files.settle()
+        assertEquals(reads, files.reads.get(), "no walk for a change under an ignored folder")
+        // A new file in a listed folder drops it: the synchronous refresh clears the cache before the write returns.
+        write("f.txt" to "f\n")
+        val after = files.candidates()
+        assertTrue("f.txt" in after, after.toString())
+    }
+
     @Test
     fun `a mentioned file with unsaved changes gives its buffer`() = timeoutRunBlocking(30.seconds) {
-        val base = write("d.txt" to "d\n")
+        // Its own folder: `dir` exists whatever ran before, so the directory check below is real.
+        val base = write("d.txt" to "d\n", "dir/x.txt" to "x")
         val file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(base.resolve("d.txt"))!!
         val files = ProjectFiles.getInstance(project.get())
         val document = withContext(Dispatchers.EDT) { FileDocumentManager.getInstance().getDocument(file)!! }
@@ -91,7 +115,7 @@ class ProjectFilesTest {
             assertEquals("changed\n", files.unsavedText("d.txt"))
             assertEquals("changed\n", files.unsavedText(base.resolve("d.txt").toString()))
             assertNull(files.unsavedText("missing.txt"))
-            assertNull(files.unsavedText("b"), "a directory has no buffer")
+            assertNull(files.unsavedText("dir"), "a directory has no buffer")
         } finally {
             withContext(Dispatchers.EDT) { FileDocumentManager.getInstance().saveAllDocuments() }
         }
