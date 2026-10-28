@@ -83,11 +83,13 @@ class EditDiff(private val project: Project) : DiffPresenter {
      */
     override suspend fun show(proposal: EditProposal): Decision {
         val result = CompletableDeferred<Decision>()
-        val opened = withContext(Dispatchers.EDT) { open(proposal, result) }
         try {
+            withContext(Dispatchers.EDT) { open(proposal, result) }
             return result.await()
         } finally {
-            withContext(NonCancellable + Dispatchers.EDT) { dismiss(opened) }
+            // Found through [shown], not through open()'s return value: a Stop that lands while the diff opens makes withContext
+            // drop that value (prompt cancellation) after open() put the diff on screen, and the diff must close all the same.
+            withContext(NonCancellable + Dispatchers.EDT) { shown?.takeIf { it.result === result }?.let(::dismiss) }
         }
     }
 
@@ -106,7 +108,7 @@ class EditDiff(private val project: Project) : DiffPresenter {
         ApplicationManager.getApplication().invokeLater({ dismiss(current) }, ModalityState.any())
     }
 
-    private fun open(proposal: EditProposal, result: CompletableDeferred<Decision>): Shown {
+    private fun open(proposal: EditProposal, result: CompletableDeferred<Decision>) {
         val name = proposal.fileName
         val factory = DiffContentFactory.getInstance()
         val document = proposal.document
@@ -163,6 +165,8 @@ class EditDiff(private val project: Project) : DiffPresenter {
         val editors = try {
             showDiffFile(file).also { check(it.isNotEmpty()) { "the IDE opened no editor for it" } }
         } catch (e: Throwable) {
+            // The IDE may have put the file on screen before failing: nothing would ever close it.
+            if (!project.isDisposed) FileEditorManager.getInstance(project).closeFile(file)
             Disposer.dispose(disposable)
             throw e
         }
@@ -173,7 +177,7 @@ class EditDiff(private val project: Project) : DiffPresenter {
         // The file editor goes away with its tab or window, in either placement: no choice made by then is a rejection.
         Disposer.register(editors[0]) { result.complete(Decision.Rejected(null)) }
         LOG.debug("diff opened for request ${proposal.call.requestId}")
-        return Shown(proposal, request, file, editors, bar, accept, reject, right, result, disposable).also { shown = it }
+        shown = Shown(proposal, request, file, editors, bar, accept, reject, right, result, disposable)
     }
 
     /** Opens (or brings to the front) the diff's [file] where the IDE's preference says: an editor tab or a window. On the EDT. */

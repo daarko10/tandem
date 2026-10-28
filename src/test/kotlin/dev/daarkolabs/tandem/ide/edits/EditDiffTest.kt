@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.ide.edits
 
 import com.intellij.diff.contents.EmptyContent
+import com.intellij.diff.editor.ChainDiffVirtualFile
 import com.intellij.diff.util.DiffUserDataKeys
 import com.intellij.diff.util.DiffUserDataKeysEx
 import com.intellij.diff.util.Side
@@ -12,7 +13,10 @@ import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.fileEditor.FileEditorManagerListener
+import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.testFramework.PlatformTestUtil
 import com.intellij.testFramework.TestActionEvent
 import com.intellij.testFramework.common.timeoutRunBlocking
@@ -26,8 +30,10 @@ import dev.daarkolabs.tandem.session.ToolCall
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -43,6 +49,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
@@ -225,4 +232,33 @@ class EditDiffTest {
             }
             assertEquals(Decision.Accepted("delta\n", all = false), decision.await())
         }
+    @Test
+    fun `a Stop that lands while the diff opens closes it`() = timeoutRunBlocking(30.seconds) {
+        val proposal = editProposal().first
+        val listening = Disposer.newDisposable("test listener")
+        try {
+            lateinit var job: Job
+            var opened: VirtualFile? = null
+            // beforeFileOpened runs on the EDT inside showDiffFile, so the cancel lands while EditDiff.open is running.
+            project.messageBus.connect(listening).subscribe(
+                FileEditorManagerListener.Before.FILE_EDITOR_MANAGER,
+                object : FileEditorManagerListener.Before {
+                    override fun beforeFileOpened(source: FileEditorManager, file: VirtualFile) {
+                        if (file is ChainDiffVirtualFile) {
+                            opened = file
+                            job.cancel()
+                        }
+                    }
+                },
+            )
+            job = launch { diff.show(proposal) }
+            job.join()
+            assertTrue(job.isCancelled)
+            val file = assertNotNull(opened, "the diff began to open")
+            assertFalse(withContext(Dispatchers.EDT) { FileEditorManager.getInstance(project).isFileOpen(file) }, "the diff closed")
+            assertEquals(null, diff.shown)
+        } finally {
+            Disposer.dispose(listening)
+        }
+    }
 }
