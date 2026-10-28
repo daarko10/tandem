@@ -136,13 +136,27 @@ class EditMatcherTest {
     }
 
     @Test
-    fun `past 20 000 input lines the diff is the whole-file block`() {
+    fun `long files diff between their common ends, and only a middle over 20 000 lines falls back`() {
         val a = (1..10_001).joinToString("\n") { "same $it" }
-        val b = a + "\nextra"
-        val diff = EditMatcher.unifiedDiff(a, b, "a", "b", maxLines = 5)
-        // No common prefix is looked for: every old line is removed and every new one added, in one hunk.
-        assertEquals("--- a\n+++ b\n@@ -1,10001 +1,10002 @@\n-same 1\n… 20002 more lines", diff)
-        assertEquals(10_002 to 10_001, EditMatcher.lineChanges(a, b))
+        // A one-line append to a 10 001-line file is one hunk and one line: the common start is trimmed before the bound applies.
+        assertEquals(
+            "--- a\n+++ b\n@@ -9999,3 +9999,4 @@\n same 9999\n same 10000\n same 10001\n+extra",
+            EditMatcher.unifiedDiff(a, a + "\nextra", "a", "b"),
+        )
+        assertEquals(1 to 0, EditMatcher.lineChanges(a, a + "\nextra"))
+        // Identical texts have no diff at any size.
+        assertEquals("", EditMatcher.unifiedDiff(a, a, "a", "b"))
+        assertEquals(0 to 0, EditMatcher.lineChanges(a, a))
+        // A middle of exactly 20 000 lines is still diffed (here as one block, its edit distance being past Myers' bound).
+        val oldAt = (1..10_000).joinToString("\n") { "old $it" }
+        val newAt = (1..10_000).joinToString("\n") { "new $it" }
+        assertTrue(EditMatcher.unifiedDiff("head\n$oldAt\ntail", "head\n$newAt\ntail", "a", "b").startsWith("--- a\n+++ b\n@@ -1,10002 +1,10002 @@\n head\n-old 1\n"))
+        assertEquals(10_000 to 10_000, EditMatcher.lineChanges("head\n$oldAt\ntail", "head\n$newAt\ntail"))
+        // One line more and the diff falls back to nothing (the result shows the file block alone); the counts are the middle's.
+        val oldOver = "head\n$oldAt\nold 10001\ntail"
+        val newOver = "head\n$newAt\nnew 10001\ntail"
+        assertEquals("", EditMatcher.unifiedDiff(oldOver, newOver, "a", "b"))
+        assertEquals(10_001 to 10_001, EditMatcher.lineChanges(oldOver, newOver))
     }
 
     @Test

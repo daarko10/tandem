@@ -19,7 +19,10 @@ sealed interface Match {
  * `\r\n` and lone `\r` in `old_string` and `new_string` are read as `\n`.
  */
 object EditMatcher {
-    /** Myers gives up on inputs longer than this (both sides' lines together): the diff is then the whole-file block. */
+    /**
+     * Myers gives up when the lines between the common start and end (both sides together) are more than this: [unifiedDiff] is then
+     * empty and the result shows the file block alone (spec 8's whole-file fallback), and [lineChanges] counts those lines.
+     */
     private const val MAX_INPUT_LINES = 20_000
 
     /** The largest edit distance Myers searches; past it the lines between the common start and end are one block. */
@@ -102,11 +105,11 @@ object EditMatcher {
     /**
      * The unified diff of [a] → [b] by line, in difflib's layout (`--- aName`, `+++ bName`, `@@ -s,l +s,l @@` hunks with 3 lines
      * of context, no trailing newline), empty when the two have the same lines. Longer than [maxLines] lines, it is cut to
-     * `maxLines - 1` lines and a last line `… <n> more lines`. Past 20 000 input lines it is one hunk of every old line removed and
-     * every new one added.
+     * `maxLines - 1` lines and a last line `… <n> more lines`. Empty too when more than 20 000 lines (both sides together) lie between
+     * the common start and end: the caller then shows the file alone.
      */
     fun unifiedDiff(a: String, b: String, aName: String, bName: String, maxLines: Int = 400): String {
-        val ops = lineOps(lines(a), lines(b))
+        val ops = lineOps(lines(a), lines(b)) ?: return ""
         if (ops.all { it.kind == ' ' }) return ""
         val out = ArrayList<String>()
         out += "--- $aName"
@@ -121,9 +124,18 @@ object EditMatcher {
         return cutLines(out, maxLines).joinToString("\n")
     }
 
-    /** The lines [b] adds to [a] and the lines it removes, as `+<added> −<removed>` counts them (the same diff as [unifiedDiff]). */
+    /**
+     * The lines [b] adds to [a] and the lines it removes, as `+<added> −<removed>` counts them (the same diff as [unifiedDiff]); past
+     * the 20 000-line bound, the lines between the common start and end on each side, an upper bound.
+     */
     fun lineChanges(a: String, b: String): Pair<Int, Int> {
-        val ops = lineOps(lines(a), lines(b))
+        val aLines = lines(a)
+        val bLines = lines(b)
+        val ops = lineOps(aLines, bLines)
+        if (ops == null) {
+            val (prefix, suffix) = commonEnds(aLines, bLines)
+            return (bLines.size - prefix - suffix) to (aLines.size - prefix - suffix)
+        }
         return ops.count { it.kind == '+' } to ops.count { it.kind == '-' }
     }
 
@@ -170,19 +182,23 @@ object EditMatcher {
     /** One line of the edit script: [kind] ` ` kept, `-` removed, `+` added; [aIndex] and [bIndex] are the 0-based positions before it. */
     private class Op(val kind: Char, val line: String, val aIndex: Int, val bIndex: Int)
 
-    private fun lineOps(a: List<String>, b: List<String>): List<Op> {
-        val ops = ArrayList<Op>(a.size + b.size)
-        if (a.size + b.size > MAX_INPUT_LINES) {
-            block(ops, a, b, 0, a.size, 0, b.size)
-            return ops
-        }
+    /** The lines the two texts share at their start and, after those, at their end. */
+    private fun commonEnds(a: List<String>, b: List<String>): Pair<Int, Int> {
         var prefix = 0
         while (prefix < a.size && prefix < b.size && a[prefix] == b[prefix]) prefix++
         var suffix = 0
         while (suffix < a.size - prefix && suffix < b.size - prefix && a[a.size - 1 - suffix] == b[b.size - 1 - suffix]) suffix++
-        for (i in 0 until prefix) ops += Op(' ', a[i], i, i)
+        return prefix to suffix
+    }
+
+    /** The edit script of [a] → [b]: the common start and end kept, Myers between; null when that middle is over [MAX_INPUT_LINES]. */
+    private fun lineOps(a: List<String>, b: List<String>): List<Op>? {
+        val (prefix, suffix) = commonEnds(a, b)
         val aEnd = a.size - suffix
         val bEnd = b.size - suffix
+        if ((aEnd - prefix) + (bEnd - prefix) > MAX_INPUT_LINES) return null
+        val ops = ArrayList<Op>(a.size + b.size)
+        for (i in 0 until prefix) ops += Op(' ', a[i], i, i)
         if (!myers(ops, a, b, prefix, aEnd, prefix, bEnd)) block(ops, a, b, prefix, aEnd, prefix, bEnd)
         for (i in 0 until suffix) ops += Op(' ', a[aEnd + i], aEnd + i, bEnd + i)
         return ops
