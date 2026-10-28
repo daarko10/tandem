@@ -126,4 +126,22 @@ class SlashPaletteViewTest {
         assertFalse(filterHintShown("", open))
         assertEquals("Type to filter", FILTER_HINT)
     }
+
+    @Test
+    fun `scopeLabel names every source`() {
+        // spec 17.6
+        val labels = mapOf(
+            CommandScope.BUILTIN to null,
+            CommandScope.PROJECT to "project",
+            CommandScope.USER to "user",
+            CommandScope.PLUGIN to "plugin",
+            CommandScope.CLAUDE_AI to "claude.ai",
+            CommandScope.MANAGED to "managed",
+            CommandScope.CLI_FLAG to "CLI flag",
+            CommandScope.MCP to "MCP",
+            CommandScope.OTHER to null,
+        )
+        assertEquals(CommandScope.entries.toSet(), labels.keys)
+        for ((scope, label) in labels) assertEquals(label, scopeLabel(scope), scope.name)
+    }
 }

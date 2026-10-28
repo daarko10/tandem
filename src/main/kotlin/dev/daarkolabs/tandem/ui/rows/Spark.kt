@@ -21,7 +21,6 @@ import dev.daarkolabs.tandem.chat.Orb
 import dev.daarkolabs.tandem.chat.OrbIndicator
 import dev.daarkolabs.tandem.ui.lineHeight
 import dev.daarkolabs.tandem.ui.smallTextStyle
-import kotlinx.coroutines.delay
 
 /** How far an orb's light centre sits up and to the left of its middle, and how far its shading spreads, in orb radii. */
 private const val LIGHT_OFFSET = 0.35f
@@ -43,7 +42,7 @@ private const val FRAME_PAUSE_MS = 33L
 /**
  * The working row's indicator (spec 4.9.1): the desktop app's coral orbs turning in 3D ([OrbIndicator]), on a square as tall as a line
  * of the row's text, each a disc of [tint], barely lighter up and to the left of its middle and darker towards its edge, drawn far to near.
- * While [animated] a frame-clock loop moves a time that only the draw phase reads, at most about 30 times a second ([FRAME_PAUSE_MS]),
+ * While [animated] a frame-clock loop moves a time that only the draw phase reads, at most about 30 times a second ([FRAME_PAUSE_MS], in [LocalMotionPause]),
  * so the row redraws but never recomposes, and in a layer of its own, so that only the indicator's small picture is drawn again, not
  * the chat's; the loop ends when the row leaves the composition. Otherwise it shows [OrbIndicator.STILL], in [tint]: the warning or
  * error colour while the row waits or the CLI is silent, and the time goes back to 0, so that a row that animates again starts the
@@ -52,12 +51,13 @@ private const val FRAME_PAUSE_MS = 33L
 @Composable
 internal fun Spark(animated: Boolean, tint: Color) {
     var elapsed by remember { mutableLongStateOf(0L) }
+    val pause = LocalMotionPause.current
     LaunchedEffect(animated) {
         if (animated) {
             val start = withFrameMillis { it }
             while (true) {
                 withFrameMillis { elapsed = it - start }
-                delay(FRAME_PAUSE_MS)
+                pause(FRAME_PAUSE_MS)
             }
         } else {
             elapsed = 0L

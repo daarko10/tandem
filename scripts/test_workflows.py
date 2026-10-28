@@ -797,7 +797,8 @@ class NightlyWorkflowTest(unittest.TestCase):
         scenarios = [s["run"].strip() for s in contract if "record-scenario.sh" in s.get("run", "")]
         for run in scenarios:
             self.assertRegex(run, r"^\./scripts/record-scenario\.sh [a-z-]+ build/contract$")
-        self.assertEqual(["bash-mode", "bash-mode-context", "bash-mode-respond", "mcp-slash", "mcp-status", "mcp-tool-call"],
+        self.assertEqual(["bash-mode", "bash-mode-context", "bash-mode-respond", "fork-at", "mcp-slash", "mcp-status", "mcp-tool-call",
+                          "parity-requests", "queue-cancel", "queue-cancel-steer", "queue-during-card", "queue-fold", "queue-later"],
                          sorted(run.split()[1] for run in scenarios))   # the scenarios ContractTest checks
 
     def test_the_nightly_keeps_its_name_schedule_and_no_interpolated_run_line(self):

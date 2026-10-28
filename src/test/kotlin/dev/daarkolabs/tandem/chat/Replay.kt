@@ -17,8 +17,8 @@ import kotlinx.serialization.json.JsonPrimitive
 internal const val PROMPT = "Reply with the single word: pong"
 
 /**
- * Replays fixture [name] through [reduce], starting from [initial], with one [ChatRowsBuilder] that builds after every event (it never
- * throws). Before every `system/init` line it sends [prompt] as `UserSent("u<line>")`, as the fake CLI waits for one prompt per init.
+ * Replays fixture [name] through [reduce], starting from [initial], with one [ChatRowsBuilder] ([builder]) that builds after every
+ * event (it never throws); a test that goes on building passes its own. Before every `system/init` line it sends [prompt] as `UserSent("u<line>")`, as the fake CLI waits for one prompt per init.
  * Each line `i` (0-based) is stamped `i * 100` ms. [lines] replaces the fixture's lines (a test that patches one in memory). [onLine]
  * sees the 1-based line number, the state and the rows after that line.
  */
@@ -28,9 +28,9 @@ internal fun replay(
     prompt: String = PROMPT,
     initial: ChatState = ChatState(),
     lines: List<String> = Fixtures.lines(name),
+    builder: ChatRowsBuilder = ChatRowsBuilder(options),
     onLine: (line: Int, state: ChatState, rows: ChatRows) -> Unit = { _, _, _ -> },
 ): Pair<ChatState, ChatRows> {
-    val builder = ChatRowsBuilder(options)
     var state = initial
     var rows = builder.build(state)
     lines.forEachIndexed { i, line ->
@@ -40,6 +40,33 @@ internal fun replay(
             rows = builder.build(state)
         }
         state = reduce(state, SessionEvent.Cli(message, atMillis = i * 100L))
+        rows = builder.build(state)
+        onLine(i + 1, state, rows)
+    }
+    return state to rows
+}
+
+/**
+ * Replays fixture [name] as [replay] does, with the host's own sends: the events [sends] lists under `n` are reduced right before line
+ * `n` (1-based), and nothing else is sent. Unlike [replay] it sends no prompt before each `system/init`, which would put a made-up
+ * [PROMPT] user message inside a queued turn (`queue-later:54`). Each line `i` (0-based) and the sends before it are stamped `i * 100`
+ * ms. [onLine] sees the 1-based line number, the state and the rows after that line.
+ */
+internal fun replayWithSends(
+    name: String,
+    sends: Map<Int, List<SessionEvent>>,
+    options: RowOptions = RowOptions(showThinking = true),
+    onLine: (line: Int, state: ChatState, rows: ChatRows) -> Unit = { _, _, _ -> },
+): Pair<ChatState, ChatRows> {
+    val builder = ChatRowsBuilder(options)
+    var state = ChatState()
+    var rows = builder.build(state)
+    Fixtures.lines(name).forEachIndexed { i, line ->
+        sends[i + 1]?.forEach { event ->
+            state = reduce(state, event)
+            rows = builder.build(state)
+        }
+        state = reduce(state, SessionEvent.Cli(Ndjson.decode(line), atMillis = i * 100L))
         rows = builder.build(state)
         onLine(i + 1, state, rows)
     }

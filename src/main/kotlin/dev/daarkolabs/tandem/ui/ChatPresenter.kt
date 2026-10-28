@@ -11,9 +11,11 @@ import dev.daarkolabs.tandem.chat.ChatRow
 import dev.daarkolabs.tandem.chat.ChatRows
 import dev.daarkolabs.tandem.chat.ChatRowsBuilder
 import dev.daarkolabs.tandem.chat.ComposerModel
+import dev.daarkolabs.tandem.chat.ImageRef
 import dev.daarkolabs.tandem.chat.NoticeRow
 import dev.daarkolabs.tandem.chat.PendingCard
 import dev.daarkolabs.tandem.chat.PlanCard
+import dev.daarkolabs.tandem.chat.QueuedRow
 import dev.daarkolabs.tandem.chat.RowGap
 import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.chat.TextRow
@@ -66,7 +68,7 @@ import kotlin.math.roundToInt
 /**
  * A chat row as the list draws it (spec 5.6): the [row], the parsed Markdown of a [TextRow] in [blocks], and in [bodies] the parsed
  * Markdown of the opened bodies of a [ToolRow] ([ToolBody.Markdown], [ToolBody.Links]), by the row's key for a lone call or by the
- * sub-row key `c:<call id>` for a call of a group. [images] holds the decoded thumbnails of a [UserRow]'s images, by image id, once
+ * sub-row key `c:<call id>` for a call of a group. [images] holds the decoded thumbnails of a [UserRow]'s (or [QueuedRow]'s) images, by image id, once
  * decoded (polish spec 2.7, 3.4).
  */
 internal data class RenderedRow(
@@ -76,16 +78,12 @@ internal data class RenderedRow(
     val images: ImmutableMap<String, ImageBitmap> = persistentMapOf(),
 )
 
-/**
- * The chat list's rows, the pending request's card, how many more requests wait, a plan card's plan, parsed, and the entry id of the
- * last ended turn's reply ([ChatRows.latestReply]).
- */
+/** The chat list's rows, the pending request's card, how many more requests wait, and a plan card's plan, parsed. */
 internal data class RenderedChat(
     val rows: ImmutableList<RenderedRow>,
     val card: PendingCard?,
     val moreWaiting: Int,
     val planBlocks: ImmutableList<MarkdownBlock>?,
-    val latestReply: String? = null,
 )
 
 /**
@@ -148,13 +146,7 @@ internal class ChatPresenter(
     val context: StateFlow<ContextUsage?> = state.map { it.context }.distinctUntilChanged().flowOn(Dispatchers.Default)
         .stateIn(scope, SharingStarted.Eagerly, state.value.context)
 
-    /**
-     * The entry id of the last ended turn's reply, the one `Fork from here` forks (polish spec 2.6). Only the hover rows read it, so a
-     * turn's start or end recomposes them and never a text row.
-     */
-    val latestReply: StateFlow<String?> = chat.map { it.latestReply }.distinctUntilChanged().stateIn(scope, SharingStarted.Eagerly, null)
-
-    /** Whether a turn runs, for the hover rows' fork state (polish spec 2.6). */
+    /** Whether a turn runs, for the prompt bar. */
     val busy: StateFlow<Boolean> = composer.map { it.busy }.distinctUntilChanged().stateIn(scope, SharingStarted.Eagerly, composer.value.busy)
 
     // Touched by the rendering coroutine only.
@@ -305,7 +297,7 @@ internal class ChatPresenter(
             sinceFull = 0
         }
         goodRows = out
-        return RenderedChat(out, card, rows.moreWaiting, planBlocks, rows.latestReply)
+        return RenderedChat(out, card, rows.moreWaiting, planBlocks)
     }
 
     /**
@@ -317,8 +309,15 @@ internal class ChatPresenter(
         live += row.key
         return when (row) {
             is TextRow -> if (old != null && old.row == row) old else RenderedRow(row, blocks(row.key, row.markdown))
+            // `/context`'s report reads as Markdown (desktop-parity spec 3.1); every other notice stays plain text.
+            is NoticeRow -> if (old != null && old.row == row) old else RenderedRow(row, if (row.markdown) blocks(row.key, row.text) else null)
             is UserRow -> {
-                val images = thumbnailsOf(row, liveImages)
+                val images = thumbnailsOf(row.images, liveImages)
+                if (old != null && old.row == row && old.images == images) old else RenderedRow(row, null, images = images)
+            }
+            // A waiting message's thumbnails (desktop-parity spec 12.1), under the ids its user row takes over once it starts.
+            is QueuedRow -> {
+                val images = thumbnailsOf(row.images, liveImages)
                 if (old != null && old.row == row && old.images == images) old else RenderedRow(row, null, images = images)
             }
             is ToolRow -> {
@@ -372,10 +371,10 @@ internal class ChatPresenter(
      * The thumbnails of [row]'s images decoded so far, by id, their ids added to [liveImages]; starts decoding each image that has
      * none and is not being decoded (polish spec 3.4).
      */
-    private fun thumbnailsOf(row: UserRow, liveImages: MutableSet<String>): ImmutableMap<String, ImageBitmap> {
-        if (row.images.isEmpty()) return persistentMapOf()
+    private fun thumbnailsOf(refs: List<ImageRef>, liveImages: MutableSet<String>): ImmutableMap<String, ImageBitmap> {
+        if (refs.isEmpty()) return persistentMapOf()
         var images = persistentMapOf<String, ImageBitmap>()
-        row.images.forEach { ref ->
+        refs.forEach { ref ->
             liveImages += ref.id
             when {
                 ref.id in thumbnails -> thumbnails[ref.id]?.let { images = images.put(ref.id, it) }
@@ -387,7 +386,9 @@ internal class ChatPresenter(
 
     /** Decodes the image [id] of the state being rendered in a child coroutine, and hands the result to the rendering coroutine. */
     private fun startDecoding(id: String) {
-        val image = rendering?.entries?.firstNotNullOfOrNull { entry -> (entry as? ChatEntry.User)?.images?.firstOrNull { it.id == id } }
+        val state = rendering
+        val image = state?.entries?.firstNotNullOfOrNull { entry -> (entry as? ChatEntry.User)?.images?.firstOrNull { it.id == id } }
+            ?: state?.pendingSends?.firstNotNullOfOrNull { send -> send.images.firstOrNull { it.id == id } }
         if (image == null) {
             decoding -= id
             thumbnails[id] = null

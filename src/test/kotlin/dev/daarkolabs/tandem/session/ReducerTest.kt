@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
@@ -9,6 +10,9 @@ import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.McpStatus
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.StreamEvent
+import dev.daarkolabs.tandem.protocol.UsageAnswer
+import dev.daarkolabs.tandem.session.transcript.TranscriptReader
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -21,8 +25,10 @@ import org.junit.Test
 import kotlin.system.measureTimeMillis
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ReducerTest {
@@ -432,6 +438,64 @@ class ReducerTest {
         assertEquals(PermissionMode.ACCEPT_EDITS, state.permissionMode)
         assertEquals(setOf("tandem-8"), state.permissionModeChanges.keys)
         assertTrue((state.entries.last() as ChatEntry.Notice).text.startsWith("The CLI rejected the switch to permission mode plan"))
+    }
+
+    @Test
+    fun `an init whose mode differs from the spawn's --permission-mode says so`() {
+        val init = SessionEvent.Cli(at("permission-mode", 5)) // "permissionMode":"default"
+        val state = reduce(ChatState(launchPermissionMode = PermissionMode.AUTO), init)
+        val warnings = state.entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == NoticeLevel.WARNING }
+        assertEquals(listOf("The CLI started in permission mode default, not auto as picked."), warnings.map { it.text })
+        assertEquals(PermissionMode.DEFAULT, state.permissionMode)
+        assertNull(state.launchPermissionMode)
+
+        val same = reduce(ChatState(launchPermissionMode = PermissionMode.DEFAULT), init)
+        assertTrue(same.entries.none { it is ChatEntry.Notice }, "the CLI started as picked")
+        assertNull(same.launchPermissionMode)
+
+        val second = reduce(state, init)
+        assertEquals(1, second.entries.count { it is ChatEntry.Notice }, "only the first init after the spawn is checked")
+    }
+
+    @Test
+    fun `a pick before the first init cancels the launch-mode check`() {
+        var state = ChatState(launchPermissionMode = PermissionMode.ACCEPT_EDITS)
+        state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.PLAN, "r1"))
+        state = reduce(state, success("r1"))
+        state = reduce(state, edited("permission-mode", 5) { it["permissionMode"] = JsonPrimitive("plan") })
+        assertTrue(state.entries.none { it is ChatEntry.Notice && it.level == NoticeLevel.WARNING })
+        assertEquals(PermissionMode.PLAN, state.permissionMode)
+        assertNull(state.launchPermissionMode)
+
+        val silent = reduce(ChatState(launchPermissionMode = PermissionMode.ACCEPT_EDITS), edited("permission-mode", 5) { it.remove("permissionMode") })
+        assertTrue(silent.entries.none { it is ChatEntry.Notice && it.level == NoticeLevel.WARNING }, "an init without a mode says nothing")
+        assertNull(silent.launchPermissionMode)
+    }
+
+    @Test
+    fun `a refused mode joins rejectedPermissionModes, a reported one leaves, Ended clears them`() {
+        var state = ChatState()
+        for (line in Fixtures.lines("permission-mode-rejected")) {
+            val message = Ndjson.decode(line)
+            if (message is CliMessage.ControlResponse && !message.isSuccess) {
+                state = reduce(state, SessionEvent.PermissionModeRequested(PermissionMode.BYPASS_PERMISSIONS, message.requestId))
+            }
+            state = reduce(state, SessionEvent.Cli(message))
+        }
+        assertEquals(setOf(PermissionMode.BYPASS_PERMISSIONS), state.rejectedPermissionModes)
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().single { it.level == NoticeLevel.ERROR }
+        assertEquals(
+            "The CLI rejected the switch to permission mode bypassPermissions (Cannot set permission mode to bypassPermissions " +
+                "because the session was not launched with --dangerously-skip-permissions); it stays default.",
+            notice.text,
+        )
+
+        val reported = reduce(state, cli("""{"type":"system","subtype":"status","status":null,"permissionMode":"bypassPermissions","uuid":"u","session_id":"s"}"""))
+        assertEquals(emptySet(), reported.rejectedPermissionModes)
+
+        val auto = ChatState(rejectedPermissionModes = setOf(PermissionMode.AUTO))
+        assertEquals(emptySet(), reduce(auto, SessionEvent.Ended("x", isError = false)).rejectedPermissionModes)
+        assertEquals(emptySet(), auto.settled().rejectedPermissionModes)
     }
 
     @Test
@@ -1613,8 +1677,549 @@ class ReducerTest {
         assertEquals(7L, shell.startedAtMillis)
         assertNull(state.runningShell)
     }
+
+    // --- Desktop parity (spec 4.2, 9.2): plugins, skills and folders from init, the usage card, the context breakdown ---
+
+    private fun usageAt(line: Int): UsageAnswer =
+        assertNotNull(ControlPayloads.usage((at("parity-usage", line) as CliMessage.ControlResponse).payload))
+
+    private fun breakdownAt(line: Int): ContextBreakdown =
+        assertNotNull(ControlPayloads.contextUsage((at("parity-context", line) as CliMessage.ControlResponse).payload))
+
+    private fun ChatState.usageNotices(): List<ChatEntry.Notice> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.kind == NoticeKind.LOCAL_COMMAND }
+
+    /** A state with one usage notice for `u1` whose card is [card]. */
+    private fun withCard(card: UsageCard, breakdown: ContextBreakdown? = null): ChatState {
+        val line = Fixtures.lines("parity-usage")[21].replace("<uuid-28>", "u1")
+        return reduce(ChatState(contextBreakdown = breakdown), cli(line)).let { state ->
+            val notice = state.usageNotices().single()
+            state.copy(entries = state.entries.map { if (it === notice) notice.copy(usage = card) else it }, entryIndex = emptyMap())
+        }
+    }
+
+    private fun ChatState.card(): UsageCard = assertNotNull(usageNotices().single().usage)
+
+    @Test
+    fun `an init sets the plugins and added directories`() {
+        val states = replay("parity-add-dir")
+        assertEquals(4, states[5].plugins.size)
+        assertEquals(emptyList(), states[5].additionalDirectories)
+        assertEquals(listOf("<path>"), states[17].additionalDirectories)
+    }
+
+    @Test
+    fun `an init replaces the skills`() {
+        val states = replay("parity-add-dir")
+        assertEquals(35, states[5].skills.size)
+        assertTrue("probe-kit:greet" in states[5].skills)
+        val withoutSkills = edited("parity-add-dir", 5) { it.remove("skills") }
+        assertEquals(emptyList(), reduce(states[5], withoutSkills).skills)
+    }
+
+    @Test
+    fun `a stream usage line gets a pending card`() {
+        val state = replay("parity-usage")[22]
+        val notice = state.entries.filterIsInstance<ChatEntry.Notice>().last()
+        assertEquals(NoticeKind.LOCAL_COMMAND, notice.kind)
+        assertEquals("usage", notice.runCommand)
+        assertEquals("<uuid-28>", notice.sourceUuid)
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), notice.usage)
+    }
+
+    // spec: /cost gets the same card
+    @Test
+    fun `cost gets the same card`() {
+        val notices = replay("parity-usage")[28].usageNotices()
+        assertEquals(2, notices.size)
+        assertEquals("<uuid-36>", notices[1].sourceUuid)
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), notices[1].usage)
+    }
+
+    @Test
+    fun `a transcript's usage line has no card`() = runBlocking {
+        val notices = TranscriptReader.read(Fixtures.transcript("parity-usage")).state.usageNotices()
+        assertEquals(2, notices.size)
+        assertTrue(notices.all { it.usage == null && it.sourceUuid == null }, notices.toString())
+    }
+
+    @Test
+    fun `usage answers fill their own card`() {
+        val u16 = usageAt(16)
+        val u17 = usageAt(17)
+        val through = replay("parity-usage")[28]
+        val first = reduce(through, SessionEvent.UsageFetched("<uuid-28>", UsagePart.SESSION, McpResult.Ok(u16)))
+        val (one, two) = first.usageNotices()
+        assertEquals(UsagePartState.Loaded(u16.session!!), one.usage!!.session)
+        assertEquals(UsagePartState.Loading, one.usage!!.history)
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), two.usage)
+
+        val second = reduce(first, SessionEvent.UsageFetched("<uuid-36>", UsagePart.HISTORY, McpResult.Ok(u17)))
+        assertEquals(UsagePartState.Loaded(u17.history), second.usageNotices()[1].usage!!.history)
+        assertEquals(UsagePartState.Loading, second.usageNotices()[1].usage!!.session)
+        assertEquals(one, second.usageNotices()[0])
+    }
+
+    @Test
+    fun `a usage answer for an unknown uuid changes nothing`() {
+        val state = replay("parity-usage")[28]
+        assertSame(state, reduce(state, SessionEvent.UsageFetched("nope", UsagePart.SESSION, McpResult.Ok(usageAt(16)))))
+        assertSame(state, reduce(state, SessionEvent.UsageRetry("nope", UsagePart.SESSION)))
+    }
+
+    @Test
+    fun `a session answer without session fails the part`() {
+        val state = reduce(
+            withCard(UsageCard(UsagePartState.Loading, UsagePartState.Loading)),
+            SessionEvent.UsageFetched("u1", UsagePart.SESSION, McpResult.Ok(UsageAnswer(null, null))),
+        )
+        assertEquals(UsagePartState.Failed(McpError.Rejected("the CLI's answer had no session")), state.card().session)
+        val failed = reduce(state, SessionEvent.UsageFetched("u1", UsagePart.HISTORY, McpResult.Failed(McpError.TimedOut(60))))
+        assertEquals(UsagePartState.Failed(McpError.TimedOut(60)), failed.card().history)
+    }
+
+    @Test
+    fun `retry sets the parts loading`() {
+        val failed = UsagePartState.Failed(McpError.TimedOut(15))
+        val both = reduce(withCard(UsageCard(failed, failed)), SessionEvent.UsageRetry("u1", UsagePart.SESSION))
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), both.card())
+
+        val loaded = UsagePartState.Loaded(usageAt(16).session!!)
+        val history = reduce(withCard(UsageCard(loaded, failed)), SessionEvent.UsageRetry("u1", UsagePart.HISTORY))
+        assertEquals(UsageCard(loaded, UsagePartState.Loading), history.card())
+    }
+
+    @Test
+    fun `a breakdown answer replaces the last one`() {
+        val b2 = breakdownAt(2)
+        val b17 = breakdownAt(17)
+        val state = reduce(reduce(ChatState(), SessionEvent.ContextBreakdownListed(b2)), SessionEvent.ContextBreakdownListed(b17))
+        assertEquals(b17, state.contextBreakdown)
+    }
+
+    @Test
+    fun `a process end turns loading usage parts into ended`() {
+        val loaded = UsagePartState.Loaded(usageAt(16).session!!)
+        val ended = reduce(withCard(UsageCard(loaded, UsagePartState.Loading)), SessionEvent.Ended("x", isError = false))
+        assertEquals(UsageCard(loaded, UsagePartState.Failed(McpError.Ended)), ended.card())
+    }
+
+    @Test
+    fun `a stop settles loading usage parts`() {
+        val b17 = breakdownAt(17)
+        val settled = withCard(UsageCard(UsagePartState.Loading, UsagePartState.Loading), breakdown = b17).settled()
+        assertEquals(UsageCard(UsagePartState.Failed(McpError.Ended), UsagePartState.Failed(McpError.Ended)), settled.card())
+        assertEquals(b17, settled.contextBreakdown)
+    }
+
+    @Test
+    fun `a usage line inside a subagent gets no card`() {
+        val line = edited("parity-usage", 22) { it["parent_tool_use_id"] = JsonPrimitive("toolu_1") }
+        val notice = reduce(ChatState(), line).usageNotices().single()
+        assertNull(notice.usage)
+        assertNull(notice.sourceUuid)
+    }
+
+    // --- Sending while Claude works (spec 12.1 to 12.6, 9.7) ---
+
+    /** A message the host sent to a live process, as [ClaudeSession.sendUserMessage] reduces it. */
+    private fun live(uuid: String, text: String, later: Boolean = false, held: Boolean = false): SessionEvent =
+        SessionEvent.UserSent(uuid, text, live = true, later = later, held = held)
+
+    /**
+     * Fixture [name] replayed with the host's own sends: the events [sends] lists under `n` are reduced right after line `n` (0: before
+     * the first line), and the lines in [skip] are left out. Element `n` is the state after line `n` and its sends.
+     */
+    private fun hostReplay(name: String, sends: Map<Int, List<SessionEvent>>, skip: Set<Int> = emptySet()): List<ChatState> {
+        val lines = Fixtures.lines(name)
+        var state = sends[0].orEmpty().fold(ChatState()) { s, e -> reduce(s, e) }
+        val states = arrayListOf(state)
+        for (n in 1..lines.size) {
+            if (n !in skip) state = reduce(state, SessionEvent.Cli(Ndjson.decode(lines[n - 1])))
+            state = sends[n].orEmpty().fold(state) { s, e -> reduce(s, e) }
+            states += state
+        }
+        return states
+    }
+
+    private fun ChatState.stages(): List<Pair<String, PendingStage>> = pendingSends.map { it.uuid to it.stage }
+
+    private fun ChatState.noticeTexts(level: NoticeLevel): List<String> =
+        entries.filterIsInstance<ChatEntry.Notice>().filter { it.level == level }.map { it.text }
+
+    /** A turn open for prompt `p`, with F waiting in the CLI's queue. */
+    private fun waitingKiwi(): ChatState = reduce(reduce(ChatState(), SessionEvent.UserSent("p", "prompt")), live(QF, KIWI))
+
+    // spec: queue-fold, replayed with the host's sends: F waits, then joins the turn after the tool result
+    @Test
+    fun `queue-fold, replayed with the host's sends - F waits, then joins the turn after the tool result`() {
+        val states = hostReplay("queue-fold", mapOf(0 to listOf(live(QP, "Run it")), 18 to listOf(live(QF, KIWI))))
+        val waiting = states[19]
+        assertEquals(listOf(QF to PendingStage.QUEUED), waiting.stages())
+        assertFalse(waiting.pendingSends.single().later)
+        assertEquals(states[18].entries, waiting.entries)
+
+        val joined = states[22]
+        assertTrue(joined.pendingSends.isEmpty())
+        val folded = joined.entries.last() as ChatEntry.User
+        assertEquals(KIWI, folded.text)
+        assertTrue(folded.folded)
+        assertIs<ChatEntry.ToolResult>(joined.entries[joined.entries.lastIndex - 1], "right after the tool result that ended the round")
+        assertNotNull(joined.turn, "the turn is still open")
+
+        val end = states[53]
+        assertEquals(1, end.turnsEnded)
+        assertFalse(end.busy)
+        assertEquals(1, end.entries.count { it is ChatEntry.User && !it.folded })
+        assertEquals(1, end.entries.count { it is ChatEntry.TurnEnded })
+    }
+
+    // spec: queue-later: F opens its own turn after the first result
+    @Test
+    fun `queue-later - F opens its own turn after the first result`() {
+        val states = hostReplay("queue-later", mapOf(0 to listOf(live(QP, "Run it")), 18 to listOf(live(QF, KIWI, later = true))))
+        assertEquals(listOf(QF to PendingStage.QUEUED), states[19].stages())
+        assertTrue(states[19].pendingSends.single().later)
+
+        val first = states[51]
+        assertEquals(1, first.turnsEnded)
+        assertFalse(first.busy)
+        assertEquals(listOf(QF), first.pendingSends.map { it.uuid })
+
+        val second = states[53]
+        assertTrue(second.pendingSends.isEmpty())
+        assertTrue(second.busy)
+        val user = second.entries.last() as ChatEntry.User
+        assertEquals(QF, user.id)
+        assertFalse(user.folded)
+        assertEquals(2, states[63].turnsEnded)
+    }
+
+    // spec: queue-cancel: a withdrawn later message leaves; Edit returns it, Cancel drops it, no notice
+    @Test
+    fun `queue-cancel - a withdrawn later message leaves, Edit returns it, Cancel drops it, no notice`() {
+        val text = "Reply with only the word KIWI."
+        val states = hostReplay(
+            "queue-cancel",
+            mapOf(0 to listOf(live(QP1, "Run the command")), 22 to listOf(live(QF1, text, later = true))),
+        )
+        for (restore in listOf(true, false)) {
+            val asked = reduce(states[23], SessionEvent.WithdrawRequested(QF1, restore))
+            assertEquals(listOf(QF1 to PendingStage.WITHDRAWING), asked.stages())
+            val notices = asked.entries.count { it is ChatEntry.Notice }
+            val cancelled = reduce(asked, SessionEvent.Cli(at("queue-cancel", 24)))
+            assertTrue(cancelled.pendingSends.isEmpty())
+            assertEquals(if (restore) listOf(ReturnedSend(QF1, text, emptyList())) else emptyList(), cancelled.returnedSends, "restore=$restore")
+            assertEquals(notices, cancelled.entries.count { it is ChatEntry.Notice }, "no notice")
+            // The answer comes after the cancelled line (queue-cancel:25): nothing waits any more.
+            assertSame(cancelled, reduce(cancelled, SessionEvent.SendWithdrawn(QF1, restore, null)))
+            assertEquals(1, fold(cancelled, "queue-cancel", 25, 36).turnsEnded)
+        }
+    }
+
+    // spec: queue-cancel: Stop's cancelled lifecycle returns F2 with one INFO notice and no further turn
+    @Test
+    fun `queue-cancel - Stop's cancelled lifecycle returns F2 with one INFO notice and no further turn`() {
+        val text = "Reply with only the word MANGO."
+        val notice = "Not sent: \"Reply with only the word MANGO.\". It is back in the composer."
+        val states = hostReplay(
+            "queue-cancel",
+            mapOf(
+                0 to listOf(live(QP1, "Run the command")),
+                37 to listOf(live(QP2, "Run the second command")),
+                53 to listOf(live(QF2, text, later = true)),
+            ),
+        )
+        assertEquals(listOf(QF2 to PendingStage.QUEUED), states[54].stages())
+        val cancelled = states[55]
+        assertEquals(listOf(ReturnedSend(QF2, text, emptyList())), cancelled.returnedSends)
+        assertTrue(cancelled.pendingSends.isEmpty())
+        assertEquals(listOf(notice), cancelled.noticeTexts(NoticeLevel.INFO))
+        // The receipt names F2 too (queue-cancel:56): its cancelled line came first, so nothing changes.
+        assertSame(cancelled, reduce(cancelled, SessionEvent.SendWithdrawn(QF2, true, notice)))
+        val end = states[61]
+        assertFalse(end.busy)
+        assertNull(end.turn)
+        assertEquals(2, end.turnsEnded, "no further turn")
+        assertEquals(1, end.noticeTexts(NoticeLevel.INFO).count { it == notice })
+    }
+
+    // D8's recordings replayed with the host's sends where the recordings wrote them (Review Focus 12; probes 5.1).
+
+    @Test
+    fun `queue-cancel-steer, replayed with the host's sends - the withdrawn steer leaves and Stop returns the second`() {
+        // withdrawable, and Stop withdraws a steer
+        val s1 = "<command_uuid-25>"
+        val s2 = "<command_uuid-47>"
+        val mango = "Also say the word MANGO at the end."
+        val notice = "Not sent: \"Also say the word MANGO at the end.\". It is back in the composer."
+        val states = hostReplay(
+            "queue-cancel-steer",
+            mapOf(
+                0 to listOf(SessionEvent.UserSent("<command_uuid-4>", "Run the two commands")),
+                18 to listOf(live(s1, KIWI), SessionEvent.WithdrawRequested(s1, restore = true)),
+                35 to listOf(live(s2, mango)),
+            ),
+        )
+        assertEquals(listOf(s1 to PendingStage.WITHDRAWING), states[18].stages())
+        val withdrawn = states[20]
+        assertTrue(withdrawn.pendingSends.none { it.uuid == s1 })
+        assertEquals(listOf(ReturnedSend(s1, KIWI, emptyList())), withdrawn.returnedSends)
+        assertEquals(emptyList(), withdrawn.noticeTexts(NoticeLevel.INFO))
+        assertEquals(listOf(s2 to PendingStage.QUEUED), states[35].stages())
+        val stopped = states[37]
+        assertEquals(listOf(ReturnedSend(s1, KIWI, emptyList()), ReturnedSend(s2, mango, emptyList())), stopped.returnedSends)
+        assertTrue(stopped.pendingSends.isEmpty())
+        assertEquals(listOf(notice), stopped.noticeTexts(NoticeLevel.INFO))
+        val end = states.last()
+        assertFalse(end.busy)
+        assertNull(end.turn)
+        assertEquals(1, end.turnsEnded, "no further turn")
+        assertEquals(1, end.entries.count { it is ChatEntry.User })
+        assertEquals(1, end.noticeTexts(NoticeLevel.INFO).count { it == notice })
+    }
+
+    @Test
+    fun `queue-during-card, replayed with the host's sends - the message waits through the card and opens its own turn`() {
+        // waits
+        val c = "<command_uuid-26>"
+        val kiwi = "Reply with only the word KIWI."
+        val states = hostReplay(
+            "queue-during-card",
+            mapOf(
+                0 to listOf(SessionEvent.UserSent("<command_uuid-4>", "Touch the file")),
+                18 to listOf(live(c, kiwi, later = true)),
+            ),
+        )
+        val carded = states[18]
+        assertTrue(carded.pendingPermissions.isNotEmpty(), "the permission card is in the state")
+        assertEquals(listOf(c to PendingStage.QUEUED), carded.stages())
+        assertEquals(listOf(c to PendingStage.QUEUED), states[21].stages())
+        val first = states[31]
+        assertEquals(1, first.turnsEnded)
+        assertEquals(listOf(c), first.pendingSends.map { it.uuid })
+        val started = states[33]
+        assertTrue(started.pendingSends.isEmpty())
+        assertTrue(started.busy)
+        val user = assertIs<ChatEntry.User>(started.entries.last())
+        assertEquals(c, user.id)
+        assertEquals(kiwi, user.text)
+        assertFalse(user.folded)
+        assertEquals(2, states[43].turnsEnded)
+    }
+
+    @Test
+    fun `the turn's own lifecycle lines change nothing`() {
+        val state = reduce(ChatState(), live("<command_uuid-1>", "Count to a hundred"))
+        for (line in listOf(5, 7, 20)) {
+            val message = at("interrupt", line)
+            assertIs<CliMessage.CommandLifecycle>(message)
+            assertSame(state, reduce(state, SessionEvent.Cli(message)), "interrupt:$line")
+        }
+    }
+
+    @Test
+    fun `a live send while a turn runs appends no entry and opens no turn`() {
+        val running = reduce(ChatState(), SessionEvent.UserSent("p", "prompt"))
+        val sent = reduce(running, SessionEvent.UserSent("x", "hi", live = true))
+        assertSame(running.entries, sent.entries)
+        assertSame(running.turn, sent.turn)
+        assertEquals(listOf("x" to PendingStage.QUEUED), sent.stages())
+    }
+
+    @Test
+    fun `a loaded transcript's UserSent still replaces the open turn`() {
+        val first = reduce(ChatState(), SessionEvent.UserSent("a", "one", atMillis = 1))
+        val second = reduce(first, SessionEvent.UserSent("b", "two", atMillis = 2))
+        assertEquals("b", second.turn?.userUuid)
+        assertEquals(listOf("one", "two"), second.entries.filterIsInstance<ChatEntry.User>().map { it.text })
+        assertTrue(second.pendingSends.isEmpty())
+    }
+
+    @Test
+    fun `a result naming a waiting uuid folds it when no lifecycle came`() {
+        val states = hostReplay("queue-fold", mapOf(0 to listOf(live(QP, "Run it")), 18 to listOf(live(QF, KIWI))), skip = setOf(19, 22))
+        assertEquals(listOf(QF to PendingStage.QUEUED), states[52].stages())
+        val end = states[53]
+        assertTrue(end.pendingSends.isEmpty())
+        val folded = end.entries[end.entries.lastIndex - 1] as ChatEntry.User
+        assertEquals(QF, folded.id)
+        assertTrue(folded.folded)
+        assertIs<ChatEntry.TurnEnded>(end.entries.last())
+    }
+
+    @Test
+    fun `the process ending returns waiting messages with a WARNING`() {
+        val ended = reduce(waitingKiwi(), SessionEvent.Ended("x", isError = false))
+        assertEquals(listOf(ReturnedSend(QF, KIWI, emptyList())), ended.returnedSends)
+        assertTrue(ended.pendingSends.isEmpty())
+        assertEquals(
+            listOf("Not sent: \"Also say the word KIWI at the end.\": the CLI ended before reading it. It is back in the composer."),
+            ended.noticeTexts(NoticeLevel.WARNING),
+        )
+    }
+
+    @Test
+    fun `settled returns them with an INFO`() {
+        val waiting = reduce(fold(ChatState(), "queue-fold", 1, 6), SessionEvent.UserSent("p", "prompt")).let { reduce(it, live(QF, KIWI)) }
+        assertNotNull(waiting.cliCapabilities)
+        val settled = waiting.settled()
+        assertEquals(listOf(ReturnedSend(QF, KIWI, emptyList())), settled.returnedSends)
+        assertTrue(settled.pendingSends.isEmpty())
+        assertEquals(listOf("Not sent: \"Also say the word KIWI at the end.\". It is back in the composer."), settled.noticeTexts(NoticeLevel.INFO))
+        assertNull(settled.cliCapabilities)
+    }
+
+    @Test
+    fun `a refused withdraw puts the message back and says so`() {
+        val asked = reduce(waitingKiwi(), SessionEvent.WithdrawRequested(QF, restore = true))
+        assertEquals(listOf(QF to PendingStage.WITHDRAWING), asked.stages())
+        val refused = reduce(asked, SessionEvent.WithdrawRefused(QF, null, KIWI))
+        assertEquals(listOf(QF to PendingStage.QUEUED), refused.stages())
+        assertEquals(listOf("Claude had already taken \"Also say the word KIWI at the end.\"; it was not withdrawn."), refused.noticeTexts(NoticeLevel.INFO))
+    }
+
+    @Test
+    fun `a refusal after the message started only says so`() {
+        val states = hostReplay("queue-fold", mapOf(0 to listOf(live(QP, "Run it")), 18 to listOf(live(QF, KIWI))))
+        var state = reduce(states[19], SessionEvent.WithdrawRequested(QF, restore = true))
+        state = fold(state, "queue-fold", 20, 22)
+        val started = state.entries.last() as ChatEntry.User
+        assertEquals(QF, started.id)
+        assertTrue(started.folded)
+        assertTrue(state.pendingSends.isEmpty())
+        val refused = reduce(state, SessionEvent.WithdrawRefused(QF, null, KIWI))
+        assertEquals(listOf("Claude had already taken \"Also say the word KIWI at the end.\"; it was not withdrawn."), refused.noticeTexts(NoticeLevel.INFO))
+        assertTrue(refused.pendingSends.isEmpty())
+        assertTrue(refused.returnedSends.isEmpty())
+        assertEquals(state.entries, refused.entries.dropLast(1))
+    }
+
+    @Test
+    fun `a lifecycle for an unknown uuid changes nothing`() {
+        val state = waitingKiwi()
+        assertSame(state, reduce(state, cli("""{"type":"command_lifecycle","command_uuid":"nope","state":"started"}""")))
+    }
+
+    @Test
+    fun `an init keeps its capabilities, Ended clears them`() {
+        val state = fold(ChatState(), "queue-fold", 1, 6)
+        val capabilities = assertNotNull(state.cliCapabilities)
+        assertTrue("msg_lifecycle_v1" in capabilities)
+        assertTrue("interrupt_cancel_queued_v1" in capabilities)
+        assertNull(ChatState().cliCapabilities, "none before an init")
+        assertNull(reduce(state, SessionEvent.Ended("x", isError = false)).cliCapabilities)
+        val init = Json.parseToJsonElement(Fixtures.lines("plain-reply")[3]).jsonObject
+        val bare = reduce(ChatState(), SessionEvent.Cli(Ndjson.decode(JsonObject(init - "capabilities").toString())))
+        assertEquals(emptySet(), bare.cliCapabilities, "an init without the key lists none")
+    }
+
+    @Test
+    fun `the first line is cut at 60 characters`() {
+        assertEquals("a".repeat(60) + "…", firstLine("a".repeat(61)))
+        assertEquals("one", firstLine("one\ntwo"))
+        assertEquals("a".repeat(60), firstLine("a".repeat(60)))
+    }
+
+    @Test
+    fun `ReturnedTaken clears what the composer took back`() {
+        val a = ReturnedSend("a", "one", emptyList())
+        val b = ReturnedSend("b", "two", emptyList())
+        assertEquals(listOf(b), reduce(ChatState(returnedSends = listOf(a, b)), SessionEvent.ReturnedTaken(listOf("a"))).returnedSends)
+    }
+
+    @Test
+    fun `forkHistory drops waiting and returned messages without a notice`() {
+        val source = waitingKiwi().copy(returnedSends = listOf(ReturnedSend("g", "older", emptyList())))
+        val fork = source.forkHistory()
+        assertTrue(fork.pendingSends.isEmpty())
+        assertTrue(fork.returnedSends.isEmpty())
+        assertTrue(fork.entries.none { it is ChatEntry.Notice })
+        assertEquals(source.copy(pendingSends = emptyList(), returnedSends = emptyList()).settled(), fork)
+        assertEquals(listOf(QF), source.pendingSends.map { it.uuid }, "the source keeps its waiting message")
+        assertEquals(listOf("g"), source.returnedSends.map { it.uuid })
+    }
+
+    // --- Fork from any reply (spec 13.1, 13.2, 9.7) ---
+
+    private fun ChatState.assistant(messageId: String): ChatEntry.Assistant = assistants().single { it.messageId == messageId }
+
+    // spec: lastUuid is the latest complete line
+    @Test
+    fun `lastUuid is the latest complete line`() {
+        val forkAt = replay("fork-at")
+        assertEquals("<uuid-14>", forkAt[11].assistants().single().lastUuid)
+        assertNull(forkAt[10].assistants().single().lastUuid, "a message drafted from deltas only has no fork point")
+
+        // One message over two complete lines (its thinking line, then its text line), as recorded.
+        val mode = replay("permission-mode")
+        assertEquals("<uuid-36>", mode[33].assistant("<id-28>").lastUuid)
+        assertEquals("<uuid-41>", mode[34].assistant("<id-28>").lastUuid)
+
+        val loaded = runBlocking { TranscriptReader.read(Fixtures.transcript("fork-at-origin")) }.state
+        assertEquals("<uuid-14>", loaded.assistants().first().lastUuid, "the transcript's uuid is the stream's")
+    }
+
+    /** `fork-at`'s origin (:1 to :55) with its three prompts sent before their inits, as the host would have sent them. */
+    private fun forkAtOrigin(): ChatState {
+        val sends = mapOf(
+            5 to listOf(SessionEvent.UserSent("<command_uuid-4>", ALPHA_PROMPT)),
+            18 to listOf(SessionEvent.UserSent("<command_uuid-21>", BRAVO_PROMPT)),
+            44 to listOf(SessionEvent.UserSent("<command_uuid-53>", CHARLIE_PROMPT)),
+        )
+        return hostReplay("fork-at", sends, skip = (56..Fixtures.lines("fork-at").size).toSet())[55]
+    }
+
+    // spec: forkedAt keeps the turn and stops at the next User or Shell
+    @Test
+    fun `forkedAt keeps the turn and stops at the next User or Shell`() {
+        val bravoTask = TaskInfo("t-bravo", "<id-28>", null, null, null, null, null, null, null, null)
+        val origin = forkAtOrigin().copy(tasks = mapOf("t-bravo" to bravoTask))
+        assertEquals(listOf(ALPHA_PROMPT, BRAVO_PROMPT, CHARLIE_PROMPT), origin.entries.filterIsInstance<ChatEntry.User>().map { it.text })
+        assertNotNull(origin.context, "the original's ring has a value")
+
+        val fork = assertNotNull(origin.forkedAt("<uuid-14>"))
+        assertEquals(listOf(ALPHA_PROMPT), fork.entries.filterIsInstance<ChatEntry.User>().map { it.text })
+        val end = assertIs<ChatEntry.TurnEnded>(fork.entries.last(), "the turn and its footer stay")
+        assertEquals(origin.entries.filterIsInstance<ChatEntry.TurnEnded>().first(), end)
+        assertEquals("OK", fork.text())
+        assertTrue(fork.entryIndex.isEmpty())
+        assertNull(fork.context)
+        assertTrue(fork.tasks.values.none { it.toolUseId == "<id-28>" }, "no task of BRAVO's Bash call")
+        assertFalse(fork.busy)
+        assertEquals(origin.entries.subList(0, fork.entries.size), fork.entries)
+
+        // A shell escape right after turn one ends the cut as a prompt does.
+        val afterTurnOne = origin.entries.indexOf(end) + 1
+        val shell = ChatEntry.Shell("sh-1", "ls", "", running = false)
+        val withShell = origin.copy(
+            entries = origin.entries.subList(0, afterTurnOne) + shell + origin.entries.subList(afterTurnOne, origin.entries.size),
+            entryIndex = emptyMap(),
+        )
+        assertEquals(fork.entries, assertNotNull(withShell.forkedAt("<uuid-14>")).entries)
+
+        assertNull(origin.forkedAt("nope"))
+        val agents = replay("agent-sync").last()
+        assertTrue(agents.assistants().any { "<uuid-50>" in it.uuids && it.parentToolUseId != null }, "agent-sync:42 is a subagent's line")
+        assertNull(agents.forkedAt("<uuid-50>"))
+    }
 }
 
 /** A complete main-thread `assistant` line with one text block. */
 private const val REPLY_LINE: String =
     """{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-sonnet-5-5","content":[{"type":"text","text":"pong"}]}}"""
+
+// The queue fixtures' prompts and the messages written while they ran (plan, Global Constraints).
+private const val QP: String = "<command_uuid-4>"
+private const val QF: String = "<command_uuid-25>"
+private const val QP1: String = "<command_uuid-4>"
+private const val QF1: String = "<command_uuid-29>"
+private const val QP2: String = "<command_uuid-47>"
+private const val QF2: String = "<command_uuid-68>"
+private const val KIWI: String = "Also say the word KIWI at the end."
+
+// The fork-at origin's three prompts (transcripts/fork-at-origin.jsonl:5, :27, :35).
+private const val ALPHA_PROMPT: String = "Remember the word ALPHA. Reply with exactly one word: OK"
+private const val BRAVO_PROMPT: String =
+    "Remember the word BRAVO. First run the shell command `echo hi` with the Bash tool, then reply with exactly one word: OK"
+private const val CHARLIE_PROMPT: String = "Remember the word CHARLIE. Reply with exactly one word: OK"

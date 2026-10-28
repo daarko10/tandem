@@ -1,9 +1,14 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.PermissionDenial
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.PluginInfo
+import dev.daarkolabs.tandem.protocol.SessionUsage
 import dev.daarkolabs.tandem.protocol.SlashCommand
+import dev.daarkolabs.tandem.protocol.UsageHistory
+import kotlinx.collections.immutable.toPersistentList
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
@@ -26,6 +31,17 @@ data class ChatState(
      * for at once, and goes back to the mode before it if the CLI rejects it. Empty once a state is [settled].
      */
     val permissionModeChanges: Map<String, PermissionModeChange> = emptyMap(),
+    /**
+     * The modes the CLI refused to switch to (`set_permission_mode` answered with an error) while this process runs: the mode cycle
+     * skips them. A mode leaves when the CLI reports it (`system/status`, `system/init`); the set is cleared when the process ends.
+     */
+    val rejectedPermissionModes: Set<PermissionMode> = emptySet(),
+    /**
+     * The mode the process was started with (`--permission-mode`) until its first `system/init`, which is compared with it: the chat
+     * says so when the CLI started in another mode (hard rule 5). A pick on the live process before that init clears it, since the
+     * CLI's answer to that pick reports a refusal itself.
+     */
+    val launchPermissionMode: PermissionMode? = null,
     /**
      * What Tandem passed with `--effort`, picked since (`apply_flag_settings`), or what a loaded transcript recorded: the recorded
      * `system/init` carries no effort.
@@ -100,7 +116,76 @@ data class ChatState(
      * sent. Empty once the process that owed them ends, and once [settled].
      */
     val quietSends: Set<String> = emptySet(),
+    /** The context window by category, from the latest `get_context_usage` answer; null until one came. Kept by [settled]. */
+    val contextBreakdown: ContextBreakdown? = null,
+    /** The plugins the latest `system/init` lists (`plugins`); absent means none. */
+    val plugins: List<PluginInfo> = emptyList(),
+    /** The folders the latest `system/init` lists besides the working directory (`additional_directories`); absent means none. */
+    val additionalDirectories: List<String> = emptyList(),
+    /** The skills the latest `system/init` lists (`skills`); absent means none. */
+    val skills: List<String> = emptyList(),
+    /**
+     * The messages sent while Claude worked that have not started yet, in send order: waiting in the CLI's queue, or held by Tandem
+     * behind a shell escape (spec 12.1, 12.4). Not chat entries: the CLI's lifecycle lines decide when each becomes one.
+     */
+    val pendingSends: List<PendingSend> = emptyList(),
+    /** Waiting messages that came back without running (a withdraw, Stop, the process's end), for the composer to take back. */
+    val returnedSends: List<ReturnedSend> = emptyList(),
+    /**
+     * The `capabilities` of the live process's latest `system/init`: null until one came (the CLI is still starting) and once the
+     * process ended or the chat was [settled]; empty for an init that lists none.
+     */
+    val cliCapabilities: Set<String>? = null,
 )
+
+/**
+ * A message sent while Claude worked, not started yet: its [text] and [images] are Tandem's own copy (the CLI never echoes it),
+ * [later] whether it was sent with `"priority":"later"`. [restoreOnWithdraw]: while [PendingStage.WITHDRAWING], whether it goes
+ * back to the composer (Edit) or is dropped (Cancel).
+ */
+data class PendingSend(
+    val uuid: String,
+    val text: String,
+    val images: List<UserImage>,
+    val sentAtMillis: Long,
+    val later: Boolean,
+    val stage: PendingStage,
+    val restoreOnWithdraw: Boolean = false,
+)
+
+/** Where a [PendingSend] stands. */
+enum class PendingStage {
+    /** Held by Tandem behind a shell escape's frames, not written yet. */
+    HELD,
+
+    /** Written, and waiting in the CLI's queue. */
+    QUEUED,
+
+    /** A `cancel_async_message` for it is out. */
+    WITHDRAWING,
+}
+
+/** A message that came back without running, for the composer to put back ahead of the draft. */
+data class ReturnedSend(val uuid: String, val text: String, val images: List<UserImage>)
+
+/** How many characters of a message's first line a notice quotes (spec 12.5). */
+private const val FIRST_LINE_LENGTH: Int = 60
+
+/** [text]'s first line, cut at 60 characters with `…` (spec 12.5): how a notice names a message. */
+internal fun firstLine(text: String): String {
+    val line = text.lineSequence().first()
+    return if (line.length <= FIRST_LINE_LENGTH) line else line.take(FIRST_LINE_LENGTH) + "…"
+}
+
+/** The notice of a message Stop or a stop gave back (spec 12.3, 12.5). */
+internal fun notSentText(text: String): String = "Not sent: \"${firstLine(text)}\". It is back in the composer."
+
+/** The notice of a message the process's end gave back (spec 12.5). */
+internal fun endedBeforeReadingText(text: String): String =
+    "Not sent: \"${firstLine(text)}\": the CLI ended before reading it. It is back in the composer."
+
+/** The notice of a refused withdraw (spec 12.3). */
+internal fun notWithdrawnText(text: String): String = "Claude had already taken \"${firstLine(text)}\"; it was not withdrawn."
 
 /**
  * The session's MCP servers: [servers] in the CLI's order; [detailed] once an `mcp_status` answer gave them (errors, config, tools),
@@ -206,12 +291,16 @@ data class UserImage(val id: String, val mediaType: String, val base64: String)
 sealed interface ChatEntry {
     val id: String
 
-    /** What the user sent; [sentAtMillis] is when, on the host's clock. [images] are its attachments, in the order sent. */
+    /**
+     * What the user sent; [sentAtMillis] is when, on the host's clock. [images] are its attachments, in the order sent. [folded]: sent
+     * while Claude worked and taken into the running turn (spec 12.1).
+     */
     data class User(
         override val id: String,
         val text: String,
         val sentAtMillis: Long? = null,
         val images: List<UserImage> = emptyList(),
+        val folded: Boolean = false,
     ) : ChatEntry
 
     /**
@@ -234,6 +323,11 @@ sealed interface ChatEntry {
         val subagentType: String? = null,
         val taskDescription: String? = null,
         val atMillis: Long? = null,
+        /**
+         * The uuid of its latest complete line, where a fork at this message cuts (`--resume-session-at`, spec 13.1); null for a
+         * message drafted from stream deltas only.
+         */
+        val lastUuid: String? = null,
     ) : ChatEntry
 
     /**
@@ -266,6 +360,10 @@ sealed interface ChatEntry {
         val kind: NoticeKind = NoticeKind.GENERIC,
         val command: String? = null,
         val runCommand: String? = null,
+        /** On a usage notice of the stream: the `uuid` of the CLI's line, which keys its [usage] card's answers. */
+        val sourceUuid: String? = null,
+        /** On a usage notice of the stream ([isUsageLine]): the card the `get_usage` answers fill; null on any other notice. */
+        val usage: UsageCard? = null,
     ) : ChatEntry
 
     /**
@@ -300,6 +398,21 @@ sealed interface ChatEntry {
 }
 
 enum class NoticeLevel { INFO, WARNING, ERROR }
+
+/** The `/usage` card of a usage notice: this session's numbers (`get_usage` with `skip_behaviors`) and the machine's history. */
+data class UsageCard(val session: UsagePartState<SessionUsage>, val history: UsagePartState<UsageHistory?>)
+
+/** Where one part of a [UsageCard] stands: its request runs, it answered (a null history: the CLI did not report one), or it failed. */
+sealed interface UsagePartState<out T> {
+    data object Loading : UsagePartState<Nothing>
+
+    data class Loaded<T>(val value: T) : UsagePartState<T>
+
+    data class Failed(val error: ControlError) : UsagePartState<Nothing>
+}
+
+/** A part of a [UsageCard]: [SESSION] (the request without the scan) or [HISTORY] (the full request). */
+enum class UsagePart { SESSION, HISTORY }
 
 /**
  * What a notice stands for: [INTERRUPTED] is the "Stopped." of an interrupted turn, which the chat shows as the turn's end;
@@ -350,17 +463,70 @@ data class PendingPermission(
 /**
  * This state with no turn in progress: not busy, not ended, no pending permission and no reply still streaming. No quiet send waits
  * for its result either: the process that owed it is gone, and the next one starts from this. A shell escape stays as it is (a
- * command runs on in Tandem's own process). A transcript loaded by `TranscriptReader` comes back settled.
+ * command runs on in Tandem's own process). A usage card's part still loading can no longer be answered: it reads
+ * [McpError.Ended]. The context breakdown stays. A message still waiting goes back to the composer with an INFO notice (spec 12.5), and
+ * no process's capabilities count any more. A transcript loaded by `TranscriptReader` comes back settled.
  */
-internal fun ChatState.settled(): ChatState = copy(
-    entries = entries.map { if (it is ChatEntry.Assistant && it.streaming) it.copy(streaming = false) else it },
+internal fun ChatState.settled(): ChatState = returnWaiting(NoticeLevel.INFO, ::notSentText).withNothingInProgress()
+
+/** [settled] once nothing waits any more: every field below is read from this state, the returned messages' notices included. */
+private fun ChatState.withNothingInProgress(): ChatState = copy(
+    entries = entries.map {
+        when {
+            it is ChatEntry.Assistant && it.streaming -> it.copy(streaming = false)
+            it is ChatEntry.Notice -> it.withUsageEnded()
+            else -> it
+        }
+    },
     busy = false,
     pendingPermissions = emptyList(),
     permissionModeChanges = emptyMap(),
+    rejectedPermissionModes = emptySet(),
+    launchPermissionMode = null,
     effortChanges = emptyMap(),
     modelChanges = emptyMap(),
     ended = false,
     turnInterrupted = false,
     turn = null,
     quietSends = emptySet(),
+    cliCapabilities = null,
 )
+
+/**
+ * The history a fork starts from (spec 12.5): [settled] without the waiting and returned messages, so no `Not sent` notice is
+ * added: a waiting message stays the original's and still runs there.
+ */
+internal fun ChatState.forkHistory(): ChatState = copy(pendingSends = emptyList(), returnedSends = emptyList()).settled()
+
+/**
+ * The history a fork at [uuid] starts from (spec 13.1): [forkHistory] up to the first main-thread [ChatEntry.Assistant] whose
+ * [ChatEntry.Assistant.uuids] hold [uuid], and on to the next [ChatEntry.User] or [ChatEntry.Shell] entry after it, so that its
+ * whole turn and the turn's footer stay. The ring waits for the fork's first turn ([ChatState.context] null), and only the tasks of
+ * calls still shown stay. Null when no main-thread assistant entry holds [uuid] (a subagent's line, or none of this history's).
+ */
+internal fun ChatState.forkedAt(uuid: String): ChatState? {
+    val history = forkHistory()
+    val entries = history.entries
+    val at = entries.indexOfFirst { it is ChatEntry.Assistant && it.parentToolUseId == null && uuid in it.uuids }
+    if (at < 0) return null
+    val next = (at + 1 until entries.size).firstOrNull { entries[it] is ChatEntry.User || entries[it] is ChatEntry.Shell }
+    val kept = entries.subList(0, next ?: entries.size).toPersistentList()
+    val calls = kept.asSequence().filterIsInstance<ChatEntry.Assistant>().flatMap { it.blocks }
+        .filterIsInstance<AssistantBlock.ToolUse>().mapTo(HashSet()) { it.id }
+    return history.copy(
+        entries = kept,
+        entryIndex = emptyMap(),
+        context = null,
+        tasks = history.tasks.filterValues { it.toolUseId in calls },
+    )
+}
+
+/** This notice with each part of its usage card that is still loading turned [McpError.Ended]; the same instance when none is. */
+internal fun ChatEntry.Notice.withUsageEnded(): ChatEntry.Notice {
+    val card = usage ?: return this
+    if (card.session != UsagePartState.Loading && card.history != UsagePartState.Loading) return this
+    return copy(usage = UsageCard(card.session.endedIfLoading(), card.history.endedIfLoading()))
+}
+
+private fun <T> UsagePartState<T>.endedIfLoading(): UsagePartState<T> =
+    if (this == UsagePartState.Loading) UsagePartState.Failed(McpError.Ended) else this

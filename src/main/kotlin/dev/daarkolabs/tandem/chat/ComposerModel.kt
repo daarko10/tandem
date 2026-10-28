@@ -7,6 +7,7 @@ import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ContextUsage
 import dev.daarkolabs.tandem.session.ModelOption
+import dev.daarkolabs.tandem.session.ReturnedSend
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.ImmutableSet
 import kotlinx.collections.immutable.persistentListOf
@@ -24,6 +25,11 @@ internal const val DEFAULT_MODEL_ENTRY: String = "default"
  * entry resolves to; [effortLevels] and [autoSupported] are those of the shown model ([shownModel]); [modelSwitchPending] mirrors
  * [ChatState.modelSwitchPending]. [commands], [slashCommandNames] and [terminalCommands] feed the slash palette ([slashPalette]).
  * [shellRunning]: a shell escape runs (MCP spec 12.1); the composer is busy meanwhile, and Stop stops the command ([stopTarget]).
+ * [plugins] are the `+` menu's Plugins pages ([pluginMenu]); [pluginsKnown]: an init came, or the catalogue names a plugin's entry;
+ * [skills] the latest init's skills, null before an init; [pluginPrefixes] the session's plugins for the palette ([pluginPrefixes]).
+ * [busy] counts a message waiting in the CLI's queue too (desktop-parity spec 12.1). [midTurnSends]: the live process takes messages
+ * while it works (its init listed both queue capabilities); [capabilitiesKnown]: an init of the live process came (deviation 16).
+ * [returned] are the messages that came back without running, for the composer to take back (spec 12.3, 12.5).
  */
 data class ComposerModel(
     val busy: Boolean,
@@ -44,24 +50,40 @@ data class ComposerModel(
     val slashCommandNames: ImmutableList<String> = persistentListOf(),
     val terminalCommands: ImmutableSet<String> = persistentSetOf(),
     val shellRunning: Boolean = false,
+    val plugins: ImmutableList<PluginEntry> = persistentListOf(),
+    val pluginsKnown: Boolean = false,
+    val skills: ImmutableList<String>? = null,
+    val pluginPrefixes: ImmutableSet<String> = persistentSetOf(),
+    val midTurnSends: Boolean = false,
+    val capabilitiesKnown: Boolean = false,
+    val returned: ImmutableList<ReturnedSend> = persistentListOf(),
 )
+
+/** The `system/init` capabilities that let the composer send while Claude works (desktop-parity spec 12.1's gate). */
+private val MID_TURN_CAPABILITIES: List<String> = listOf("msg_lifecycle_v1", "interrupt_cancel_queued_v1")
 
 /**
  * The composer's model of [state]. Its models are the session's own ([ChatState.models]), else, while its process has not listed
  * any (it has none, as a restored session before its first prompt), the [known] ones another process listed
  * ([dev.daarkolabs.tandem.session.SessionManager.models]), else, before any process has, the CLI's own aliases ([CLI_MODEL_ALIASES]).
  * Its commands, and the terminal-only names the palette leaves out, are the session's own likewise, else those of [knownCommands]
- * ([dev.daarkolabs.tandem.session.SessionManager.commands]); the session's own replace them once its process offers them.
+ * ([dev.daarkolabs.tandem.session.SessionManager.commands]); the session's own replace them once its process offers them. The plugins
+ * come from those commands until the session's first `system/init`, then from its `plugins` (spec 3.3, 17.3, 17.6).
  */
 fun composerModel(
     state: ChatState,
     known: List<ModelOption> = emptyList(),
     knownCommands: CommandCatalogue = CommandCatalogue(),
 ): ComposerModel {
-    val models = state.models.ifEmpty { known }.ifEmpty { CLI_MODEL_ALIASES }
+    val models = composerModels(state, known)
     val shown = shownModel(models, state.requestedModel, state.activeModel, state.modelSwitchPending)
+    val commands = state.commands.ifEmpty { knownCommands.commands }
+    val initSeen = state.mcp.initCount > 0
+    val initPlugins = state.plugins.takeIf { initSeen }
+    val skills = state.skills.takeIf { initSeen }
+    val plugins = pluginMenu(initPlugins, commands, state.slashCommandNames, skills)
     return ComposerModel(
-        busy = state.busy,
+        busy = state.busy || state.pendingSends.isNotEmpty(),
         ended = state.ended,
         cardOpen = state.pendingPermissions.isNotEmpty(),
         models = models.toImmutableList(),
@@ -75,12 +97,27 @@ fun composerModel(
         effortLevels = shown?.effortLevels.orEmpty().toImmutableList(),
         autoSupported = shown?.supportsAutoMode == true,
         modelSwitchPending = state.modelSwitchPending,
-        commands = state.commands.ifEmpty { knownCommands.commands }.toImmutableList(),
+        commands = commands.toImmutableList(),
         slashCommandNames = state.slashCommandNames.toImmutableList(),
         terminalCommands = state.terminalCommands.ifEmpty { knownCommands.terminal }.toImmutableSet(),
         shellRunning = state.runningShell != null,
+        plugins = plugins,
+        pluginsKnown = initSeen || plugins.isNotEmpty(),
+        skills = skills?.toImmutableList(),
+        pluginPrefixes = pluginPrefixes(initPlugins, commands).toImmutableSet(),
+        midTurnSends = state.cliCapabilities?.containsAll(MID_TURN_CAPABILITIES) == true && !state.ended,
+        capabilitiesKnown = state.cliCapabilities != null,
+        returned = state.returnedSends.toImmutableList(),
     )
 }
+
+/** The models the composer offers for [state]: its own, else the [known] ones, else the CLI's own aliases ([composerModel]). */
+private fun composerModels(state: ChatState, known: List<ModelOption>): List<ModelOption> =
+    state.models.ifEmpty { known }.ifEmpty { CLI_MODEL_ALIASES }
+
+/** Whether the model the footer shows for [state] supports the `auto` mode, as [ComposerModel.autoSupported] reads it. */
+internal fun autoSupported(state: ChatState, known: List<ModelOption> = emptyList()): Boolean =
+    shownModel(composerModels(state, known), state.requestedModel, state.activeModel, state.modelSwitchPending)?.supportsAutoMode == true
 
 /** A draft that is a shell escape: `!` as its first non-blank character, then a command that is not blank. */
 private val SHELL_ESCAPE = Regex("^\\s*!\\s*\\S")
@@ -168,6 +205,13 @@ object ContextFormat {
         val window = usage.window?.takeIf { it != 0L } ?: return null
         return (tokens.toFloat() / window).coerceIn(0f, 1f)
     }
+
+    /**
+     * The share of [max] that [tokens] are, to one decimal (`0.3%`, `0.0%` for a sliver), as the CLI's own `/context` table prints it
+     * (spec 3.1); `—` without a window.
+     */
+    fun percentOf(tokens: Long, max: Long): String =
+        if (max <= 0) "—" else String.format(Locale.ROOT, "%.1f%%", 100.0 * tokens / max)
 
     /** `200k` under a million; `1M`, `1.5M` from one, with one decimal only when it is not zero (where [formatTokens] gives `1.0m`). */
     fun formatWindow(window: Long): String =

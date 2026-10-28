@@ -10,8 +10,9 @@ import java.util.BitSet
 
 /**
  * The first pass over a transcript: for each line, only what places it in the conversation; then [abandoned] decides which
- * lines the second pass leaves out: conversational lines (`user` or `assistant` lines, and a local command's `system` line of
- * subtype `local_command`, that are neither sidechain nor meta) off the current history, and lines that were not a JSON object
+ * lines the second pass leaves out: conversational lines (`user` or `assistant` lines, a local command's `system` line of
+ * subtype `local_command`, and a message folded into a running turn, an `attachment` line of type `queued_command` in prompt mode
+ * ([isQueuedPrompt]), that are neither sidechain nor meta) off the current history, and lines that were not a JSON object
  * (such as a last line the CLI was still writing).
  *
  * A transcript is only ever appended to, so it keeps the turns a rewind abandoned. The current history is the `parentUuid`
@@ -47,7 +48,10 @@ internal class TranscriptChain {
         val type = raw?.string("type")
         // A local command's line loads as a prompt or a notice, so a rewind abandons it too, and it can end the history (`/help`).
         val isConversational = raw != null &&
-            (type == "user" || type == "assistant" || type == "system" && raw.string("subtype") == "local_command") &&
+            (
+                type == "user" || type == "assistant" || type == "system" && raw.string("subtype") == "local_command" ||
+                    raw.isQueuedPrompt()
+                ) &&
             !raw.isSet("isSidechain") && !raw.isSet("isMeta")
         uuids += raw?.string("uuid")
         parents += raw?.string("parentUuid")
@@ -136,6 +140,18 @@ internal class TranscriptChain {
     }
 
     private fun parentOf(line: Int, byUuid: Map<String, Int>): Int? = parents[line]?.let(byUuid::get)
+}
+
+/**
+ * A message the CLI took into a running turn (spec 12.1 Reload): an `attachment` line whose `attachment.type` is `queued_command` and
+ * whose `commandMode` is absent or `prompt` (`transcripts/queue-fold.jsonl:23`). Any other attachment carries no history.
+ */
+internal fun JsonObject.isQueuedPrompt(): Boolean {
+    if (string("type") != "attachment") return false
+    val attachment = obj("attachment") ?: return false
+    if (attachment.string("type") != "queued_command") return false
+    val mode = attachment["commandMode"]
+    return mode == null || attachment.string("commandMode") == "prompt"
 }
 
 /** A flag that is present and true. */

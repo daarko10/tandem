@@ -273,7 +273,7 @@ object Cards {
         val turn = ArrayList<AssistantBlock>()
         for (i in end - 1 downTo 0) {
             val entry = entries[i]
-            if (entry is ChatEntry.User || entry is ChatEntry.Shell) break
+            if (entry.startsTurn()) break
             if (entry is ChatEntry.Assistant && entry.parentToolUseId == null) turn.addAll(entry.blocks.asReversed())
         }
         val call = turn.indexOfFirst { it is AssistantBlock.ToolUse && it.id == toolUseId }

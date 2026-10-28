@@ -50,6 +50,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.StringReader
 import java.nio.file.AccessDeniedException
+import java.nio.file.Files
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.time.Instant
@@ -61,9 +62,11 @@ import java.util.concurrent.TimeUnit
 import kotlin.io.path.appendText
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.readBytes
 import kotlin.io.path.readLines
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -129,7 +132,7 @@ class SessionManagerTest {
         /** More variables for every process, such as `TANDEM_FAKE_SESSION_ID`. */
         environment: Map<String, String> = emptyMap(),
         mcpAuthEvery: Duration = 2.seconds,
-        mcpAuthTimeout: Duration = 3.minutes,
+        mcpAuthTimeout: suspend () -> Unit = { delay(3.minutes) },
         respondToShell: () -> Boolean = { true },
         shell: ShellRunner = ShellRunner(environment = { mapOf("SHELL" to "/bin/sh") }),
     ): SessionManager {
@@ -161,9 +164,9 @@ class SessionManagerTest {
 
     private fun test(block: suspend CoroutineScope.() -> Unit): Unit = runBlocking { withTimeout(30_000, block) }
 
-    /** Writes the `history-reply` transcript as session [id]'s, through [edit]. */
-    private fun seed(id: String, edit: (String) -> String = { it }) {
-        folder.resolve("$id.jsonl").writeText(edit(Fixtures.transcript("history-reply").readText()))
+    /** Writes the [fixture] transcript (by default `history-reply`) as session [id]'s, through [edit]. */
+    private fun seed(id: String, fixture: String = "history-reply", edit: (String) -> String = { it }) {
+        folder.resolve("$id.jsonl").writeText(edit(Fixtures.transcript(fixture).readText()))
     }
 
     /** The complete lines of the fake's log: a `__spawn__` line per process, then each frame the host wrote to that process. */
@@ -373,7 +376,10 @@ class SessionManagerTest {
         handle.state.first { s -> !s.busy && s.entries.filterIsInstance<ChatEntry.Assistant>().size == 2 }
         assertEquals(listOf<String?>(seeded), spawns().map { it.valueOf("--resume") })
         val history = "Reply with the single word: pong" // the seeded transcript's prompt
-        assertEquals(listOf(history, "Reply with the single word: pong", "And once more"), handle.state.value.prompts())
+        // The second prompt reached the process while the first one's turn ran: it waits in the CLI's queue (spec 12.1), which the
+        // fake never runs, until its lifecycle lines make it an entry.
+        assertEquals(listOf(history, "Reply with the single word: pong"), handle.state.value.prompts())
+        assertEquals(listOf("And once more"), handle.state.value.pendingSends.map { it.text })
     }
 
     @Test
@@ -487,6 +493,74 @@ class SessionManagerTest {
         // The picks made while stopped went into the flags, not to a process.
         assertEquals(1, frames().count { it.subtype() == "set_model" })
         assertEquals(0, frames().count { it.subtype() == "set_permission_mode" })
+    }
+
+    /** A stand-in for `Modes.cycleFrom` (D13b): Manual → Accept edits → Plan → Manual, no mode yet counting as Manual. */
+    private val step: (ChatState) -> PermissionMode = {
+        when (it.permissionMode) {
+            PermissionMode.ACCEPT_EDITS -> PermissionMode.PLAN
+            PermissionMode.PLAN -> PermissionMode.DEFAULT
+            else -> PermissionMode.ACCEPT_EDITS
+        }
+    }
+
+    /** The modes of the `set_permission_mode` frames the host wrote, in order. */
+    private fun modeFrames(): List<String> = frames().filter { it.subtype() == "set_permission_mode" }
+        .map { it["request"]!!.jsonObject["mode"]!!.jsonPrimitive.content }
+
+    @Test
+    fun `two cyclePermissionMode calls with no reply between them send acceptEdits then plan`() = test {
+        val manager = manager() // plain-reply answers no control request
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        while (handle.liveSession() == null) delay(20)
+
+        assertEquals(PermissionMode.ACCEPT_EDITS, manager.cyclePermissionMode(handle.id, step))
+        assertEquals(PermissionMode.PLAN, manager.cyclePermissionMode(handle.id, step))
+        awaitLog { modeFrames().size == 2 }
+        assertEquals(listOf("acceptEdits", "plan"), modeFrames())
+        // The process's own state holds both picks at once; the handle's follows it through its mirror, a coroutine, so it is awaited.
+        assertEquals(PermissionMode.PLAN, handle.liveSession()!!.state.value.permissionMode)
+        handle.state.first { it.permissionMode == PermissionMode.PLAN }
+    }
+
+    @Test
+    fun `a stopped session's cycle reaches the next spawn's --permission-mode`() = test {
+        val manager = manager()
+        val handle = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        manager.stop(handle.id)
+
+        assertEquals(PermissionMode.ACCEPT_EDITS, manager.cyclePermissionMode(handle.id, step))
+        assertEquals(PermissionMode.PLAN, manager.cyclePermissionMode(handle.id, step))
+        manager.send(handle.id, "Reply with the single word: pong")
+        awaitLog { spawns().size == 2 }
+        assertEquals("plan", spawns().last().valueOf("--permission-mode"))
+        assertEquals(emptyList(), modeFrames(), "the picks made while stopped went into the flag")
+    }
+
+    @Test
+    fun `cyclePermissionMode on an unknown id gives null`() = test {
+        val manager = manager()
+        assertNull(manager.cyclePermissionMode("no-such-session", step))
+    }
+
+    @Test
+    fun `a cycle while a turn runs writes its frame at once`() = test {
+        // The turn waits on its permission request, and the fake reads (and logs) host frames while it waits for the answer: a
+        // frame in its log reached the process before the turn's result, which the fake writes only after that answer.
+        val manager = manager(fixtures = "permission")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Create the fixture file")
+        handle.status.await(SessionStatus.WAITING)
+
+        assertEquals(PermissionMode.ACCEPT_EDITS, manager.cyclePermissionMode(handle.id, step))
+        awaitLog { modeFrames().isNotEmpty() }
+        assertEquals(listOf("acceptEdits"), modeFrames())
+        val state = handle.state.value
+        assertTrue(state.busy, "the turn is still open")
+        assertEquals(0, state.turnsEnded)
+        manager.stop(handle.id)
     }
 
     @Test
@@ -1067,6 +1141,95 @@ class SessionManagerTest {
         assertEquals(1, spawns().size)
     }
 
+    /** The arguments of the process started for session [id] (its `--session-id`), once there is one, from `--resume` on. */
+    private suspend fun forkTail(id: String): List<String> {
+        awaitLog { spawns().any { it.valueOf("--session-id") == id } }
+        val argv = spawns().single { it.valueOf("--session-id") == id }
+        return argv.subList(argv.indexOf("--resume"), argv.size)
+    }
+
+    // spec: fork at a reply resumes with --resume-session-at and starts from the history up to that turn
+    @Test
+    fun `fork at a reply resumes with --resume-session-at and starts from the history up to that turn`() = test {
+        seed(seeded, fixture = "fork-at-origin")
+        val transcript = folder.resolve("$seeded.jsonl").readBytes()
+        val manager = manager()
+        val original = manager.open(seeded, spawn = false)
+        manager.refreshIndex()
+        original.title.await("Remember word ALPHA")
+        val history = original.state.value
+        assertEquals(3, history.prompts().size)
+        val x = assertNotNull(history.entries.filterIsInstance<ChatEntry.Assistant>().first().lastUuid)
+        assertEquals("<uuid-14>", x)
+
+        val fork = assertNotNull(manager.fork(seeded, x))
+        val tail = listOf("--resume", seeded, "--fork-session", "--session-id", fork.id, "--resume-session-at", "<uuid-14>")
+        assertEquals(tail, forkTail(fork.id))
+        assertEquals(listOf("Remember the word ALPHA. Reply with exactly one word: OK"), fork.state.value.prompts())
+        assertEquals("Remember word ALPHA (fork)", fork.title.value)
+        assertEquals(fork.id, manager.selected.value)
+        assertEquals(listOf(original, fork), manager.sessions.value)
+        assertSame(history, original.state.value, "the original's chat is untouched")
+        assertEquals("Remember word ALPHA", original.title.value)
+        assertContentEquals(transcript, folder.resolve("$seeded.jsonl").readBytes())
+
+        // Until the fork has a transcript of its own, every process forks at the same line.
+        manager.stop(fork.id)
+        manager.send(fork.id, "Which words do you remember?")
+        awaitLog { spawns().size == 2 }
+        assertEquals(tail, spawns().last().let { it.subList(it.indexOf("--resume"), it.size) })
+        fork.state.first { s -> !s.busy && s.prompts().size == 2 && s.entries.last() is ChatEntry.TurnEnded }
+
+        // Once it has, it resumes as itself.
+        seed(fork.id)
+        manager.stop(fork.id)
+        manager.send(fork.id, "And once more")
+        awaitLog { spawns().size == 3 }
+        val last = spawns().last()
+        assertEquals(fork.id, last.valueOf("--resume"))
+        assertFalse("--fork-session" in last)
+        assertFalse("--resume-session-at" in last)
+        assertContentEquals(transcript, folder.resolve("$seeded.jsonl").readBytes())
+    }
+
+    // spec: fork at a uuid not in the history gives null and starts nothing
+    @Test
+    fun `fork at a uuid not in the history gives null and starts nothing`() = test {
+        seed(seeded, fixture = "fork-at-origin")
+        val manager = manager()
+        val original = manager.open(seeded, spawn = false)
+        assertNull(manager.fork(seeded, "no-such-uuid"))
+        assertEquals(ForkResult.Refused.NOT_IN_HISTORY, manager.forkResult(seeded, "no-such-uuid"))
+        assertEquals(listOf(original), manager.sessions.value)
+        assertNull(manager.selected.value)
+
+        val created = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id))
+        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id, "<uuid-14>"))
+        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult("not-a-session-id"))
+        assertEquals(listOf(original, created), manager.sessions.value)
+        assertNull(manager.selected.value)
+        assertEquals(1, spawns().size, "only the new session's process started")
+    }
+
+    // spec: a fork without a transcript forks its original at the same line
+    @Test
+    fun `a fork without a transcript forks its original at the same line`() = test {
+        seed(seeded, fixture = "fork-at-origin")
+        val manager = manager(maxLive = 8)
+        val f = assertNotNull(manager.fork(seeded)) // no prompt: no transcript of its own
+        val g = assertNotNull(manager.fork(f.id, "<uuid-14>"))
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", g.id, "--resume-session-at", "<uuid-14>"), forkTail(g.id))
+        assertEquals(listOf("Remember the word ALPHA. Reply with exactly one word: OK"), g.state.value.prompts())
+
+        val h = assertNotNull(manager.fork(seeded, "<uuid-14>"))
+        val i = assertNotNull(manager.fork(h.id))
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", i.id, "--resume-session-at", "<uuid-14>"), forkTail(i.id))
+        assertEquals(h.state.value.entries, i.state.value.entries)
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", f.id), forkTail(f.id))
+    }
+
     @Test
     fun `a resume that comes back with another id becomes a new row with a warning`() = test {
         seed(seeded)
@@ -1263,8 +1426,14 @@ class SessionManagerTest {
         val manager = manager(maxLive = 2)
         // Created in one go: their starts make room one after the other, so the third stops an idle one first.
         val created = List(3) { manager.create(NewSessionOptions()) }
-        awaitLog { spawns().size == 3 }
+        // Each start holds its session's spawn lock from create on: once none is held, the three starts, and the stop that made
+        // room, are over. Not a count of spawns: the stopped session may have been stopped before its process launched.
+        awaitLog { created.none { it.spawnLock.isLocked } }
         awaitLog { created.count { it.status.value == SessionStatus.STOPPED } == 1 } // polled: a status change alone re-checks it
+        val live = created.filter { it.liveSession() != null }
+        assertEquals(2, live.size)
+        awaitLog { live.all { handle -> spawns().any { argv -> argv.zipWithNext().contains("--session-id" to handle.id) } } }
+        assertTrue(spawns().size in 2..3, "one process per start at most")
         val deadline = System.nanoTime() + 10_000_000_000L
         while (ownFakeProcesses().size > 2 && System.nanoTime() < deadline) delay(20)
         assertEquals(2, ownFakeProcesses().size)
@@ -1653,6 +1822,89 @@ class SessionManagerTest {
             .string("authUrl")!!
 
     /** A new session of this manager, once its process is attached. */
+    // --- Desktop parity (spec 4.2, 9.2): the context breakdown and the usage card through the fake's rules (h)-(j) ---
+
+    private fun ChatState.usageNotice(): ChatEntry.Notice? = entries.filterIsInstance<ChatEntry.Notice>().lastOrNull { it.usage != null }
+
+    /** A session of [manager] that ran its first prompt to the end. */
+    private suspend fun SessionManager.afterFirstTurn(): SessionHandle {
+        val handle = started()
+        send(handle.id, "one")
+        handle.state.first { it.turnsEnded == 1 && !it.busy }
+        return handle
+    }
+
+    /** The usage card of [handle] once neither part is loading. */
+    private suspend fun loadedCard(handle: SessionHandle): ChatEntry.Notice = handle.state.first { state ->
+        val card = state.usageNotice()?.usage
+        card != null && card.session != UsagePartState.Loading && card.history != UsagePartState.Loading
+    }.usageNotice()!!
+
+    @Test
+    fun `contextBreakdown coalesces a second call`() = test {
+        val manager = manager(fixtures = "parity-context", delayMs = 300)
+        val handle = manager.afterFirstTurn()
+        val answers = List(3) { async { manager.contextBreakdown(handle.id) } }.awaitAll()
+        val breakdowns = answers.map { (it as? McpResult.Ok)?.value ?: fail("expected an answer, got $it") }
+        assertEquals(1, breakdowns.distinct().size, "every caller gets the same breakdown")
+        assertEquals(10L, breakdowns.first().categories.single { it.id == "messages" }.tokens, "rule (h) serves parity-context:2")
+        assertTrue(requests("get_context_usage").size <= 2, "one run and one shared follow-up: ${requests("get_context_usage").size}")
+        assertEquals(breakdowns.first(), handle.state.value.contextBreakdown)
+    }
+
+    @Test
+    fun `NotRunning without a process`() = test {
+        val manager = manager()
+        val handle = manager.started()
+        manager.stop(handle.id)
+        assertEquals(McpResult.Failed(McpError.NotRunning), manager.contextBreakdown(handle.id))
+        assertEquals(McpResult.Failed(McpError.NotRunning), manager.contextBreakdown("no-such-session"))
+        assertEquals(emptyList(), requests("get_context_usage"))
+    }
+
+    @Test
+    fun `a CLI without get_context_usage answers its error`() = test {
+        val manager = manager(fixtures = "plain-reply")
+        val handle = manager.started()
+        assertEquals(
+            McpResult.Failed(McpError.Rejected("Unsupported control request subtype: get_context_usage")),
+            manager.contextBreakdown(handle.id),
+        )
+    }
+
+    @Test
+    fun `a usage prompt fills its card from the CLI's answers`() = test {
+        val manager = manager(fixtures = "parity-usage")
+        val handle = manager.afterFirstTurn()
+        manager.send(handle.id, "/usage")
+        val card = loadedCard(handle).usage!!
+        val session = (card.session as UsagePartState.Loaded).value
+        assertEquals(0.1523063, session.totalCostUsd)
+        val history = (card.history as UsagePartState.Loaded).value
+        assertEquals(23, history?.day?.sessionCount)
+        val usage = requests("get_usage").map { it["request"]!!.jsonObject }
+        assertEquals(2, usage.size)
+        assertEquals(true, usage[0]["skip_behaviors"]?.jsonPrimitive?.boolean)
+        assertFalse("skip_behaviors" in usage[1], usage[1].toString())
+    }
+
+    @Test
+    fun `retryUsage on a stopped session ends the part`() = test {
+        val manager = manager(fixtures = "parity-usage")
+        val handle = manager.afterFirstTurn()
+        manager.send(handle.id, "/usage")
+        val notice = loadedCard(handle)
+        manager.stop(handle.id)
+        val sent = requests("get_usage").size
+
+        manager.retryUsage(handle.id, notice.sourceUuid!!, UsagePart.SESSION)
+        val card = handle.state.value.entries.filterIsInstance<ChatEntry.Notice>().single { it.id == notice.id }.usage!!
+        assertEquals(UsagePartState.Failed(McpError.NotRunning), card.session)
+        assertEquals(notice.usage!!.history, card.history)
+        assertEquals(sent, requests("get_usage").size, "no frame")
+        assertEquals(SessionStatus.STOPPED, handle.status.value)
+    }
+
     private suspend fun SessionManager.started(): SessionHandle {
         val handle = create(NewSessionOptions())
         handle.status.first { it == SessionStatus.IDLE }
@@ -1666,7 +1918,7 @@ class SessionManagerTest {
     private suspend fun mcpSession(
         environment: Map<String, String> = emptyMap(),
         every: Duration = 2.seconds,
-        timeout: Duration = 3.minutes,
+        timeout: suspend () -> Unit = { delay(3.minutes) },
     ): Pair<SessionManager, SessionHandle> {
         val manager = manager(fixtures = "mcp-status", environment = environment, mcpAuthEvery = every, mcpAuthTimeout = timeout)
         val handle = manager.started()
@@ -1877,14 +2129,16 @@ class SessionManagerTest {
 
     @Test
     fun `the sign-in poll times out while the server still needs auth`() = test {
-        val (manager, handle) = mcpSession(every = 50.milliseconds, timeout = 300.milliseconds)
+        // The time limit runs out once the fake has read the poll's second mcp_status, however fast the machine is.
+        val asked = { framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } }
+        val (manager, handle) = mcpSession(every = 50.milliseconds, timeout = { awaitLog { asked() >= 2 } })
 
         manager.startMcpAuth(handle.id, "authy") {}.ok()
 
         assertEquals(McpAuthOutcome.StillNeedsAuth, handle.awaitOutcome("authy"))
         val chat = handle.state.first { it.notices(NoticeLevel.WARNING).isNotEmpty() }
         assertEquals(listOf("Sign-in to authy did not complete within 3 minutes."), chat.notices(NoticeLevel.WARNING))
-        assertTrue(framesAfter("mcp_authenticate").count { it.subtype() == "mcp_status" } >= 2, "the poll asked more than once")
+        assertTrue(asked() >= 2, "the poll asked more than once")
     }
 
     // MCP spec 3.3 steps 3 and 5: a pending server (reconnecting after the callback, unrecorded) keeps the wait going, and every
@@ -2441,5 +2695,402 @@ class SessionManagerTest {
         delay(500) // a process started now would have logged its spawn by then
         assertEquals(emptyList(), userFrames(), "no frame queued for a process")
         assertEquals(1, spawns().size, "no claude started during the IDE's exit")
+    }
+
+    // --- Sending while Claude works (spec 12, 9.7; the fake's rule (m)) ---
+
+    /** Whether the state shows the first Bash call's `tool_use` (`queue-later:14`, `queue-cancel:18`). */
+    private fun ChatState.hasToolCall(): Boolean =
+        entries.any { e -> e is ChatEntry.Assistant && e.blocks.any { it is AssistantBlock.ToolUse && it.input != null } }
+
+    @Test
+    fun `send passes later through to the process`() = test {
+        val manager = manager()
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "hi")
+        handle.state.first { it.turnsEnded == 1 }
+        manager.send(handle.id, "more", later = true)
+        awaitLog { userFrames().size == 2 }
+        val (first, second) = userFrames()
+        assertFalse("priority" in first)
+        assertEquals("later", second["priority"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `withdraw and takeReturned reach the live process, or the stopped chat`() = test {
+        val manager = manager(fixtures = "queue-cancel")
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Run the command")
+        handle.state.first { it.hasToolCall() }
+        manager.send(handle.id, "Reply with only the word KIWI.", later = true)
+        val waiting = handle.state.first { it.pendingSends.isNotEmpty() }.pendingSends.single()
+        assertEquals(PendingStage.QUEUED, waiting.stage)
+
+        manager.withdraw(handle.id, waiting.uuid, restore = true)
+        awaitLog { frames().any { it.subtype() == "cancel_async_message" } }
+        val request = frames().single { it.subtype() == "cancel_async_message" }
+        assertEquals(waiting.uuid, request["request"]!!.jsonObject["message_uuid"]!!.jsonPrimitive.content)
+        val returned = handle.state.first { it.returnedSends.isNotEmpty() }
+        assertEquals(listOf(ReturnedSend(waiting.uuid, "Reply with only the word KIWI.", emptyList())), returned.returnedSends)
+        manager.takeReturned(handle.id, listOf(waiting.uuid))
+        handle.state.first { it.returnedSends.isEmpty() }
+
+        // The second turn, with a later message waiting when the session is stopped: settled() gives it back.
+        handle.state.first { it.turnsEnded == 1 }
+        manager.send(handle.id, "Run the second command")
+        handle.state.first { s -> s.entries.count { e -> e is ChatEntry.Assistant && e.blocks.any { it is AssistantBlock.ToolUse && it.input != null } } == 2 }
+        manager.send(handle.id, "Reply with only the word MANGO.", later = true)
+        val mango = handle.state.first { it.pendingSends.isNotEmpty() }.pendingSends.single()
+        manager.stop(handle.id)
+        val stopped = handle.status.await(SessionStatus.STOPPED).let { handle.state.value }
+        assertEquals(listOf(mango.uuid), stopped.returnedSends.map { it.uuid })
+        val before = frames().size
+        manager.withdraw(handle.id, mango.uuid, restore = true)
+        assertEquals(stopped, handle.state.value, "no process: nothing to withdraw")
+        manager.takeReturned(handle.id, listOf(mango.uuid))
+        assertTrue(handle.state.value.returnedSends.isEmpty())
+        assertEquals(before, frames().size)
+        assertEquals(1, spawns().size)
+    }
+
+    @Test
+    fun `no attention while a message waits, attention after the queued turn ends`() = test {
+        // The second turn streams slowly enough to look between the two results.
+        val manager = manager(fixtures = "queue-later", environment = mapOf("TANDEM_FAKE_LINE_DELAY_MS" to "150"))
+        val handle = manager.create(NewSessionOptions())
+        manager.send(handle.id, "Run it")
+        handle.state.first { it.hasToolCall() }
+        manager.send(handle.id, "Also say the word KIWI at the end.", later = true)
+        handle.state.first { it.turnsEnded == 1 }
+        delay(300)
+        assertEquals(1, handle.state.value.turnsEnded, "the queued turn still runs")
+        assertFalse(handle.attention.value, "a message waited when the first turn ended")
+        handle.state.first { it.turnsEnded == 2 }
+        handle.attention.await(true)
+    }
+
+    @Test
+    fun `a whole fork while a message waits leaves it with the original`() = test {
+        seed(seeded)
+        // The fake holds the turn for a while once it has read F (rule (m)'s knob), so F still waits when the fork is made.
+        val manager = manager(fixtures = "queue-later", environment = mapOf("TANDEM_FAKE_QUEUED_DELAY_MS" to "5000"))
+        val original = manager.open(seeded)
+        manager.send(seeded, "Run it")
+        original.state.first { it.hasToolCall() }
+        manager.send(seeded, "Also say the word KIWI at the end.", later = true)
+        val waiting = original.state.first { it.pendingSends.isNotEmpty() }.pendingSends.single()
+        assertEquals(PendingStage.QUEUED, waiting.stage)
+
+        val fork = assertNotNull(manager.fork(seeded))
+        val forked = fork.state.value
+        assertTrue(forked.pendingSends.isEmpty())
+        assertTrue(forked.returnedSends.isEmpty())
+        assertTrue(forked.entries.none { it is ChatEntry.Notice && it.text.startsWith("Not sent") })
+        assertEquals(listOf(waiting.uuid), original.state.value.pendingSends.map { it.uuid })
+    }
+
+    // spec: a process that ends by itself raises attention unless selected
+    @Test
+    fun `a process that ends by itself raises attention unless selected`() = test {
+        // Each fake exits 1.5 s after its last line: time to look at a finished turn before its process ends by itself.
+        val manager = manager(environment = mapOf("TANDEM_FAKE_EXIT_AT_END" to "1500"))
+        val a = manager.create(NewSessionOptions())
+        val b = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 2 }
+        manager.select(a.id)
+        manager.send(a.id, "hi")
+        manager.send(b.id, "hi")
+        b.attention.await(true) // its turn ended while another was selected
+        manager.select(b.id)
+        manager.select(a.id)
+        assertFalse(b.attention.value)
+
+        b.status.await(SessionStatus.STOPPED)
+        b.attention.await(true)
+        b.selfEnds.await(1)
+        a.status.await(SessionStatus.STOPPED)
+        a.selfEnds.await(1)
+        delay(300) // time for a wrong badge to show
+        assertFalse(a.attention.value, "the selected session needs no badge")
+        assertEquals(1, b.selfEnds.value)
+    }
+
+    // spec: the stops Tandem makes raise none
+    @Test
+    fun `the stops Tandem makes raise none`() = test {
+        val manager = manager(maxLive = 1)
+        val stopped = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        stopped.status.await(SessionStatus.IDLE)
+        manager.select(null)
+        stopped.clearAttention()
+        manager.stop(stopped.id)
+        stopped.status.await(SessionStatus.STOPPED)
+        delay(300) // time for a wrong badge to show
+        assertFalse(stopped.attention.value)
+        assertEquals(0, stopped.selfEnds.value)
+
+        // The cap's stopIfIdle: a second session started at a cap of one stops the idle first.
+        val evicted = manager.create(NewSessionOptions())
+        awaitLog { spawns().size == 2 }
+        evicted.status.await(SessionStatus.IDLE)
+        manager.select(null)
+        val second = manager.create(NewSessionOptions())
+        evicted.status.await(SessionStatus.STOPPED)
+        awaitLog { spawns().size == 3 }
+        delay(300)
+        assertFalse(evicted.attention.value)
+        assertEquals(0, evicted.selfEnds.value)
+
+        manager.close(second.id)
+        assertEquals(0, second.selfEnds.value)
+    }
+
+    /** Folders made for the folder tests, outside the project (`dir`): removed after each test. */
+    private val outside = ArrayList<Path>()
+
+    @AfterEach
+    fun removeOutsideFolders() {
+        outside.forEach { it.toFile().deleteRecursively() }
+    }
+
+    /** A new empty folder outside the project, by its real path (macOS: `/private/var/...`). */
+    private fun outsideFolder(): String =
+        Files.createTempDirectory("tandem-folder-").toRealPath().also { outside.add(it) }.toString()
+
+    private fun ChatState.warnings(text: String): Int = notices(NoticeLevel.WARNING).count { it == text }
+
+    /** A new session of [this] whose process runs and is idle, before any prompt. */
+    private suspend fun SessionManager.idle(): SessionHandle {
+        val handle = create(NewSessionOptions())
+        awaitLog { spawns().size == 1 }
+        handle.status.await(SessionStatus.IDLE)
+        return handle
+    }
+
+    // spec: adding a folder stops an idle process and the next spawn carries it
+    @Test
+    fun `adding a folder stops an idle process and the next spawn carries it`() = test {
+        val extra = outsideFolder()
+        val manager = manager()
+        val handle = manager.idle()
+        manager.addFolder(handle.id, extra)
+        assertEquals(listOf(AddedFolder(extra, FolderState.PENDING)), handle.folders.value)
+        handle.status.await(SessionStatus.STOPPED)
+
+        manager.send(handle.id, "hi")
+        awaitLog { spawns().size == 2 }
+        assertEquals(listOf("--session-id", handle.id, "--add-dir", extra), spawns().last().takeLast(4))
+        handle.state.first { it.turnsEnded == 1 && !it.busy }
+        handle.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        assertEquals(0, handle.selfEnds.value, "the folder's stop is Tandem's own (spec 18.1)")
+    }
+
+    // spec: adding during a turn stops after the turn
+    @Test
+    fun `adding during a turn stops after the turn`() = test {
+        val extra = outsideFolder()
+        val manager = manager(environment = mapOf("TANDEM_FAKE_LINE_DELAY_MS" to "200"))
+        val handle = manager.idle()
+        manager.send(handle.id, "Reply with the single word: pong")
+        handle.status.await(SessionStatus.RUNNING)
+        manager.addFolder(handle.id, extra)
+        delay(300)
+        assertEquals(SessionStatus.RUNNING, handle.status.value, "no stop during the turn")
+        handle.state.first { it.turnsEnded == 1 }
+        handle.status.await(SessionStatus.STOPPED)
+        assertEquals(1, spawns().size)
+    }
+
+    // spec: a folder missing from init warns once
+    @Test
+    fun `a folder missing from init warns once`() = test {
+        val extra = outsideFolder()
+        // Two turns in one process: parity-context replays two inits.
+        val manager = manager(fixtures = "parity-context", environment = mapOf("TANDEM_FAKE_SKIP_ADD_DIR" to extra))
+        val handle = manager.idle()
+        manager.addFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "one")
+        handle.state.first { it.turnsEnded == 1 && !it.busy }
+        handle.folders.await(listOf(AddedFolder(extra, FolderState.MISSING)))
+        manager.send(handle.id, "two")
+        handle.state.first { it.mcp.initCount == 2 && !it.busy } // the second turn is a local command's
+        delay(500) // the second init's check runs on IO
+        assertEquals(listOf(AddedFolder(extra, FolderState.MISSING)), handle.folders.value)
+        assertEquals(1, handle.state.value.warnings("The CLI did not add the folder $extra."))
+        assertEquals(2, spawns().size)
+    }
+
+    // spec: a vanished folder is dropped with a notice
+    @Test
+    fun `a vanished folder is dropped with a notice`() = test {
+        val extra = outsideFolder()
+        val manager = manager()
+        val handle = manager.idle()
+        manager.addFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        Path.of(extra).toFile().deleteRecursively()
+
+        manager.send(handle.id, "hi")
+        awaitLog { spawns().size == 2 }
+        assertFalse("--add-dir" in spawns().last(), spawns().last().toString())
+        assertEquals(emptyList(), handle.folders.value)
+        assertEquals(1, handle.state.value.warnings("The folder $extra no longer exists, so it was not added."))
+    }
+
+    // spec: a fork copies the folders
+    @Test
+    fun `a fork copies the folders`() = test {
+        seed(seeded)
+        val extra = outsideFolder()
+        val manager = manager()
+        manager.open(seeded, spawn = false)
+        manager.addFolder(seeded, extra) // no process: nothing to stop
+        val fork = assertNotNull(manager.fork(seeded))
+        assertEquals(listOf(AddedFolder(extra, FolderState.PENDING)), fork.folders.value)
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", fork.id, "--add-dir", extra), forkTail(fork.id))
+        assertEquals(emptyList(), manager.create(NewSessionOptions()).folders.value, "a new session starts with none")
+    }
+
+    // spec: a fork at a reply passes its parent's folders after the fork tail
+    @Test
+    fun `a fork at a reply passes its parent's folders after the fork tail`() = test {
+        seed(seeded, fixture = "fork-at-origin")
+        val extra = outsideFolder()
+        val manager = manager()
+        manager.open(seeded, spawn = false)
+        manager.addFolder(seeded, extra)
+        val fork = assertNotNull(manager.fork(seeded, "<uuid-14>"))
+        assertEquals(listOf(AddedFolder(extra, FolderState.PENDING)), fork.folders.value)
+        assertEquals(listOf("--resume-session-at", "<uuid-14>", "--add-dir", extra), forkTail(fork.id).takeLast(4))
+    }
+
+    // spec: removing a folder respawns without it
+    @Test
+    fun `removing a folder respawns without it`() = test {
+        val extra = outsideFolder()
+        val manager = manager()
+        val handle = manager.idle()
+        manager.addFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "one")
+        handle.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        handle.status.await(SessionStatus.IDLE)
+
+        manager.removeFolder(handle.id, extra)
+        assertEquals(emptyList(), handle.folders.value)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "two")
+        awaitLog { spawns().size == 3 }
+        assertFalse("--add-dir" in spawns().last(), spawns().last().toString())
+        handle.state.first { it.turnsEnded == 2 && !it.busy }
+        delay(300)
+        assertTrue(handle.state.value.notices(NoticeLevel.WARNING).none { "removed folder" in it })
+    }
+
+    // spec: a removed folder the CLI still lists warns
+    @Test
+    fun `a removed folder the CLI still lists warns`() = test {
+        val extra = outsideFolder()
+        val kept = "The CLI still lists the removed folder $extra."
+        // The third process has two turns: parity-context replays two inits.
+        val manager = manager(
+            fixtures = "plain-reply,plain-reply,parity-context",
+            environment = mapOf("TANDEM_FAKE_KEEP_ADD_DIR" to extra),
+        )
+        val handle = manager.idle()
+        manager.send(handle.id, "one")
+        handle.state.first { it.turnsEnded == 1 && !it.busy && it.additionalDirectories == listOf(extra) }
+        delay(300)
+        assertEquals(0, handle.state.value.warnings(kept), "never added: no notice")
+
+        manager.addFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "two")
+        handle.state.first { it.turnsEnded == 2 && !it.busy }
+        handle.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        assertEquals(0, handle.state.value.warnings(kept))
+
+        manager.removeFolder(handle.id, extra)
+        handle.status.await(SessionStatus.STOPPED)
+        manager.send(handle.id, "three")
+        awaitLog { spawns().size == 3 }
+        assertFalse("--add-dir" in spawns().last(), spawns().last().toString())
+        handle.state.first { it.warnings(kept) == 1 }
+        handle.state.first { it.turnsEnded == 3 && !it.busy }
+        manager.send(handle.id, "four")
+        handle.state.first { it.mcp.initCount == 2 && !it.busy } // the second turn is a local command's
+        delay(500) // the second init's check runs on IO
+        assertEquals(1, handle.state.value.warnings(kept), "once per folder per spawn")
+        assertEquals(3, spawns().size)
+    }
+
+    // spec: removing a folder before the stop leaves the process running
+    @Test
+    fun `removing a folder before the stop leaves the process running`() = test {
+        val extra = outsideFolder()
+        val manager = manager(environment = mapOf("TANDEM_FAKE_LINE_DELAY_MS" to "200"))
+        val handle = manager.idle()
+        manager.send(handle.id, "Reply with the single word: pong")
+        handle.status.await(SessionStatus.RUNNING)
+        manager.addFolder(handle.id, extra)
+        manager.removeFolder(handle.id, extra)
+        handle.state.first { it.turnsEnded == 1 && !it.busy }
+        delay(500)
+        assertEquals(SessionStatus.IDLE, handle.status.value, "nothing differs, so nothing stops")
+        manager.send(handle.id, "again")
+        delay(300)
+        assertEquals(1, spawns().size, "the next send goes to the same process")
+    }
+
+    // review: a folder added while the session's spawn is under way still reaches the CLI
+    @Test
+    fun `a folder added while the spawn is under way reaches the CLI`() = test {
+        val extra = outsideFolder()
+        // At most one live session, and a stop that takes a second: the second session's spawn reads its folders, then waits
+        // for room while the first one's process exits.
+        val manager = manager(maxLive = 1, environment = mapOf("TANDEM_FAKE_EXIT_DELAY_MS" to "1000"))
+        val first = manager.idle()
+        val second = manager.create(NewSessionOptions())
+        first.status.await(SessionStatus.STOPPED) // let go to make room: the second spawn has read its folders already
+        manager.addFolder(second.id, extra)
+        assertEquals(1, spawns().size, "the second spawn still waits for room")
+
+        // That spawn goes on without the folder. Its process is stopped at once (it may be gone before it even logs its spawn),
+        // or, should the prompt reach it first, after its turn: either way the folder reaches the CLI.
+        withTimeout(10_000) {
+            manager.send(second.id, "one")
+            second.state.first { it.turnsEnded == 1 && !it.busy }
+            if ("--add-dir" !in spawns().last()) {
+                // The prompt reached the process spawned without the folder: it is stopped after its turn.
+                second.status.await(SessionStatus.STOPPED)
+                manager.send(second.id, "two")
+                second.state.first { it.turnsEnded == 2 && !it.busy }
+            }
+            assertEquals(listOf("--add-dir", extra), spawns().last().takeLast(2))
+            second.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        }
+    }
+
+    // review: a resume that comes back as another session takes its folders to the new row
+    @Test
+    fun `a session taken over keeps the folders its process runs with`() = test {
+        seed(seeded)
+        val extra = outsideFolder()
+        val manager = manager(environment = mapOf("TANDEM_FAKE_SESSION_ID" to other))
+        val resumed = manager.open(seeded, spawn = false)
+        manager.addFolder(seeded, extra)
+        manager.send(seeded, "Reply with the single word: pong")
+
+        val taken = manager.sessions.first { it.size == 2 }.last()
+        assertEquals(other, taken.id)
+        assertEquals(listOf("--add-dir", extra), spawns().single().takeLast(2))
+        taken.folders.await(listOf(AddedFolder(extra, FolderState.ACTIVE)))
+        taken.status.await(SessionStatus.IDLE)
+        delay(300)
+        assertEquals(listOf(AddedFolder(extra, FolderState.ACTIVE)), taken.folders.value)
+        assertEquals(1, spawns().size, "the row that took the process over does not stop it for its folders")
+        assertEquals(listOf(extra), resumed.folders.value.map { it.path }, "the old row keeps its own")
     }
 }

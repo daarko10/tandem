@@ -45,6 +45,13 @@ private const val CONFIG_DIR_PROPERTY: String = "tandem.configDir"
 private const val AUTO_PROMPT_PROPERTY: String = "tandem.autoPrompt"
 
 /**
+ * The claude.ai page that lists the account's connectors, which the `+` menu's `Browse connectors` opens in the browser
+ * (docs/superpowers/specs/2026-10-22-desktop-parity-design.md 17.2). Unverified (spec 11 item 19): the desktop app opens a directory
+ * of its own, which has no address.
+ */
+const val CONNECTORS_URL: String = "https://claude.ai/settings/connectors"
+
+/**
  * The project's sessions: owns the [SessionManager], which runs every session's `claude` in this service's scope, so the platform
  * ends them all when the project closes. [ensureStarted] opens the sessions that were open last time, keeps the workspace file up to
  * date and starts the [SessionNotifier].
@@ -58,6 +65,10 @@ private const val AUTO_PROMPT_PROPERTY: String = "tandem.autoPrompt"
 class TandemSessions(private val project: Project, private val scope: CoroutineScope) {
     /** The project's base path, absolute and as the platform gives it; the user's home for a project without one. Sessions run in it. */
     private val directory: Path = baseDirectory(project)
+
+    /** The project's directory, as sessions run in it: `Add folder` refuses it and the folders under it (spec 3.4). */
+    internal val projectDirectory: Path
+        get() = directory
 
     /** [directory] with its links resolved, native separators: the path the CLI keys its transcript folder on. Read off the EDT. */
     private val projectPath: Lazy<String> = lazy { physical(directory).toString() }
@@ -114,6 +125,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     /** Opens an MCP server's sign-in page in the system browser (spec 3.3, 4.4); tests swap in a log line (`tandem.browserOpener`). */
     val browserOpener: BrowserOpener = BrowserOpeners.default()
 
+    /** Picks the folder `Add folder` adds (desktop-parity spec 3.4); tests name one with `tandem.addFolder`. */
+    val folderChooser: FolderChooser = FolderChoosers.default()
+
     // The settings as already loaded: loading them reads a file, which the constructor must not (it may run on the EDT), so when
     // they are not loaded yet the default holds until ensureStarted reads them on IO, before it restores any session.
     private val _rowOptions = MutableStateFlow(
@@ -128,8 +142,8 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     )
 
     /**
-     * Tandem's `Reduce motion` setting, as last applied ([settingsChanged]): the working row's spark stands still. Apart from
-     * [rowOptions], which the rows are built from, so that toggling it rebuilds no chat's rows.
+     * Tandem's `Reduce motion` setting, as last applied ([settingsChanged]): the working row's orbs stand still and nothing
+     * shimmers. Apart from [rowOptions], which the rows are built from, so that toggling it rebuilds no chat's rows.
      */
     val reduceMotion: StateFlow<Boolean> = _reduceMotion.asStateFlow()
 

@@ -1,6 +1,6 @@
 # CLI stream-json protocol reference
 
-How Tandem talks to the user's `claude` binary (Claude Code; recorded with CLI 2.1.300 to 2.1.308) over stdin/stdout
+How Tandem talks to the user's `claude` binary (Claude Code; recorded with CLI 2.1.300 to 2.1.310) over stdin/stdout
 NDJSON. Every claim names the fixture line that shows it and the CLI version it was recorded on, or the source it rests
 on (below); the traps that cost the most time are collected in the Gotchas section right after this introduction: read
 it first. It is unnumbered, so sections 1 to 11 keep the numbers the code cites them by (section 9 points back to it).
@@ -26,6 +26,16 @@ Sources, in order of authority:
      `mcp-status`, `mcp-tool-call` and `mcp-slash` (how they were made: section 10).
    - 2.1.308, with its transcript: `bash-mode-context` (a context-only shell escape as Tandem sends it, one quiet frame,
      section 3; recorded with `--model claude-sonnet-5-5`).
+   - 2.1.308, each with its transcript, recorded with `--model claude-sonnet-5-5`: `parity-context`, `parity-usage` and
+     `parity-add-dir` (the context breakdown, `get_usage`, the plugin and skill lists of `init` and `--add-dir`: sections
+     4.4, 5.1, 6.1), `queue-fold`, `queue-later` and `queue-cancel` (messages written while a turn runs, section 3), and
+     `fork-at` with `fork-at-origin` (a fork cut at a reply, section 8).
+   - 2.1.310, each with its transcript, recorded with `--model claude-sonnet-5-5`: `queue-steer-text`,
+     `queue-cancel-steer`, `queue-later-command` and `queue-during-card` (more cases of messages written while a turn runs,
+     section 3), `fork-at-live` and `fork-at-busy` (a fork cut at a reply while the original's process is live, and while it
+     runs a turn, with `fork-at-live-origin` and `fork-at-busy-origin`: section 8), and `parity-add-dir-spawn` (`--add-dir` on
+     a spawn, a resume, a fork and a fork at a reply, section 1.1; its stream holds five processes' stdout, the
+     transcripts `parity-add-dir-spawn-origin` and `parity-add-dir-spawn` are the origin's and the plain fork's).
    `synthetic-long-reply` is generated from `plain-reply` by `scripts/make_long_reply.py`, the only fixture that was not
    recorded; nothing here cites it. Re-record with `scripts/record-fixture.sh` (one-shot prompt) or
    `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too and redact the recording in the
@@ -111,10 +121,10 @@ then appends optional flags in this order (SDK 0.3.300; only those Tandem cares 
 | `--fallback-model <id>` | option; SDK throws if equal to `--model` | no by default |
 | `--include-hook-events` | option | no |
 | `--include-partial-messages` | option | **yes** (streaming text) |
-| `--add-dir <dir>` (repeat) | `additionalDirectories` | for extra content roots |
+| `--add-dir <dir>` (repeat) | `additionalDirectories` | yes, one per folder the user added, after the session flags below: a running stream-json session cannot gain a folder outside its working directory, so a folder is added by a respawn (below) |
 | `--plugin-dir <path>` or `--await-initialize` | plugins | no |
 | `--fork-session` | `forkSession` | with `--resume` and `--session-id` for a fork (section 8) |
-| `--resume-session-at <uuid>` | `resumeSessionAt` | see section 8 |
+| `--resume-session-at <uuid>` | `resumeSessionAt` | yes, only together with `--fork-session`, for a fork cut at a reply (section 8) |
 | `--session-id <uuid>` | `sessionId` | **yes**: a new session's id, and a fork's own id (section 8) |
 | `--no-session-persistence` | `persistSession:false` | no |
 
@@ -142,6 +152,7 @@ claude --output-format stream-json --verbose --input-format stream-json \
 | new | `--session-id <uuid>`, an id Tandem generates |
 | existing, once its `<id>.jsonl` exists | `--resume <id>` |
 | fork of `<id>`, until the fork's own transcript exists | `--resume <id> --fork-session --session-id <new uuid>` |
+| fork of `<id>` cut at a reply | `--resume <id> --fork-session --session-id <new uuid> --resume-session-at <uuid>` (section 8) |
 
 Measured with CLI 2.1.301, sending only `initialize` (conditions in Sources item 2; these facts also sit on
 `SessionSpawner.configFor`):
@@ -163,6 +174,30 @@ Measured with CLI 2.1.301, sending only `initialize` (conditions in Sources item
 
 So Tandem passes `--resume` exactly when `<id>.jsonl` exists, and gives every new session and every fork its id up
 front. Either mistake above would fail again on every retry.
+
+**`--add-dir <dir>`** (CLI 2.1.310, `parity-add-dir-spawn`: five processes in a row, every one without `--safe-mode`, with
+`--setting-sources project,local --strict-mcp-config`, from two empty folders A and B outside the working directory). Tandem
+appends one `--add-dir` per folder after the session flags, a path with spaces as one argument. The process's `system/init`
+lists exactly the folders its argv passed, in `additional_directories`:
+
+| Process | Argv after the common flags | `init` | `additional_directories` | `session_id` |
+|---|---|---|---|---|
+| spawn | `--add-dir A` | `:4` | `[A]` | the new id |
+| resume | `--resume <id> --add-dir A --add-dir B` | `:19` | `[A, B]` | the same id |
+| fork cut at the first reply | `--resume <id> --fork-session --session-id <G> --resume-session-at <uuid> --add-dir A` | `:34` | `[A]` | `G` |
+| plain fork | `--resume <id> --fork-session --session-id <F> --add-dir A` | `:49` | `[A]` | `F` |
+| resume without A | `--resume <id> --add-dir B` | `:64` | `[B]` | the same id |
+
+A resume keeps the session's id and transcript (the second and fifth processes continue the origin's chain,
+`transcripts/parity-add-dir-spawn-origin.jsonl`), a fork's `init` carries the id passed with `--session-id`, and a folder
+left out of a resume's argv is not restored from the session: the fifth `init` lists B alone. So a folder is removed the
+same way it is added, by a respawn. A running session cannot gain one: `/add-dir` typed as a prompt answers
+`/add-dir isn't available in this environment.` (`local_command_outcome` `unavailable_headless`, `parity-add-dir:6`);
+`register_repo_root` with a subfolder of the working directory succeeds (`:10`), the same folder again answers `is already a
+registered working directory` (`:11`), and a folder outside it answers `is not a subdirectory of the session's working
+directory or of a launch-time --add-dir root` (`:12`); `add_directory` is for hosted containers (`mount_path must be under
+/uploads/ or /outputs/`, `:13`). What a folder loads (its `.claude/skills`, `.claude/commands` and `.claude/agents`; its
+`CLAUDE.md` only with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`) is from the CLI's documentation, not recorded.
 
 ### 1.2 Environment
 
@@ -248,6 +283,7 @@ One JSON object per line, UTF-8, `\n`-terminated. Blank lines and non-JSON lines
 | `control_response` | answer to a host request |
 | `control_cancel_request` | CLI withdraws its own pending request |
 | `keep_alive` | heartbeat, ignore |
+| `command_lifecycle` | `{command_uuid, state}`, `state` one of `queued`, `started`, `completed`, `cancelled`: where a user message is in the CLI's queue (section 3). Every user message gets one, the turn's own prompt too (`queue-fold.ndjson:3`, `:5`, `:54`; `interrupt.ndjson:5`, `:7`, `:20`) |
 | `active_goal` | goal state (fixture; typed in SDK) |
 | `autocompact_state` | auto-compact config (fixture; untyped) |
 | `tool_progress`, `auth_status`, `tool_use_summary`, `prompt_suggestion`, `transcript_mirror`, ... | other SDK types; render or ignore |
@@ -308,7 +344,38 @@ Slash commands are sent as plain text (`"/compact"`) unless `client_composed:tru
 (`/mcp`, `/model`, `/help` in 2.1.306) runs no model turn: the reply is one synthetic `assistant` line (6.1,
 `mcp-slash.ndjson:5`), and the CLI does not echo the typed line. A project command (`/hello` from `.claude/commands/hello.md`)
 is a normal turn (`mcp-slash.ndjson:22-34`).
-Messages sent while a turn is running are queued and may be folded into the running turn; `result.user_message_uuids` lists which sends a turn consumed.
+
+**Messages written while a turn runs** (CLI 2.1.308 and 2.1.310; the `queue-*` fixtures). The CLI queues a `user` frame written
+while a turn runs, never echoes it on stdout, and reports where it is with `command_lifecycle` lines (section 2) whose
+`command_uuid` is the `uuid` the host sent. `init` advertises `msg_lifecycle_v1` and `interrupt_cancel_queued_v1` in
+`capabilities` (`queue-fold.ndjson:6`).
+
+- **Without `priority`** the message is folded into the running turn at the next tool round: `queued` (`queue-fold.ndjson:19`),
+  the tool result, then `started` (`:22`), a `system/status` whose `user_message_uuids` names the turn's prompt and the
+  message (`:23`), one `result` for the one turn whose `user_message_uuids` holds both (`:53`), and `completed` for the message
+  (`:52`) before the prompt's (`:54`). On disk the message is not a `user` line but an `attachment` of type `queued_command`
+  (`transcripts/queue-fold.jsonl:23`, section 11.2). If the turn has no tool round left, the message is not folded: it stays
+  queued while the text streams, the turn's `result` names the prompt alone (`queue-steer-text.ndjson:54`), and the message
+  runs as the next turn, `started` after the prompt's `completed` (`:55`, `:56`), with its own `init` (`:57`) and `result`
+  (`:66`).
+- **With `"priority":"later"`** the message waits for the turn to end and runs as its own turn: `queued`
+  (`queue-later.ndjson:19`), the turn's `result` names the prompt only (`:51`; its `queued_turn_count` is 0 although the
+  message waits, so it is not a signal that nothing is left), `started` (`:53`), an `init` (`:54`) and a `result` naming the
+  message (`:63`). A slash command sent `later` while a turn runs waits too, then runs as a local command: `queued`
+  (`queue-later-command.ndjson:23`), the turn's `result` names the prompt only (`:35`), `started` (`:37`), an `init` (`:38`),
+  the local reply (`:39`) and a `result` with `local_command` and `num_turns` 0 (`:40`). An image message sent `later` right
+  after it (`:24`) runs as its own turn once the command is done: `started` (`:42`), `init` (`:43`), `result` (`:52`). A
+  `later` message written while a `can_use_tool` request waits is `queued` after the request and before the answer
+  (`queue-during-card.ndjson:18`, `:21`), waits for the turn's `result` (`:31`) and then runs (`:33`, `:43`).
+- **Withdrawing a queued message**: `cancel_async_message` (section 4.4) closes it with `cancelled` and the turn goes on
+  (`queue-cancel.ndjson:23`-`:25`); it works for a message without `priority` too (`queue-cancel-steer.ndjson:19`-`:21`).
+  `interrupt` with `cancel_queued:true` withdraws every queued message with the interrupt (`queue-cancel.ndjson:54`-`:61`,
+  `queue-cancel-steer.ndjson:36`-`:38`); the aborted turn's `result` is `error_during_execution` with
+  `terminal_reason` `aborted_tools` and no `init` follows (`queue-cancel-steer.ndjson:42`).
+- `"priority":"now"` also exists in the SDK's types; Tandem does not send it and no recording has it.
+
+Not recorded: a message written while a subagent runs, two `later` messages in a row, an image folded into a running turn,
+a withdrawal answered `cancelled:false`, other models than `claude-sonnet-5-5`, and runs without `--safe-mode`.
 
 **Shell escapes (`! command`, bash mode).** Tandem runs the command itself and sends what the terminal's own `!` sends: `content` is a
 string, not a block array, and every frame carries `client_composed:true` (`HostMessages.bashInput`, `bashOutput`, `bashContext`):
@@ -506,13 +573,15 @@ Request fields follow `sdk.d.ts` 0.3.300. A row that names no fixture or measure
 
 | subtype | Request fields | Success `response` |
 |---|---|---|
-| `interrupt` | `cancel_queued?: boolean` | `{still_queued: string[], cancelled?: string[]}` (empty `{}` on CLIs without `interrupt_receipt_v1`); recorded `{"still_queued":[]}` (`interrupt.ndjson:13`, 2.1.300) |
+| `interrupt` | `cancel_queued?: boolean` | `{still_queued: string[], cancelled?: string[]}` (empty `{}` on CLIs without `interrupt_receipt_v1`); recorded `{"still_queued":[]}` (`interrupt.ndjson:13`, 2.1.300). With `cancel_queued:true` the receipt lists what the interrupt withdrew: `{"still_queued":[],"cancelled":["<command_uuid>"]}` after the message's `cancelled` lifecycle line and before the aborted turn's `result` (`queue-cancel.ndjson:55`, `:56`, `:60`; `queue-cancel-steer.ndjson:37`, `:38`, `:42`) |
+| `cancel_async_message` | `message_uuid: string`, the `uuid` of a message the host sent | `{"cancelled":true}` after the message's `cancelled` lifecycle line (`queue-cancel.ndjson:24`, `:25`; `queue-cancel-steer.ndjson:20`, `:21`). The SDK's types say `cancelled:false` for a message already folded in or started: unrecorded. Tandem waits 5 s |
 | `set_model` | `model?: string\|null` (`null`/`"default"` = session default) | none: the success frame has no `response` field (`model-switch.ndjson:21`, 2.1.300), and just before it the CLI emits a replayed `user` line (`isReplay:true`) with `<local-command-stdout>Set model to ...</local-command-stdout>` (`:20`). An `error` answer is unrecorded; what Tandem does with one: section 8, Switch model mid-session |
 | `set_permission_mode` | `mode: "default"\|"acceptEdits"\|"bypassPermissions"\|"plan"\|"dontAsk"\|"auto"` | `{"mode": "<wire name>"}`, then a `system/status` line with `status: null` and the new `permissionMode`; the next `init` agrees (fixture `permission-mode`, 2.1.301) |
 | `rename_session` | `title: string`, `source: "host"` | none: no `response` field, like `set_model`. A `system/session_title_changed` line (`title`) comes just before it, and the CLI appends a `custom-title` line to the transcript (fixtures `fork`, `fork-origin`) |
 | `set_max_thinking_tokens` | `max_thinking_tokens?: number\|null`, `thinking_display?: "summarized"\|"omitted"\|"highlights"\|null` | none: the success frame has no `response` field (`think-summarized.ndjson:25`, 2.1.302). Takes effect on the next turn (below). Not sent by Tandem, which passes `--thinking-display summarized` at spawn (1.1) |
 | `list_models` | — | model catalog (`{models: ModelInfo[]}`, inferred shape) |
-| `get_context_usage` | `detail?: "summary"\|"full"` | categories `{name, tokens, kind:"used"\|"free"\|"buffer"\|"deferred"}` plus totals |
+| `get_context_usage` | `detail?: "summary"\|"full"` (Tandem sends none, which is `full`) | the context window by category, plus the MCP tools, memory files and skills behind it (below); recorded `parity-context.ndjson:17` |
+| `get_usage` | `skip_behaviors?: boolean` | this session's cost, times and per-model tokens, and, without `skip_behaviors`, a scan of this machine's recent sessions (below); recorded `parity-usage.ndjson:16`, `:17` |
 | `rewind_files` | `user_message_id: string`, `dry_run?: boolean` | rewind result (needs file checkpointing env) |
 | `mcp_status`, `mcp_toggle`, `mcp_reconnect`, `mcp_authenticate`, `mcp_set_servers` | see MCP requests, below (2.1.306) | see MCP requests, below |
 | `stop_task` | `task_id` | `{}` |
@@ -616,6 +685,72 @@ server leaves `needs-auth`. None of these requests reaches the on-disk transcrip
 the three turns). claude.ai connectors, which the documentation describes as servers with `source:"claudeai"` and
 `config.type:"claudeai-proxy"`, are in no recording yet.
 
+#### Context and usage requests
+
+Recorded with CLI 2.1.308 (`parity-context`, `parity-usage`; both run `--model claude-sonnet-5-5` on a sign-in that is not a
+claude.ai subscription: `init.apiKeySource` is `none`). The frames Tandem sends (`ClaudeSession`; the request ids are examples):
+
+```json
+{"type":"control_request","request_id":"c1","request":{"subtype":"get_context_usage"}}
+{"type":"control_request","request_id":"u1","request":{"subtype":"get_usage","skip_behaviors":true}}
+{"type":"control_request","request_id":"u2","request":{"subtype":"get_usage"}}
+```
+
+**`get_context_usage`** with no `detail` is the `full` form. After a turn (`parity-context.ndjson:17`) the answer has the keys
+`categories`, `totalTokens`, `maxTokens`, `rawMaxTokens`, `percentage`, `gridRows`, `model`, `memoryFiles`, `mcpTools`,
+`mcpInstructions`, `agents`, `slashCommands`, `skills`, `autoCompactThreshold`, `isAutoCompactEnabled`, `autocompactSource`,
+`messageBreakdown` and `apiUsage`. Before the first turn the same shape comes back at once, with a Messages row of a few
+tokens (`:2`).
+
+- `categories[]` is `{id, name, tokens, color, kind}`; `kind` is `used`, `free`, `buffer` or `deferred` (a deferred row also has
+  `isDeferred:true`). Seen ids: `system_prompt`, `system_tools`, `system_tools_deferred`, `mcp_tools_deferred`, `memory_files`,
+  `skills`, `messages`, `autocompact_buffer`, `free_space`. A row with no tokens is left out, not sent as zero, so a reader
+  cannot assume a fixed set (there is no `mcp_tools` row on `:17`, although `mcpTools` lists a tool). `color` is the terminal's
+  theme key (`promptBorder`, `inactive`, `claude`, `warning`), not a colour value.
+- The `used` rows sum to `totalTokens`, and `totalTokens` plus the buffer and the free space is `maxTokens` (`:17`: 38032 +
+  33000 + 928968 = 1000000); deferred rows count toward neither. `percentage` is `totalTokens` over the window as an integer.
+  No per-row percentage is sent. `rawMaxTokens` equals `maxTokens` in every recording; it can be smaller for a compaction
+  window (documentation only).
+- `memoryFiles[] {path, type, tokens}`, `mcpTools[] {name, serverName, tokens, isLoaded}`, `mcpInstructions[] {serverName,
+  tokens}` and `agents[] {agentType, source, tokens}` (the last two empty in the recordings, from the SDK's types) and
+  `skills.skillFrontmatter[] {name, source, pluginName?, pluginId?, path?, tokens}`: a plugin's skill names its plugin, a
+  built-in has `source:"built-in"` and no plugin. `totalTokens` equals the turn's `message_start` input sum and the `result`'s
+  `first_request_input_tokens`, so the ring Tandem draws and this answer agree after a turn.
+- `detail:"summary"` is a different estimate, not a cheaper copy of the same one (`:18`, sent right after `:17`): no
+  `messages` row, an extra `mcp_tools_deferred` row, larger system tools and a different total. Tandem does not send it.
+- Tandem decodes the categories, the memory files, the MCP tools and instructions, the agents, the skills, the totals, the
+  percentage and the model. It skips `gridRows` (the CLI's own 10 by 20 grid), `messageBreakdown`, `slashCommands`,
+  `apiUsage`, the auto-compact keys and `color`.
+- An unknown subtype is an error answer with the CLI's text (`:19`): `Unsupported control request subtype:
+  get_context_breakdown`. A CLI too old for `get_context_usage` presumably answers the same way (inferred).
+- `/context` typed as a prompt is a local command (6.1) whose reply text is Markdown (`:24`), with a structured twin.
+
+**`get_usage`**. Without the scan (`skip_behaviors:true`, `parity-usage.ndjson:16`) the answer is `{session,
+subscription_type, rate_limits_available, rate_limits, behaviors}` with `behaviors` null:
+
+- `session` holds the CLI's running totals: `total_cost_usd` (equal to the last `result`'s), `total_api_duration_ms`,
+  `total_duration_ms` (wall time since the process started), `total_lines_added`, `total_lines_removed` and `model_usage`,
+  the same per-model objects as `result.modelUsage` (`inputTokens`, `outputTokens`, `cacheReadInputTokens`,
+  `cacheCreationInputTokens`, `webSearchRequests`, `costUSD`, `contextWindow`, ...), the helper model beside the session's.
+  The costs are estimates from a bundled price table, not billing data (documentation).
+- `subscription_type` is null and `rate_limits_available` false here, with `rate_limits` null (`:16`): this sign-in is not a
+  claude.ai subscription, so the plan's limits were not observable. Tandem decodes none of the three.
+
+Without `skip_behaviors` (`:17`) `behaviors` is `{day, week}` (the last 24 hours and 7 days; the scan reads every transcript
+touched in the last 7 days, documentation). Each window has `recommendations[{key, pct, title, detail?}]`, `fix{keys,
+messages}`, `request_count`, `session_count`, `behaviors[{key, pct, count}]` and the `agents`, `skills`, `plugins` and
+`mcp_servers` arrays of `{name, pct}`. `behaviors` came back although `subscription_type` is null; the SDK says it is null for
+sessions without a subscription, so it is optional. The percentages overlap and do not sum to 100. `recommendations[].title`
+and `detail` are the CLI's own English and `fix.messages[]` a ready-made prompt that embeds names from the user's logs; Tandem
+shows the titles as text and never sends or decodes `fix`. Behaviour keys seen: `subagent_heavy`, `cron`, `workflow`,
+`long_context`, `large_tool_results`, `max_effort`.
+
+Tandem waits 30 s for `get_context_usage`, 15 s for `get_usage` with `skip_behaviors` and 60 s without it, then shows the
+failure. Every request in the fixtures falls between turns: whether the CLI answers one while a turn runs is **unrecorded**,
+and so is how long the scan takes on a machine with many sessions. `get_session_cost` (`parity-usage.ndjson:18`) answers `{text}`,
+the same text character for character as `/usage`'s reply; Tandem does not send it. `get_memory_dialog` (`parity-context.ndjson:20`)
+and `get_skills_dialog` (`parity-add-dir.ndjson:2`) are internal and undeclared in the SDK: nothing relies on them.
+
 ### 4.5 Other CLI → host requests
 
 | subtype | When | Tandem |
@@ -670,6 +805,25 @@ server the `init` leaves out is dropped, except a claude.ai connector (`source:"
 `mcp_status`: whether `init` lists connectors is unrecorded. `slash_commands` lists the command names (73 in
 `mcp-slash.ndjson:4`, the names of the initialize `commands`, 4.2) and `terminal_slash_commands` the ones that need the
 terminal (`["doctor","color","focus","reload-plugins"]`, `:4`). In the other fixtures the redactor empties these lists.
+
+Plugins, skills and folders (2.1.308, `parity-add-dir.ndjson:5`; the redactor empties these lists in most fixtures and keeps them there):
+
+- `plugins[] {name, path, source, version?}`: the session-only plugin `probe-kit` has `source:"probe-kit@inline"` and a
+  `version`; the three built-in plugins have `path:"builtin"`, `source:"<name>@builtin"` and no version. There is no
+  description and no list of what a plugin ships. The `source` suffixes the CLI uses are `@inline` (`--plugin-dir`),
+  `@skills-dir`, `@synced` (from claude.ai) and `@builtin` (binary strings, not recorded beyond the first and last).
+  Tandem keeps a `version` only when it looks like one (`^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$`). `plugin_errors` was absent.
+- `skills[]`: names of SKILL.md skills only, plugin skills as `<plugin>:<name>`; it is the one list that tells a skill from a
+  command. `probe-kit:greet` is in it and `probe-kit:hello`, a plugin command, is not (`:5`), while `slash_commands` has both.
+  Tandem decodes it.
+- The initialize answer's `commands` (`parity-add-dir.ndjson:1`, section 4.2) shows a plugin's entries as
+  `{"name":"probe-kit:hello","description":"(probe-kit) Says hello from a plugin command"}`: the name is namespaced, and the
+  description starts with the plugin's display name in parentheses (its `displayName` when it has one, else its name); a plugin
+  skill has its bare name as an alias, a plugin command none. A project or user entry takes a suffix instead (` (project)`,
+  ` (user)`), and `anthropic-skills:` is the CLI's own namespace for skills synced from claude.ai, not a plugin (binary strings
+  and a scratch probe, not a fixture).
+- `additional_directories`: the folders `--add-dir` passed, `[]` without any (`parity-add-dir.ndjson:5`; one folder after a
+  spawn that passed one, `parity-add-dir-spawn.ndjson:4`, section 1.1).
 
 `effort` is typed in the SDK but missing from every recorded `init` (2.1.300 to 2.1.308, e.g. `plain-reply.ndjson:4`,
 `mcp-status.ndjson:6`, `bash-mode-context.ndjson:5`), which carry only `per_turn_effort_active: true`. So Tandem shows the effort it passed with `--effort`, which for a session loaded from
@@ -797,6 +951,14 @@ Shape (`plain-reply.ndjson:10`, 2.1.300; trimmed):
   `Assistant.toolUseMeta` (an entry without a string `id` is skipped), not shown yet: the row names an
   `mcp__<server>__<tool>` call `<server>: <tool>`. MCP tools are deferred: before the call the model runs `ToolSearch` with
   `select:mcp__echo__echo` (`:22`).
+
+- `/usage` and `/cost` (2.1.308, `parity-usage.ndjson:22`, `:28`) are local commands too: the synthetic `assistant` line's
+  `local_command_run.command` is `usage` for both, and the `result` has `local_command:"usage"` (`:23`) or `"cost"` (`:29`),
+  `num_turns` 0 and the unchanged running `total_cost_usd`. The reply text is the same as `get_session_cost`'s. There is no
+  `usage_report` twin and no `system/local_command_output` on a sign-in that is not a subscription (a subscriber's would add the
+  plan's bars: documentation only). Tandem draws a card from the reply and then sends `get_usage`, first with
+  `skip_behaviors:true` and then without (4.4). `/context` (`parity-context.ndjson:24`) carries beside `message` a top-level
+  `context_usage`, the answer of 4.4 in snake_case and thinner (categories without `id` or `color`).
 
 ### 6.2 `user` (tool results)
 
@@ -955,6 +1117,10 @@ footer when its `result` has `local_command` or a local-command line (6.1) came 
 
 Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session_state_changed{state:"idle"}` when available.
 
+`user_message_uuids` names every message the turn consumed, a message folded into it included (`queue-fold.ndjson:53`). A message
+sent with `"priority":"later"` is not in it, and `queued_turn_count` is 0 while such a message waits (`queue-later.ndjson:51`),
+so neither says that nothing is queued; the message's `command_lifecycle` lines (section 3) do.
+
 ---
 
 ## 8. Sessions, resume, fork, model switching
@@ -965,7 +1131,7 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 | Resume | `--resume <id>` once `<id>.jsonl` exists, else `--session-id <id>` again. The CLI loads the transcript itself and does not stream the history to stdout (fixture `fork`: the second process streams only its own turn); Tandem loads it from the transcript (section 11). Without `--model` the session ran the model it was started with (`--model` at the start), not the default (below); a model switched mid-session with `set_model` was not measured |
 | Continue latest in cwd | `--continue` (not used) |
 | Fork | `--resume <id> --fork-session --session-id <new uuid>` until the fork's own transcript exists, then `--resume <new uuid>`. Measured with 2.1.301 (one prompt each): the fork's `system/init` reports `<new uuid>` and `<id>.jsonl` is left as it was. The fork's transcript starts with a copy of the original's history, every `sessionId` rewritten to the fork's (fixture `fork`). Without `--session-id` the CLI picks the fork's id, and no `system/init` reports it before the fork's first prompt (only undocumented lines do, section 1.1) |
-| Resume at a point | `--resume <id> --resume-session-at <message uuid>` (not used) |
+| Fork cut at a reply | `--resume <id> --fork-session --session-id <new uuid> --resume-session-at <message uuid>`: the fork knows the conversation up to and including that reply (below) |
 | Switch model mid-session | `control_request{set_model, model}` (4.4; fixture `model-switch`, 2.1.300); next turn's `system/init.model` must equal it. `--model` on resume also works. Tandem shows the picked model at once. An `error` answer is unrecorded (no recording has one); Tandem then puts back what the footer showed before that pick, its own mismatch warning included, unless a later pick replaced it meanwhile, and adds the error notice `The CLI rejected the switch to model <m> (<error>); it stays on model <x>.`: `<x>` is the model the CLI still runs, an earlier accepted pick that still waits for its `system/init`, else the last `init`'s model, else the pick before; `the default model` stands for `model <m>` or `model <x>` when that is the default, and the parentheses are left out when the answer has no `error` text. The CLI takes the requests in the order they were sent, so a pick still waiting starts from the model the refused one left |
 | Switch permission mode | `control_request{set_permission_mode}`: acknowledged with `{"mode": …}` and a `system/status` line carrying `permissionMode` right after it; the next `init.permissionMode` agrees (fixture `permission-mode`: `default`, `plan`, `acceptEdits`). Tandem shows the new mode at once; an `error` response to that request (envelope 4.1; fixture `permission-mode-rejected`, 2.1.302: `bypassPermissions` to a process not launched with `--dangerously-skip-permissions` gets `{"subtype":"error","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions","error_code":"bypass_not_launched"}`, and the session goes on) puts back the mode shown before it, unless a later pick replaced it, with an error notice naming the rejected mode. `auto` (fixture `permission-mode-auto`, 2.1.306): `set_permission_mode auto` is acknowledged with `{"mode":"auto"}` and a `system/status` line in `auto`, and the next `init` reports `auto`; a process spawned with `--permission-mode auto` reports `auto` in its first `init` too (a probe, not committed), so Tandem offers `auto` and a respawn keeps it |
 | Change effort | `control_request{apply_flag_settings, settings: {effortLevel}}` (section 4.4; fixture `effort-switch` for the request, its success and its error shape): the next turn runs at the new level (the 2.1.301 probe of section 4.4; both of the fixture's turns ran at its default, `high`). Tandem sends it for an effort picked in the footer of a live session and shows the level at once; an `error` answer puts back the level shown before it, with the notice `Effort not changed: <error>`. A stopped session passes the pick with `--effort` at its next spawn |
@@ -974,6 +1140,20 @@ Turn over = `result` for the main thread (`queued_turn_count == 0`), or `session
 | Rewind files | `rewind_files{user_message_id}` (needs `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` at spawn) |
 
 The `session_id` on every line is authoritative; it changes after fork.
+
+**A fork cut at a reply** (2.1.308 `fork-at`; 2.1.310 `fork-at-live` and `fork-at-busy`). The uuid is that of an `assistant`
+line. In `fork-at` the first process ran three turns; the second ran `--resume <A> --fork-session --session-id <B>
+--resume-session-at <uuid of the first turn's reply>` and was asked what it had been told: it answered with the first turn's
+word alone (`fork-at.ndjson:65`), and its `init` carries `B` (`:60`; `A` is the origin's, `:6`, `:19`, `:45`). The fork's
+transcript copies the origin's chain up to and including the cut with the uuids kept and nothing after it
+(`transcripts/fork-at.jsonl:6`-`:17` against `transcripts/fork-at-origin.jsonl:20`, whose later prompts are `:27` and `:35`),
+and its first new prompt has the cut as `parentUuid` (`transcripts/fork-at.jsonl:18`). The same holds while the original's
+process is still live and idle (`fork-at-live.ndjson:58` init, `:63` answer; `transcripts/fork-at-live.jsonl:17`-`:18`) and
+while the original is running a turn: the fork's `init` (`fork-at-busy.ndjson:49`) and answer (`:54`) come during the origin's
+second turn, which still ends `success` (`:44`) with its lines whole in `transcripts/fork-at-busy-origin.jsonl`. With
+`--add-dir` beside it the fork lists the folders (1.1). Seen with 2.1.308 but in no fixture: without `--fork-session` the flag
+branches the original's own transcript, and a uuid that is not in the session exits 1 with `No message found with
+message.uuid of: <uuid>`. A fork before a compaction boundary or of a renamed session is unrecorded.
 
 Model on resume, measured with 2.1.301 (one short prompt each, signed in, from an empty scratch folder, spawned as
 `drive_cli.py` spawns the CLI: the parent-session variables of section 1.2 removed, `--safe-mode`): a session started
@@ -1019,7 +1199,12 @@ Parse them leniently; any of them can change without notice.
 | `system/init` | `analytics_disabled, product_feedback_disabled, scratchpad_path, messaging_socket_path, per_turn_effort_active, startup_timing` | not in `SDKSystemMessage` |
 | `result` | `api_error_status, subagent_stats, safety_stops, turn_start_resume_kind, process_*` timings | not in `SDKResultMessage` |
 | `rate_limit_event.rate_limit_info` | `overageDisabledReason, unifiedWindows{five_hour,seven_day}` | beyond the typed fields |
-| top-level `command_lifecycle` | `{command_uuid, state:"queued"\|"started"\|"completed"\|"cancelled"}` | not in `sdk.d.ts`. `command_uuid` is the `uuid` the host sent with the user message |
+| top-level `command_lifecycle` | `{command_uuid, state:"queued"\|"started"\|"completed"\|"cancelled"}` | not in `sdk.d.ts`. `command_uuid` is the `uuid` the host sent with the user message; also sent for the turn's own prompt (`queue-fold.ndjson:3`, `:5`, `:54`; `interrupt.ndjson:5`, `:7`, `:20`). Typed (`CommandLifecycle`). Section 3 |
+| `system/init` | `capabilities` `msg_lifecycle_v1`, `interrupt_cancel_queued_v1` | feature flags for the lifecycle lines and `interrupt` with `cancel_queued` (`queue-fold.ndjson:6`) |
+| `system/status` | `user_message_uuids` | the messages the turn consumed (`queue-fold.ndjson:23`) |
+| assistant `context_usage`, system `local_command` `contextUsage` | `/context`'s structured twin (4.4, 6.1, 11.2) | not in `sdk.d.ts` (`parity-context.ndjson:24`, `transcripts/parity-context.jsonl:30`, 2.1.308) |
+| `get_context_usage` answer | `autocompactSource`, `first_request_input_tokens` on the `result` | not in `sdk.d.ts` (`parity-context.ndjson:17`, `:15`) |
+| `init.plugins`, `init.skills`, `init.additional_directories` | 5.1 | `parity-add-dir.ndjson:5` (2.1.308) |
 | `system/ui_invalidate` | `{event:"ui.render"}` | not in `sdk.d.ts`; before `init` |
 | `system/task_summary` | `{detail: string\|null}` | not in `sdk.d.ts`; short status line while a tool runs, `null` when done |
 | `system/session_title_changed` | `{title}` | not in `sdk.d.ts`. Just before the success of a `rename_session` (section 4.4); a fork of a renamed session also emits it, before its `initialize` response (fixture `fork`, 2.1.301) |
@@ -1053,6 +1238,23 @@ and `bash-mode-context` (2.1.308); the nightly records all three again. `transcr
 line's own `uuid` is the second's, `<command_uuid-6>`, as `bash-mode.ndjson:3-4` queued them), and the redactor now replaces
 that key.
 
+The parity and queue fixtures were recorded with `scripts/record-scenario.sh` (scenario names in brackets) or by scratch probes
+whose recordings were promoted; each has its transcript, and all ran with `--model claude-sonnet-5-5`:
+
+| Fixture | Host frames (not in the file) | What it records |
+|---|---|---|
+| `parity-context` | `initialize`; `get_context_usage`; a turn; `get_context_usage`; `get_context_usage` with `detail:"summary"`; `get_context_breakdown` (no such subtype); `get_memory_dialog`; the prompt `/context` | the breakdown before and after a turn (`:2`, `:17`), `summary` (`:18`), the unknown-subtype error (`:19`), `/context` as a local command with its twin (`:24`, `:25`). Twin: `transcripts/parity-context.jsonl` (`:30` carries `contextUsage`) |
+| `parity-usage` | `initialize`; a turn; `get_usage` with `skip_behaviors`; `get_usage`; `get_session_cost`; the prompts `/usage` and `/cost` | `get_usage` without and with the scan (`:16`, `:17`), the local command (`:22`, `:23`, `:28`, `:29`). Twin: `transcripts/parity-usage.jsonl` (`:37` is a `cost-state` line) |
+| `parity-add-dir` | `initialize`; `get_skills_dialog`; the prompt `/add-dir <dir>`; `register_repo_root` (three times); `add_directory`; `reload_plugins`; a turn | `init` with `plugins`, `skills` and `additional_directories` (`:5`, `:17`), the catalogue with a plugin's entries (`:1`), every add-folder attempt (`:6`-`:13`). Twin: `transcripts/parity-add-dir.jsonl` |
+| `parity-add-dir-spawn` | five processes: spawn, resume, fork cut at a reply, plain fork, resume without a folder (section 1.1) | each `init`'s `additional_directories` (`:4`, `:19`, `:34`, `:49`, `:64`). Twins: `parity-add-dir-spawn-origin.jsonl` and `parity-add-dir-spawn.jsonl` |
+| `queue-fold`, `queue-later`, `queue-cancel` | a long Bash turn; a message written at its `task_started`, without `priority` or with `later`; `cancel_async_message` or `interrupt` with `cancel_queued` | section 3 |
+| `queue-steer-text`, `queue-cancel-steer`, `queue-later-command`, `queue-during-card` | a streaming count; a steer withdrawn and one withdrawn by Stop; a slash command and an image sent `later`; a `later` message while a permission request waits | section 3 |
+| `fork-at`, `fork-at-live`, `fork-at-busy` | three turns, then a fork cut at the first reply: after the origin ended, while it is live and idle, while it runs a turn | section 8. Twins: `fork-at.jsonl`, `fork-at-origin.jsonl` and the `-live`, `-busy` pairs |
+
+The nightly contract job records `queue-fold`, `queue-later`, `queue-cancel`, `queue-cancel-steer`, `queue-during-card`,
+`fork-at` and `parity-requests` (a scripted run of the context and usage requests, 4.4, with no committed fixture) and
+`ContractTest` checks what Tandem switches on in them.
+
 ---
 
 ## 11. Transcripts on disk
@@ -1060,7 +1262,7 @@ that key.
 The CLI keeps each session as a JSONL file that it only ever appends to. Tandem has no session store of its own: the
 sidebar lists these files and a session's history loads from its file (`session/transcript/`), so sessions started in a
 terminal show up too. Sources: SDK 0.3.300 (`sdk.mjs` reads and writes the same files), the transcript fixtures in
-`src/test/resources/fixtures/transcripts/` (CLI 2.1.301 to 2.1.308, as Sources at the top lists them), and measurements
+`src/test/resources/fixtures/transcripts/` (CLI 2.1.301 to 2.1.310, as Sources at the top lists them), and measurements
 where noted.
 
 ### 11.1 Where they are
@@ -1110,7 +1312,8 @@ have `uuid` and `parentUuid` (11.3).
 | `summary` | `summary` | a generated summary, a title like `ai-title` |
 | `last-prompt` | none | `lastPrompt`, `leafUuid`: not used |
 | `system` | `uuid`, `parentUuid`, `subtype`; for `local_command`: `content`, `commandRun`, `commandOutcome`, `submitUuid` | links of the chain; `subtype: compact_boundary` marks a compaction (11.3); `subtype: local_command` is a local command (below) |
-| `attachment`, `queue-operation`, `cost-state`, `atis-latch`, `mode`, `agent-name`, `file-history-snapshot`, `progress`, any other type | `uuid`, `parentUuid` when present | skipped, except as links of the chain |
+| `attachment` of type `queued_command` | `attachment.prompt`, `commandMode` | a message the CLI took into a running turn (`transcripts/queue-fold.jsonl:23`, below); with `commandMode` absent or `prompt` it is a prompt in the history |
+| `attachment` (any other type), `queue-operation`, `cost-state`, `atis-latch`, `mode`, `agent-name`, `file-history-snapshot`, `progress`, any other type | `uuid`, `parentUuid` when present | skipped, except as links of the chain |
 
 The 2.1.301 fixtures show every type above except `summary`, `system`, `file-history-snapshot` and `progress`. `system`
 (`subtype: local_command`, and `turn_duration` in the terminal's own transcript) and `file-history-snapshot` are recorded
@@ -1118,6 +1321,15 @@ with 2.1.306 (`transcripts/mcp-slash.jsonl`, `transcripts/bash-mode-interactive.
 from the SDK's reader only. Also recorded: a prompt's `user` line has the `uuid` the host sent with the prompt
 (`history-interrupt`); `assistant` lines also carry `requestedModel`, `perTurnEffort` and `requestId`; a reply cut off
 by an interrupt has `isAbortedMidStream: true` where its stdout line has `aborted: true`.
+
+A message written while a turn runs (section 3) has a `queue-operation` line at each step: `enqueue`, then `dequeue` when it
+runs (`transcripts/queue-later.jsonl:31`, a `user` line for it at `:32`) or `remove` with a `reason` when it does not:
+`absorbed_mid_turn` for a message folded into the running turn (`transcripts/queue-fold.jsonl:24`) and `cleared_on_cancel` for
+one `interrupt` withdrew (`transcripts/queue-cancel.jsonl:34`). A folded message has no `user` line: its text is in the
+`queued_command` attachment (`transcripts/queue-fold.jsonl:23`, with `source_uuid` and `delivery_id`). A withdrawn one leaves
+nothing but its `queue-operation` lines. `/context` and `/usage` are written as in the next paragraph; `/context`'s `system`
+line also carries the structured twin under `contextUsage` (`transcripts/parity-context.jsonl:30`). Tandem records it but does
+not decode it: a reloaded `/context` is the notice's Markdown text, and the breakdown is not kept across a reload; the `get_context_usage` and `get_usage` requests leave no trace on disk.
 
 A local command (2.1.306, `transcripts/mcp-slash.jsonl`; on stdout, 6.1) is written as an `isMeta` user line with a
 `<local-command-caveat>` (`:3`, skipped as every `isMeta` line is), the `<command-name>/mcp</command-name>` user line (`:4`,
@@ -1179,6 +1391,9 @@ the shape the hand-written test uses; a slash command's line (`transcripts/mcp-s
 lines (`transcripts/bash-mode.jsonl:5`, `transcripts/bash-mode-respond.jsonl:6`, 2.1.306). The others, a
 `<local-command-stdout>` or `<local-command-stderr>` user line and `<task-notification>`, come from the CLI's binary and the SDK and are pinned with
 hand-written lines in `TranscriptReaderTest`.
+
+A `queued_command` attachment in prompt mode (11.2) is shown as a prompt of its own, marked as sent while Claude worked, in
+the turn it joined (`TranscriptReader`); without it a message folded into a turn would vanish when the session is reloaded.
 
 A loaded chat is settled whatever the file ends with: not busy, no pending permission, no streaming entry.
 

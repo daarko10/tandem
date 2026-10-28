@@ -75,6 +75,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import com.intellij.openapi.diagnostic.fileLogger
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.util.ui.JBUI
+import dev.daarkolabs.tandem.chat.statusWord
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
@@ -620,12 +621,13 @@ private fun StatusDot(status: SessionStatus) {
     // Read from the theme so that the dot follows a change of theme, as the IDE's own icon badges do.
     val dark = JewelTheme.isDark
     val stopped = JewelTheme.globalColors.text.disabled
-    val (color, word) = remember(status, dark, stopped) {
+    val word = statusWord(status)
+    val color = remember(status, dark, stopped) {
         when (status) {
-            SessionStatus.RUNNING -> JBUI.CurrentTheme.IconBadge.INFORMATION.toComposeColor() to "running"
-            SessionStatus.WAITING -> JBUI.CurrentTheme.IconBadge.WARNING.toComposeColor() to "waiting for permission"
-            SessionStatus.IDLE -> JBUI.CurrentTheme.IconBadge.SUCCESS.toComposeColor() to "idle"
-            SessionStatus.STOPPED -> stopped to "stopped"
+            SessionStatus.RUNNING -> JBUI.CurrentTheme.IconBadge.INFORMATION.toComposeColor()
+            SessionStatus.WAITING -> JBUI.CurrentTheme.IconBadge.WARNING.toComposeColor()
+            SessionStatus.IDLE -> JBUI.CurrentTheme.IconBadge.SUCCESS.toComposeColor()
+            SessionStatus.STOPPED -> stopped
         }
     }
     WithTooltip(word) {

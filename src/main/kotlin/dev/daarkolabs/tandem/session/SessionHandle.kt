@@ -1,10 +1,12 @@
 package dev.daarkolabs.tandem.session
 
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
 import dev.daarkolabs.tandem.session.transcript.promptTitle
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
@@ -13,6 +15,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -22,13 +25,33 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.InvalidPathException
+import java.nio.file.Path
 
 /** A session's id: the CLI's session UUID, which also names its transcript, `<id>.jsonl`. */
 typealias SessionId = String
 
+/** A folder added to a session (spec 3.4): its real [path], passed as `--add-dir` on each spawn, and what the CLI made of it. */
+data class AddedFolder(val path: String, val state: FolderState)
+
+/** Where an [AddedFolder] stands. */
+enum class FolderState {
+    /** Not yet passed to a process that reported its `system/init`: it applies with the next prompt. */
+    PENDING,
+
+    /** The init of the process spawned with it lists it. */
+    ACTIVE,
+
+    /** The process was spawned with it, but its init does not list it. */
+    MISSING,
+}
+
 /** What a session is doing, as the session list shows it. */
 enum class SessionStatus {
-    /** A turn is in progress. */
+    /** A turn is in progress, or a message waits to run. */
     RUNNING,
 
     /** A permission request waits for the user. */
@@ -60,6 +83,11 @@ class SessionHandle internal constructor(
     createdAt: Long,
     /** The session this one is a fork of: its processes fork that one again for as long as this one has no transcript. */
     internal val forkOf: SessionId? = null,
+    /**
+     * With [forkOf]: the line of [forkOf]'s transcript this fork starts after (`--resume-session-at`, spec 13.1); null for a whole
+     * fork. Passed, as [forkOf] is, until this session has a transcript of its own.
+     */
+    internal val forkAt: String? = null,
     /** A title the CLI is still to be told, such as a fork's: shown at once, and sent once a process reports its `system/init`. */
     pendingTitle: String? = null,
 ) {
@@ -115,7 +143,8 @@ class SessionHandle internal constructor(
             get() = when {
                 !attached || chat.ended -> SessionStatus.STOPPED
                 chat.pendingPermissions.isNotEmpty() -> SessionStatus.WAITING
-                chat.busy -> SessionStatus.RUNNING
+                // A message waiting in the CLI's queue runs soon: no eviction or folder respawn until it has (spec 12.5).
+                chat.busy || chat.pendingSends.isNotEmpty() -> SessionStatus.RUNNING
                 else -> SessionStatus.IDLE
             }
     }
@@ -130,6 +159,18 @@ class SessionHandle internal constructor(
     private val mutableState = MutableStateFlow(initialState)
     private val mutableAttention = MutableStateFlow(false)
     private val mutableLastFrameAt = MutableStateFlow(0L)
+
+    private val mutableFolders = MutableStateFlow<List<AddedFolder>>(emptyList())
+
+    /** Folders removed from this session ([removeFolder]) and not added again: the CLI must not still list them. Guarded by [lock]. */
+    private val removedFolders = LinkedHashSet<String>()
+
+    /** The folders the last spawn passed ([foldersForSpawn]), in order. Guarded by [lock]. */
+    private var spawnFolders: List<String> = emptyList()
+
+    /** The folders this spawn's notices were raised for already, so that each is raised once per folder per spawn. Guarded by [lock]. */
+    private val warnedMissing = HashSet<String>()
+    private val warnedKept = HashSet<String>()
 
     /** A title set in Tandem ([rename], or a fork's) that the index does not list yet: it wins until the index lists the same. */
     private var titleOverride: String? = pendingTitle
@@ -165,11 +206,25 @@ class SessionHandle internal constructor(
     /** Whether the user should look at this session: it asked for permission or finished a turn while another one was selected. */
     val attention: StateFlow<Boolean> = mutableAttention.asStateFlow()
 
+    private val mutableSelfEnds = MutableStateFlow(0)
+
+    /**
+     * How many processes of this session ended by themselves (the CLI exited, crashed or was killed) while attached: counted where
+     * the process's own exit lets it go, never for a stop Tandem makes, which lets the process go first (desktop-parity spec 18.1).
+     */
+    internal val selfEnds: StateFlow<Int> = mutableSelfEnds.asStateFlow()
+
     /**
      * The attached process's [ClaudeSession.lastFrameAtMillis]: when it last wrote a line, 0 until it wrote one. Keeps the last
      * value once the process is let go, until the next one is attached.
      */
     val lastFrameAtMillis: StateFlow<Long> = mutableLastFrameAt.asStateFlow()
+
+    /**
+     * The folders added to this session, in the order added (spec 3.4): each goes to the CLI as `--add-dir` on the next spawn. They
+     * live as long as this handle, across stops and resumes.
+     */
+    val folders: StateFlow<List<AddedFolder>> = mutableFolders.asStateFlow()
 
     /** The session's MCP servers as the chat knows them ([ChatState.mcp]): every `system/init`'s list, then every `mcp_status` answer. */
     val mcpServers: StateFlow<McpState> =
@@ -385,6 +440,18 @@ class SessionHandle internal constructor(
         }
     }
 
+    /**
+     * Picks the mode [next] gives for the chat as it stands, and returns it. Read and pick are one step under the lock, from the live
+     * process's own state, which already holds every earlier pick ([ClaudeSession.setPermissionMode] changes it at once), else from
+     * the chat: quick presses step one mode each. A running process switches (`set_permission_mode`); a stopped session starts
+     * with it (`--permission-mode`). Nothing here waits: the frame is queued for the process's writer.
+     */
+    internal fun pickMode(next: (ChatState) -> PermissionMode): PermissionMode = synchronized(lock) {
+        val mode = next(liveLocked()?.state?.value ?: mutableState.value)
+        pick(live = { it.setPermissionMode(mode) }, stopped = SessionEvent.PermissionModeRequested(mode))
+        mode
+    }
+
     /** Shows a notice in the chat: through the running process, whose state the chat follows, or straight in the chat without one. */
     internal fun notice(level: NoticeLevel, text: String) {
         pick(live = { it.notice(level, text) }, stopped = SessionEvent.HostNotice(level, text))
@@ -432,7 +499,10 @@ class SessionHandle internal constructor(
         }
     }
 
-    /** Whether a process runs and nothing is in progress: no turn, no pending permission, no prompt waiting to be sent. */
+    /**
+     * Whether a process runs and nothing is in progress: no turn, no pending permission, no prompt waiting to be sent, no message
+     * waiting in the CLI's queue.
+     */
     internal fun isIdle(): Boolean = synchronized(lock) { attachment?.session?.let(::idleLocked) ?: false }
 
     /**
@@ -448,6 +518,99 @@ class SessionHandle internal constructor(
         shell?.cancelAndJoin() // ahead of the process: its end reaches the chat the process leaves
         stop()
         scope.coroutineContext.job.cancelAndJoin()
+    }
+
+    /**
+     * Adds [realPath] (checked by the caller on IO) as [FolderState.PENDING]; false when it is listed already (the same string). It
+     * is no longer a removed folder then.
+     */
+    internal fun addFolder(realPath: String): Boolean = synchronized(lock) {
+        if (mutableFolders.value.any { it.path == realPath }) return false
+        removedFolders.remove(realPath)
+        mutableFolders.value += AddedFolder(realPath, FolderState.PENDING)
+        true
+    }
+
+    /** Removes [realPath] and remembers it as removed, so that a CLI that still lists it is caught ([confirmFolders]); false if not listed. */
+    internal fun removeFolder(realPath: String): Boolean = synchronized(lock) {
+        val listed = mutableFolders.value
+        if (listed.none { it.path == realPath }) return false
+        mutableFolders.value = listed.filter { it.path != realPath }
+        removedFolders.add(realPath)
+        true
+    }
+
+    /** Takes [from]'s folders, all [FolderState.PENDING]: a fork's, before its first spawn. */
+    internal fun copyFolders(from: SessionHandle) {
+        val copied = from.folders.value.map { AddedFolder(it.path, FolderState.PENDING) }
+        synchronized(lock) { mutableFolders.value = copied }
+    }
+
+    /**
+     * Takes [from]'s folders, all [FolderState.PENDING], with what its last spawn passed and what was removed: before [adopt] of the
+     * process [from] spawned and handed over, so that this row lists the folders that process runs with and checks its inits.
+     */
+    internal fun inheritFolders(from: SessionHandle) {
+        val (spawned, removed) = synchronized(from.lock) { from.spawnFolders to from.removedFolders.toList() }
+        val copied = from.folders.value.map { AddedFolder(it.path, FolderState.PENDING) }
+        synchronized(lock) {
+            mutableFolders.value = copied
+            spawnFolders = spawned
+            removedFolders.clear()
+            removedFolders.addAll(removed)
+        }
+    }
+
+    /**
+     * The folders the next spawn passes, in the order added, remembered as that spawn's. Checked on [Dispatchers.IO]: one that is no
+     * longer a directory leaves the list, with a warning in the chat.
+     */
+    internal suspend fun foldersForSpawn(): List<String> {
+        val paths = folders.value.map { it.path }
+        val vanished = withContext(Dispatchers.IO) { paths.filterNot(::isDirectory).toSet() }
+        val passed = synchronized(lock) {
+            if (vanished.isNotEmpty()) mutableFolders.value = mutableFolders.value.filter { it.path !in vanished }
+            val current = mutableFolders.value.mapTo(HashSet()) { it.path }
+            spawnFolders = paths.filter { it !in vanished && it in current }
+            warnedMissing.clear()
+            warnedKept.clear()
+            spawnFolders
+        }
+        vanished.forEach { notice(NoticeLevel.WARNING, "The folder $it no longer exists, so it was not added.") }
+        return passed
+    }
+
+    /** Whether a live process runs whose spawn passed other folders than [folders] lists now: it has to be stopped and spawned again. */
+    internal fun spawnDiffers(): Boolean = synchronized(lock) {
+        liveLocked() != null && spawnFolders != mutableFolders.value.map { it.path }
+    }
+
+    /** Whether the inits of the attached process are checked against the folders: it was spawned with some, or one was removed. */
+    private fun foldersToConfirm(): Boolean = synchronized(lock) { spawnFolders.isNotEmpty() || removedFolders.isNotEmpty() }
+
+    /**
+     * Compares a `system/init`'s [listed] directories with the spawn's folders, on [Dispatchers.IO] (string equality, then
+     * [Files.isSameFile]): each found turns [FolderState.ACTIVE], each not found [FolderState.MISSING], with a warning once per folder
+     * per spawn (hard rule 5). A removed folder the spawn did not pass that [listed] still names gets its own warning, as often.
+     */
+    internal suspend fun confirmFolders(listed: List<String>) {
+        val (passed, removed) = synchronized(lock) { spawnFolders to removedFolders.filter { it !in spawnFolders } }
+        val (found, kept) = withContext(Dispatchers.IO) {
+            passed.filterTo(HashSet()) { listed.containsFolder(it) } to removed.filter { listed.containsFolder(it) }
+        }
+        val notices = ArrayList<String>()
+        synchronized(lock) {
+            mutableFolders.value = mutableFolders.value.map { folder ->
+                when (folder.path) {
+                    in found -> folder.copy(state = FolderState.ACTIVE)
+                    in passed -> folder.copy(state = FolderState.MISSING)
+                    else -> folder
+                }
+            }
+            passed.filter { it !in found && warnedMissing.add(it) }.forEach { notices += "The CLI did not add the folder $it." }
+            kept.filter { it in removedFolders && warnedKept.add(it) }.forEach { notices += "The CLI still lists the removed folder $it." }
+        }
+        notices.forEach { notice(NoticeLevel.WARNING, it) }
     }
 
     /** Publishes [wait] as its server's sign-in wait, in place of any earlier one. */
@@ -497,7 +660,7 @@ class SessionHandle internal constructor(
     private fun idleLocked(session: ClaudeSession): Boolean {
         val chat = session.state.value
         return !chat.ended && !chat.busy && chat.pendingPermissions.isEmpty() && queued.isEmpty() &&
-            runningShellJob?.isActive != true && chat.quietSends.isEmpty()
+            runningShellJob?.isActive != true && chat.quietSends.isEmpty() && chat.pendingSends.isEmpty()
     }
 
     private fun flushLocked(live: ClaudeSession) {
@@ -514,6 +677,13 @@ class SessionHandle internal constructor(
         mirror = scope.launch {
             // A child of the mirror, so that it ends when the process is let go or handed over before its first system/init.
             launch { onFirstInit(session, session.reportedSessionId.filterNotNull().first()) }
+            // After each system/init of a process spawned with folders, or once a folder was removed (spec 3.4).
+            launch {
+                session.state.map { it.mcp.initCount to it.additionalDirectories }
+                    .distinctUntilChanged { a, b -> a.first == b.first }
+                    .filter { (count, _) -> count > 0 && foldersToConfirm() }
+                    .collect { (_, listed) -> confirmFolders(listed) }
+            }
             launch {
                 session.lastFrameAtMillis.collect { at ->
                     synchronized(lock) { if (attachment?.session === session) mutableLastFrameAt.value = at }
@@ -526,25 +696,25 @@ class SessionHandle internal constructor(
         // A process that ends by itself (it exits, crashes or cannot start) leaves its last state, error notice included.
         scope.launch {
             process.running.join()
-            release(session)
+            synchronized(lock) {
+                if (releaseLocked(session) && !closed) mutableSelfEnds.value += 1
+            }
             session.close()
         }
     }
 
-    private fun release(ended: ClaudeSession, settle: Boolean = false) {
-        synchronized(lock) { releaseLocked(ended, settle) }
-    }
-
     /**
      * Lets [ended] go if it is still the attached process: its last state becomes the chat's, [settle]d if asked. A shell escape it
-     * still held is dropped first, with a notice that its output was not sent (a [stop] during the turn it waited for).
+     * still held is dropped first, with a notice that its output was not sent (a [stop] during the turn it waited for). Returns
+     * whether it let [ended] go.
      */
-    private fun releaseLocked(ended: ClaudeSession, settle: Boolean = false) {
-        if (attachment?.session !== ended) return
+    private fun releaseLocked(ended: ClaudeSession, settle: Boolean = false): Boolean {
+        if (attachment?.session !== ended) return false
         detachLocked()
         ended.letGoShellFrames()
         val last = ended.state.value
         publishLocked(if (settle) last.settled() else last, attached = false)
+        return true
     }
 
     /**
@@ -602,8 +772,8 @@ private fun ChatEntry.asTitle(): String? = when (this) {
 
 /** What waits for a process, in order: a prompt, or a shell escape's frames. */
 internal sealed interface Outbound {
-    /** A prompt: [text] and the [images] attached to it. */
-    data class Prompt(val text: String, val images: List<ImageBlock> = emptyList()) : Outbound
+    /** A prompt: [text] and the [images] attached to it; [later]: sent with `"priority":"later"` (spec 12.1). */
+    data class Prompt(val text: String, val images: List<ImageBlock> = emptyList(), val later: Boolean = false) : Outbound
 
     /**
      * Shell escape [id]'s frames: its [command] and [output] (with Tandem's note for a stopped or capped one), and whether Claude
@@ -615,9 +785,26 @@ internal sealed interface Outbound {
 /** Hands [outbound] to this process: a prompt as a user message, a shell escape as its frames. */
 private fun ClaudeSession.deliver(outbound: Outbound) {
     when (outbound) {
-        is Outbound.Prompt -> sendUserMessage(outbound.text, outbound.images)
+        is Outbound.Prompt -> sendUserMessage(outbound.text, outbound.images, outbound.later)
         is Outbound.ShellEscape -> sendShellEscape(outbound.id, outbound.command, outbound.output, outbound.respond)
     }
 }
 
 private fun List<SessionSummary>.titleOf(id: SessionId): String? = firstOrNull { it.id == id }?.title
+
+private fun isDirectory(path: String): Boolean = try {
+    Files.isDirectory(Path.of(path))
+} catch (_: InvalidPathException) {
+    false
+}
+
+/** Whether these listed directories name [folder]: the same string, or the same file ([Files.isSameFile]). */
+private fun List<String>.containsFolder(folder: String): Boolean = any { listed ->
+    listed == folder || try {
+        Files.isSameFile(Path.of(listed), Path.of(folder))
+    } catch (_: IOException) {
+        false
+    } catch (_: InvalidPathException) {
+        false
+    }
+}

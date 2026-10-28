@@ -29,7 +29,9 @@ enum class RowGap(val dp: Int) {
 
 /**
  * What the user sent, `u:<entry id>`. [mono]: a slash command or a `!` shell line, drawn in the editor font. [images]: the images
- * sent with it, in order, by id only (polish spec 2.7); an images-only prompt has a blank [text].
+ * sent with it, in order, by id only (polish spec 2.7); an images-only prompt has a blank [text]. [caption]: the line under the
+ * bubble, [FOLDED_CAPTION] for a prompt the CLI took into the running turn (desktop-parity spec 12.1); null for a prompt that
+ * started its own turn.
  */
 data class UserRow(
     override val key: String,
@@ -37,6 +39,22 @@ data class UserRow(
     val mono: Boolean,
     override val gap: RowGap = RowGap.TURN,
     val images: ImmutableList<ImageRef> = persistentListOf(),
+    val caption: String? = null,
+) : ChatRow
+
+/**
+ * A message sent while Claude works that the CLI has not started yet (desktop-parity spec 12.1), `q:<uuid>`: a dimmed bubble with its
+ * [text] and [images] after the working row, and its [caption] ([queuedCaption]). [withdrawable]: it has Edit and Cancel (spec 12.3);
+ * [withdrawing]: a withdraw is out, and both are disabled. Once started, the message is a [UserRow] under the user row's own key.
+ */
+data class QueuedRow(
+    override val key: String,
+    val text: String,
+    val images: ImmutableList<ImageRef>,
+    val caption: String,
+    val withdrawable: Boolean,
+    val withdrawing: Boolean,
+    override val gap: RowGap = RowGap.AFTER_BUBBLE,
 ) : ChatRow
 
 /**
@@ -72,29 +90,26 @@ data class TextRow(
 
 /**
  * What the hover row under a reply acts on (polish spec 2.6): the reply's entry ([entryId]), its [markdown] (the message's non-blank
- * text blocks joined by a blank line, the narration messages before it left out) for Copy, and when it came ([atMillis], null when
- * unknown) for its time.
+ * text blocks joined by a blank line, the narration messages before it left out) for Copy, when it came ([atMillis], null when
+ * unknown) for its time, and where `Fork from here` cuts ([forkAt], desktop-parity spec 13.1: the uuid of the latest complete line of
+ * its turn's last main-thread message that has one; null when none has, so the turn cannot be forked).
  */
-data class MessageActions(val entryId: String, val markdown: String, val atMillis: Long?)
+data class MessageActions(val entryId: String, val markdown: String, val atMillis: Long?, val forkAt: String? = null)
 
-/** Whether a reply's `Fork from here` can fork now (polish spec 2.6). */
+/**
+ * Whether a reply's `Fork from here` can fork (desktop-parity spec 13.1). A fork made while a later turn runs knows only the turns up
+ * to its cut (D8's `fork-at-busy`), so a running turn does not hold the button back.
+ */
 enum class ForkState {
-    /** The latest ended turn's reply, while no turn runs. */
+    /** The reply has a fork point: `Fork from here`. */
     ENABLED,
 
-    /** The latest ended turn's reply while a newer turn runs: `Wait for the reply to finish`. */
-    WAIT,
-
-    /** An earlier reply: `Only the latest reply can be forked`. */
-    NOT_LATEST,
+    /** The reply has no fork point: `This reply cannot be forked: the CLI sent no id for it`. */
+    UNAVAILABLE,
 }
 
-/** The fork state of reply [entryId] when [latestReply] is the latest ended turn's reply and [busy] says whether a turn runs. */
-fun forkState(entryId: String, latestReply: String?, busy: Boolean): ForkState = when {
-    entryId != latestReply -> ForkState.NOT_LATEST
-    busy -> ForkState.WAIT
-    else -> ForkState.ENABLED
-}
+/** The fork state of a reply whose fork point is [forkAt]. */
+fun forkState(forkAt: String?): ForkState = if (forkAt == null) ForkState.UNAVAILABLE else ForkState.ENABLED
 
 /** One thinking block of a main-thread reply, `th:<entry id>:<block index>`; it opens only when [summary] is not blank. */
 data class ThinkingRow(
@@ -118,7 +133,9 @@ data class ToolRow(
 /**
  * A notice of the chat (retries, fallbacks, errors, a local command's output), `n:<entry id>`. On a [NoticeKind.LOCAL_COMMAND]
  * notice, [command] is the command it answers (its accessibility name `Reply to /<command>`, `Command output` when null) and [link]
- * the action that replaces the CLI's terminal hint (`/mcp`'s [MCP_TERMINAL_HINT], removed from [text]).
+ * the action that replaces the CLI's terminal hint (`/mcp`'s [MCP_TERMINAL_HINT], removed from [text]). A `/usage` notice of the
+ * stream carries its card ([usage], drawn in place of [text]) and the uuid of the CLI's line ([sourceUuid], which its `Retry` names);
+ * `/context`'s notice is drawn as Markdown ([markdown], spec 3.1).
  */
 data class NoticeRow(
     override val key: String,
@@ -128,6 +145,9 @@ data class NoticeRow(
     val kind: NoticeKind = NoticeKind.GENERIC,
     val command: String? = null,
     val link: NoticeLink? = null,
+    val usage: UsageCardModel? = null,
+    val markdown: Boolean = false,
+    val sourceUuid: String? = null,
 ) : ChatRow
 
 /** An action at the end of a notice, with its label. */

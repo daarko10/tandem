@@ -13,6 +13,7 @@ import com.intellij.driver.sdk.isPluginLoaded
 import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.singleProject
 import com.intellij.driver.sdk.ui.components.UiComponent
+import com.intellij.driver.sdk.ui.components.elements.list
 import com.intellij.driver.sdk.ui.ui
 import com.intellij.driver.sdk.waitFor
 import com.intellij.driver.sdk.waitForIndicators
@@ -260,6 +261,8 @@ class ToolWindowIdeTest {
             waitFor("working row with elapsed", 1.minutes) {
                 node("Claude is working") { "contains($it, ' · ') and substring($it, string-length($it)) = 's'" }.present()
             }
+            // The only real-IDE view of the composed row: the orbs and the step (runTandem's own screenshot comes after the row is gone).
+            takeScreenshot("working-row")
             // A lone running call opens on its command (polish spec 2.1) while its permission request is still held back.
             described("Creating empty fixture file").click(Point(10, 10))
             waitFor("a lone running call opens on its command", 30.seconds) {
@@ -702,6 +705,480 @@ class ToolWindowIdeTest {
         listOf("/usage", "/context", "/help", "/hello").forEachIndexed { index, text -> assertTrue(text in prompts[index], prompts.toString()) }
     }
 
+    // spec: the context ring opens the breakdown
+    @Test
+    fun `the context ring opens the breakdown`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        runChat("context-popover", fixtures = listOf("parity-context"), sentLog = log) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            waitFor("the context ring", 1.minutes) { ui.x(RING).present() }
+            ui.x(RING).click(Point(10, 10))
+            waitFor("the breakdown's header", 30.seconds) { described("Context window categories").present() }
+            assertTrue(described("Context window breakdown").present(), "the popover is named for assistive technology")
+            assertFalse(ui.x(MESSAGES_ROW).present(), "the category list opens collapsed")
+            described("Context window categories").click(Point(10, 10))
+            waitFor("the category rows", 30.seconds) { ui.x(MESSAGES_ROW).present() }
+            // Kept as a test artifact: header, bar, eight rows, the two collapsed groups and the two buttons.
+            takeScreenshot("context-popover")
+            waitFor("get_context_usage reached the CLI", 30.seconds) { "\"subtype\":\"get_context_usage\"" in log.readText() }
+            ui.keyboard { escape() }
+            waitFor("Escape closed the popover", 30.seconds) { !described("Context window breakdown").present() }
+        }
+    }
+
+    // spec: the context popover works from the keyboard
+    @Test
+    fun `the context popover works from the keyboard`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        runChat("context-popover-keys", fixtures = listOf("parity-context"), sentLog = log) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            waitFor("the context ring", 1.minutes) { ui.x(RING).present() }
+            // Tab moves the focus forward from the text area (spec 14.2): Send or Stop, the mode, the model, then the ring. Shift+Tab
+            // in the text area cycles the permission mode, so it is not pressed there.
+            focusPromptBox()
+            pressUntil("the ring focused", { ui.keyboard { key(KeyEvent.VK_TAB) } }, max = 10) { ui.x("$RING[@focused='true']").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the popover", 30.seconds) { described("Context window breakdown").present() }
+            pressUntil("the header row selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { ui.x("$HEADER_ROW[@focused='true']").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the category list", 30.seconds) { ui.x(MESSAGES_ROW).present() }
+            assertTrue(described("Context window breakdown").present(), "the header's toggle keeps the popover open")
+            ui.keyboard { escape() }
+            waitFor("Escape closed the popover and the ring has the focus", 30.seconds) {
+                !described("Context window breakdown").present() && ui.x("$RING[@focused='true']").present()
+            }
+            // Enter on a button closes the popover from the keyboard too, so the ring takes the focus back (spec 3.5).
+            ui.keyboard { enter() }
+            waitFor("Enter reopened the popover", 30.seconds) { described("Context window breakdown").present() }
+            pressUntil("See detailed breakdown selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) {
+                ui.x("$DETAILED_ITEM[@focused='true']").present()
+            }
+            ui.keyboard { enter() }
+            waitFor("Enter on See detailed breakdown closed the popover and the ring has the focus", 30.seconds) {
+                !described("Context window breakdown").present() && ui.x("$RING[@focused='true']").present()
+            }
+            // The button's action runs after the close: the prompt reaches the CLI (spec 3.1).
+            waitFor("/context reached the CLI", 30.seconds) {
+                log.readLines().mapNotNull { line -> runCatching { Json.parseToJsonElement(line).jsonObject }.getOrNull() }
+                    .any { it.type == "user" && "/context" in it["message"]?.jsonObject?.get("content").toString() }
+            }
+        }
+    }
+
+    // spec: the context popover shows the CLI's error
+    @Test
+    fun `the context popover shows the CLI's error`() {
+        runChat("context-popover-error", fixtures = listOf("plain-reply")) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            waitFor("the context ring", 1.minutes) { ui.x(RING).present() }
+            ui.x(RING).click(Point(10, 10))
+            waitFor("the CLI's error and Retry", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and starts-with(@visible_text, 'Could not load the breakdown: Unsupported control request subtype')]")
+                    .present() && menuItem("Retry").present()
+            }
+            takeScreenshot("context-popover-error")
+        }
+    }
+
+    // spec: the + menu inserts a plugin command
+    @Test
+    fun `the plus menu inserts a plugin command`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // Before any prompt: the fake answers initialize at spawn and sends no init until a turn starts (spec 3.3), so the Plugins
+        // page lists the catalogue's plugin, without a version.
+        val sent = runChat("plus-menu", fixtures = listOf("parity-add-dir"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            plusItem("Plugins").click(Point(10, 10))
+            waitFor("the catalogue's plugin row", 1.minutes) { described("probe-kit plugin").present() }
+            assertFalse(containing("v0.1.0").present(), "before an init the row has no version")
+            described("probe-kit plugin").click(Point(10, 10))
+            waitForText("Skills")
+            waitForText("Commands")
+            // Before an init greet is a skill by its alias, hello a command (spec 17.3), each under its heading in document order.
+            assertTrue(
+                ui.x(
+                    "//div[@class='ComposeNode' and @visible_text='Skills']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:greet']" +
+                        "/following::div[@class='ComposeNode' and @visible_text='Commands']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:hello']",
+                ).present(),
+                "Skills, /probe-kit:greet, Commands, /probe-kit:hello in document order",
+            )
+            // Kept as a test artifact: the plugin's page, its two headings and their rows.
+            takeScreenshot("plus-menu")
+            described("/probe-kit:greet").click(Point(10, 10))
+            waitFor("the command in the draft", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='/probe-kit:greet ']").present() }
+        }
+        assertTrue(sent.none { it.type == "user" }, "a pick sends nothing: ${sent.map { it.type }}")
+    }
+
+    // spec: the + menu works from the keyboard
+    @Test
+    fun `the plus menu works from the keyboard`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("plus-menu-keys", fixtures = listOf("parity-add-dir"), sentLog = log) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            // `+` comes before the text area (spec 3.5, 14.2): Tab goes forward from the text area round the focus cycle to it.
+            // Shift+Tab in the text area cycles the permission mode, so it is not pressed there.
+            focusPromptBox()
+            pressUntil("+ focused", { ui.keyboard { key(KeyEvent.VK_TAB) } }, max = 40) { focusedIconButton("Add").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened page 1", 30.seconds) { plusItem("Plugins").present() }
+            // Page 1: exactly five rows, in the desktop's order (spec 3.3).
+            assertEquals(5, ui.xx(MENU_ITEM).list().size, "page 1 has five rows")
+            assertTrue(
+                ui.x(
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Add folder").removePrefix("//")}" +
+                        "/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                        "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
+                ).present(),
+                "Add files or photos, Add folder, Slash commands, Connectors, Plugins in document order",
+            )
+            // Kept as a test artifact: page 1's five rows, each with its icon.
+            takeScreenshot("plus-menu-main")
+            // → is not bound in the + menu (deviation 23): still page 1.
+            ui.keyboard { key(KeyEvent.VK_RIGHT) }
+            assertTrue(runCatching { waitFor("→ turned a page", 3.seconds) { plusItem("‹ Plugins").present() } }.isFailure, "→ turns no page")
+            assertTrue(plusItem("Add files or photos").present(), "still page 1")
+            pressUntil("Plugins selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { focusedPlusItem("Plugins").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the Plugins page, the init's row with its version", 30.seconds) {
+                plusItem("‹ Plugins").present() && containing("v0.1.0").present()
+            }
+            pressUntil("the plugin selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { focusedDescribed("probe-kit plugin").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the plugin's page", 30.seconds) { plusItem("‹ probe-kit").present() }
+            ui.keyboard { key(KeyEvent.VK_LEFT) }
+            waitFor("← went back to the Plugins page", 30.seconds) { plusItem("‹ Plugins").present() && !plusItem("‹ probe-kit").present() }
+            pressUntil("the plugin selected again", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { focusedDescribed("probe-kit plugin").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened the plugin's page again", 30.seconds) { plusItem("‹ probe-kit").present() }
+            pressUntil("greet selected", { ui.keyboard { key(KeyEvent.VK_DOWN) } }) { focusedDescribed("/probe-kit:greet").present() }
+            ui.keyboard { enter() }
+            waitFor("the menu gone, the command in the draft and the text area focused", 30.seconds) {
+                !plusItem("‹ probe-kit").present() && ui.x("$PROMPT_BOX[@editabletext='/probe-kit:greet ' and @focused='true']").present()
+            }
+            pressUntil("+ focused again", { ui.keyboard { key(KeyEvent.VK_TAB) } }, max = 40) { focusedIconButton("Add").present() }
+            ui.keyboard { enter() }
+            waitFor("Enter opened page 1 again", 30.seconds) { plusItem("Plugins").present() }
+            ui.keyboard { escape() }
+            waitFor("Escape closed the menu and the + has the focus", 30.seconds) {
+                ui.xx(MENU_ITEM).list().isEmpty() && focusedIconButton("Add").present()
+            }
+        }
+        assertEquals(1, sent.count { it.type == "user" }, "only the first prompt went out: ${sent.map { it.type }}")
+    }
+
+    // spec: Shift+Tab in the composer cycles the mode and Tab leaves it
+    @Test
+    fun `Shift+Tab in the composer cycles the mode and Tab leaves it`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        fun modes(): List<String> = log.readLines().mapNotNull { line -> runCatching { Json.parseToJsonElement(line).jsonObject }.getOrNull() }
+            .filter { it.type == "control_request" }
+            .map { it["request"]!!.jsonObject }
+            .filter { it["subtype"]?.jsonPrimitive?.content == "set_permission_mode" }
+            .map { it["mode"]!!.jsonPrimitive.content }
+        runChat("mode-cycle", fixtures = listOf("permission-mode"), sentLog = log) {
+            // Before any prompt (deviation 17): the fake answers no set_permission_mode until its first turn, so both presses read
+            // Tandem's own picks, Manual → Accept edits → Plan.
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            focusPromptBox()
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("the first press picked Accept edits", 30.seconds) { picker("Permission mode", "Accept edits").present() }
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("the second press picked Plan", 30.seconds) { picker("Permission mode", "Plan").present() }
+            assertTrue(ui.x("$PROMPT_BOX[@focused='true']").present(), "Shift+Tab kept the focus in the prompt box")
+            // Kept as a test artifact: the footer's mode reads Plan.
+            takeScreenshot("mode-cycle")
+            waitFor("both picks reached the CLI", 30.seconds) { modes() == listOf("acceptEdits", "plan") }
+            // Tab leaves the text area (spec 14.2): a typed key no longer lands in it.
+            ui.keyboard { key(KeyEvent.VK_TAB) }
+            waitFor("Tab moved the focus out of the prompt box", 30.seconds) { !ui.x("$PROMPT_BOX[@focused='true']").present() }
+            ui.keyboard { typeText("x", 20) }
+            assertTrue(ui.x("$PROMPT_BOX[@editabletext='']").present(), "Tab typed no tab, and the typed x went elsewhere")
+            // In a chat, once the CLI has reported its mode: one press steps on from whatever it reported.
+            enterPrompt("hi")
+            waitForTurnEnd()
+            val labels = listOf("Manual", "Accept edits", "Plan", "Auto")
+            val before = labels.single { picker("Permission mode", it).present() }
+            focusPromptBox()
+            ui.keyboard { hotKey(KeyEvent.VK_SHIFT, KeyEvent.VK_TAB) }
+            waitFor("the press changed the mode from $before", 30.seconds) { !picker("Permission mode", before).present() }
+            waitFor("a third set_permission_mode reached the CLI", 30.seconds) { modes().size == 3 }
+        }
+    }
+
+    // spec: Add folder respawns with --add-dir (IDE test 4)
+    @Test
+    fun `Add folder respawns with --add-dir`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // Outside the project; the chooser's property goes through the same posted event as the platform chooser, whose modal
+        // FolderChooserTest covers.
+        val folder = Files.createTempDirectory("tandem-add-folder").resolve("shared-lib").createDirectories()
+        val real = folder.toRealPath().toString()
+        val sent = runChat(
+            "add-folder",
+            fixtures = listOf("plain-reply", "plain-reply"),
+            sentLog = log,
+            systemProperties = mapOf("tandem.addFolder" to folder.toString()),
+        ) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            // Page 1: exactly five rows, in the desktop's order (spec 3.3).
+            assertEquals(5, ui.xx(MENU_ITEM).list().size, "page 1 has five rows")
+            assertTrue(
+                ui.x(
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Add folder").removePrefix("//")}" +
+                        "/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                        "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
+                ).present(),
+                "Add files or photos, Add folder, Slash commands, Connectors, Plugins in document order",
+            )
+            plusItem("Add folder").click(Point(10, 10))
+            waitFor("the folder's pill", 1.minutes) { described("Folder shared-lib").present() }
+            // The pill's × is a focus stop after the `+` and before the text area (spec 3.5), although the pill sits above them.
+            // Shift+Tab in the text area cycles the mode (spec 14.1), so Tab goes forward round the cycle to the `+`.
+            focusPromptBox()
+            pressUntil("+ focused", { ui.keyboard { key(KeyEvent.VK_TAB) } }, max = 40) { focusedIconButton("Add").present() }
+            ui.keyboard { key(KeyEvent.VK_TAB) }
+            waitFor("Tab from the + reaches the pill's ×", 30.seconds) { focusedIconButton("Remove folder shared-lib").present() }
+            ui.keyboard { key(KeyEvent.VK_TAB) }
+            waitFor("Tab from the × reaches the text area", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
+            enterPrompt("hi")
+            waitForTurnEnd()
+            // Kept as a test artifact: the pill at the top of the composer box.
+            takeScreenshot("folder-pill")
+        }
+        val spawns = sent.filter { it.type == "__spawn__" }.map { spawn -> spawn["argv"]!!.jsonArray.map { it.jsonPrimitive.content } }
+        assertEquals(2, spawns.size, spawns.toString())
+        assertFalse("--add-dir" in spawns[0], "the first spawn had no folder: ${spawns[0]}")
+        val second = spawns[1]
+        val at = second.indexOf("--add-dir")
+        assertTrue(at >= 0 && second.getOrNull(at + 1) == real, "the second spawn passes --add-dir $real: $second")
+    }
+
+    // spec: the plus menu shows where things come from (9.8 IDE test 1)
+    @Test
+    fun `the plus menu shows where things come from`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // Before any prompt: parity-add-dir's answers list mcpServers, so the fake serves mcp_status from its table (one dynamic
+        // server, no connector).
+        val sent = runChat("plus-menu-sources", fixtures = listOf("parity-add-dir"), sentLog = log, browserLog = true) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            widenToolWindow()
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            // Page 1: exactly five rows, in the desktop's order (spec 3.3).
+            assertEquals(5, ui.xx(MENU_ITEM).list().size, "page 1 has five rows")
+            assertTrue(
+                ui.x(
+                    "${plusItemPath("Add files or photos")}/following::${plusItemPath("Add folder").removePrefix("//")}" +
+                        "/following::${plusItemPath("Slash commands").removePrefix("//")}" +
+                        "/following::${plusItemPath("Connectors").removePrefix("//")}/following::${plusItemPath("Plugins").removePrefix("//")}",
+                ).present(),
+                "Add files or photos, Add folder, Slash commands, Connectors, Plugins in document order",
+            )
+            assertTrue(containing(ADD_FILES_SHORTCUT).present(), "the shortcut text on a wide menu (deviation 28)")
+            ui.keyboard { escape() }
+            waitFor("the menu closed", 30.seconds) { ui.xx(MENU_ITEM).list().isEmpty() }
+            // Kept as test artifacts: page 1 in a 350 px tool window, then in a 260 px one, where the shortcut leaves the row.
+            narrowToolWindow(350)
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu at 350 px", 30.seconds) { plusItem("Plugins").present() }
+            takeScreenshot("plus-menu-page-1")
+            ui.keyboard { escape() }
+            waitFor("the menu closed", 30.seconds) { ui.xx(MENU_ITEM).list().isEmpty() }
+            narrowToolWindow(260)
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu at 260 px", 30.seconds) { plusItem("Add files or photos").present() }
+            assertFalse(containing(ADD_FILES_SHORTCUT).present(), "no shortcut text on a narrow menu (spec 17.1)")
+            takeScreenshot("plus-menu-page-1-narrow")
+            ui.keyboard { escape() }
+            waitFor("the menu closed", 30.seconds) { ui.xx(MENU_ITEM).list().isEmpty() }
+            widenToolWindow()
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Connectors").present() }
+            plusItem("Connectors").click(Point(10, 10))
+            waitFor("the Connectors page", 30.seconds) {
+                plusItem("‹ Connectors").present() && plusItem("Browse connectors").present() && plusItem("Manage connectors").present()
+            }
+            waitForText("No claude.ai connectors in this session.")
+            takeScreenshot("connectors-page")
+            plusItem("Browse connectors").click(Point(10, 10))
+            waitFor("the menu closed", 30.seconds) { !plusItem("‹ Connectors").present() }
+            waitFor("the connectors page opened in the browser", 30.seconds) { "__browse__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Plugins").present() }
+            plusItem("Plugins").click(Point(10, 10))
+            waitFor("the catalogue's plugin row", 1.minutes) { described("probe-kit plugin").present() }
+            described("probe-kit plugin").click(Point(10, 10))
+            waitForText("Skills")
+            assertTrue(
+                ui.x(
+                    "//div[@class='ComposeNode' and @visible_text='Skills']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:greet']" +
+                        "/following::div[@class='ComposeNode' and @visible_text='Commands']" +
+                        "/following::div[@class='ComposeNode' and @contentdescription='/probe-kit:hello']",
+                ).present(),
+                "Skills, /probe-kit:greet, Commands, /probe-kit:hello in document order",
+            )
+            ui.keyboard { escape() }
+        }
+        val browse = sent.filter { it.type == "__browse__" }
+        assertEquals(listOf("https://claude.ai/settings/connectors"), browse.map { it["url"]!!.jsonPrimitive.content })
+    }
+
+    // spec: Manage connectors opens the MCP panel (9.8 IDE test 2)
+    @Test
+    fun `Manage connectors opens the MCP panel`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        runChat("plus-menu-connectors", fixtures = listOf("mcp-status"), sentLog = log) {
+            newSession()
+            waitFor("the session's process started", 1.minutes) { "__spawn__" in log.readText() }
+            iconButton("Add").click(Point(10, 10))
+            waitFor("the + menu", 30.seconds) { plusItem("Connectors").present() }
+            plusItem("Connectors").click(Point(10, 10))
+            // mcp-status's three servers are dynamic: no connector.
+            waitForText("No claude.ai connectors in this session.")
+            plusItem("Manage connectors").click(Point(10, 10))
+            waitFor("the MCP panel", 1.minutes) { described("MCP servers panel").present() }
+            assertFalse(plusItem("‹ Connectors").present(), "the menu closed before the panel opened")
+        }
+    }
+
+    // spec: /usage shows a card
+    @Test
+    fun `usage shows a card`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        // The fake replays parity-usage's turns in order, one per prompt: the model reply under `hi`, the /usage turn under /usage
+        // and the /cost turn (whose local command is usage, parity-usage:28) under the ring's `Show session usage`.
+        val sent = runChat("usage-card", fixtures = listOf("parity-usage"), sentLog = log) {
+            newSession()
+            enterPrompt("hi")
+            waitForTurnEnd()
+            enterPrompt("/usage")
+            waitFor("the usage card", 1.minutes) { described(USAGE_CARD).present() }
+            waitForTextContaining("Est. cost \$0.15")
+            waitForTextContaining(">99% of cost")
+            waitForText(DAY_CAVEAT)
+            // Three tips, then the disclosure (spec 16.2): the fourth shows only once it is open.
+            assertFalse(menuItem("Start fresh when you switch tasks").present(), "the fourth tip waits behind Show 2 more")
+            menuItem("Show 2 more").click(Point(10, 10))
+            waitForText("Start fresh when you switch tasks")
+            assertTrue(menuItem("Show fewer").present(), "the open tips' disclosure reads Show fewer")
+            menuItem("7d").click(Point(10, 10))
+            waitForText(WEEK_CAVEAT)
+            takeScreenshot("usage-card")
+            // The ring leads to the card too (spec 16.2): the popover closes and the CLI answers with a second card.
+            waitForTurnEnd()
+            // The first card keeps 7d (its choice lives in the session's ChatUiState), so from here on it never shows the 24h caveat.
+            waitForText(WEEK_CAVEAT)
+            assertFalse(text(DAY_CAVEAT).present(), "the first card shows only the 7d caveat")
+            ui.x(RING).click(Point(10, 10))
+            waitFor("the popover's Show session usage", 30.seconds) { menuItem("Show session usage").present() }
+            menuItem("Show session usage").click(Point(10, 10))
+            waitFor("the popover closed and the ring's /usage went out", 1.minutes) {
+                !described("Context window breakdown").present() &&
+                    log.readLines().count { line -> line.contains("\"type\":\"user\"") } == 3
+            }
+            // The transcript is a lazy list: the first card may be scrolled out of view and no longer composed, so a single card node
+            // proves nothing. The second card is told apart by what only it can show: a new card starts on 24h, and the first card
+            // stays on 7d. With both cards composed, two card nodes prove it as well.
+            waitFor("the second card", 1.minutes) {
+                val cards = ui.xx("//div[@class='ComposeNode' and @contentdescription='$USAGE_CARD']").list().size
+                cards == 2 || (cards >= 1 && text(DAY_CAVEAT).present())
+            }
+            waitFor("the second card's requests reached the CLI", 30.seconds) {
+                log.readText().split("\"subtype\":\"get_usage\"").size - 1 == 4
+            }
+        }
+        val prompts = sent.filter { it.type == "user" }
+        assertEquals("/usage", prompts.last()["message"]!!.jsonObject.text(), "the ring sends /usage")
+        val usage = sent.mapNotNull { it["request"]?.jsonObject }.filter { it["subtype"]?.jsonPrimitive?.content == "get_usage" }
+        assertEquals(
+            listOf(true, false, true, false),
+            usage.map { it["skip_behaviors"]?.jsonPrimitive?.content == "true" },
+            "get_usage with skip_behaviors, then without it, for each card: $usage",
+        )
+    }
+
+    // Desktop-parity spec 9.7, IDE test 1: a steer sent with Enter while a Bash runs folds into the turn (fake rule (m)).
+    @Test
+    fun `send while Claude works`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat(
+            "queued-steer",
+            fixtures = listOf("queue-fold"),
+            sentLog = log,
+            extraEnv = mapOf("TANDEM_FAKE_QUEUED_DELAY_MS" to "1500"),
+        ) {
+            newSession()
+            enterPrompt("Run the two commands")
+            // The first Bash row: the fake waits at queue-fold:19 for the message sent while it runs.
+            waitForTextContaining("sleep 6")
+            enterPrompt("Also say the word KIWI at the end.")
+            // Contained, not equal: the bubble's text and caption are one node for assistive technology.
+            waitForTextContaining("Sent · Claude reads it at its next step")
+            takeScreenshot("queued-steer")
+            waitForTextContaining("Sent while Claude worked")
+            waitForTurnEnd()
+            // Only the latest turn draws a footer, so this alone does not show the turn is unsplit: ChatRowsBuilderTest's folded
+            // prompt replay pins that.
+            assertEquals(1, ui.xx(FOOTER).list().size, "one turn, one footer")
+        }
+        val users = sent.filter { it.type == "user" }
+        assertEquals(2, users.size, users.toString())
+        assertTrue("Also say the word KIWI at the end." in users[1].toString(), users[1].toString())
+        assertFalse("priority" in users[1], users[1].toString())
+    }
+
+    // Desktop-parity spec 9.7, IDE test 2: Ctrl/Cmd+Enter queues for later, and Edit takes it back (queue-cancel's first turn).
+    @Test
+    fun `queue for later and edit`() {
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val kiwi = "Reply with only the word KIWI."
+        val sent = runChat("queued-later", fixtures = listOf("queue-cancel"), sentLog = log) {
+            newSession()
+            enterPrompt("Run the command")
+            // The Bash row, by the call's own description (`Sleeping then echo first`, queue-cancel:18).
+            waitForTextContaining("echo first")
+            focusPromptBox()
+            promptBox().keyboard { typeText(kiwi, 20) }
+            waitFor("prompt box holds the message", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='$kiwi']").present() }
+            // Also the check that the keymap lets Ctrl/Cmd+Enter reach the composer (spec 11 item 10).
+            ui.keyboard { hotKey(if (isMac) KeyEvent.VK_META else KeyEvent.VK_CONTROL, KeyEvent.VK_ENTER) }
+            waitFor("prompt box cleared after Ctrl/Cmd+Enter", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
+            waitForTextContaining("Queued · sends when Claude is done")
+            takeScreenshot("queued-later")
+            iconButton("Edit queued message").click(Point(10, 10))
+            waitFor("the message back in the prompt box", 1.minutes) { ui.x("$PROMPT_BOX[@editabletext='$kiwi']").present() }
+            waitForTurnEnd()
+        }
+        val users = sent.filter { it.type == "user" }
+        assertEquals(2, users.size, "no third user frame: $users")
+        val later = users[1]
+        assertEquals("later", later["priority"]?.jsonPrimitive?.content, later.toString())
+        val uuid = later["uuid"]!!.jsonPrimitive.content
+        val after = sent.drop(sent.indexOf(later) + 1).mapNotNull { it["request"]?.jsonObject }
+        val cancel = after.single { it["subtype"]?.jsonPrimitive?.content == "cancel_async_message" }
+        assertEquals(uuid, cancel["message_uuid"]?.jsonPrimitive?.content, cancel.toString())
+    }
+
     @Test
     fun `a bang command runs locally and Claude replies`() {
         val log = Files.createTempFile("tandem-sent", ".ndjson")
@@ -750,6 +1227,214 @@ class ToolWindowIdeTest {
             }
             assertFalse(described("Stop command").present(), "no Stop on the row once the command stopped")
         }
+    }
+
+    @Test
+    fun `fork from here on an earlier reply`() {
+        val configDir = Files.createTempDirectory("tandem-config")
+        val project = newProject()
+        val seeded = "77777777-7777-4777-8777-777777777777"
+        // Three turns: "Reply 1." to "Reply 3.", whose lines are a1 to a3.
+        configDir.resolve("projects").resolve(TranscriptFolder.key(project.toRealPath().toString())).createDirectories()
+            .resolve("$seeded.jsonl").writeText(longTranscript(seeded, turns = 3))
+        val original = "$ROW[contains(@text, 'Seeded') and not(contains(@text, '(fork)'))]"
+        val sent = runChat("fork-at", fixtures = listOf("plain-reply"), configDir = configDir, project = project) {
+            openSidebar()
+            row("Seeded").click(Point(10, 10))
+            waitForText("Reply 3.")
+            // Each ended turn's reply has its own Fork from here (desktop-parity spec 13.1); the first in document order is Reply 1.'s.
+            text("Reply 1.").moveMouse(Point(10, 5))
+            val fork = ui.xx("//div[@class='ComposeNode' and @role='Button' and @contentdescription='Fork from here']").list()
+            assertEquals(3, fork.size, "one Fork from here per reply")
+            fork.first().click(Point(10, 10))
+            // The fork's chat, cut after the first turn, under its title in the header.
+            waitFor("the fork shown, cut after the first turn", 1.minutes) {
+                ui.x("//div[@class='ComposeNode' and @contentdescription='Seeded (fork)']").present() &&
+                    text("Reply 1.").present() &&
+                    !text("Prompt 2 of the seeded history").present() &&
+                    !text("Reply 3.").present()
+            }
+            takeScreenshot("fork-at")
+            openSidebar()
+            waitFor("the fork selected", 30.seconds) { ui.x("$ROW[@selected='true' and contains(@text, 'Seeded (fork)')]").present() }
+            // The original stays as it is.
+            ui.x(original).click(Point(10, 10))
+            waitForText("Reply 3.")
+        }
+        val spawns = sent.filter { it.type == "__spawn__" }.map { spawn -> spawn["argv"]!!.jsonArray.map { it.jsonPrimitive.content } }
+        val argv = spawns.last()
+        val order = listOf("--resume", seeded, "--fork-session", "--resume-session-at", "a1").map { argv.indexOf(it) }
+        assertTrue(order.all { it >= 0 } && order == order.sorted(), argv.toString())
+        assertEquals(argv.indexOf("--resume") + 1, argv.indexOf(seeded), argv.toString())
+        assertEquals(argv.indexOf("--resume-session-at") + 1, argv.indexOf("a1"), argv.toString())
+    }
+
+    // spec: session tabs follow the sessions (desktop-parity spec 9.8 IDE test 3)
+    @Test
+    fun `session tabs follow the sessions`() {
+        // The platform's tab keys: $default's Alt+Left, Alt+Right and Alt+Down; the macOS keymap's Cmd+Shift+[, Cmd+Shift+] and
+        // Ctrl+Shift+Down.
+        val previousTab = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_SHIFT, KeyEvent.VK_OPEN_BRACKET) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_LEFT)
+        val nextTab = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_SHIFT, KeyEvent.VK_CLOSE_BRACKET) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_RIGHT)
+        val showContent = if (isMac) intArrayOf(KeyEvent.VK_CONTROL, KeyEvent.VK_SHIFT, KeyEvent.VK_DOWN) else intArrayOf(KeyEvent.VK_ALT, KeyEvent.VK_DOWN)
+        val sent = runChat("session-tabs", fixtures = listOf("plain-reply", "plain-reply", "plain-reply", "plain-reply")) {
+            // New Session from anywhere (as Find Action runs it) shows and activates the hidden tool window, and focuses the composer.
+            withContext(OnDispatcher.EDT) { tandemWindow().hide() }
+            waitFor("the tool window hidden", 30.seconds) { !withContext(OnDispatcher.EDT) { tandemWindow().isVisible() } }
+            invokeAction(NEW_SESSION_ACTION)
+            waitFor("the tool window shown and active, one New session tab, the composer focused", 1.minutes) {
+                withContext(OnDispatcher.EDT) { tandemWindow().isVisible() && tandemWindow().isActive() } &&
+                    tabLabels("New session").size == 1 && ui.x("$PROMPT_BOX[@focused='true']").present()
+            }
+
+            // Room for two tabs in the header, still too narrow to dock the sidebar (set once the window is shown again: hiding
+            // and showing it lays it out at its remembered width).
+            setToolWindowWidth(TWO_TABS_WIDTH)
+            waitFor("the tool window widened", 30.seconds) {
+                withContext(OnDispatcher.EDT) { tandemWindow().getComponent().getWidth() } >= TWO_TABS_WIDTH - 5
+            }
+
+            // The + after the tabs starts a second session, selected.
+            tabPlus().click()
+            waitFor("two New session tabs, the second selected", 30.seconds) {
+                tabLabels("New session").size == 2 && selectedTab() == ("New session" to 1)
+            }
+            enterPrompt("Tab two")
+            waitForTurnEnd()
+            waitFor("the tab takes the session's title", 30.seconds) { tabLabels("Tab two").size == 1 }
+            promptBox().keyboard { typeText("draft-two", 20) }
+            waitFor("the draft typed", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='draft-two']").present() }
+
+            // A tab click: the platform takes the shared panel out and puts it back; the composer gets the focus back.
+            tabLabels("New session").single().click(Point(10, 10))
+            waitFor("the first session's empty draft, focused", 30.seconds) {
+                ui.x("$PROMPT_BOX[@editabletext='' and @focused='true']").present()
+            }
+            ui.keyboard { typeText("a", 20) }
+            waitFor("the first session's draft", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='a']").present() }
+            openSidebar()
+            waitFor("its row selected", 30.seconds) { ui.x("$ROW[@selected='true' and not(contains(@text, 'Tab two'))]").present() }
+
+            // A sidebar pick selects the tab; the controller's selection keeps the panel, so the focus the pick gave stays.
+            row("Tab two").click(Point(10, 10))
+            waitFor("the Tab two tab selected with its draft", 30.seconds) {
+                selectedTab()?.first == "Tab two" && ui.x("$PROMPT_BOX[@editabletext='draft-two' and @focused='true']").present()
+            }
+            ui.keyboard { typeText("2", 20) }
+            waitFor("typed into Tab two's draft", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='draft-two2']").present() }
+
+            // The platform's tab keys work from the composer.
+            focusPromptBox()
+            ui.keyboard { hotKey(*previousTab) }
+            waitFor("PreviousTab shows the first session's draft", 30.seconds) {
+                selectedTab()?.first == "New session" && ui.x("$PROMPT_BOX[@editabletext='a' and @focused='true']").present()
+            }
+            ui.keyboard { typeText("x", 20) }
+            waitFor("typed into the first draft", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='ax']").present() }
+            ui.keyboard { hotKey(*nextTab) }
+            waitFor("NextTab shows Tab two's draft", 30.seconds) {
+                selectedTab()?.first == "Tab two" && ui.x("$PROMPT_BOX[@editabletext='draft-two2' and @focused='true']").present()
+            }
+
+            // ShowContent lists every tab; its pick selects the tab and the sidebar row.
+            ui.keyboard { hotKey(*showContent) }
+            waitFor("the content list", 30.seconds) { contentList().present() }
+            println("ShowContent list: " + contentList().getAllTexts().map { it.text })
+            assertTrue(contentList().getAllTexts().map { it.text }.containsAll(listOf("New session", "Tab two")))
+            // Picked with the keyboard, as from the composer: Up to New session, then Enter. The Enter that closes the list must not
+            // reach the composer, which gets the focus back through focus(id), and send its draft.
+            val choices = ui.list("//div[@class='MyList' or @class='JBList']")
+            // It opens on the selected tab, Tab two, the second of two; a key's effect on the list is read once it has landed.
+            // The list's renderer may shorten a name ("New ..."), so its rows are told apart by their index.
+            assertEquals(2, choices.items.size, choices.items.toString())
+            assertEquals("Tab two", choices.items[1])
+            waitFor("the list opened on Tab two", 30.seconds) { choices.isSelectedIndex(1) }
+            ui.keyboard { up() }
+            waitFor("New session chosen in the list", 30.seconds) {
+                choices.isSelectedIndex(0) && !choices.isSelectedIndex(1)
+            }
+            ui.keyboard { enter() }
+            waitFor("the first tab selected by ShowContent's pick, its draft kept and focused", 30.seconds) {
+                selectedTab()?.first == "New session" && !contentList().present() &&
+                    ui.x("$PROMPT_BOX[@editabletext='ax' and @focused='true']").present()
+            }
+            openSidebar()
+            waitFor("its row selected", 30.seconds) { ui.x("$ROW[@selected='true' and not(contains(@text, 'Tab two'))]").present() }
+            ui.keyboard { escape() }
+            waitFor("the sidebar closed", 30.seconds) { !row("Tab two").present() }
+            takeScreenshot("session-tabs")
+
+            // Overflow: four live sessions in a narrow tool window.
+            for ((index, title) in listOf("Tab three", "Tab four").withIndex()) {
+                tabPlus().click()
+                waitFor("a new tab selected, last", 30.seconds) { selectedTab() == ("New session" to index + 2) }
+                enterPrompt(title)
+                waitForTurnEnd()
+                waitFor("the tab takes the title $title", 30.seconds) { selectedTab() == (title to index + 2) }
+            }
+            narrowToolWindow(350)
+            // A titled one, whose sidebar row names it (a new session's row shows its id).
+            waitFor("a titled tab out of the header", 30.seconds) { hiddenTabs().any { it != "New session" } }
+            val hidden = hiddenTabs().first { it != "New session" }
+            println("tabs out of the header: ${hiddenTabs()}")
+            // The header's overflow control lists the tabs that do not fit.
+            ui.x("//div[@class='ActionButton' and @accessiblename='Show Hidden Tabs']").click()
+            waitFor("the hidden tabs' list lists $hidden", 30.seconds) {
+                contentList().present() && contentList().getAllTexts().any { it.text == hidden }
+            }
+            contentList().getAllTexts().first { it.text == hidden }.click()
+            waitFor("the hidden tab selected", 30.seconds) { selectedTab()?.first == hidden }
+            openSidebar()
+            waitFor("its row selected", 30.seconds) { ui.x("$ROW[@selected='true' and contains(@text, '$hidden')]").present() }
+            ui.keyboard { escape() }
+            takeScreenshot("session-tabs-overflow")
+        }
+        // ShowContent's Enter sent no draft: the only prompts are the four typed ones.
+        val prompts = sent.filter { it.type == "user" }.map { it.toString() }
+        assertTrue(prompts.none { "\"ax\"" in it || "draft-two" in it }, "a draft was sent: $prompts")
+    }
+
+    // spec: closing a tab stops its session and keeps its transcript (desktop-parity spec 9.8 IDE test 4)
+    @Test
+    fun `closing a tab stops its session and keeps its transcript`() {
+        val configDir = Files.createTempDirectory("tandem-config")
+        val project = newProject()
+        val seeded = "88888888-8888-4888-8888-888888888888"
+        val transcript = configDir.resolve("projects").resolve(TranscriptFolder.key(project.toRealPath().toString())).createDirectories()
+            .resolve("$seeded.jsonl")
+        transcript.writeText(longTranscript(seeded, turns = 3))
+        val closeContent = if (isMac) intArrayOf(KeyEvent.VK_META, KeyEvent.VK_W) else intArrayOf(KeyEvent.VK_CONTROL, KeyEvent.VK_F4)
+        runChat("tab-close", fixtures = listOf("plain-reply", "plain-reply"), configDir = configDir, project = project) {
+            openSidebar()
+            row("Seeded").click(Point(10, 10))
+            waitFor("the Seeded tab", 30.seconds) { tabLabels("Seeded").size == 1 }
+            enterPrompt("hi")
+            waitForTurnEnd()
+            tabPlus().click()
+            waitFor("a New session tab", 30.seconds) { tabLabels("New session").size == 1 }
+
+            // Its ×, drawn at the label's right end only for a closeable content of a tool window that can close its contents.
+            val label = tabLabels("New session").single()
+            val width = label.component.width
+            println("New session tab label width: $width")
+            label.click(Point(width - TAB_CLOSE_INSET, 10))
+            waitFor("the New session tab closed", 30.seconds) { tabLabels("New session").isEmpty() }
+
+            // CloseContent on the last tab: the tool window stays, with the placeholder.
+            tabLabels("Seeded").single().click(Point(10, 10))
+            focusPromptBox()
+            ui.keyboard { hotKey(*closeContent) }
+            waitFor("the Seeded tab closed", 30.seconds) { tabLabels("Seeded").isEmpty() }
+            waitFor("the tool window still shown, the placeholder selected", 30.seconds) {
+                withContext(OnDispatcher.EDT) { tandemWindow().isVisible() } && selectedTab() == ("" to 0)
+            }
+            openSidebar()
+            // The dot's word is the row's own description: its semantics merge into the row.
+            waitFor("the row stopped", 30.seconds) { ui.x("$ROW[contains(@text, 'Seeded') and @contentdescription='stopped']").present() }
+            row("Seeded").click(Point(10, 10))
+            waitFor("the Seeded tab back", 30.seconds) { tabLabels("Seeded").size == 1 }
+        }
+        assertTrue(transcript.exists(), "the transcript stays")
     }
 
     @Test
@@ -946,6 +1631,52 @@ class ToolWindowIdeTest {
         override fun getTransferData(flavor: DataFlavor): Any = if (flavor == DataFlavor.imageFlavor) image else throw UnsupportedFlavorException(flavor)
     }
 
+    /** The Tandem tool window. Call on the EDT. */
+    private fun Driver.tandemWindow(): ToolWindowRef =
+        service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")
+
+    /** Makes the Tandem tool window [width] pixels wide, or leaves it if it is narrower already. */
+    private fun Driver.narrowToolWindow(width: Int) {
+        withContext(OnDispatcher.EDT) {
+            val window = tandemWindow()
+            val now = window.getComponent().getWidth()
+            if (now > width) window.stretchWidth(width - now)
+        }
+    }
+
+    /** Makes the Tandem tool window [width] pixels wide. */
+    private fun Driver.setToolWindowWidth(width: Int) {
+        withContext(OnDispatcher.EDT) {
+            val window = tandemWindow()
+            window.stretchWidth(width - window.getComponent().getWidth())
+        }
+    }
+
+    /** The selected content's name and index in the Tandem tool window's content manager, null with none. */
+    private fun Driver.selectedTab(): Pair<String, Int>? = withContext(OnDispatcher.EDT) {
+        val manager = tandemWindow().getContentManager()
+        manager.getSelectedContent()?.let { it.getDisplayName() to manager.getIndexOfContent(it) }
+    }
+
+    /** The header's tab labels named [text]. */
+    private fun Driver.tabLabels(text: String): List<UiComponent> =
+        ui.xx("//div[@class='ContentTabLabel' and (@text='$text' or @visible_text='$text' or @accessiblename='$text')]").list()
+
+    /** The session tabs' names that have no room in the header: a label not showing, or no label at all. */
+    private fun Driver.hiddenTabs(): List<String> {
+        val names = withContext(OnDispatcher.EDT) {
+            val manager = tandemWindow().getContentManager()
+            (0 until manager.getContentCount()).map { manager.getContent(it)?.getDisplayName() ?: "" }.filter { it.isNotEmpty() }
+        }
+        return names.filter { name -> tabLabels(name).none { it.component.isShowing() && it.component.width > 0 } }
+    }
+
+    /** The `+` after the last tab: the New Session action's button in the header. */
+    private fun Driver.tabPlus(): UiComponent = ui.x("//div[@class='ActionButton' and contains(@myaction, 'New Session')]")
+
+    /** ShowContent's list of the tool window's contents. */
+    private fun Driver.contentList(): UiComponent = ui.x("//div[@class='MyList' or @class='JBList' or @class='ListWithFilter']")
+
     /** Makes the tool window wide enough to dock the sidebar: the IDE gives it less than 500 dp. */
     private fun Driver.widenToolWindow() {
         withContext(OnDispatcher.EDT) {
@@ -1027,7 +1758,8 @@ class ToolWindowIdeTest {
      * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists and sleeps
      * [lineDelayMs] before each stream line. The frames go to [sentLog] as the fake CLI reads them, so that [script] can wait for one.
      * [extraEnv] adds variables to the IDE's environment, which the fake CLI inherits; with [browserLog] a link the plugin opens in
-     * the browser is a `{"type":"__browse__","url":…}` line in [sentLog] instead (`tandem.browserOpener=log`).
+     * the browser is a `{"type":"__browse__","url":…}` line in [sentLog] instead (`tandem.browserOpener=log`). [systemProperties] are
+     * set in the IDE's JVM (`tandem.addFolder`, say).
      */
     private fun runChat(
         name: String,
@@ -1039,6 +1771,7 @@ class ToolWindowIdeTest {
         lineDelayMs: Int? = null,
         extraEnv: Map<String, String> = emptyMap(),
         browserLog: Boolean = false,
+        systemProperties: Map<String, String> = emptyMap(),
         script: Driver.() -> Unit,
     ): List<JsonObject> {
         ideContext(
@@ -1051,6 +1784,7 @@ class ToolWindowIdeTest {
             lineDelayMs,
             extraEnv = extraEnv,
             browserLog = browserLog,
+            systemProperties = systemProperties,
         ).runTandem(name, script)
         return if (sentLog.exists()) sentLog.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject } else emptyList()
     }
@@ -1066,6 +1800,7 @@ class ToolWindowIdeTest {
         lineDelayMs: Int? = null,
         extraEnv: Map<String, String> = emptyMap(),
         browserLog: Boolean = false,
+        systemProperties: Map<String, String> = emptyMap(),
     ): IDETestContext =
         Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
@@ -1081,6 +1816,7 @@ class ToolWindowIdeTest {
                 if (lineDelayMs != null) withEnv("TANDEM_FAKE_LINE_DELAY_MS", lineDelayMs.toString())
                 extraEnv.forEach { (key, value) -> withEnv(key, value) }
                 if (browserLog) addSystemProperty("tandem.browserOpener", "log")
+                systemProperties.forEach { (key, value) -> addSystemProperty(key, value) }
             }
         }
 
@@ -1254,11 +1990,53 @@ class ToolWindowIdeTest {
         return "$output[${endsWith("@text")} or ${endsWith("@visible_text")}] | $output//div[@class='ComposeNode' and ${endsWith("@visible_text")}]"
     }
 
+    /** A prompt's text: its `content`'s text blocks, joined. */
+    private fun JsonObject.text(): String =
+        this["content"]!!.jsonArray.mapNotNull { block -> block.jsonObject["text"]?.jsonPrimitive?.content }.joinToString("")
+
     /** A `user` frame's `message.content`, a string in the shell escape frames. */
     private fun JsonObject.content(): String = this["message"]!!.jsonObject["content"]!!.jsonPrimitive.content
 
+    /** Presses [press] until [done], at most [max] times, and fails as [what] when it never is. */
+    private fun Driver.pressUntil(what: String, press: Driver.() -> Unit, max: Int = MAX_PRESSES, done: Driver.() -> Boolean) {
+        repeat(max) { presses ->
+            if (done()) return
+            press()
+            if (runCatching { waitFor(what, 2.seconds) { done() } }.isSuccess) {
+                println("$what after ${presses + 1} presses")
+                return
+            }
+        }
+        waitFor(what, 5.seconds) { done() }
+    }
+
+    /** A menu item (a node with a `selected` state, not a sidebar tab) whose text contains [text]. */
+    private fun plusItemPath(text: String): String =
+        "$MENU_ITEM[contains(@visible_text,'$text') or contains(@text,'$text')]"
+
+    private fun Driver.plusItem(text: String): UiComponent = ui.x(plusItemPath(text))
+
+    /** The menu item whose text contains [text], if it is the keyboard's selection. */
+    private fun Driver.focusedPlusItem(text: String): UiComponent = ui.x("${plusItemPath(text)}[@focused='true']")
+
+    /** The node described as [description], if it has the keyboard focus. */
+    private fun Driver.focusedDescribed(description: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and @contentdescription='$description' and @focused='true']")
+
+    /** Any node whose text contains [text]. */
+    private fun Driver.containing(text: String): UiComponent =
+        ui.x("//div[@class='ComposeNode' and (contains(@visible_text,'$text') or contains(@text,'$text'))]")
+
     private fun Driver.waitForText(text: String) {
-        waitFor("'$text' rendered", 2.minutes) { ui.x("//div[@class='ComposeNode' and @visible_text='$text']").present() }
+        waitFor("'$text' rendered", 2.minutes) { text(text).present() }
+    }
+
+    /** The node whose text is [text]. */
+    private fun Driver.text(text: String): UiComponent = ui.x("//div[@class='ComposeNode' and @visible_text='$text']")
+
+    /** As [waitForText], for [text] as a part of a node's text, such as one pair of a wrapping line. */
+    private fun Driver.waitForTextContaining(text: String) {
+        waitFor("'$text' rendered within a text", 2.minutes) { ui.x("//div[@class='ComposeNode' and contains(@visible_text, '$text')]").present() }
     }
 
     /** Clicks the prompt box and waits until it has the keyboard focus. */
@@ -1331,8 +2109,44 @@ class ToolWindowIdeTest {
         /** The first attached or sent image: a thumbnail, or its placeholder while it decodes. */
         const val FIRST_IMAGE = "//div[@class='ComposeNode' and @contentdescription='[Image #1]']"
 
+        /** The New Session action (desktop-parity spec 18.2). */
+        const val NEW_SESSION_ACTION = "Tandem.NewSession"
+
+        /** A Tandem tool window wide enough for two session tabs in its header, narrower than the sidebar's 500 dp. */
+        const val TWO_TABS_WIDTH = 495
+
+        /** Where a tab label's × is, counted from the label's right end. */
+        const val TAB_CLOSE_INSET = 12
+
         /** Whether the IDE runs on macOS, where paste is Cmd+V. */
         val isMac: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
+
+        /** `Add files or photos`' shortcut as the IDE draws it (deviation 28). */
+        val ADD_FILES_SHORTCUT: String = if (isMac) "⌥⇧⌘O" else "Ctrl+Alt+Shift+O"
+
+        /** The /usage card's description (desktop-parity spec 3.7). */
+        const val USAGE_CARD = "Usage for this session"
+        const val DAY_CAVEAT = "Last 24 hours · 23 sessions · 8.3k requests · approximate, overlapping measures · this machine only, excludes claude.ai"
+        const val WEEK_CAVEAT = "Last 7 days · 88 sessions · 19.7k requests · approximate, overlapping measures · this machine only, excludes claude.ai"
+
+        /** The footer's context ring. */
+        const val RING = "//div[@class='ComposeNode' and @contentdescription='Context window']"
+
+        /** The context popover's header row, the category list's toggle. */
+        const val HEADER_ROW = "//div[@class='ComposeNode' and @contentdescription='Context window categories']"
+
+        /** The popover's `See detailed breakdown` item, its text merged into the menu item's node. */
+        const val DETAILED_ITEM =
+            "//div[@class='ComposeNode' and (contains(@visible_text, 'See detailed breakdown') or contains(@text, 'See detailed breakdown'))]"
+
+        /** The popover's Messages category row, shown only while the category list is open. */
+        const val MESSAGES_ROW = "//div[@class='ComposeNode' and starts-with(@contentdescription, 'Messages,')]"
+
+        /** A menu's item: a node with a `selected` state that is not a sidebar row (a tab). */
+        const val MENU_ITEM = "//div[@class='ComposeNode' and @selected and not(@role='Tab')]"
+
+        /** The most key presses a test makes to move the focus or a menu's selection to a control. */
+        const val MAX_PRESSES = 40
 
         /** A turn's footer. */
         const val FOOTER = "//div[@class='ComposeNode' and starts-with(@visible_text, 'Worked for')]"
@@ -1376,6 +2190,30 @@ interface ToolWindowRef {
     fun stretchWidth(value: Int)
 
     fun getComponent(): JComponentRef
+
+    fun hide()
+
+    fun isVisible(): Boolean
+
+    fun isActive(): Boolean
+
+    fun getContentManager(): ContentManagerRef
+}
+
+@Remote("com.intellij.ui.content.ContentManager")
+interface ContentManagerRef {
+    fun getSelectedContent(): ContentRef?
+
+    fun getContentCount(): Int
+
+    fun getContent(index: Int): ContentRef?
+
+    fun getIndexOfContent(content: ContentRef): Int
+}
+
+@Remote("com.intellij.ui.content.Content")
+interface ContentRef {
+    fun getDisplayName(): String
 }
 
 @Remote("javax.swing.JComponent")

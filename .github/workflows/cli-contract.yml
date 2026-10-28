@@ -109,7 +109,9 @@ jobs:
       # answers, an MCP tool call's request and the slash-command catalogue and local commands, against
       # scripts/mcp_probe_servers.py's local servers (mcp-slash, mcp-status, mcp-tool-call), and the shell-escape frames with
       # their zero-turn results (bash-mode, bash-mode-respond, and bash-mode-context, the one frame Tandem sends with replies
-      # off). Each scenario starts the CLI once, so each is a step of its own with a fresh identity token: a GitHub token is
+      # off), and what the parity round reads: messages written while a turn runs and their withdrawal (queue-fold, queue-later,
+      # queue-cancel, queue-cancel-steer, queue-during-card), a fork cut at a reply (fork-at) and the context and usage requests
+      # (parity-requests). Each scenario starts the CLI once, so each is a step of its own with a fresh identity token: a GitHub token is
       # single use and lives about five minutes (.github/actions/anthropic-token).
       - name: Fetch a fresh identity token for the CLI
         uses: ./.github/actions/anthropic-token
@@ -135,6 +137,34 @@ jobs:
         uses: ./.github/actions/anthropic-token
       - name: Record the bash-mode-context scenario
         run: ./scripts/record-scenario.sh bash-mode-context build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the queue-fold scenario
+        run: ./scripts/record-scenario.sh queue-fold build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the queue-later scenario
+        run: ./scripts/record-scenario.sh queue-later build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the queue-cancel scenario
+        run: ./scripts/record-scenario.sh queue-cancel build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the queue-cancel-steer scenario
+        run: ./scripts/record-scenario.sh queue-cancel-steer build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the queue-during-card scenario
+        run: ./scripts/record-scenario.sh queue-during-card build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the fork-at scenario
+        run: ./scripts/record-scenario.sh fork-at build/contract
+      - name: Fetch a fresh identity token for the CLI
+        uses: ./.github/actions/anthropic-token
+      - name: Record the parity-requests scenario
+        run: ./scripts/record-scenario.sh parity-requests build/contract
       # The rehearsal of the drift loop: the live recording is mutated in place (all three files are read before any is
       # written) and a marker file names the mode, so the Gradle step goes red, the real artifact is uploaded and
       # drift-fix.yml fires through workflow_run exactly as for a real red. A scheduled run has no input and records as is.

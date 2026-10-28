@@ -9,6 +9,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,7 +42,8 @@ internal fun shownWorkingRow(row: WorkingRow, agentExpanded: Boolean): WorkingRo
 
 /**
  * The working row while a turn runs (spec 4.9): the [Spark], then `Pondering… · 3s · 1.2k tokens`, `Waiting for you · 3s` in the
- * warning colour or `Not responding · 1m 5s` in the error colour. Once a second it reads the clock and when the process last wrote a
+ * warning colour or `Not responding · 1m 5s` in the error colour. While it runs a light band sweeps across `Pondering…` alone
+ * ([shimmer], spec 15.1), in the normal text colour over the info colour. Once a second it reads the clock and when the process last wrote a
  * line ([lastFrameAt], read on the tick, never collected, so that a line never recomposes the row); [WorkingIndicator.view] does the
  * rest. [agentExpanded]: a running Agent row is open ([shownWorkingRow]). One node for assistive technology, described as
  * `Claude is working` (or waiting, or not responding), with the text merged in.
@@ -50,6 +52,7 @@ internal fun shownWorkingRow(row: WorkingRow, agentExpanded: Boolean): WorkingRo
 internal fun WorkingRowItem(row: WorkingRow, lastFrameAt: StateFlow<Long>, agentExpanded: Boolean = false) {
     var now by remember(row.key) { mutableLongStateOf(System.currentTimeMillis()) }
     var lastFrame by remember(row.key) { mutableLongStateOf(lastFrameAt.value) }
+    var stepEnd by remember(row.key) { mutableFloatStateOf(0f) }
     LaunchedEffect(row.key) {
         while (true) {
             delay(TICK_MS)
@@ -72,13 +75,24 @@ internal fun WorkingRowItem(row: WorkingRow, lastFrameAt: StateFlow<Long>, agent
     ) {
         Spark(animated = view.animated, tint = if (view.mode == Mode.RUNNING) TandemColors.spark else color)
         Spacer(Modifier.width(8.dp))
-        Text(view.text, color = color, style = smallTextStyle())
+        // One Text, one string: the band crosses the step only, up to its x-extent, read in draw (spec 15.3).
+        val shimmering = view.shimmerEnd > 0
+        val shimmer = rememberShimmer(shimmering)
+        Text(
+            view.text,
+            color = color,
+            style = smallTextStyle(),
+            onTextLayout = { layout ->
+                stepEnd = layout.getHorizontalPosition(view.shimmerEnd.coerceAtMost(layout.layoutInput.text.length), usePrimaryDirection = true)
+            },
+            modifier = Modifier.shimmer(shimmering, { shimmer.value }, { stepEnd }, colors.normal),
+        )
     }
 }
 
 /**
  * What [WorkingRowItem] shows for [row] at [now], the process having last written a line at [lastFrame] ([WorkingIndicator.view]):
- * the spark stands still under Tandem's `Reduce motion` setting ([reducedMotion]).
+ * under Tandem's `Reduce motion` setting ([reducedMotion]) the orbs stand still and nothing shimmers.
  */
 @Composable
 internal fun workingView(row: WorkingRow, now: Long, lastFrame: Long, agentExpanded: Boolean): WorkingIndicator.View =
@@ -86,14 +100,14 @@ internal fun workingView(row: WorkingRow, now: Long, lastFrame: Long, agentExpan
 
 /**
  * Tandem's `Reduce motion` setting (`TandemSessions.reduceMotion`), which the tool window provides around the chat; off unless
- * provided, so the spark moves.
+ * provided, so the orbs move and the shimmer sweeps.
  */
 internal val LocalReducedMotion: ProvidableCompositionLocal<Boolean> = compositionLocalOf { false }
 
 /**
- * Whether the user asked for less motion: Tandem's `Reduce motion` setting ([LocalReducedMotion]). Then the spark stands still. Not
- * the IDE's `UISettings.animateWindows`: that is the slide of unpinned tool windows (registry `ide.animate.toolwindows`), off by
- * default, which stilled the spark for everyone.
+ * Whether the user asked for less motion: Tandem's `Reduce motion` setting ([LocalReducedMotion]). Then the orbs stand still and
+ * nothing shimmers. Not the IDE's `UISettings.animateWindows`: that is the slide of unpinned tool windows (registry
+ * `ide.animate.toolwindows`), off by default, which stilled the spark for everyone.
  */
 @Composable
 internal fun reducedMotion(): Boolean = LocalReducedMotion.current

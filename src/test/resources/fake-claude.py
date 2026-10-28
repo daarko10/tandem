@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake `claude` for platform and IDE tests: replays a recorded fixture in step with the host.
 
-Reads --session-id <id>, --resume <id> and --fork-session from its arguments and ignores the rest. Environment:
+Reads --session-id <id>, --resume <id>, --fork-session and --add-dir <dir> from its arguments and ignores the rest. Environment:
   TANDEM_FAKE_FIXTURES    comma-separated fixture names in ./fixtures. Process number N (from 0) started against the same
                           TANDEM_FAKE_LOG replays name N; the last name is reused once the list runs out
   TANDEM_FAKE_FIXTURE     a single fixture name, used when TANDEM_FAKE_FIXTURES is unset (default: plain-reply)
@@ -12,7 +12,7 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
                           KEY, SECRET, PASSWORD, CREDENTIAL or AUTH (in any case) is logged as <redacted>.
                           Every frame the host writes follows, one per line
   TANDEM_FAKE_SESSION_ID  the session id to use, whatever the arguments say
-  TANDEM_FAKE_DELAY_MS    sleep this long before emitting each control_request
+  TANDEM_FAKE_DELAY_MS    sleep this long before emitting each control_request, and before the answers of rules (h) and (i)
   TANDEM_FAKE_GATE_FILE   before emitting each control_request (after the delay, if both are set), wait until this file
                           exists, checking every 100 ms for up to 60 s, then emit it anyway: a test holds a request
                           back until it is ready for it, in place of guessing a delay
@@ -24,6 +24,15 @@ Reads --session-id <id>, --resume <id> and --fork-session from its arguments and
                           without an mcp_reconnect is a guess at the unrecorded callback completion (probes open question 2)
   TANDEM_FAKE_EXTRA_NEEDS_AUTH  in an MCP fixture: the seeded server table gains a copy of the seeded needs-auth entry
                           under this name, served like it. Synthetic: a test-only knob for two sign-in waits at once
+  TANDEM_FAKE_QUEUED_DELAY_MS  in a `queue-` fixture (rule (m)): after a `queued` lifecycle line that bound a host frame, sleep
+                          this long (unset or 0: no sleep), so that a test sees the message wait before its `started` comes
+  TANDEM_FAKE_EXIT_AT_END  after the last replayed line, sleep this many ms, then exit 0 (unset: read stdin until the host
+                          closes it, as below), so that a test sees a process end by itself
+  TANDEM_FAKE_SKIP_ADD_DIR  rule (l): this `--add-dir` directory is left out of every replayed init, as a CLI that did not add it
+  TANDEM_FAKE_KEEP_ADD_DIR  rule (l): this directory is listed in every replayed init, after the others and once, with or without
+                          `--add-dir`, as a CLI that keeps a folder a resume left out
+  TANDEM_FAKE_EXIT_DELAY_MS  once the host closes stdin, sleep this long before exiting (unset or 0: exit at once), so that a
+                          test can hold a stop (the host waits for the exit) while something else happens
 
 Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
 with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
@@ -71,6 +80,29 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
       a `system/status` line that has `user_message_uuids` gets the list as it stands. So a result names the host's own sends,
       as the real CLI's does (`bash-mode:8` names both quiet sends, `bash-mode-respond:6` the command frame and `:41` the
       output frame), never the recorded `<command_uuid-N>` placeholders.
+  (h) `get_context_usage` is answered inline, at any time and in every fixture, with the fixture's first control_response
+      whose payload has a `categories` array with a `messages` category (the full answer; `parity-context:2`), else with
+      {"subtype":"error","error":"Unsupported control request subtype: get_context_usage"} (the shape of `parity-context:19`).
+  (i) `get_usage` is answered inline, at any time and in every fixture: with `skip_behaviors: true` by the first
+      control_response whose payload has a `session` object and `behaviors: null` (`parity-usage:16`), without it by the
+      first whose `behaviors` is an object (`:17`), else with the same error naming `get_usage`.
+  (j) In a fixture whose name starts with `parity-`, every control_response line leaves the in-order replay (`initialize`
+      is still answered by (a)): its answers were given to requests sent out of the recorded order. Any other host control
+      request gets a bare success there, as in an MCP fixture (c).
+  (k) `--add-dir` arguments are logged with the rest of the argv in `__spawn__`.
+  (l) With `--add-dir <dir>` (repeatable) in the argv, every replayed `system/init` gets `additional_directories` = those dirs
+      in order, less the one TANDEM_FAKE_SKIP_ADD_DIR names; TANDEM_FAKE_KEEP_ADD_DIR adds its dir to every replayed init, after
+      the others and once, with or without `--add-dir`; with neither the line replays as recorded.
+  (m) In a fixture whose name starts with `queue-`, the `<command_uuid-N>` placeholders stand for the host's own `user` frames:
+      a line naming one not yet bound (as `command_uuid`, or inside a `user_message_uuids` list) binds it to the oldest host
+      `user` frame read and not yet bound, waiting for the next one when there is none, and every bound placeholder in the line
+      is rewritten to that frame's `uuid`. A `command_lifecycle` `cancelled` line for a placeholder bound after the last `init` (a
+      message sent while the turn ran, not the turn's own prompt) first waits for the host's next `cancel_async_message` or
+      `interrupt`, and the `control_response` after it answers that request (`queue-cancel:24`-`:25`, `:55`-`:56`; the prompt's
+      own `cancelled` at `:61` does not wait); any other replayed `control_response` still pairs with the host's next
+      `control_request`. The wait before an `init` is met by a frame a line has named since the last `result` (bound then or
+      before: `queue-later:53` names F, bound at `:19`, ahead of the `init` at `:54`). Rule (g) is off for these fixtures.
+      `--resume-session-at` needs no rule: it is logged with the argv in `__spawn__`, like any other argument.
 """
 import copy
 import fcntl
@@ -95,6 +127,17 @@ SESSION_PLACEHOLDER = re.compile(r"<session_id-\d+>")
 SECRET_NAME_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH")
 UNKNOWN_SUBTYPE = "Unknown subtype"
 read_user_uuids = []  # rule (g): the uuids of the user frames read since the last result written
+queued_delay_ms = int(os.environ.get("TANDEM_FAKE_QUEUED_DELAY_MS") or 0)
+exit_at_end = os.environ.get("TANDEM_FAKE_EXIT_AT_END")
+COMMAND_PLACEHOLDER = re.compile(r"<command_uuid-\d+>")
+unbound_frames = []  # rule (m): the uuids of the host's user frames read and not yet bound, oldest first
+bound = {}  # rule (m): placeholder -> the host frame's uuid
+bound_after_init = set()  # rule (m): the placeholders bound since the last init
+named_since_result = [False]  # rule (m): whether a line has named a bound placeholder since the last result
+add_dirs = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--add-dir"]  # rule (l)
+skip_add_dir = os.environ.get("TANDEM_FAKE_SKIP_ADD_DIR") or None
+keep_add_dir = os.environ.get("TANDEM_FAKE_KEEP_ADD_DIR") or None
+exit_delay_ms = int(os.environ.get("TANDEM_FAKE_EXIT_DELAY_MS") or 0)
 
 
 def option(name):
@@ -153,7 +196,10 @@ def read_host():
             continue
         if isinstance(frame, dict) and frame.get("type") == "user" and isinstance(frame.get("uuid"), str):
             read_user_uuids.append(frame["uuid"])
+            unbound_frames.append(frame["uuid"])
         return frame
+    if exit_delay_ms:
+        time.sleep(exit_delay_ms / 1000)
     return None
 
 
@@ -180,6 +226,12 @@ def wait_for_gate():
 
 
 def emit(message):
+    if queue_fixture:
+        line = SESSION_PLACEHOLDER.sub(lambda _: escaped_session_id, json.dumps(message, separators=(",", ":")))
+        line = COMMAND_PLACEHOLDER.sub(lambda m: bound.get(m.group(0), m.group(0)), line)
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+        return
     if message.get("type") == "result":
         message["user_message_uuids"] = list(read_user_uuids)
         del read_user_uuids[:]
@@ -278,8 +330,28 @@ def answer_mcp(request_id, subtype, request):
         answer(request_id)
 
 
+def unsupported(subtype):
+    return "Unsupported control request subtype: " + subtype
+
+
+def answer_parity(request_id, subtype, request):
+    """Rules (h) and (i): `get_context_usage` and `get_usage` from the fixture's recorded answers, else the CLI's error."""
+    if delay_ms:
+        time.sleep(delay_ms / 1000)
+    if subtype == "get_context_usage":
+        payload = context_payload
+    elif request.get("skip_behaviors") is True:
+        payload = usage_session_payload
+    else:
+        payload = usage_history_payload
+    if payload is None:
+        answer(request_id, error=unsupported(subtype))
+    else:
+        answer(request_id, copy.deepcopy(payload))
+
+
 def answer_inline(frame):
-    """Answers a host control request at once when rules (a)-(d) say so; True if it did (the frame is then used up)."""
+    """Answers a host control request at once when rules (a)-(d) and (h)-(j) say so; True if it did (the frame is then used up)."""
     if frame.get("type") != "control_request":
         return False
     request = frame.get("request") or {}
@@ -288,6 +360,9 @@ def answer_inline(frame):
     if subtype == "initialize":
         if initialize_line is not None:
             answer(request_id, copy.deepcopy(payload_of(initialize_line)))
+        return True
+    if subtype in ("get_context_usage", "get_usage"):
+        answer_parity(request_id, subtype, request)
         return True
     if isinstance(subtype, str) and subtype.startswith("mcp_"):
         if mcp_fixture:
@@ -298,12 +373,48 @@ def answer_inline(frame):
     if mcp_fixture:
         answer(request_id, {"still_queued": []} if subtype == "interrupt" else None)
         return True
+    if parity_fixture:
+        answer(request_id)
+        return True
     return False
 
 
 def thin_list():
     """The table as `init.mcp_servers` lists it (`mcp-status:6`): name, status and source."""
     return [{key: entry[key] for key in ("name", "status", "source") if key in entry} for entry in table]
+
+
+def named_placeholders(message):
+    """Rule (m): the placeholders a line names as `command_uuid` or inside a `user_message_uuids` list, in order."""
+    names = []
+    if isinstance(message.get("command_uuid"), str):
+        names.append(message["command_uuid"])
+    uuids = message.get("user_message_uuids")
+    if isinstance(uuids, list):
+        names.extend(u for u in uuids if isinstance(u, str))
+    return [name for name in names if COMMAND_PLACEHOLDER.fullmatch(name)]
+
+
+def bind_queue_line(message):
+    """Rule (m): binds the placeholders `message` names; returns the request id a replayed cancel answers, if it waited for one."""
+    newly = False
+    for name in named_placeholders(message):
+        if name not in bound:
+            while not unbound_frames:
+                wait_for(lambda m: m.get("type") == "user")
+            bound[name] = unbound_frames.pop(0)
+            bound_after_init.add(name)
+            newly = True
+        named_since_result[0] = True
+    if message.get("type") == "command_lifecycle":
+        name = message.get("command_uuid")
+        if message.get("state") == "queued" and newly and queued_delay_ms:
+            time.sleep(queued_delay_ms / 1000)
+        if message.get("state") == "cancelled" and name in bound_after_init:
+            request = wait_for(lambda m: m.get("type") == "control_request"
+                               and (m.get("request") or {}).get("subtype") in ("cancel_async_message", "interrupt"))
+            return request.get("request_id")
+    return None
 
 
 fixture = fixture_name(record_spawn())
@@ -320,6 +431,20 @@ responses = [message for message in lines if message.get("type") == "control_res
 initialize_line = next((m for m in responses if "commands" in (payload_of(m) or {})), responses[0] if responses else None)
 server_payloads = [payload_of(m) for m in responses if isinstance((payload_of(m) or {}).get("mcpServers"), list)]
 mcp_fixture = bool(server_payloads)
+parity_fixture = fixture.startswith("parity-")
+queue_fixture = fixture.startswith("queue-")
+
+
+def is_full_breakdown(payload):
+    """A `get_context_usage` answer with its `messages` category: the full one, not the summary (`parity-context:18`)."""
+    categories = payload.get("categories")
+    return isinstance(categories, list) and any(isinstance(c, dict) and c.get("id") == "messages" for c in categories)
+
+
+payloads = [payload_of(m) or {} for m in responses]
+context_payload = next((p for p in payloads if is_full_breakdown(p)), None)
+usage_session_payload = next((p for p in payloads if isinstance(p.get("session"), dict) and "behaviors" in p and p["behaviors"] is None), None)
+usage_history_payload = next((p for p in payloads if isinstance(p.get("behaviors"), dict)), None)
 
 
 def has_pending(payload):
@@ -340,20 +465,35 @@ pending_served = False
 auth_payload = next((payload_of(m) for m in responses if "authUrl" in (payload_of(m) or {})), None)
 auth_started = {}
 
-if mcp_fixture:
+if mcp_fixture or parity_fixture:
     replay = [message for message in lines if message.get("type") != "control_response"]
 else:
     replay = [message for message in lines if message is not initialize_line]
 
+cancel_request_id = None  # rule (m): the request a waited-for cancelled line's control_response answers
 for message in replay:
     kind = message.get("type")
     if kind == "system" and message.get("subtype") == "init":
-        wait_for(lambda m: m.get("type") == "user")
+        if not (queue_fixture and named_since_result[0]):
+            wait_for(lambda m: m.get("type") == "user")
+        if queue_fixture:
+            bound_after_init.clear()
         if mcp_fixture:
             message["mcp_servers"] = thin_list()
+        if add_dirs or keep_add_dir:
+            listed = [d for d in add_dirs if d != skip_add_dir]
+            if keep_add_dir and keep_add_dir not in listed:
+                listed.append(keep_add_dir)
+            message["additional_directories"] = listed
+    if queue_fixture:
+        cancel_request_id = bind_queue_line(message) or cancel_request_id
     if kind == "control_response":
-        request = wait_for(lambda m: m.get("type") == "control_request")
-        message["response"]["request_id"] = request.get("request_id")
+        if cancel_request_id is not None:
+            message["response"]["request_id"] = cancel_request_id
+            cancel_request_id = None
+        else:
+            request = wait_for(lambda m: m.get("type") == "control_request")
+            message["response"]["request_id"] = request.get("request_id")
     if kind == "control_request" and delay_ms:
         time.sleep(delay_ms / 1000)
     if kind == "control_request" and gate_file:
@@ -361,8 +501,13 @@ for message in replay:
     if kind == "stream_event" and line_delay_ms:
         time.sleep(line_delay_ms / 1000)
     emit(message)
+    if kind == "result":
+        named_since_result[0] = False
     if kind == "control_request":
         wait_for(lambda m: m.get("type") == "control_response"
                  and m.get("response", {}).get("request_id") == message.get("request_id"))
 
+if exit_at_end:
+    time.sleep(int(exit_at_end) / 1000)
+    sys.exit(0)
 wait_for(lambda m: False)

@@ -2,6 +2,7 @@ package dev.daarkolabs.tandem.session
 
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.McpServerInfo
@@ -25,6 +26,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -35,6 +37,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -42,10 +45,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.nio.file.Path
 import java.time.Instant
@@ -81,6 +84,19 @@ data class NewSessionOptions(val model: String? = null, val effort: String? = nu
  * latest `system/init` named ([ChatState.terminalCommands]), which the palette leaves out.
  */
 data class CommandCatalogue(val commands: List<SlashCommand> = emptyList(), val terminal: Set<String> = emptySet())
+
+/** What [SessionManager.forkResult] did: [Started] a fork, or [Refused] to, with the reason the chat shows (hard rule 5). */
+sealed interface ForkResult {
+    /** The fork, added, selected and starting. */
+    data class Started(val handle: SessionHandle) : ForkResult
+
+    /**
+     * Nothing forked: [NO_TRANSCRIPT], there is no transcript to fork yet; [NOT_IN_HISTORY], the line asked for is no main-thread
+     * reply line of the session's history; [BUSY], a turn started before the original's idle process could stop (spec 13.1). [BUSY] is reserved: the
+     * recorded `fork-at-live` and `fork-at-busy` stories fork beside a live original, so no path produces it today.
+     */
+    enum class Refused : ForkResult { NO_TRANSCRIPT, NOT_IN_HISTORY, BUSY }
+}
 
 /**
  * The sessions of one project. Each open session has a [SessionHandle] in [sessions], which runs its own `claude` process
@@ -126,13 +142,16 @@ class SessionManager internal constructor(
     private val deleteFiles: (transcript: Path) -> Unit = TranscriptFiles::delete,
     /** How often a sign-in wait asks for the servers ([startMcpAuth]). */
     private val mcpAuthEvery: Duration = 2.seconds,
-    /** How long a sign-in wait lasts at most. */
-    private val mcpAuthTimeout: Duration = 3.minutes,
+    /**
+     * Returns when a sign-in wait has lasted as long as it may: 3 minutes. Tests pass one that returns once the poll has asked enough
+     * times, so that what they check does not depend on how fast the machine runs.
+     */
+    private val mcpAuthTimeout: suspend () -> Unit = { delay(3.minutes) },
     /** Whether Claude replies to a shell escape's output (the setting), read when each command ends. */
     private val respondToShell: () -> Boolean = { true },
     /** Runs the shell escapes ([runShell]). */
     private val shell: ShellRunner = ShellRunner(environment = System::getenv),
-) : McpControls {
+) : McpControls, ContextControls {
     /** Reads histories with [TranscriptReader]. */
     constructor(
         scope: CoroutineScope,
@@ -187,10 +206,16 @@ class SessionManager internal constructor(
     private val closings = HashMap<SessionId, Long>()
 
     /**
-     * Per session: the `mcp_status` run in flight ([McpRefresh.running]) and the follow-up run that callers arriving meanwhile share
-     * ([McpRefresh.next]). Weak keys, so a closed session's entry goes with its handle. Guarded by [lock].
+     * Per session: the `mcp_status` run in flight ([Coalesced.running]) and the follow-up run that callers arriving meanwhile share
+     * ([Coalesced.next]). Weak keys, so a closed session's entry goes with its handle. Guarded by [lock].
      */
-    private val mcpRefreshes = WeakHashMap<SessionHandle, McpRefresh>()
+    private val mcpRefreshes = WeakHashMap<SessionHandle, Coalesced<List<McpServerInfo>>>()
+
+    /** Per session: the `get_context_usage` run in flight and its shared follow-up, as [mcpRefreshes]. Guarded by [lock]. */
+    private val contextFetches = WeakHashMap<SessionHandle, Coalesced<ContextBreakdown>>()
+
+    /** Per session: the job that stops its process once idle for a folder change ([respawnWhenIdle]). Guarded by [lock]. */
+    private val respawns = WeakHashMap<SessionHandle, Job>()
 
     /** Per session: the sign-in wait of each server, by name ([startMcpAuth]). Guarded by [lock]. */
     private val mcpAuthJobs = WeakHashMap<SessionHandle, MutableMap<String, Job>>()
@@ -293,33 +318,55 @@ class SessionManager internal constructor(
     }
 
     /**
-     * Forks session [id]: a new session, with a new id, that goes on from [id]'s history while [id] stays as it is. The fork is
-     * added to [sessions], selected and returned at once, and its process starts in the background, as for [create]. Null if [id]
-     * has no transcript yet, since there is nothing to fork then.
-     *
-     * The fork starts from [id]'s settled history: the open session's chat, else its transcript's. Its title is
-     * "<title of [id]> (fork)" at once, and the CLI is told so (`rename_session`) as soon as the fork's process reports its first
-     * `system/init`, which comes with its first prompt: the CLI does not title a fork itself. [SessionSpawner.configFor] says how a fork starts.
+     * Forks session [id]: a new session, with a new id, that goes on from [id]'s history while [id] stays as it is, or, with
+     * [atMessage], from that history up to the end of the turn whose main-thread reply holds the line [atMessage]
+     * ([ChatState.forkedAt], `--resume-session-at`, spec 13.1). The fork is added to [sessions], selected and returned at once,
+     * and its process starts in the background, as for [create]. Null when nothing forked; [forkResult] says why.
      */
-    suspend fun fork(id: SessionId): SessionHandle? {
-        val file = withContext(Dispatchers.IO) { index.transcript(id) } ?: return null
+    suspend fun fork(id: SessionId, atMessage: String? = null): SessionHandle? =
+        (forkResult(id, atMessage) as? ForkResult.Started)?.handle
+
+    /**
+     * [fork], with the reason when nothing forked: [ForkResult.Refused.NO_TRANSCRIPT] when there is no transcript to fork yet,
+     * [ForkResult.Refused.NOT_IN_HISTORY] when [atMessage] is no main-thread reply line of [id]'s history.
+     *
+     * The transcript forked is [id]'s; a fork with none of its own yet (no prompt sent) shows its original's lines, so it forks its
+     * original again, at its own cut unless [atMessage] names another. The fork starts from [id]'s settled history: the open
+     * session's chat, else its transcript's. Its title is "<title of [id]> (fork)" at once, and the CLI is told so
+     * (`rename_session`) as soon as the fork's process reports its first `system/init`, which comes with its first prompt: the CLI
+     * does not title a fork itself. [SessionSpawner.configFor] says how a fork starts. Tandem never falls back to a whole fork: an
+     * argv the CLI refuses shows in the fork's chat through the result and exit paths.
+     */
+    suspend fun forkResult(id: SessionId, atMessage: String? = null): ForkResult {
         val original = handle(id)
+        val own = withContext(Dispatchers.IO) { index.transcript(id) }
+        val inherited = original?.forkOf?.takeIf { own == null }
+        val source = inherited ?: id
+        val file = own
+            ?: inherited?.let { withContext(Dispatchers.IO) { index.transcript(it) } }
+            ?: return ForkResult.Refused.NO_TRANSCRIPT
         val (history, title) = if (original != null) {
-            original.state.value.settled() to original.title.value
+            // A message waiting in the original stays the original's (spec 12.5).
+            original.state.value.forkHistory() to original.title.value
         } else {
             val (loaded, loadedTitle) = load(id, file)
             loaded to (loadedTitle ?: id)
         }
+        val start = if (atMessage == null) history else history.forkedAt(atMessage) ?: return ForkResult.Refused.NOT_IN_HISTORY
+        val cut = atMessage ?: original?.forkAt?.takeIf { inherited != null }
         val forkId = UUID.randomUUID().toString()
         val fork = synchronized(lock) {
             // Its id comes with its first system/init: until then the state carries none, not the original's.
-            val (fork, _) = registerLocked(forkId, history.copy(sessionId = null), forkOf = id, pendingTitle = "$title (fork)")
+            val (fork, _) =
+                registerLocked(forkId, start.copy(sessionId = null), forkOf = source, forkAt = cut, pendingTitle = "$title (fork)")
+            // The open original's added folders go with it, after the fork tail (spec 3.4 "Lifetime", 13.1).
+            original?.let(fork::copyFolders)
             selectLocked(forkId)
             fork
         }
         spawner.startInBackground(fork, forPrompts = false)
-        LOG.info("session $id forked as $forkId")
-        return fork
+        LOG.info("session $id forked as $forkId" + if (cut != null) " at a reply" else " whole")
+        return ForkResult.Started(fork)
     }
 
     /** Offers [models], the list remembered from an earlier IDE run, as [SessionManager.models] until a process lists them. */
@@ -338,13 +385,27 @@ class SessionManager internal constructor(
     }
 
     /**
-     * Sends a prompt: [text] and the [images] attached to it, in order. A stopped session starts a process first, and gets the
-     * prompt once it is up.
+     * Sends a prompt: [text] and the [images] attached to it, in order, with `"priority":"later"` when [later]. A stopped session
+     * starts a process first, and gets the prompt once it is up.
      */
-    fun send(id: SessionId, text: String, images: List<ImageBlock> = emptyList()) {
+    fun send(id: SessionId, text: String, images: List<ImageBlock> = emptyList(), later: Boolean = false) {
         val handle = handle(id) ?: return
         handle.lastUsed = clock()
-        if (handle.sendOrQueue(Outbound.Prompt(text, images))) spawner.startInBackground(handle, forPrompts = true)
+        if (handle.sendOrQueue(Outbound.Prompt(text, images, later))) spawner.startInBackground(handle, forPrompts = true)
+    }
+
+    /**
+     * Withdraws the waiting message [uuid] of session [id] (spec 12.3): through its live process ([ClaudeSession.withdraw]). Without
+     * one nothing: the stopped chat gave every waiting message back already.
+     */
+    fun withdraw(id: SessionId, uuid: String, restore: Boolean) {
+        handle(id)?.liveSession()?.withdraw(uuid, restore)
+    }
+
+    /** The composer of session [id] took the returned messages [uuids] back: they leave the live process's state, or the stopped chat. */
+    fun takeReturned(id: SessionId, uuids: List<String>) {
+        val event = SessionEvent.ReturnedTaken(uuids)
+        handle(id)?.pick(live = { it.event(event) }, stopped = event)
     }
 
     /**
@@ -390,17 +451,24 @@ class SessionManager internal constructor(
                 // A closed session, a project that closes (its scope cancelled without a close) or the IDE's exit sends nothing.
                 if (!shuttingDown && !handle.isClosed && handle.scope.isActive) {
                     sendShellFrames(handle, shellId, command, withNote(soFar.toString(), "Stopped after ${elapsed(ms)}"))
+                } else {
+                    // Its place among the held frames goes: the prompts behind it are not held with nothing to release them.
+                    handle.liveSession()?.shellUnsent(shellId)
                 }
             }
             throw e
         } catch (e: Exception) {
             handle.shellEvent(SessionEvent.ShellEnded(shellId, ShellEnd.Failed(e.message ?: e.javaClass.simpleName), clock() - started))
             LOG.info("shell escape failed: ${e.javaClass.simpleName}")
+            handle.liveSession()?.shellUnsent(shellId)
             return
         }
         handle.shellEvent(SessionEvent.ShellEnded(shellId, result.end, result.durationMs))
         // Not started: nothing ran. Stopped here means killAllNow killed it (the IDE exits): no claude may start now.
-        if (result.end is ShellEnd.NotStarted || result.end is ShellEnd.Stopped || shuttingDown) return
+        if (result.end is ShellEnd.NotStarted || result.end is ShellEnd.Stopped || shuttingDown) {
+            handle.liveSession()?.shellUnsent(shellId)
+            return
+        }
         val output = if (result.end is ShellEnd.TimedOut) withNote(result.output, "Killed after 10 minutes") else result.output
         sendShellFrames(handle, shellId, command, output)
     }
@@ -409,6 +477,64 @@ class SessionManager internal constructor(
     private fun sendShellFrames(handle: SessionHandle, shellId: String, command: String, output: String) {
         if (handle.sendOrQueue(Outbound.ShellEscape(shellId, command, output, respondToShell()))) {
             spawner.startInBackground(handle, forPrompts = true)
+        }
+    }
+
+    /**
+     * Adds the folder [realPath] to session [id] (spec 3.4): the caller checked it on IO (a directory, outside the project, not
+     * added yet). It reaches the CLI as `--add-dir` on the next spawn: an idle process is stopped now, a busy one once it is idle.
+     */
+    fun addFolder(id: SessionId, realPath: String) {
+        val handle = handle(id) ?: return
+        if (!handle.addFolder(realPath)) return
+        LOG.info("session $id: folder added, ${handle.folders.value.size} in all")
+        respawnWhenIdle(handle)
+    }
+
+    /** Removes the folder [realPath] from session [id]: the next spawn goes without it, as for [addFolder]. */
+    fun removeFolder(id: SessionId, realPath: String) {
+        val handle = handle(id) ?: return
+        if (!handle.removeFolder(realPath)) return
+        LOG.info("session $id: folder removed, ${handle.folders.value.size} left")
+        respawnWhenIdle(handle)
+    }
+
+    /**
+     * Stops [handle]'s process once it is idle, while its spawn passed other folders than it has now, so that the next prompt
+     * spawns with them; one job per session. Each try that finds it busy waits for the next change of its chat; one that finds it
+     * idle but its spawn lock held (a start or a stop under way) waits for the lock. It ends once no process runs and none is being
+     * started, or the spawn no longer differs (a folder added and removed again stops nothing). A start under way may have read the
+     * folders before the change and attach a process without it, so the job outlives it and looks again. Tandem's own stop: the
+     * next prompt resumes the session, and nothing asks for attention.
+     */
+    private fun respawnWhenIdle(handle: SessionHandle) {
+        synchronized(lock) {
+            if (respawns[handle]?.isActive == true) return
+            respawns[handle] = handle.scope.launch(CoroutineName("SessionManager.folderRespawn")) {
+                while (true) {
+                    // Decided under the lock that starts a job, so that a change made as this one ends starts the next. The spawn
+                    // lock is read first: a start that takes it after this read reads the folders after the change.
+                    val (differs, starting) = synchronized(lock) {
+                        val starting = handle.spawnLock.isLocked
+                        val differs = handle.spawnDiffers()
+                        if (!differs && !starting) respawns.remove(handle)
+                        differs to starting
+                    }
+                    if (!differs) {
+                        if (!starting) return@launch
+                        handle.spawnLock.withLock {}
+                        continue
+                    }
+                    val before = handle.state.value
+                    when {
+                        handle.stopIfIdle() -> LOG.info("session ${handle.id}: stopped to spawn again with its added folders")
+                        // Idle, but a start or a stop holds the spawn lock (stopIfIdle never waits for it): no change of the chat
+                        // may follow, so wait for the lock instead and look again.
+                        handle.spawnLock.isLocked || handle.isIdle() -> handle.spawnLock.withLock {}
+                        else -> handle.state.first { it != before }
+                    }
+                }
+            }
         }
     }
 
@@ -449,6 +575,17 @@ class SessionManager internal constructor(
     /** Picks a permission mode. A running process switches (`set_permission_mode`); a stopped session starts with it. */
     fun setPermissionMode(id: SessionId, mode: PermissionMode) {
         handle(id)?.pick(live = { it.setPermissionMode(mode) }, stopped = SessionEvent.PermissionModeRequested(mode))
+    }
+
+    /**
+     * Picks the permission mode [next] gives for session [id]'s chat as it stands (the mode cycle, spec 14.1) and returns it; null
+     * for an unknown id. The read and the pick are one step under the session's lock, so quick calls step one mode each. Never
+     * waits: a running process gets `set_permission_mode`, a stopped session starts with it.
+     */
+    fun cyclePermissionMode(id: SessionId, next: (ChatState) -> PermissionMode): PermissionMode? {
+        val mode = handle(id)?.pickMode(next) ?: return null
+        LOG.debug("cycled permission mode to ${mode.wire}")
+        return mode
     }
 
     /**
@@ -534,12 +671,50 @@ class SessionManager internal constructor(
     override suspend fun refreshMcp(id: SessionId): McpResult<List<McpServerInfo>> {
         val handle = handle(id) ?: return McpResult.Failed(McpError.NotRunning)
         handle.liveSession() ?: return McpResult.Failed(McpError.NotRunning)
+        return coalesced(handle, mcpRefreshes, "SessionManager.mcpStatus") {
+            val listed = handle.mcpActions.withLock { handle.liveSession()?.mcpStatus() ?: McpResult.Failed(McpError.NotRunning) }
+            if (listed is McpResult.Ok) mutableKnownMcp.value = listed.value.map { it.lastKnown() }
+            listed
+        }
+    }
+
+    /** Not under [SessionHandle.mcpActions]: a breakdown changes nothing, so it need not wait for an MCP action. */
+    override suspend fun contextBreakdown(id: SessionId): ControlResult<ContextBreakdown> {
+        val handle = handle(id) ?: return McpResult.Failed(McpError.NotRunning)
+        handle.liveSession() ?: return McpResult.Failed(McpError.NotRunning)
+        return coalesced(handle, contextFetches, "SessionManager.contextUsage") {
+            handle.liveSession()?.contextUsage() ?: McpResult.Failed(McpError.NotRunning)
+        }
+    }
+
+    /**
+     * Asks again for [part] of the usage card of [uuid] in session [id] ([ClaudeSession.retryUsage]); without a live process the
+     * part reads [McpError.NotRunning] at once.
+     */
+    fun retryUsage(id: SessionId, uuid: String, part: UsagePart) {
+        val handle = handle(id) ?: return
+        handle.pick(
+            live = { it.retryUsage(uuid, part) },
+            stopped = SessionEvent.UsageFetched(uuid, part, McpResult.Failed(McpError.NotRunning)),
+        )
+    }
+
+    /**
+     * [run]'s answer for [handle], one run in flight at a time: a call made while one runs waits for, and shares, one follow-up run
+     * ([Coalesced.next]). [entries] holds each session's [Coalesced].
+     */
+    private suspend fun <T> coalesced(
+        handle: SessionHandle,
+        entries: WeakHashMap<SessionHandle, Coalesced<T>>,
+        name: String,
+        run: suspend () -> McpResult<T>,
+    ): McpResult<T> {
         val answer = synchronized(lock) {
-            val refresh = mcpRefreshes.getOrPut(handle, ::McpRefresh)
-            if (refresh.running != null) {
-                refresh.next ?: CompletableDeferred<McpResult<List<McpServerInfo>>>().also { refresh.next = it }
+            val entry = entries.getOrPut(handle) { Coalesced() }
+            if (entry.running != null) {
+                entry.next ?: CompletableDeferred<McpResult<T>>().also { entry.next = it }
             } else {
-                CompletableDeferred<McpResult<List<McpServerInfo>>>().also { first -> startRefreshes(handle, refresh, first) }
+                CompletableDeferred<McpResult<T>>().also { first -> startCoalesced(handle, entry, first, name, run) }
             }
         }
         return answer.await()
@@ -616,19 +791,21 @@ class SessionManager internal constructor(
     }
 
     /**
-     * Starts [handle]'s `mcp_status` runs, under [lock]: the first answers [first]; then, while callers arrived meanwhile
-     * ([McpRefresh.next]), one more run answers all of them. A run cut off by the session's end answers [McpError.Ended].
+     * Starts [handle]'s runs of [run] in its scope, under [lock]: the first answers [first]; then, while callers arrived meanwhile
+     * ([Coalesced.next]), one more run answers all of them. A run cut off by the session's end answers [McpError.Ended].
      */
-    private fun startRefreshes(handle: SessionHandle, refresh: McpRefresh, first: CompletableDeferred<McpResult<List<McpServerInfo>>>) {
-        val job = handle.scope.launch(CoroutineName("SessionManager.mcpStatus")) {
-            var target: CompletableDeferred<McpResult<List<McpServerInfo>>>? = first
+    private fun <T> startCoalesced(
+        handle: SessionHandle,
+        refresh: Coalesced<T>,
+        first: CompletableDeferred<McpResult<T>>,
+        name: String,
+        run: suspend () -> McpResult<T>,
+    ) {
+        val job = handle.scope.launch(CoroutineName(name)) {
+            var target: CompletableDeferred<McpResult<T>>? = first
             try {
                 while (target != null) {
-                    val listed = handle.mcpActions.withLock {
-                        handle.liveSession()?.mcpStatus() ?: McpResult.Failed(McpError.NotRunning)
-                    }
-                    if (listed is McpResult.Ok) mutableKnownMcp.value = listed.value.map { it.lastKnown() }
-                    target.complete(listed)
+                    target.complete(run())
                     target = synchronized(lock) {
                         refresh.next?.also { refresh.next = null } ?: run {
                             refresh.running = null
@@ -725,10 +902,23 @@ class SessionManager internal constructor(
         }
     }
 
-    /** Waits for [server] to connect: its status every [mcpAuthEvery], for up to [mcpAuthTimeout]. */
+    /**
+     * Waits for [server] to connect: its status every [mcpAuthEvery], until [mcpAuthTimeout] returns. The scope returns once both
+     * the poll and the time limit have ended, so [lastError] is read after the poll's last write.
+     */
     private suspend fun pollSignIn(id: SessionId, server: String): McpAuthOutcome {
         var lastError: McpError? = null
-        val settled = withTimeoutOrNull(mcpAuthTimeout) { pollUntilSettled(id, server) { lastError = it } }
+        val settled = coroutineScope {
+            val poll = async { pollUntilSettled(id, server) { lastError = it } }
+            val limit = async { mcpAuthTimeout() }
+            select<McpAuthOutcome?> {
+                poll.onAwait { it }
+                limit.onAwait { null }
+            }.also {
+                poll.cancel()
+                limit.cancel()
+            }
+        }
         return settled ?: lastError?.let { McpAuthOutcome.Failed(it) } ?: McpAuthOutcome.StillNeedsAuth
     }
 
@@ -814,17 +1004,18 @@ class SessionManager internal constructor(
     }
 
     /**
-     * The open handle for [id] and false, or a new one with [state], added to [sessions], and true. [forkOf] and [pendingTitle] are
-     * a fork's, see [SessionHandle].
+     * The open handle for [id] and false, or a new one with [state], added to [sessions], and true. [forkOf], [forkAt] and
+     * [pendingTitle] are a fork's, see [SessionHandle].
      */
     private fun registerLocked(
         id: SessionId,
         state: ChatState,
         forkOf: SessionId? = null,
+        forkAt: String? = null,
         pendingTitle: String? = null,
     ): Pair<SessionHandle, Boolean> {
         handle(id)?.let { return it to false }
-        val handle = SessionHandle(id, scope, state, listing, clock(), forkOf, pendingTitle)
+        val handle = SessionHandle(id, scope, state, listing, clock(), forkOf, forkAt, pendingTitle)
         addLocked(handle)
         return handle to true
     }
@@ -870,7 +1061,8 @@ class SessionManager internal constructor(
      * Follows the session's status: every change counts as use, and a session that is not selected asks for attention when it
      * starts waiting for a permission, or when a turn ends ([ChatState.turnsEnded] grows: a count, which no conflation of the status
      * hides, and which a permission answered outside a turn or a Stop leaves alone), from [SessionHandle.turnsEndedAtStart] on: a
-     * turn that ended before this, as while a resumed-as-new session is taken over, still asks. The models its process lists become
+     * turn that ended before this, as while a resumed-as-new session is taken over, still asks; and when a process ends by itself
+     * ([SessionHandle.selfEnds] grows). The models its process lists become
      * [models], and the commands it offers [commands].
      */
     private fun watch(handle: SessionHandle) {
@@ -886,9 +1078,21 @@ class SessionManager internal constructor(
         }
         handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
             var ended = handle.turnsEndedAtStart
-            handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
-                if (count > ended) raiseAttentionUnlessSelected(handle)
+            // A turn that ends while a message waits to run, or as the next turn opens, raises nothing: the last one does (spec 12.5).
+            handle.state.map { it.turnsEnded to it.nothingNext() }.distinctUntilChanged { a, b -> a.first == b.first }.collect { (count, last) ->
+                if (count > ended && last) raiseAttentionUnlessSelected(handle)
                 ended = count
+            }
+        }
+        handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            // A process that ended by itself, not by a stop of Tandem's, asks for attention (desktop-parity spec 18.1).
+            var ends = handle.selfEnds.value
+            handle.selfEnds.collect { count ->
+                if (count > ends) {
+                    LOG.info("session ${handle.id}: its process ended by itself")
+                    raiseAttentionUnlessSelected(handle)
+                }
+                ends = count
             }
         }
         handle.scope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -963,10 +1167,13 @@ class SessionManager internal constructor(
     }
 }
 
-/** A session's `mcp_status` run in flight and the follow-up run shared by the callers that came meanwhile; see [SessionManager.refreshMcp]. */
-private class McpRefresh {
+/**
+ * A session's request run in flight and the follow-up run shared by the callers that came meanwhile; see [SessionManager.refreshMcp]
+ * and [SessionManager.contextBreakdown].
+ */
+private class Coalesced<T> {
     var running: Job? = null
-    var next: CompletableDeferred<McpResult<List<McpServerInfo>>>? = null
+    var next: CompletableDeferred<McpResult<T>>? = null
 }
 
 /**
@@ -1029,3 +1236,9 @@ private fun elapsed(ms: Long): String {
         else -> "${seconds / 3_600}h ${seconds % 3_600 / 60}m"
     }
 }
+
+/**
+ * Whether nothing follows the turn that just ended: no message waits to run and no next turn has opened. Attention and the IDE
+ * notification for a turn's end wait for the last queued turn (spec 12.5).
+ */
+internal fun ChatState.nothingNext(): Boolean = pendingSends.isEmpty() && turn == null

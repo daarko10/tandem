@@ -13,15 +13,23 @@ import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.chat.UserRow
 import dev.daarkolabs.tandem.chat.paletteFor
+import dev.daarkolabs.tandem.session.ReturnedSend
+import dev.daarkolabs.tandem.session.UserImage
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentMapOf
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.markdown.MarkdownBlock
 import org.junit.jupiter.api.Test
+import java.util.Base64
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -297,4 +305,110 @@ class ChatUiStateTest {
     private companion object {
         const val HEIGHT = 600
     }
+
+    @Test
+    fun `restoreReturned puts the texts ahead of the draft and re-attaches the images once`() {
+        // spec 12.3, 12.5; Review Focus 6: a message that came back is never lost
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 1, 2, 3)
+        val ui = ChatUiState()
+        ui.draft.setTextAndPlaceCursorAtEnd("draft")
+        val attached = ArrayList<Pair<String, ByteArray>>()
+        val returned = listOf(
+            ReturnedSend("a", "first", emptyList()),
+            ReturnedSend("b", "second", listOf(UserImage("b#0", "image/png", Base64.getEncoder().encodeToString(png)))),
+        )
+        val taken = ArrayList<List<String>>()
+        runBlocking { withTimeout(10_000) { restoreReturned(ui, returned, { taken += it }) { _, type, bytes -> attached += type to bytes } } }
+        assertEquals("first\n\nsecond\n\ndraft", ui.draft.text.toString())
+        assertEquals(listOf(listOf("a", "b")), taken)
+        assertEquals(TextRange(ui.draft.text.length), ui.draft.selection)
+        assertEquals(1, attached.size)
+        assertEquals("image/png", attached.single().first)
+        assertTrue(png.contentEquals(attached.single().second))
+
+        // An empty draft takes the texts alone, with no blank line after them.
+        val empty = ChatUiState()
+        runBlocking { withTimeout(10_000) { restoreReturned(empty, listOf(ReturnedSend("c", "only", emptyList())), {}) { _, _, _ -> error("no image") } } }
+        assertEquals("only", empty.draft.text.toString())
+    }
+
+    @Test
+    fun `a message returned while another is being restored is restored once, and so is the first`() {
+        // Review Focus 6: the session's list lags behind (mapped off the EDT), so it lists A again after A was taken, then B after B was
+        // taken; neither goes back twice, and each image is attached once.
+        val ui = ChatUiState()
+        val a = ReturnedSend("a", "first", listOf(image("a#0")))
+        val b = ReturnedSend("b", "second", listOf(image("b#0")))
+        val list = MutableStateFlow(listOf(a))
+        val taken = ArrayList<List<String>>()
+        val attached = ArrayList<Int>()
+        val inFirstAttach = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        runBlocking {
+            withTimeout(10_000) {
+                val job = launch {
+                    restoreReturnedFrom(ui, list, { taken += it }) { _, _, bytes ->
+                        if (attached.isEmpty()) {
+                            inFirstAttach.complete(Unit)
+                            release.await()
+                        }
+                        attached += bytes.size
+                    }
+                }
+                inFirstAttach.await()
+                assertEquals(listOf(listOf("a")), taken, "taken before its images are attached")
+                list.value = listOf(a, b)
+                release.complete(Unit)
+                while (taken.size < 2) yield()
+                list.value = listOf(b)
+                while (attached.size < 2) yield()
+                list.value = emptyList()
+                yield()
+                job.cancel()
+            }
+        }
+        assertEquals("second\n\nfirst", ui.draft.text.toString())
+        assertEquals(listOf(listOf("a"), listOf("b")), taken)
+        assertEquals(2, attached.size)
+        assertTrue(ui.restoredUuids.isEmpty(), "uuids the list no longer names are forgotten")
+    }
+
+    @Test
+    fun `a restore cut short by a session switch is not restored again when the session shows again`() {
+        // Review Focus 6: the effect is cancelled while an image is being attached; the session took the message already, and its
+        // images are still attached. A list that still names it (the take not seen yet) restores nothing more.
+        val ui = ChatUiState()
+        val a = ReturnedSend("a", "first", listOf(image("a#0"), image("a#1")))
+        val list = MutableStateFlow(listOf(a))
+        val taken = ArrayList<List<String>>()
+        val attached = ArrayList<Int>()
+        val inFirstAttach = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        runBlocking {
+            withTimeout(10_000) {
+                val job = launch {
+                    restoreReturnedFrom(ui, list, { taken += it }) { i, _, _ ->
+                        if (i == 0) {
+                            inFirstAttach.complete(Unit)
+                            release.await()
+                        }
+                        attached += i
+                    }
+                }
+                inFirstAttach.await()
+                job.cancel()
+                release.complete(Unit)
+                job.join()
+                val again = launch { restoreReturnedFrom(ui, list, { taken += it }) { i, _, _ -> attached += i } }
+                yield()
+                again.cancel()
+            }
+        }
+        assertEquals("first", ui.draft.text.toString())
+        assertEquals(listOf(listOf("a")), taken)
+        assertEquals(listOf(0, 1), attached)
+    }
+
+    private fun image(uuid: String): UserImage =
+        UserImage(uuid, "image/png", Base64.getEncoder().encodeToString(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 1)))
 }

@@ -43,6 +43,7 @@ import dev.daarkolabs.tandem.ui.bottomFade
 import dev.daarkolabs.tandem.ui.chatColumn
 import dev.daarkolabs.tandem.ui.chatPalette
 import dev.daarkolabs.tandem.ui.monoTextStyle
+import dev.daarkolabs.tandem.ui.smallTextStyle
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.ImmutableMap
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -79,7 +80,7 @@ internal fun showsTextBox(row: UserRow): Boolean = row.text.isNotBlank()
  * The text is plain, never Markdown, with its line breaks; a slash command or `!` line is in the editor font. One text node. A
  * prompt over 8 laid-out lines ([bubbleClamp]) is clamped at 160 dp, its text fading out at the bottom, with `Show more` under the
  * bubble; opened, `Show less`. The images sent with it show above the bubble ([ImageStrip]), from [rendered]'s decoded thumbnails
- * (polish spec 2.7); a prompt of images only has no bubble.
+ * (polish spec 2.7); a prompt of images only has no bubble. A [UserRow.caption] goes under it in the footer size and the dim tier.
  */
 @Composable
 internal fun UserBubble(rendered: RenderedRow) {
@@ -121,6 +122,10 @@ internal fun UserBubble(rendered: RenderedRow) {
                         BubbleClamp.OPEN -> Link("Show less", onClick = { shown = false })
                         BubbleClamp.NONE -> Unit
                     }
+                }
+                // `Sent while Claude worked` under a prompt the CLI took into the running turn (desktop-parity spec 12.1).
+                row.caption?.let { caption ->
+                    Text(caption, style = smallTextStyle(), color = chatPalette().dim, modifier = Modifier.padding(top = 4.dp))
                 }
             }
         }

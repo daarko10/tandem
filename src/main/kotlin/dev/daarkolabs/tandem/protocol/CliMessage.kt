@@ -28,6 +28,12 @@ sealed interface CliMessage {
         val slashCommands: List<String> = emptyList(),
         /** `terminal_slash_commands`: the names of the commands that only work in the CLI's own terminal. */
         val terminalSlashCommands: List<String> = emptyList(),
+        /** `plugins`: the session's plugins, built-in ones included ([PluginInfo.builtin]). */
+        val plugins: List<PluginInfo> = emptyList(),
+        /** `additional_directories`: the folders the CLI was given with `--add-dir`. */
+        val additionalDirectories: List<String> = emptyList(),
+        /** `skills`: the names of the session's skills, in the CLI's order; the one list that tells a skill from a command. */
+        val skills: List<String> = emptyList(),
         override val raw: JsonObject,
     ) : CliMessage
 
@@ -199,6 +205,12 @@ sealed interface CliMessage {
     data class ControlCancelRequest(val requestId: String, override val raw: JsonObject) : CliMessage
 
     data class KeepAlive(override val raw: JsonObject) : CliMessage
+
+    /**
+     * A queued message's progress (`command_lifecycle`, capability `msg_lifecycle_v1`): [commandUuid] is the uuid the host sent it
+     * with; [state] as sent, `queued`, `started`, `completed` or `cancelled`, any other text kept.
+     */
+    data class CommandLifecycle(val commandUuid: String, val state: String, override val raw: JsonObject) : CliMessage
 
     /** Anything else. [type] is the line's `type` when it had one. Never an error. */
     data class Unknown(val line: String, val type: String?, val subtype: String?, override val raw: JsonObject?) : CliMessage

@@ -39,6 +39,12 @@ class TandemPluginTest {
         assertEquals(TandemToolWindowFactory::class.java.name, assertNotNull(toolWindow).factoryClass)
     }
 
+    // spec: the tool window lets its tabs close
+    @Test
+    fun `the tool window lets its tabs close`() {
+        assertTrue(ToolWindowEP.EP_NAME.extensionList.single { it.id == "Tandem" }.canCloseContents)
+    }
+
     @Test
     fun `the GFM table and strikethrough modules are visible to the plugin`() {
         val loader = assertNotNull(PluginManagerCore.getPlugin(PluginId.getId("dev.daarkolabs.tandem"))).pluginClassLoader

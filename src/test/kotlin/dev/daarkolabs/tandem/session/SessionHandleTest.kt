@@ -197,4 +197,31 @@ class SessionHandleTest {
             scope.coroutineContext.job.cancelAndJoin()
         }
     }
+
+    @Test
+    fun `a session with a message in the CLI's queue is RUNNING and not idle, so stopIfIdle refuses`() = runBlocking {
+        val id = "33333333-3333-4333-8333-333333333333"
+        val processes = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val waiting = PendingSend("x", "more", emptyList(), sentAtMillis = 0, later = true, stage = PendingStage.QUEUED)
+        val handle = SessionHandle(id, scope, ChatState(), MutableStateFlow(emptyList()), createdAt = 0)
+        runQueued()
+        try {
+            handle.attach(
+                create = { chat ->
+                    ClaudeSession(processes, SessionConfig("claude", tmp, sessionId = id), { _, _ -> ScriptedProcess.quiet() }, chat.copy(pendingSends = listOf(waiting)))
+                },
+                onFirstInit = { _, _ -> },
+            )
+            runQueued()
+            assertEquals(SessionStatus.RUNNING, handle.status.value)
+            assertFalse(handle.state.value.busy, "no turn: only the message in the CLI's queue")
+            assertFalse(handle.isIdle())
+            assertFalse(handle.stopIfIdle())
+            assertTrue(handle.liveSession() != null, "the process is still attached")
+        } finally {
+            processes.coroutineContext.job.cancelAndJoin()
+            scope.cancel()
+            runQueued()
+        }
+    }
 }

@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
 
 /** A session's sender: prompts captured on the EDT are encoded off it and sent in order (polish spec 2.7, 3.4). */
 class ComposerSenderTest {
-    private class Sent(val text: String, val images: List<ImageBlock>)
+    private class Sent(val text: String, val images: List<ImageBlock>, val later: Boolean = false)
 
     private val bytes = byteArrayOf(1, 2, 3)
 
@@ -34,7 +34,7 @@ class ComposerSenderTest {
                 if (calls.getAndIncrement() == 0) Thread.sleep(50)
                 Base64.getEncoder().encodeToString(it)
             }
-            val sender = ComposerSender(scope, { text, images -> sent += Sent(text, images) }, { dropped += it }, encode)
+            val sender = ComposerSender(scope, { text, images, _ -> sent += Sent(text, images) }, { dropped += it }, encode)
             sender.submit(CapturedPrompt("a", listOf(CapturedImage("image/png", bytes))))
             assertTrue(sender.sending.value, "sending from the capture on")
             sender.submit(CapturedPrompt("b", listOf(CapturedImage("image/png", bytes))))
@@ -48,12 +48,34 @@ class ComposerSenderTest {
     }
 
     @Test
+    fun `later travels with its prompt and the order holds across encodes`() = runBlocking {
+        // spec 12.1, 12.7: Ctrl/Cmd+Enter's flag reaches manager.send with its own prompt, after the prompts captured before it
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val sent: MutableList<Sent> = Collections.synchronizedList(ArrayList())
+            val calls = AtomicInteger()
+            val encode: (ByteArray) -> String = {
+                if (calls.getAndIncrement() == 0) Thread.sleep(50)
+                Base64.getEncoder().encodeToString(it)
+            }
+            val sender = ComposerSender(scope, { text, images, later -> sent += Sent(text, images, later) }, {}, encode)
+            sender.submit(CapturedPrompt("A", listOf(CapturedImage("image/png", bytes))))
+            sender.submit(CapturedPrompt("B", emptyList(), later = true))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            assertEquals(listOf("A" to false, "B" to true), sent.map { it.text to it.later })
+            assertEquals(1, sent[0].images.size)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `sending is true from the capture until manager send returns`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob())
         try {
             val inSend = CountDownLatch(1)
             val release = CountDownLatch(1)
-            val sender = ComposerSender(scope, { _, _ ->
+            val sender = ComposerSender(scope, { _, _, _ ->
                 inSend.countDown()
                 release.await(TIMEOUT, TimeUnit.MILLISECONDS)
             }, {})
@@ -82,7 +104,7 @@ class ComposerSenderTest {
             latch.await(TIMEOUT, TimeUnit.MILLISECONDS)
             "x"
         }
-        val sender = ComposerSender(scope, { text, _ -> sent += text }, {
+        val sender = ComposerSender(scope, { text, _, _ -> sent += text }, {
             dropped += it
             droppedOnce.countDown()
         }, encode)

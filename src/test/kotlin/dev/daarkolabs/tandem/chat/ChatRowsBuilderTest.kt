@@ -1,19 +1,25 @@
 package dev.daarkolabs.tandem.chat
 
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.Fixtures
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.StreamEvent
+import dev.daarkolabs.tandem.protocol.UsageAnswer
 import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.McpResult
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
+import dev.daarkolabs.tandem.session.PendingSend
+import dev.daarkolabs.tandem.session.PendingStage
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.TurnEnd
+import dev.daarkolabs.tandem.session.UsagePart
 import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.reduce
 import dev.daarkolabs.tandem.session.settled
@@ -33,6 +39,7 @@ import kotlin.system.measureTimeMillis
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
@@ -1138,31 +1145,94 @@ class ChatRowsBuilderTest {
         assertEquals("pong", assertNotNull(rows.rows.filterIsInstance<TextRow>().single().actions).markdown)
     }
 
-    @Test
-    fun `the latest reply is the last ended turn's, and none after a turn without text`() {
-        val seen = HashMap<Int, String?>()
-        val (state, rows) = replay("permission-mode") { line, _, rows -> seen[line] = rows.latestReply }
-        val (id1, id2, id3) = listOf("one", "two", "three").map { replyOf(state, it).id }
-        assertEquals(id1, seen[15], "after the first result")
-        // The second turn runs from the prompt sent before line 21 to its result at 38: not ended, so the latest is still the first.
-        for (line in 16..37) assertEquals(id1, seen[line], "line $line")
-        assertEquals(id2, seen[38], "after the second result")
-        for (line in 39..52) assertEquals(id2, seen[line], "line $line")
-        assertEquals(id3, rows.latestReply)
+    /** The reply TextRows of [rows] (those with the hover row's actions), by their reply's text. */
+    private fun replyRows(rows: ChatRows): Map<String, TextRow> =
+        rows.rows.filterIsInstance<TextRow>().filter { it.actions != null }.associateBy { it.markdown }
 
-        val again = reduce(state, SessionEvent.UserSent("u-x", "again"))
-        assertEquals(id3, ChatRowsBuilder(options).build(again).latestReply)
-        // interrupt:19, the error_during_execution result that ends a turn with no text.
-        val interrupted = reduce(again, SessionEvent.Cli(Fixtures.decode("interrupt").filterIsInstance<CliMessage.Result>().single()))
-        assertNull(interrupted.turn)
-        assertNull(ChatRowsBuilder(options).build(interrupted).latestReply)
+    /** The [ChatEntry.Assistant.lastUuid] of the last main-thread message, scanning back from the entry that holds [text]. */
+    private fun lastMainThreadUuid(state: ChatState, text: String): String? {
+        val reply = state.entries.indexOf(replyOf(state, text))
+        val start = (reply downTo 0).first { state.entries[it].startsTurn() }
+        val end = (reply + 1..state.entries.lastIndex).firstOrNull { state.entries[it].startsTurn() } ?: state.entries.size
+        return (end - 1 downTo start).map { state.entries[it] }
+            .firstNotNullOfOrNull { (it as? ChatEntry.Assistant)?.takeIf { a -> a.parentToolUseId == null }?.lastUuid }
     }
 
     @Test
-    fun `fork is enabled on the latest reply, waits while a turn runs, and is refused on earlier replies`() {
-        assertEquals(ForkState.ENABLED, forkState("a", "a", false))
-        assertEquals(ForkState.WAIT, forkState("a", "a", true))
-        assertEquals(ForkState.NOT_LATEST, forkState("a", "b", false))
+    fun `every ended turn's reply carries its fork point`() {
+        val (state, rows) = replay("permission-mode")
+        val replies = replyRows(rows)
+        val points = listOf("one", "two", "three").map { assertNotNull(replies[it]).actions!!.forkAt }
+        // permission-mode:11, :34 and :49, each turn's last main-thread line.
+        assertEquals(listOf("<uuid-14>", "<uuid-41>", "<uuid-58>"), points)
+        assertEquals(listOf("one", "two", "three").map { lastMainThreadUuid(state, it) }, points)
+        assertEquals(3, points.toSet().size)
+    }
+
+    @Test
+    fun `earlier replies keep forkAt and their row instances while a turn runs`() {
+        val builder = ChatRowsBuilder(options)
+        val (state, rows) = replay("permission-mode", builder = builder)
+        val before = replyRows(rows)
+        var running = reduce(state, SessionEvent.UserSent("u-4", "four"))
+        running = reduce(running, SessionEvent.Cli(fixtureLine("permission-mode", 44)))
+        assertNotNull(running.turn)
+        val during = replyRows(builder.build(running))
+        assertEquals(before.keys, during.keys)
+        for ((text, row) in before) {
+            assertSame(row, during[text], text)
+            assertEquals(row.actions!!.forkAt, during.getValue(text).actions!!.forkAt)
+        }
+    }
+
+    @Test
+    fun `a subagent line is not the fork point`() {
+        val (state, rows) = replay("agent-sync")
+        val reply = rows.rows.filterIsInstance<TextRow>().single { it.actions != null }
+        val point = reply.actions!!.forkAt
+        assertNotEquals("<uuid-50>", point, "agent-sync:42 is a subagent's line")
+        // agent-sync:61, the turn's last main-thread line.
+        assertEquals("<uuid-74>", point)
+        val text = state.entries.filterIsInstance<ChatEntry.Assistant>().single { it.lastUuid == "<uuid-74>" }
+            .blocks.filterIsInstance<AssistantBlock.Text>().first().text
+        assertEquals(lastMainThreadUuid(state, text), point)
+    }
+
+    @Test
+    fun `a stopped turn's reply with only a draft falls back to the turn's last saved line, or null`() {
+        val (state, rows) = replay("interrupt")
+        assertNull(state.turn)
+        val reply = rows.rows.filterIsInstance<TextRow>().single { it.actions != null }
+        val entry = state.entries.filterIsInstance<ChatEntry.Assistant>().single { e -> reply.key.startsWith("t:${e.id}:") }
+        // interrupt:14 is the turn's only complete main-thread line.
+        assertEquals("<uuid-17>", reply.actions!!.forkAt)
+        assertEquals(entry.lastUuid ?: lastSavedBefore(state, entry), reply.actions!!.forkAt)
+
+        // With no complete main-thread line in the turn, the reply has no fork point.
+        val drafted = state.copy(
+            entries = state.entries.map { if (it is ChatEntry.Assistant) it.copy(lastUuid = null) else it },
+        )
+        val none = ChatRowsBuilder(options).build(drafted).rows.filterIsInstance<TextRow>().single { it.actions != null }
+        assertNull(none.actions!!.forkAt)
+        assertEquals(ForkState.UNAVAILABLE, forkState(none.actions!!.forkAt))
+    }
+
+    /** The lastUuid of the last main-thread message before [entry] in its turn. */
+    private fun lastSavedBefore(state: ChatState, entry: ChatEntry.Assistant): String? {
+        val at = state.entries.indexOf(entry)
+        for (i in at - 1 downTo 0) {
+            val e = state.entries[i]
+            if (e.startsTurn()) return null
+            if (e is ChatEntry.Assistant && e.parentToolUseId == null) e.lastUuid?.let { return it }
+        }
+        return null
+    }
+
+    @Test
+    fun `forkState follows the fork point`() {
+        // D8's fork-at-busy matches fork-at: a fork while a later turn runs knows only the turns up to its cut, so busy holds nothing back.
+        assertEquals(ForkState.ENABLED, forkState("x"))
+        assertEquals(ForkState.UNAVAILABLE, forkState(null))
     }
 
     @Test
@@ -1324,9 +1394,10 @@ class ChatRowsBuilderTest {
         assertNull(shell.status)
         assertTrue(assertIs<TextRow>(rows.rows[2]).markdown.startsWith("The probe ran"))
         assertEquals(TurnEnd.COMPLETED, assertIs<TurnEndRow>(rows.rows[3]).end)
-        // The reply is the latest ended turn's, under its hover row.
-        assertNotNull(assertIs<TextRow>(rows.rows[2]).actions)
-        assertEquals(rows.latestReply, assertIs<TextRow>(rows.rows[2]).actions!!.entryId)
+        // The reply is the ended turn's, under its hover row, with the turn's fork point.
+        val actions = assertNotNull(assertIs<TextRow>(rows.rows[2]).actions)
+        assertEquals(state.entries.filterIsInstance<ChatEntry.Assistant>().last { it.parentToolUseId == null }.lastUuid, actions.forkAt)
+        assertNotNull(actions.forkAt)
     }
 
     @Test
@@ -1345,8 +1416,7 @@ class ChatRowsBuilderTest {
 
     @Test
     fun `a shell row starts a turn`() {
-        // As with a User entry in the Shell entry's place: each of the three turns' replies carries its hover row, and the latest
-        // ended turn's reply is the last one.
+        // As with a User entry in the Shell entry's place: each of the three turns' replies carries its hover row.
         fun entries(middle: ChatEntry): List<ChatEntry> = listOf(
             ChatEntry.User("u1", "a"),
             assistant("a1", AssistantBlock.Text("reply a")),
@@ -1360,8 +1430,6 @@ class ChatRowsBuilderTest {
         fun withActions(rows: ChatRows): List<String> = rows.rows.filterIsInstance<TextRow>().filter { it.actions != null }.map { it.key }
         assertEquals(listOf("t:a1:0", "t:a2:0", "t:a3:0"), withActions(user))
         assertEquals(withActions(user), withActions(shell))
-        assertEquals(user.latestReply, shell.latestReply)
-        assertEquals("a3", shell.latestReply)
         assertEquals(
             listOf(
                 "u:u1" to RowGap.NONE,
@@ -1373,10 +1441,10 @@ class ChatRowsBuilderTest {
             ),
             shell.rows.map { it.key to it.gap },
         )
-        // While the shell's turn runs, the latest ended turn is the one before it.
+        // While the shell's turn runs, the ended turn before it keeps its hover row and the running one has none.
         val running = ChatState(entries = entries(ChatEntry.Shell("s1", "ls", "out", running = false)).take(4))
             .let { reduce(it, SessionEvent.ShellSent("s1", listOf("x"), "q", 0)) }
-        assertEquals("a1", ChatRowsBuilder(options).build(running).latestReply)
+        assertEquals(listOf("t:a1:0"), withActions(ChatRowsBuilder(options).build(running)))
         // An ended turn's footer belongs to the latest turn: a shell escape after it, as a prompt after it, starts the next one.
         fun footers(next: ChatEntry): List<ChatRow> = ChatRowsBuilder(options).build(
             ChatState(
@@ -1396,4 +1464,246 @@ class ChatRowsBuilderTest {
 
     private fun assistant(id: String, vararg blocks: AssistantBlock): ChatEntry.Assistant =
         ChatEntry.Assistant(id, id, parentToolUseId = null, model = null, blocks = blocks.toList(), completedBlocks = blocks.size, streaming = false, uuids = emptySet())
+
+    private val u17: UsageAnswer = ControlPayloads.usage((fixtureLine("parity-usage", 17) as CliMessage.ControlResponse).payload)!!
+
+    private fun noticeRows(rows: ChatRows): List<NoticeRow> = rows.rows.filterIsInstance<NoticeRow>()
+
+    private fun usageRow(rows: ChatRows): NoticeRow = rows.rows.filterIsInstance<NoticeRow>().single { it.sourceUuid == "<uuid-28>" }
+
+    @Test
+    fun `a usage notice row carries its card`() {
+        val (_, rows) = replay("parity-usage", prompt = "hi", lines = Fixtures.lines("parity-usage").take(22))
+        val row = usageRow(rows)
+        assertNotNull(row.usage)
+        assertFalse(row.markdown)
+        assertEquals(UsageSection.Loading, row.usage!!.facts)
+    }
+
+    @Test
+    fun `a context notice is markdown`() {
+        val (_, rows) = replay("parity-context", prompt = "hi", lines = Fixtures.lines("parity-context").take(24))
+        val row = noticeRows(rows).single { it.kind == NoticeKind.LOCAL_COMMAND }
+        assertTrue(row.markdown)
+        assertNull(row.usage)
+        assertNull(row.sourceUuid)
+    }
+
+    @Test
+    fun `other local notices stay plain`() {
+        val (_, rows) = replay("mcp-slash", prompt = "hi", lines = Fixtures.lines("mcp-slash").take(5))
+        val row = noticeRows(rows).single { it.kind == NoticeKind.LOCAL_COMMAND }
+        assertFalse(row.markdown)
+        assertNull(row.usage)
+    }
+
+    @Test
+    fun `a usage card in an older turn updates when its answer arrives`() {
+        // Review Focus 1: three turns, the first two cached.
+        val builder = ChatRowsBuilder(options)
+        val (state, rows) = replay("parity-usage", prompt = "hi", builder = builder)
+        assertEquals(UsageSection.Loading, usageRow(rows).usage!!.history)
+        val answered = reduce(state, SessionEvent.UsageFetched("<uuid-28>", UsagePart.HISTORY, McpResult.Ok(u17)))
+        assertIs<UsageSection.Shown<*>>(usageRow(builder.build(answered)).usage!!.history)
+    }
+
+    @Test
+    fun `Retry on an older card shows it loading again`() {
+        // Review Focus 1
+        val builder = ChatRowsBuilder(options)
+        val (state, _) = replay("parity-usage", prompt = "hi", builder = builder)
+        val answered = reduce(state, SessionEvent.UsageFetched("<uuid-28>", UsagePart.HISTORY, McpResult.Ok(u17)))
+        assertIs<UsageSection.Shown<*>>(usageRow(builder.build(answered)).usage!!.history)
+        val retried = reduce(answered, SessionEvent.UsageRetry("<uuid-28>", UsagePart.HISTORY))
+        assertEquals(UsageSection.Loading, usageRow(builder.build(retried)).usage!!.history)
+    }
+
+    @Test
+    fun `a usage card in an earlier frozen turn updates and later turns keep their rows`() {
+        // Review Focus 1, deviation 7: the card's turn is neither the last frozen turn nor ended by the card.
+        val builder = ChatRowsBuilder(options)
+        var (state, _) = replay("parity-usage", prompt = "hi", builder = builder)
+        state = replay("plain-reply", prompt = "hi", initial = state, builder = builder).first
+        val suffixed = Fixtures.lines("plain-reply").map { it.replace(Regex("\"(<(?:uuid|id)-\\d+>)\""), "\"$1-2\"") }
+        state = replay("plain-reply", prompt = "hi", initial = state, lines = suffixed, builder = builder).first
+        val rows = builder.build(state)
+        val at = rows.rows.indexOf(usageRow(rows))
+        assertTrue(rows.rows.size > at + 4, rows.rows.toString())
+        val after = builder.build(reduce(state, SessionEvent.UsageFetched("<uuid-28>", UsagePart.HISTORY, McpResult.Ok(u17))))
+        assertIs<UsageSection.Shown<*>>(usageRow(after).usage!!.history)
+        assertEquals(rows.rows.size, after.rows.size)
+        for (i in at + 1 until rows.rows.size) assertSame(rows.rows[i], after.rows[i], "row $i")
+        for (i in 0 until at) assertSame(rows.rows[i], after.rows[i], "row $i")
+    }
+
+    // Spec 12.1's pending bubbles and folded prompts (D11), on replays that inject only the host's sends at their lines.
+
+    private fun pending(uuid: String, text: String, later: Boolean, stage: PendingStage, images: List<UserImage> = emptyList()) =
+        PendingSend(uuid, text, images, 0L, later, stage)
+
+    @Test
+    fun `waiting messages draw QueuedRows after the working row, in order`() {
+        val image = UserImage("s2#0", "image/png", "iVBORw0KGgo=")
+        val running = reduce(ChatState(), SessionEvent.UserSent("p", "Run it", atMillis = 0L))
+        val state = running.copy(
+            pendingSends = listOf(
+                pending("s1", "steer", later = false, stage = PendingStage.QUEUED),
+                pending("s2", "later", later = true, stage = PendingStage.QUEUED, images = listOf(image)),
+                pending("s3", "held", later = true, stage = PendingStage.HELD),
+                pending("s4", "withdrawing", later = true, stage = PendingStage.WITHDRAWING),
+            ),
+        )
+        val rows = ChatRowsBuilder(options).build(state).rows
+        val working = rows.indexOfFirst { it is WorkingRow }
+        assertTrue(working >= 0, rows.toString())
+        val queued = rows.drop(working + 1).map { assertIs<QueuedRow>(it) }
+        assertEquals(listOf("q:s1", "q:s2", "q:s3", "q:s4"), queued.map { it.key })
+        assertEquals(listOf("steer", "later", "held", "withdrawing"), queued.map { it.text })
+        assertEquals(
+            listOf(
+                "Sent · Claude reads it at its next step",
+                "Queued · sends when Claude is done",
+                "Waits for the shell command's output to go out",
+                "Withdrawing…",
+            ),
+            queued.map { it.caption },
+        )
+        // D8's queue-cancel-steer outcome is withdrawable: a steer gets Edit and Cancel too.
+        assertEquals(listOf(true, true, true, true), queued.map { it.withdrawable })
+        assertEquals(listOf(false, false, false, true), queued.map { it.withdrawing })
+        assertEquals(persistentListOf(ImageRef("s2#0", "image/png", 0)), queued[1].images)
+        assertTrue(queued[0].images.isEmpty())
+        assertTrue(queued.all { it.gap == RowGap.AFTER_BUBBLE })
+        // A message waiting after the turn's result (queue-later:51 to :53) still draws, with no working row.
+        val gap = ChatRowsBuilder(options).build(state.copy(turn = null, busy = false)).rows
+        assertEquals(listOf("q:s1", "q:s2", "q:s3", "q:s4"), gap.filterIsInstance<QueuedRow>().map { it.key })
+        assertIs<QueuedRow>(gap.last())
+    }
+
+    @Test
+    fun `a folded prompt has its caption and the turn one footer`() {
+        val footers = HashSet<String>()
+        val earlyActions = ArrayList<String>()
+        val (state, rows) = replayWithSends(
+            "queue-fold",
+            mapOf(
+                1 to listOf(SessionEvent.UserSent(QP, "Run the two commands")),
+                19 to listOf(SessionEvent.UserSent(QF, KIWI, live = true)),
+            ),
+        ) { line, _, lineRows ->
+            lineRows.rows.filterIsInstance<TurnEndRow>().forEach { footers += it.key }
+            // From F's started (queue-fold:22) to the result (:53) the turn runs: a split turn would close P's part and give its reply
+            // the hover row.
+            if (line in 22 until 53) lineRows.rows.filterIsInstance<TextRow>().filter { it.actions != null }.forEach { earlyActions += "$line:${it.key}" }
+        }
+        // One CLI turn is one visual turn (Review Focus 7): the folded prompt does not start a turn.
+        assertFalse(state.entries.single { it.id == QF }.startsTurn())
+        assertTrue(earlyActions.isEmpty(), earlyActions.toString())
+        val texts = rows.rows.filterIsInstance<TextRow>()
+        assertEquals(listOf(texts.last().key), texts.filter { it.actions != null }.map { it.key }, "only the final reply has the hover row")
+        val users = rows.rows.filterIsInstance<UserRow>()
+        assertEquals(2, users.size, rows.rows.toString())
+        val (prompt, folded) = users
+        assertNull(prompt.caption)
+        assertEquals(KIWI, folded.text)
+        assertEquals("Sent while Claude worked", folded.caption)
+        assertEquals("u:$QF", folded.key)
+        // Right after the first Bash call's row (queue-fold:14's call, its result at :21).
+        val at = rows.rows.indexOf(folded)
+        val bash = toolUseAt("queue-fold", 14).id
+        assertEquals(listOf(bash), assertIs<ToolRow>(rows.rows[at - 1]).calls.map { it.id })
+        // Only the latest turn draws a footer, so these alone do not show the turn is unsplit: the assertions above do.
+        assertEquals(1, footers.size, footers.toString())
+        assertEquals(1, rows.rows.count { it is TurnEndRow })
+        assertTrue(rows.rows.none { it is QueuedRow })
+    }
+
+    @Test
+    fun `queue-later has two footers`() {
+        val footers = LinkedHashSet<String>()
+        val (state, rows) = replayWithSends(
+            "queue-later",
+            mapOf(
+                1 to listOf(SessionEvent.UserSent(QP, "Run the two commands")),
+                19 to listOf(SessionEvent.UserSent(QF, KIWI, later = true, live = true)),
+            ),
+        ) { _, _, lineRows -> lineRows.rows.filterIsInstance<TurnEndRow>().forEach { footers += it.key } }
+        assertEquals(2, footers.size, footers.toString())
+        assertEquals(2, state.turnsEnded)
+        val user = rows.rows.filterIsInstance<UserRow>().single { it.key == "u:$QF" }
+        assertNull(user.caption)
+        assertEquals(KIWI, user.text)
+        assertTrue(state.entries.none { it is ChatEntry.User && it.text == PROMPT })
+    }
+
+    @Test
+    fun `the key moves from the queued row to the user row once started`() {
+        val seen = HashMap<Int, ChatRows>()
+        replayWithSends(
+            "queue-later",
+            mapOf(
+                1 to listOf(SessionEvent.UserSent(QP, "Run the two commands")),
+                19 to listOf(SessionEvent.UserSent(QF, KIWI, later = true, live = true)),
+            ),
+        ) { line, _, lineRows -> seen[line] = lineRows }
+        val waiting = seen.getValue(19).rows
+        val queued = waiting.filterIsInstance<QueuedRow>().single()
+        assertEquals("q:$QF", queued.key)
+        assertEquals("Queued · sends when Claude is done", queued.caption)
+        assertTrue(waiting.none { it.key == "u:$QF" })
+        // Through the gap between the result (:51) and its started (:53) the bubble stays.
+        assertEquals(listOf("q:$QF"), seen.getValue(52).rows.filterIsInstance<QueuedRow>().map { it.key })
+        val started = seen.getValue(53).rows
+        assertTrue(started.none { it is QueuedRow }, started.toString())
+        assertEquals(KIWI, started.filterIsInstance<UserRow>().single { it.key == "u:$QF" }.text)
+    }
+
+    @Test
+    fun `a later context runs as its own local turn after the running one`() {
+        // spec: a later /context runs as its own local turn after the running one
+        // D8's after-the-turn outcome (probes 5.1): queue-later-command's C (/context) and I (an image message), both later.
+        val p = "<command_uuid-4>"
+        val c = "<command_uuid-29>"
+        val i = "<command_uuid-31>"
+        val image = UserImage("$i#0", "image/png", "iVBORw0KGgo=")
+        val seen = HashMap<Int, Pair<ChatState, ChatRows>>()
+        val (state, rows) = replayWithSends(
+            "queue-later-command",
+            mapOf(
+                1 to listOf(SessionEvent.UserSent(p, "Run the command")),
+                23 to listOf(SessionEvent.UserSent(c, "/context", later = true, live = true)),
+                24 to listOf(
+                    SessionEvent.UserSent(i, "What colour is this image? Reply with one word.", images = listOf(image), later = true, live = true),
+                ),
+            ),
+        ) { line, lineState, lineRows -> seen[line] = lineState to lineRows }
+        // The running turn ends as a model turn with its footer (queue-later-command:35), its two messages still waiting.
+        val (afterResult, resultRows) = seen.getValue(35)
+        assertEquals(1, afterResult.turnsEnded)
+        val footer = resultRows.rows.filterIsInstance<TurnEndRow>().single()
+        assertEquals(TurnEnd.COMPLETED, footer.end)
+        assertEquals(listOf("q:$c", "q:$i"), resultRows.rows.filterIsInstance<QueuedRow>().map { it.key })
+        assertTrue(resultRows.rows.none { it is NoticeRow && it.kind == NoticeKind.LOCAL_COMMAND })
+        // Then the command runs as its own turn: its bubble, then its local notice.
+        val all = rows.rows
+        val command = all.indexOfFirst { it is UserRow && it.key == "u:$c" }
+        val done = all.indexOfFirst { it is TextRow && it.markdown == "DONE" }
+        assertTrue(done in 0 until command, all.toString())
+        assertNull((all[command] as UserRow).caption)
+        val notice = assertIs<NoticeRow>(all[command + 1])
+        assertEquals(NoticeKind.LOCAL_COMMAND, notice.kind)
+        assertEquals("context", notice.command)
+        // The image message after it, as its own turn, which the last footer closes.
+        val imageRow = all.indexOfFirst { it is UserRow && it.key == "u:$i" }
+        assertTrue(imageRow > command + 1, all.toString())
+        assertEquals(1, (all[imageRow] as UserRow).images.size)
+        assertIs<TurnEndRow>(all.last())
+        assertTrue(all.none { it is QueuedRow })
+        assertEquals(listOf(p, c, i), state.entries.filterIsInstance<ChatEntry.User>().map { it.id })
+        assertTrue(state.entries.filterIsInstance<ChatEntry.User>().none { it.folded })
+    }
 }
+
+private const val QP: String = "<command_uuid-4>"
+private const val QF: String = "<command_uuid-25>"
+private const val KIWI: String = "Also say the word KIWI at the end."

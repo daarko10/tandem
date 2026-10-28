@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.protocol
 
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -7,6 +8,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
@@ -15,6 +17,7 @@ import java.time.Instant
 import kotlin.io.path.readLines
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -189,7 +192,13 @@ class FixtureDecodeTest {
 
     @Test
     fun `transcript fixtures decode line by line without throwing`() {
-        for (name in listOf("history-reply", "history-permission", "history-interrupt", "fork", "fork-origin")) {
+        val names = listOf(
+            "history-reply", "history-permission", "history-interrupt", "fork", "fork-origin",
+            "fork-at", "fork-at-origin", "queue-fold", "queue-later", "queue-cancel",
+            "queue-steer-text", "queue-cancel-steer", "fork-at-live", "fork-at-live-origin", "queue-later-command",
+            "queue-during-card", "fork-at-busy", "fork-at-busy-origin",
+        )
+        for (name in names) {
             val lines = Fixtures.transcript(name).readLines().filter { it.isNotBlank() }
             assertTrue(lines.isNotEmpty(), "$name: empty transcript")
             lines.forEach(Ndjson::decode)
@@ -208,7 +217,8 @@ class FixtureDecodeTest {
     fun `undocumented types the fixtures show decode to Unknown with their type`() {
         val unknownTypes = Fixtures.names().flatMap(Fixtures::decode).filterIsInstance<CliMessage.Unknown>().map { it.type }.toSet()
         assertTrue("autocompact_state" in unknownTypes)
-        assertTrue("command_lifecycle" in unknownTypes)
+        assertTrue("rate_limit_event" in unknownTypes)
+        assertTrue("command_lifecycle" !in unknownTypes)
     }
 
     /** Line [line] (1-based) of fixture [name], decoded. */
@@ -797,5 +807,524 @@ class FixtureDecodeTest {
         assertEquals(1, prompt.numTurns)
         assertEquals(listOf("<command_uuid-10>"), prompt.userMessageUuids)
         assertEquals("bash-mode-probe", prompt.result)
+    }
+
+    private fun contextUsage(line: Int): ContextBreakdown =
+        assertNotNull(ControlPayloads.contextUsage(response("parity-context", line).payload))
+
+    private fun usage(line: Int): UsageAnswer = assertNotNull(ControlPayloads.usage(response("parity-usage", line).payload))
+
+    // spec: parity-context: the breakdown after a turn decodes every category
+    @Test
+    fun `parity-context - the breakdown after a turn decodes every category`() {
+        val b17 = contextUsage(17)
+        assertEquals(
+            listOf(
+                "system_prompt", "system_tools", "system_tools_deferred", "memory_files", "skills", "messages", "autocompact_buffer",
+                "free_space",
+            ),
+            b17.categories.map { it.id },
+        )
+        assertEquals(listOf("used", "used", "deferred", "used", "used", "used", "buffer", "free"), b17.categories.map { it.kind })
+        assertEquals(38032L, b17.categories.filter { it.kind == "used" }.sumOf { it.tokens })
+        assertEquals(38032L, b17.totalTokens)
+        assertEquals(1_000_000L, b17.maxTokens)
+        assertEquals(1_000_000L, b17.rawMaxTokens)
+        assertEquals(4, b17.percentage)
+        assertEquals("claude-sonnet-5-5", b17.model)
+        val deferred = b17.categories.single { it.deferred }
+        assertEquals("system_tools_deferred" to 22275L, deferred.id to deferred.tokens)
+        assertEquals(listOf(MemoryFileUsage("<path>", "Project", 4300)), b17.memoryFiles)
+        assertEquals(listOf(McpToolUsage("mcp__echo__echo", "echo", 0, false)), b17.mcpTools)
+        assertEquals(36, b17.skills.size)
+        assertEquals(3155L, b17.skills.sumOf { it.tokens })
+        assertEquals(SkillUsage("probe-kit:greet", "plugin", "probe-kit", 22), b17.skills.single { it.name == "probe-kit:greet" })
+        assertTrue(b17.mcpInstructions.isEmpty())
+        assertTrue(b17.agents.isEmpty())
+    }
+
+    // spec: parity-context: the breakdown before the first turn
+    @Test
+    fun `parity-context - the breakdown before the first turn`() {
+        val b2 = contextUsage(2)
+        assertTrue(b2.mcpTools.isEmpty())
+        assertEquals(10L, b2.categories.single { it.id == "messages" }.tokens)
+        assertEquals(30909L, b2.totalTokens)
+        assertEquals(3, b2.percentage)
+    }
+
+    // spec: parity-context: summary has no messages row and a deferred MCP row
+    @Test
+    fun `parity-context - summary has no messages row and a deferred MCP row`() {
+        val b18 = contextUsage(18)
+        assertTrue(b18.categories.none { it.id == "messages" })
+        val mcp = b18.categories.single { it.id == "mcp_tools_deferred" }
+        assertTrue(mcp.deferred)
+        assertEquals(120L, mcp.tokens)
+        assertEquals(42383L, b18.totalTokens)
+    }
+
+    // spec: parity-context: an unknown subtype is an error with the CLI's text
+    @Test
+    fun `parity-context - an unknown subtype is an error with the CLI's text`() {
+        val answer = response("parity-context", 19)
+        assertEquals(false, answer.isSuccess)
+        assertEquals("Unsupported control request subtype: get_context_breakdown", answer.error)
+        assertNull(ControlPayloads.contextUsage(answer.payload))
+    }
+
+    // spec: parity-usage: get_usage without the scan has the session and no history
+    @Test
+    fun `parity-usage - get_usage without the scan has the session and no history`() {
+        val u16 = usage(16)
+        val session = assertNotNull(u16.session)
+        assertEquals(0.1523063, session.totalCostUsd)
+        assertEquals(4192L, session.apiDurationMs)
+        assertEquals(7234L, session.wallDurationMs)
+        assertEquals(listOf("claude-haiku-5-5", "claude-sonnet-5-5"), session.models.map { it.first })
+        assertEquals(ModelTokens(2, 3, 0, 38037, 0.152182, webSearches = 0), session.models[1].second)
+        assertEquals(1173L, session.models[0].second.input)
+        assertEquals(0.0001243, session.models[0].second.costUsd)
+        assertNull(u16.history)
+    }
+
+    // spec: parity-usage: get_usage with the scan has both windows
+    @Test
+    fun `parity-usage - get_usage with the scan has both windows`() {
+        val u17 = usage(17)
+        val history = assertNotNull(u17.history)
+        val day = assertNotNull(history.day)
+        assertEquals(23, day.sessionCount)
+        assertEquals(8314, day.requestCount)
+        assertEquals(listOf("subagent_heavy", "cron", "workflow", "long_context", "large_tool_results"), day.behaviors.map { it.key })
+        assertEquals(listOf(100, 100, 80, 65, 11), day.behaviors.map { it.pct })
+        assertEquals(UsageTip("subagent_heavy", "Give simple subagents a cheaper model", null), day.tips[0])
+        assertEquals("some ran 8 hours or more", day.tips[1].detail)
+        assertEquals(listOf(UsageShare("workflow-subagent", 80)), day.agents)
+        assertTrue(day.skills.isEmpty())
+        assertTrue(day.plugins.isEmpty())
+        assertEquals(listOf(UsageShare("server-a", 2), UsageShare("server-b", 2)), day.mcpServers)
+        val week = assertNotNull(history.week)
+        assertEquals(88, week.sessionCount)
+        assertEquals(listOf(UsageShare("plugin-a", 1)), week.plugins)
+        assertEquals(listOf(UsageShare("workflow-subagent", 58), UsageShare("general-purpose", 19)), week.agents)
+        assertTrue(UsageBehavior("max_effort", 19) in week.behaviors)
+        assertEquals(9921L, assertNotNull(u17.session).wallDurationMs)
+    }
+
+    // spec: parity-usage: /usage and /cost run the usage command locally
+    @Test
+    fun `parity-usage - usage and cost run the usage command locally`() {
+        for ((line, uuid) in listOf(22 to "<uuid-28>", 28 to "<uuid-36>")) {
+            val assistant = assertIs<CliMessage.Assistant>(at("parity-usage", line))
+            assertEquals("usage", assertNotNull(assistant.localCommand).command)
+            assertNull(assistant.parentToolUseId)
+            assertEquals(uuid, assistant.uuid)
+        }
+        val usage = assertIs<CliMessage.Result>(at("parity-usage", 23))
+        assertEquals("usage", usage.localCommand)
+        assertEquals(0, usage.numTurns)
+        assertEquals("cost", assertIs<CliMessage.Result>(at("parity-usage", 29)).localCommand)
+    }
+
+    // spec: parity-add-dir: init lists plugins and additional directories
+    @Test
+    fun `parity-add-dir - init lists plugins and additional directories`() {
+        val first = init("parity-add-dir", 5)
+        assertEquals(4, first.plugins.size)
+        assertEquals(3, first.plugins.count { it.builtin })
+        assertEquals(PluginInfo("probe-kit", "<path>", "probe-kit@inline", "0.1.0"), first.plugins[0])
+        assertTrue(first.additionalDirectories.isEmpty())
+        assertEquals(listOf("<path>"), init("parity-add-dir", 17).additionalDirectories)
+    }
+
+    // spec: parity-add-dir: the catalogue names plugin commands with a prefix
+    @Test
+    fun `parity-add-dir - the catalogue names plugin commands with a prefix`() {
+        val byName = assertNotNull(ControlPayloads.initialize(response("parity-add-dir", 1).payload)).commands.associateBy { it.name }
+        assertEquals("(probe-kit) Says hello from a plugin command", byName.getValue("probe-kit:hello").description)
+        val greet = byName.getValue("probe-kit:greet")
+        assertEquals("(probe-kit) Greets the user by name in one short sentence.", greet.description)
+        assertEquals(listOf("greet"), greet.aliases)
+    }
+
+    // spec: parity-add-dir: init lists skills apart from commands
+    @Test
+    fun `parity-add-dir - init lists skills apart from commands`() {
+        val skills = init("parity-add-dir", 5).skills
+        assertEquals(35, skills.size)
+        assertTrue("probe-kit:greet" in skills)
+        assertTrue("probe-kit:hello" !in skills)
+        assertEquals("actions", skills.first())
+    }
+
+    // spec: parity-add-dir-spawn: each init lists the spawn's folders and the resume keeps the id
+    @Test
+    fun `parity-add-dir-spawn - each init lists the spawn's folders and the resume keeps the id`() {
+        val first = init("parity-add-dir-spawn", 4)
+        assertEquals(1, first.additionalDirectories.size)
+        assertEquals(2, init("parity-add-dir-spawn", 19).additionalDirectories.size)
+        assertEquals(first.sessionId, init("parity-add-dir-spawn", 19).sessionId)
+        assertEquals(first.sessionId, init("parity-add-dir-spawn", 64).sessionId)
+        val messages = Fixtures.decode("parity-add-dir-spawn")
+        val results = messages.filterIsInstance<CliMessage.Result>()
+        assertEquals(5, results.size)
+        // An API error result also has subtype success: a refused turn would pass on the subtype alone.
+        assertTrue(results.all { it.subtype == "success" && !it.isError }, results.toString())
+        assertTrue(messages.filterIsInstance<CliMessage.Assistant>().all { it.error == null })
+    }
+
+    // spec: parity-add-dir-spawn: a fork with --add-dir lists its folder
+    @Test
+    fun `parity-add-dir-spawn - a fork with --add-dir lists its folder`() {
+        val fork = init("parity-add-dir-spawn", 49)
+        assertEquals(1, fork.additionalDirectories.size)
+        assertNotEquals(init("parity-add-dir-spawn", 4).sessionId, fork.sessionId)
+        val ids = Fixtures.transcript("parity-add-dir-spawn").readLines().filter { it.isNotBlank() }
+            .map { Json.parseToJsonElement(it).jsonObject["sessionId"]?.jsonPrimitive?.content }
+        assertTrue(ids.isNotEmpty())
+        assertTrue(ids.all { it == fork.sessionId }, "the fork's transcript is under the fork's id: $ids")
+        assertEquals(false, assertIs<CliMessage.Result>(at("parity-add-dir-spawn", 59)).isError)
+    }
+
+    // spec: parity-add-dir-spawn: a resume without a folder leaves it out
+    @Test
+    fun `parity-add-dir-spawn - a resume without a folder leaves it out`() {
+        assertEquals(1, init("parity-add-dir-spawn", 64).additionalDirectories.size)
+    }
+
+    // spec: parity-add-dir-spawn: a fork at a reply with --add-dir lists its folder
+    @Test
+    fun `parity-add-dir-spawn - a fork at a reply with --add-dir lists its folder`() {
+        val forkAt = init("parity-add-dir-spawn", 34)
+        assertEquals(1, forkAt.additionalDirectories.size)
+        assertNotEquals(init("parity-add-dir-spawn", 4).sessionId, forkAt.sessionId)
+        assertNotEquals(init("parity-add-dir-spawn", 49).sessionId, forkAt.sessionId)
+        assertEquals(false, assertIs<CliMessage.Result>(at("parity-add-dir-spawn", 44)).isError)
+    }
+
+    private fun lifecycle(name: String, line: Int): Pair<String, String> =
+        assertIs<CliMessage.CommandLifecycle>(at(name, line)).let { it.commandUuid to it.state }
+
+    private fun result(name: String, line: Int): CliMessage.Result = assertIs<CliMessage.Result>(at(name, line))
+
+    private fun JsonObject.rawString(key: String): String? = (this[key] as? JsonPrimitive)?.content
+
+    // spec: queue-fold: lifecycle lines decode with their states
+    @Test
+    fun `queue-fold - lifecycle lines decode with their states`() {
+        val p = "<command_uuid-4>"
+        val f = "<command_uuid-25>"
+        assertEquals(p to "queued", lifecycle("queue-fold", 3))
+        assertEquals(p to "started", lifecycle("queue-fold", 5))
+        assertEquals(f to "queued", lifecycle("queue-fold", 19))
+        assertEquals(f to "started", lifecycle("queue-fold", 22))
+        assertEquals(f to "completed", lifecycle("queue-fold", 52))
+        assertEquals(p to "completed", lifecycle("queue-fold", 54))
+    }
+
+    // spec: queue-fold: one result names the prompt and the folded message
+    @Test
+    fun `queue-fold - one result names the prompt and the folded message`() {
+        val p = "<command_uuid-4>"
+        val f = "<command_uuid-25>"
+        val status = assertIs<CliMessage.SystemStatus>(at("queue-fold", 23))
+        assertEquals(listOf(p, f), status.raw["user_message_uuids"]!!.jsonArray.map { it.jsonPrimitive.content })
+        val result = result("queue-fold", 53)
+        assertEquals(3, result.numTurns)
+        assertEquals(p, result.raw.rawString("user_message_uuid"))
+        assertEquals(listOf(p, f), result.userMessageUuids)
+        assertEquals(0, result.raw["queued_turn_count"]!!.jsonPrimitive.int)
+        val users = Fixtures.decode("queue-fold").filterIsInstance<CliMessage.User>()
+        assertTrue(users.isNotEmpty())
+        for (user in users) {
+            assertNotEquals(f, user.raw.rawString("uuid"))
+            assertTrue(user.content.none { it == ContentBlock.Text("Also say the word KIWI at the end.") })
+        }
+    }
+
+    // spec: queue-later: the later message runs as its own turn
+    @Test
+    fun `queue-later - the later message runs as its own turn`() {
+        val p = "<command_uuid-4>"
+        val f = "<command_uuid-25>"
+        assertEquals(f to "queued", lifecycle("queue-later", 19))
+        val first = result("queue-later", 51)
+        assertEquals(listOf(p), first.userMessageUuids)
+        assertEquals(0, first.raw["queued_turn_count"]!!.jsonPrimitive.int)
+        assertEquals(f to "started", lifecycle("queue-later", 53))
+        assertIs<CliMessage.SystemInit>(at("queue-later", 54))
+        val second = result("queue-later", 63)
+        assertEquals(f, second.raw.rawString("user_message_uuid"))
+        assertEquals(1, second.numTurns)
+    }
+
+    // spec: queue-cancel: cancel_async_message answers cancelled true
+    @Test
+    fun `queue-cancel - cancel_async_message answers cancelled true`() {
+        assertEquals("<command_uuid-29>" to "cancelled", lifecycle("queue-cancel", 24))
+        assertEquals(true, cancelAsyncAnswer(response("queue-cancel", 25).payload))
+        val result = result("queue-cancel", 36)
+        assertEquals("success", result.subtype)
+        assertEquals(listOf("<command_uuid-4>"), result.userMessageUuids)
+    }
+
+    // spec: queue-cancel: interrupt with cancel_queued lists the cancelled message
+    @Test
+    fun `queue-cancel - interrupt with cancel_queued lists the cancelled message`() {
+        val f2 = "<command_uuid-68>"
+        assertEquals(f2 to "cancelled", lifecycle("queue-cancel", 55))
+        assertEquals(InterruptReceipt(emptyList(), listOf(f2)), interruptReceipt(response("queue-cancel", 56).payload))
+        val result = result("queue-cancel", 60)
+        assertEquals("error_during_execution", result.subtype)
+        assertEquals("aborted_tools", result.terminalReason)
+        assertTrue(result.isError)
+        assertEquals("<command_uuid-47>" to "cancelled", lifecycle("queue-cancel", 61))
+    }
+
+    // spec: the init lists the queue capabilities
+    @Test
+    fun `the init lists the queue capabilities`() {
+        for ((name, line) in listOf("queue-fold" to 6, "queue-cancel" to 5, "plain-reply" to 4)) {
+            val capabilities = init(name, line).capabilities
+            assertTrue("msg_lifecycle_v1" in capabilities, "$name:$line")
+            assertTrue("interrupt_cancel_queued_v1" in capabilities, "$name:$line")
+        }
+    }
+
+    // D8's four queue recordings (Review Focus 12), each in the branch probes 5.1 settled, from the lines it wrote there.
+
+    /** The texts of every main-thread and subagent assistant line of fixture [name], lines [from] to [to]. */
+    private fun assistantTexts(name: String, from: Int = 1, to: Int = Fixtures.lines(name).size): List<String> =
+        (from..to).mapNotNull { at(name, it) as? CliMessage.Assistant }.flatMap { line ->
+            line.content.filterIsInstance<ContentBlock.Text>().map { it.text }
+        }
+
+    @Test
+    fun `queue-steer-text - a steer with no tool round left runs as the next turn`() {
+        // probes 5.1: next turn
+        val p = "<command_uuid-2>"
+        val s = "<command_uuid-13>"
+        assertEquals(s to "queued", lifecycle("queue-steer-text", 10))
+        val first = result("queue-steer-text", 54)
+        assertEquals(listOf(p), first.userMessageUuids)
+        assertEquals(p to "completed", lifecycle("queue-steer-text", 55))
+        assertEquals(s to "started", lifecycle("queue-steer-text", 56))
+        assertIs<CliMessage.SystemInit>(at("queue-steer-text", 57))
+        val second = result("queue-steer-text", 66)
+        assertEquals(s, second.raw.rawString("user_message_uuid"))
+        assertEquals(listOf(s), second.userMessageUuids)
+        assertTrue(assistantTexts("queue-steer-text", 57, 66).any { "KIWI" in it })
+        assertEquals(s to "completed", lifecycle("queue-steer-text", 67))
+    }
+
+    @Test
+    fun `queue-cancel-steer - a steer withdrawn before its tool round never runs`() {
+        // probes 5.1: withdrawable, and Stop withdraws a steer
+        val s1 = "<command_uuid-25>"
+        val s2 = "<command_uuid-47>"
+        assertIs<CliMessage.TaskStarted>(at("queue-cancel-steer", 18))
+        assertEquals(s1 to "queued", lifecycle("queue-cancel-steer", 19))
+        assertEquals(s1 to "cancelled", lifecycle("queue-cancel-steer", 20))
+        assertEquals(true, cancelAsyncAnswer(response("queue-cancel-steer", 21).payload))
+        assertEquals(s2 to "queued", lifecycle("queue-cancel-steer", 36))
+        assertEquals(s2 to "cancelled", lifecycle("queue-cancel-steer", 37))
+        val receipt = interruptReceipt(response("queue-cancel-steer", 38).payload)
+        assertEquals(listOf(s2), receipt.cancelled)
+        assertEquals(emptyList(), receipt.stillQueued)
+        val result = result("queue-cancel-steer", 42)
+        assertEquals("error_during_execution", result.subtype)
+        assertEquals(listOf("<command_uuid-4>"), result.userMessageUuids)
+        val texts = assistantTexts("queue-cancel-steer")
+        assertTrue(texts.none { "KIWI" in it || "MANGO" in it }, texts.toString())
+        val lines = Fixtures.lines("queue-cancel-steer")
+        assertTrue((43..lines.size).none { at("queue-cancel-steer", it) is CliMessage.SystemInit }, "no further turn")
+        assertTrue(lines.none { s1 in it && "\"started\"" in it } && lines.none { s2 in it && "\"started\"" in it })
+    }
+
+    @Test
+    fun `queue-later-command - a later command and image message run as recorded`() {
+        // probes 5.1: the command after the turn, the image message runs
+        val p = "<command_uuid-4>"
+        val c = "<command_uuid-29>"
+        val i = "<command_uuid-31>"
+        assertEquals(c to "queued", lifecycle("queue-later-command", 23))
+        assertEquals(i to "queued", lifecycle("queue-later-command", 24))
+        val running = result("queue-later-command", 35)
+        assertEquals(listOf(p), running.userMessageUuids)
+        assertNull(running.localCommand)
+        assertEquals(p to "completed", lifecycle("queue-later-command", 36))
+        assertEquals(c to "started", lifecycle("queue-later-command", 37))
+        // An init between the command's started and its local reply, as an idle /usage gets (parity-usage:21, probes 5.1).
+        assertIs<CliMessage.SystemInit>(at("queue-later-command", 38))
+        assertEquals("context", assertIs<CliMessage.Assistant>(at("queue-later-command", 39)).localCommand?.command)
+        val local = result("queue-later-command", 40)
+        assertEquals("context", local.localCommand)
+        assertEquals(0, local.numTurns)
+        assertEquals(listOf(c), local.userMessageUuids)
+        // The image message, in a turn of its own after the command's.
+        assertEquals(i to "started", lifecycle("queue-later-command", 42))
+        assertIs<CliMessage.SystemInit>(at("queue-later-command", 43))
+        val image = result("queue-later-command", 52)
+        assertFalse(image.isError)
+        assertEquals(listOf(i), image.userMessageUuids)
+        assertEquals(i, image.raw.rawString("user_message_uuid"))
+        assertTrue((43..52).mapNotNull { at("queue-later-command", it) as? CliMessage.Assistant }.none { it.error != null })
+        assertEquals(i to "completed", lifecycle("queue-later-command", 53))
+    }
+
+    @Test
+    fun `queue-during-card - a later message waits through the card and runs as its own turn`() {
+        // probes 5.1: waits
+        val p = "<command_uuid-4>"
+        val c = "<command_uuid-26>"
+        val request = assertIs<CliMessage.ControlRequest>(at("queue-during-card", 18))
+        assertIs<InboundRequest.CanUseTool>(request.request)
+        val lines = Fixtures.lines("queue-during-card")
+        val queued = (1..lines.size).first { (at("queue-during-card", it) as? CliMessage.CommandLifecycle)?.commandUuid == c }
+        val firstResult = (1..lines.size).first { at("queue-during-card", it) is CliMessage.Result }
+        assertEquals(21, queued)
+        assertEquals(31, firstResult)
+        assertTrue(18 < queued && queued < firstResult)
+        assertEquals(c to "queued", lifecycle("queue-during-card", 21))
+        assertEquals(listOf(p), result("queue-during-card", 31).userMessageUuids)
+        assertEquals(c to "started", lifecycle("queue-during-card", 33))
+        assertIs<CliMessage.SystemInit>(at("queue-during-card", 34))
+        assertEquals(c, result("queue-during-card", 43).raw.rawString("user_message_uuid"))
+    }
+
+    // spec: fork-at: a fork at the first reply knows only that turn
+    @Test
+    fun `fork-at - a fork at the first reply knows only that turn`() {
+        val a = "<session_id-2>"
+        val b = "<session_id-70>"
+        assertEquals(listOf(a, a, a, b), listOf(6, 19, 45, 60).map { init("fork-at", it).sessionId })
+        assertNotEquals(a, b)
+        val cut = assertIs<CliMessage.Assistant>(at("fork-at", 11))
+        assertEquals("<uuid-14>", cut.uuid)
+        assertNull(cut.parentToolUseId)
+        assertEquals(listOf<ContentBlock>(ContentBlock.Text("ALPHA")), assertIs<CliMessage.Assistant>(at("fork-at", 65)).content)
+        val result = result("fork-at", 70)
+        assertEquals("success", result.subtype)
+        assertEquals(1, result.numTurns)
+    }
+
+    // spec: fork-at transcripts: the fork copies the chain up to the cut and nothing after
+    @Test
+    fun `fork-at transcripts - the fork copies the chain up to the cut and nothing after`() {
+        fun lines(name: String): List<JsonObject> =
+            Fixtures.transcript(name).readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+        val fork = lines("fork-at")
+        val origin = lines("fork-at-origin")
+        assertEquals("assistant", fork[16].rawString("type"))
+        assertEquals("<uuid-14>", fork[16].rawString("uuid"))
+        assertEquals("user", fork[17].rawString("type"))
+        assertEquals("<uuid-14>", fork[17].rawString("parentUuid"))
+        val sessionIds = fork.mapNotNull { it.rawString("sessionId") }
+        assertEquals(fork.size, sessionIds.size)
+        assertTrue(sessionIds.all { it == "<session_id-70>" }, sessionIds.toSet().toString())
+        assertEquals("<uuid-14>", origin[19].rawString("uuid"))
+        assertEquals(assertIs<CliMessage.Assistant>(at("fork-at", 11)).uuid, origin[19].rawString("uuid"))
+        val later = origin.drop(20).filter { it.rawString("type") in setOf("user", "assistant") }.mapNotNull { it.rawString("uuid") }.toSet()
+        assertTrue(listOf(27, 35, 37).all { origin[it - 1].rawString("uuid") in later })
+        assertTrue(fork.none { it.rawString("uuid") in later })
+    }
+
+    private fun transcriptLines(name: String): List<JsonObject> =
+        Fixtures.transcript(name).readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+
+    /** The text of each text block of the assistant line [line] of fixture [name]. */
+    private fun replyText(name: String, line: Int): String =
+        assertIs<CliMessage.Assistant>(at(name, line)).content.filterIsInstance<ContentBlock.Text>().joinToString("") { it.text }
+
+    /**
+     * The twin [fork] of a fork at [cut] (0-based [cutAt] in it): its copied chain ends with the cut's assistant line, its new prompt's
+     * parentUuid is the cut, every line carries the fork's session id [b], and no user or assistant line of [origin] after the cut
+     * (0-based [originCutAt]) is in it.
+     */
+    private fun assertForkTwin(fork: List<JsonObject>, origin: List<JsonObject>, cut: String, cutAt: Int, originCutAt: Int, b: String) {
+        assertEquals("assistant", fork[cutAt].rawString("type"))
+        assertEquals(cut, fork[cutAt].rawString("uuid"))
+        assertEquals("user", fork[cutAt + 1].rawString("type"))
+        assertEquals(cut, fork[cutAt + 1].rawString("parentUuid"))
+        val sessionIds = fork.mapNotNull { it.rawString("sessionId") }
+        assertEquals(fork.size, sessionIds.size)
+        assertTrue(sessionIds.all { it == b }, sessionIds.toSet().toString())
+        assertEquals(cut, origin[originCutAt].rawString("uuid"))
+        val later = origin.drop(originCutAt + 1).filter { it.rawString("type") in setOf("user", "assistant") }
+            .mapNotNull { it.rawString("uuid") }.toSet()
+        assertTrue(later.isNotEmpty())
+        assertTrue(fork.none { it.rawString("uuid") in later })
+    }
+
+    // spec: fork-at-live: works (D8 probes 5): a fork while the origin's process is still open forks as fork-at does
+    @Test
+    fun `fork-at-live - a fork while the origin's process is open knows only the first turn`() {
+        val a = "<session_id-4>"
+        val b = "<session_id-71>"
+        assertEquals(listOf(a, a, a, b), listOf(5, 18, 44, 58).map { init("fork-at-live", it).sessionId })
+        assertNotEquals(a, b)
+        val cut = assertIs<CliMessage.Assistant>(at("fork-at-live", 10))
+        assertEquals("<uuid-13>", cut.uuid)
+        assertNull(cut.parentToolUseId)
+        // The origin's three turns end before the fork starts (its last result at :53, the fork's init at :58).
+        assertEquals(listOf("success", "success", "success"), listOf(14, 40, 53).map { result("fork-at-live", it).subtype })
+        val reply = replyText("fork-at-live", 63)
+        assertTrue("ALPHA" in reply, reply)
+        assertFalse("BRAVO" in reply || "CHARLIE" in reply, reply)
+        val result = result("fork-at-live", 68)
+        assertEquals("success", result.subtype)
+        assertFalse(result.isError)
+    }
+
+    // spec: fork-at-live transcripts: the fork copies the chain up to the cut and nothing after
+    @Test
+    fun `fork-at-live transcripts - the fork copies the chain up to the cut and nothing after`() {
+        val fork = transcriptLines("fork-at-live")
+        val origin = transcriptLines("fork-at-live-origin")
+        assertForkTwin(fork, origin, "<uuid-13>", cutAt = 16, originCutAt = 18, b = "<session_id-71>")
+        // The BRAVO and CHARLIE prompts (fork-at-live-origin.jsonl:26, :34) come after the cut.
+        assertTrue(listOf(26, 34).all { origin[it - 1].rawString("type") == "user" })
+        assertEquals("<uuid-79>", fork[24].rawString("uuid"))
+    }
+
+    // spec: fork-at-busy: matches (D8 probes 5): a fork made while the origin runs a turn forks as fork-at does
+    @Test
+    fun `fork-at-busy - a fork made during the origin's turn knows only the first turn`() {
+        val a = "<session_id-4>"
+        val b = "<session_id-60>"
+        assertEquals(listOf(a, a, b), listOf(5, 18, 49).map { init("fork-at-busy", it).sessionId })
+        assertEquals("<uuid-13>", assertIs<CliMessage.Assistant>(at("fork-at-busy", 10)).uuid)
+        val reply = replyText("fork-at-busy", 54)
+        assertTrue("ALPHA" in reply, reply)
+        assertFalse("BRAVO" in reply, reply)
+        assertEquals("success", result("fork-at-busy", 59).subtype)
+        // The origin's second turn, during which the fork ran, ends in a success all the same.
+        val origin = result("fork-at-busy", 44)
+        assertEquals("success", origin.subtype)
+        assertFalse(origin.isError)
+        assertEquals(2, origin.numTurns)
+    }
+
+    // spec: fork-at-busy transcripts: a fork made during the origin's turn copies the chain up to the cut, and the origin keeps its turn
+    @Test
+    fun `fork-at-busy transcripts - a fork made during the origin's turn copies the chain up to the cut`() {
+        val fork = transcriptLines("fork-at-busy")
+        val origin = transcriptLines("fork-at-busy-origin")
+        assertForkTwin(fork, origin, "<uuid-13>", cutAt = 16, originCutAt = 18, b = "<session_id-60>")
+        // fork-at-busy-origin.jsonl:26-31: BRAVO's prompt, its Bash call and result, and its reply, the turn whole.
+        val bravo = origin[25]
+        assertEquals("user", bravo.rawString("type"))
+        assertTrue("BRAVO" in bravo.toString())
+        val call = origin[27]
+        assertEquals("assistant", call.rawString("type"))
+        assertTrue("\"Bash\"" in call.toString())
+        val toolResult = origin[28]
+        assertEquals("user", toolResult.rawString("type"))
+        assertEquals(call.rawString("uuid"), toolResult.rawString("parentUuid"))
+        assertTrue("tool_result" in toolResult.toString())
+        val reply = origin[30]
+        assertEquals("assistant", reply.rawString("type"))
+        assertEquals(assertIs<CliMessage.Assistant>(at("fork-at-busy", 40)).uuid, reply.rawString("uuid"))
     }
 }

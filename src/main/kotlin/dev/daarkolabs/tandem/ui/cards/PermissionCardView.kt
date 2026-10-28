@@ -2,6 +2,7 @@
 
 package dev.daarkolabs.tandem.ui.cards
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +53,8 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.HorizontallyScrollableContainer
 import org.jetbrains.jewel.ui.component.Link
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.VerticalScrollbar
+import org.jetbrains.jewel.ui.component.scrollbarContentSafePadding
 
 /** A payload longer than this many lines is clamped until `Show more` (spec 4.12 item 4). */
 private const val CLAMP_LINES = 8
@@ -61,7 +66,8 @@ private val CLAMP_HEIGHT = 160.dp
  * The permission card (spec 4.12): a warning dot and `Allow Claude to <verb> <object>?`, the subagent that asks, the request's
  * description, what the call would do in a mono box (clamped at 8 lines with `Show more`), then `Deny` (Esc), `Always allow for
  * session` (Cmd/Ctrl+Enter, only when the request offers it) and `Allow once` (Enter, the default, which takes the focus when
- * [takeFocus] says so), and how many more requests wait behind it ([moreWaiting]).
+ * [takeFocus] says so), and how many more requests wait behind it ([moreWaiting]). The card is never taller than the space it is
+ * given: what precedes the buttons scrolls in what they leave of it, so a long command in a short tool window keeps them in view.
  */
 @Composable
 internal fun PermissionCardView(
@@ -85,15 +91,27 @@ internal fun PermissionCardView(
         onCmdEnter = onAllowForSession.takeIf { card.canAlwaysAllow },
         onEscape = onDeny,
     ) {
-        Row(verticalAlignment = Alignment.Top) {
-            // Centred on the title's first line.
-            Box(Modifier.padding(top = 6.dp).size(6.dp).background(colors.warning, CircleShape))
-            Spacer(Modifier.width(8.dp))
-            Text(permissionTitleText(card), color = colors.normal)
+        // What the request says scrolls in what the buttons leave of the card's space (a short tool window): they stay in view.
+        val scroll = remember(card.requestId) { ScrollState(0) }
+        Box(Modifier.weight(1f, fill = false).fillMaxWidth()) {
+            Column(
+                Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = if (scroll.maxValue > 0) scrollbarContentSafePadding() else 0.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(verticalAlignment = Alignment.Top) {
+                    // Centred on the title's first line.
+                    Box(Modifier.padding(top = 6.dp).size(6.dp).background(colors.warning, CircleShape))
+                    Spacer(Modifier.width(8.dp))
+                    Text(permissionTitleText(card), color = colors.normal)
+                }
+                agentLine(card)?.let { Text(it, color = colors.info) }
+                card.description?.takeIf { it != card.objectText }?.let { Text(it, color = colors.info) }
+                PayloadView(card)
+            }
+            if (scroll.maxValue > 0) {
+                Box(Modifier.matchParentSize()) { VerticalScrollbar(scroll, Modifier.align(Alignment.TopEnd).fillMaxHeight()) }
+            }
         }
-        agentLine(card)?.let { Text(it, color = colors.info) }
-        card.description?.takeIf { it != card.objectText }?.let { Text(it, color = colors.info) }
-        PayloadView(card)
         FlowRow(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),

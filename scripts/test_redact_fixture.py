@@ -152,6 +152,49 @@ class RedactTest(unittest.TestCase):
         self.assertIn('"<base64>"', text)
         self.assertIn('"<task_id-1>"', text)
 
+    def test_attachments_are_cut_to_their_type_and_rendered_is_emptied(self):
+        (out,), err = self.redact({"type": "attachment", "uuid": "u1", "rendered": [{"type": "text", "text": "prompt"}],
+                                   "attachment": {"type": "environment", "cwd": "here", "platform": "linux"}})
+        self.assertEqual({"type": "environment"}, out["attachment"])
+        self.assertEqual("", out["rendered"])
+        self.assertEqual("", err)
+
+    def test_a_queued_command_keeps_its_prompt_and_its_ids_match_the_stream_and_the_queue_lines(self):
+        frame = "00000000-0000-4000-8000-000000000003"
+        delivery = "83441617-e858-44ed-a3b9-7c1a3eb5580a"
+        prompt = [{"type": "text", "text": "Also say KIWI."}]
+        (lifecycle, folded, removed), err = self.redact(
+            {"type": "command_lifecycle", "command_uuid": frame, "state": "queued"},
+            {"type": "attachment", "uuid": "a1", "rendered": [{"type": "text", "text": "Also say KIWI."}],
+             "attachment": {"type": "queued_command", "prompt": prompt, "source_uuid": frame, "delivery_id": delivery,
+                            "commandMode": "prompt"}},
+            {"type": "queue-operation", "operation": "remove", "content": "Also say KIWI.",
+             "reason": "absorbed_mid_turn", "commandUuid": frame, "deliveryId": delivery},
+        )
+        self.assertEqual("", err)
+        self.assertEqual(prompt, folded["attachment"]["prompt"])
+        self.assertEqual("prompt", folded["attachment"]["commandMode"])
+        self.assertEqual("", folded["rendered"])
+        placeholder = lifecycle["command_uuid"]
+        self.assertEqual([placeholder] * 2, [folded["attachment"]["source_uuid"], removed["commandUuid"]])
+        self.assertEqual(folded["attachment"]["delivery_id"], removed["deliveryId"])
+        self.assertNotIn(frame, json.dumps([lifecycle, folded, removed]))
+        self.assertNotIn(delivery, json.dumps([lifecycle, folded, removed]))
+
+    def test_the_interrupt_receipt_lists_get_placeholders_and_a_cancel_answer_stays_a_boolean(self):
+        frame = "00000000-0000-4000-8000-000000000006"
+        (receipt, answer), err = self.redact(
+            {"type": "control_response", "response": {"subtype": "success", "request_id": "host-7",
+                                                      "response": {"still_queued": [frame], "cancelled": [frame]}}},
+            {"type": "control_response", "response": {"subtype": "success", "request_id": "host-4",
+                                                      "response": {"cancelled": True}}},
+        )
+        self.assertEqual("", err)
+        lists = receipt["response"]["response"]
+        self.assertEqual(lists["still_queued"], lists["cancelled"])
+        self.assertNotIn(frame, json.dumps(receipt))
+        self.assertIs(True, answer["response"]["response"]["cancelled"])
+
     def test_a_line_that_is_not_a_json_object_is_dropped_with_a_warning(self):
         out, err = self.redact("[1, 2]", "not json", {"type": "kept"})
         self.assertEqual([{"type": "kept"}], out)
@@ -194,6 +237,47 @@ class RedactTest(unittest.TestCase):
         self.assertEqual("<submitUuid-2>", out["submitUuid"])
         self.assertNotIn("leaked", json.dumps(out))
         self.assertEqual("", err)
+
+    def test_context_category_ids_are_kept(self):
+        (out,), err = self.redact({"type": "control_response", "response": {"subtype": "success", "request_id": "r",
+            "response": {"categories": [{"id": "system_prompt", "name": "System prompt", "tokens": 5},
+                                        {"id": "free_space", "name": "Free", "tokens": 7}]}}})
+        self.assertEqual(["system_prompt", "free_space"],
+                         [c["id"] for c in out["response"]["response"]["categories"]])
+        self.assertEqual("", err)
+
+    def test_submit_uuid_is_an_id(self):
+        (out,), err = self.redact({"type": "system", "subtype": "local_command",
+                                   "submitUuid": "99999999-2222-4333-8444-555555555555"})
+        self.assertRegex(out["submitUuid"], r"^<submitUuid-\d+>$")
+        self.assertNotIn("leaked", json.dumps(out))
+        self.assertEqual("", err)
+
+    def test_usage_share_names_are_renamed(self):
+        def window(servers):
+            return {"mcp_servers": servers, "agents": [{"name": "general-purpose", "pct": 5},
+                                                       {"name": "my-agent", "pct": 3}],
+                    "skills": [{"name": "my-skill", "pct": 1}], "plugins": [{"name": "my-plugin", "pct": 1}]}
+
+        (out,), _ = self.redact({"type": "control_response", "response": {"subtype": "success", "request_id": "r",
+            "response": {"behaviors": {
+                "day": window([{"name": "corp-x", "pct": 2}, {"name": "corp-y", "pct": 1}]),
+                "week": window([{"name": "corp-x", "pct": 4}])}}}})
+        day = out["response"]["response"]["behaviors"]["day"]
+        week = out["response"]["response"]["behaviors"]["week"]
+        self.assertEqual(["server-a", "server-b"], [e["name"] for e in day["mcp_servers"]])
+        self.assertEqual(["server-a"], [e["name"] for e in week["mcp_servers"]])
+        self.assertEqual([2, 1], [e["pct"] for e in day["mcp_servers"]])
+        self.assertEqual(["general-purpose", "agent-a"], [e["name"] for e in day["agents"]])
+        self.assertEqual(["general-purpose", "agent-a"], [e["name"] for e in week["agents"]])
+        self.assertEqual(["skill-a"], [e["name"] for e in day["skills"]])
+        self.assertEqual(["plugin-a"], [e["name"] for e in day["plugins"]])
+
+    def test_path_stops_at_a_backtick_and_a_trailing_colon(self):
+        (out,), _ = self.redact({"type": "system", "subtype": "x", "note": "rule to `/home/u/.claude/CLAUDE.md`: when"})
+        self.assertEqual("rule to `<path>`: when", out["note"])
+        (out,), _ = self.redact({"type": "system", "subtype": "x", "note": "see /home/u/x.md: now"})
+        self.assertEqual("see <path>: now", out["note"])
 
     def test_merged_send_uuids_get_the_placeholders_of_their_sends(self):
         (stream, line), err = self.redact(

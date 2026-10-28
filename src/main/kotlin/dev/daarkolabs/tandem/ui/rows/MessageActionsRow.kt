@@ -10,8 +10,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.State
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -44,16 +42,11 @@ import java.util.Locale
 private const val CLOCK_TICK_MS: Long = 60_000L
 
 /**
- * What the hover rows under the replies of one session need (polish spec 2.6): [onCopy] puts a reply's Markdown on the clipboard,
- * [onFork] forks the session, and [latestReply] and [busy] give the fork state. Only [MessageActionsRow] reads the two states, so a
- * turn's start or end recomposes the action rows and never a text row.
+ * What the hover rows under the replies of one session need (polish spec 2.6): [onCopy] puts a reply's Markdown on the clipboard and
+ * [onFork] forks the session at a reply's fork point (desktop-parity spec 13.1). The fork state comes from the row alone, so a turn's
+ * start or end recomposes no hover row.
  */
-internal class ReplyHost(
-    val onCopy: (String) -> Unit,
-    val onFork: () -> Unit,
-    val latestReply: State<String?>,
-    val busy: State<Boolean>,
-)
+internal class ReplyHost(val onCopy: (String) -> Unit, val onFork: (forkAt: String) -> Unit)
 
 /** Puts [text] on the clipboard: the default [ReplyHost.onCopy]. */
 internal fun copyToClipboard(text: String) {
@@ -75,9 +68,7 @@ internal fun MessageActionsRow(actions: MessageActions, reply: ReplyHost, hovere
     val source = remember { MutableInteractionSource() }
     val ownHover by source.collectIsHoveredAsState()
     var focused by remember { mutableStateOf(false) }
-    val fork by remember(actions.entryId, reply) {
-        derivedStateOf { forkState(actions.entryId, reply.latestReply.value, reply.busy.value) }
-    }
+    val fork = forkState(actions.forkAt)
     val tint = remember(palette.dim) { ColorFilter.tint(palette.dim) }
     Row(
         Modifier.height(24.dp)
@@ -100,7 +91,7 @@ internal fun MessageActionsRow(actions: MessageActions, reply: ReplyHost, hovere
             IconActionButton(
                 AllIconsKeys.Vcs.Branch,
                 contentDescription = "Fork from here",
-                onClick = reply.onFork,
+                onClick = { actions.forkAt?.takeIf { fork == ForkState.ENABLED }?.let(reply.onFork) },
                 modifier = Modifier.size(24.dp),
                 iconModifier = Modifier.size(16.dp),
                 enabled = fork == ForkState.ENABLED,
@@ -111,7 +102,7 @@ internal fun MessageActionsRow(actions: MessageActions, reply: ReplyHost, hovere
     }
 }
 
-/** The fork button's tooltip by its state (polish spec 2.6). */
+/** The fork button's tooltip by its state (desktop-parity spec 13.1); the button's accessible name stays `Fork from here`. */
 @Composable
 private fun ForkTooltip(fork: ForkState) {
     when (fork) {
@@ -119,8 +110,7 @@ private fun ForkTooltip(fork: ForkState) {
             Text("Fork from here")
             Text("Starts a new session from this point. This one stays as it is.", color = chatPalette().dim)
         }
-        ForkState.WAIT -> Text("Wait for the reply to finish")
-        ForkState.NOT_LATEST -> Text("Only the latest reply can be forked")
+        ForkState.UNAVAILABLE -> Text("This reply cannot be forked: the CLI sent no id for it")
     }
 }
 

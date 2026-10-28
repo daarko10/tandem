@@ -13,6 +13,7 @@ import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.SessionStatus
 import dev.daarkolabs.tandem.session.TurnEnd
+import dev.daarkolabs.tandem.session.nothingNext
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -107,8 +108,9 @@ class SessionNotifier(private val project: Project, private val manager: Session
             // of the status hides. Counted from the handle's start, so that a turn that ended before this first looks, as while a
             // resumed-as-new session is taken over, is announced too.
             var ended = handle.turnsEndedAtStart
-            handle.state.map { it.turnsEnded }.distinctUntilChanged().collect { count ->
-                if (count > ended && manager.selected.value == handle.id) notify(handle) { Event.FINISHED }
+            // As the manager's attention: a turn that ends while a message waits to run, or as the next opens, is not told (spec 12.5).
+            handle.state.map { it.turnsEnded to it.nothingNext() }.distinctUntilChanged { a, b -> a.first == b.first }.collect { (count, last) ->
+                if (count > ended && last && manager.selected.value == handle.id) notify(handle) { Event.FINISHED }
                 ended = count
             }
         }

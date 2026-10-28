@@ -288,4 +288,126 @@ class RobustnessTest {
         assertNull(ask.mcpServer)
         assertEquals(false, ask.serverPolicyAskOnly)
     }
+
+    /** [payload] with [key] set to the JSON [value]. */
+    private fun with(payload: JsonObject?, key: String, value: String): JsonObject =
+        JsonObject(assertNotNull(payload) + (key to Json.parseToJsonElement(value)))
+
+    /** The `system/init` of fixture [name] line [line] with [key] set to the JSON [value]. */
+    private fun initWith(name: String, line: Int, key: String, value: String): CliMessage.SystemInit =
+        assertIs<CliMessage.SystemInit>(Ndjson.decode(Json.encodeToString(JsonObject.serializer(), with(json(Fixtures.lines(name)[line - 1]), key, value))))
+
+    @Test
+    fun `mutated parity shapes degrade, never throw`() {
+        val context = payloadOf(Fixtures.lines("parity-context")[16])
+        val noId = assertNotNull(ControlPayloads.contextUsage(payloadOf(mutated("parity-context", 17, "{\"id\":\"system_prompt\",", "{"))))
+        assertEquals(null to "System prompt", noId.categories[0].let { it.id to it.name })
+        val noKind = assertNotNull(
+            ControlPayloads.contextUsage(payloadOf(mutated("parity-context", 17, "\"color\":\"promptBorder\",\"kind\":\"used\"", "\"color\":\"promptBorder\""))),
+        )
+        assertNull(noKind.categories[0].kind)
+        assertEquals(8, noKind.categories.size)
+        for (tokens in listOf("\"12\"", "-1", "null")) {
+            val skipped = assertNotNull(
+                ControlPayloads.contextUsage(
+                    payloadOf(mutated("parity-context", 17, "\"name\":\"Messages\",\"tokens\":6448", "\"name\":\"Messages\",\"tokens\":$tokens")),
+                ),
+            )
+            assertEquals(7, skipped.categories.size, tokens)
+            assertTrue(skipped.categories.none { it.id == "messages" }, tokens)
+        }
+        assertNull(ControlPayloads.contextUsage(with(context, "categories", "{}")))
+        assertTrue(assertNotNull(ControlPayloads.contextUsage(with(context, "mcpTools", """[{"name":"x"}]"""))).mcpTools.isEmpty())
+        assertTrue(assertNotNull(ControlPayloads.contextUsage(with(context, "skills", "[]"))).skills.isEmpty())
+        assertTrue(assertNotNull(ControlPayloads.contextUsage(with(context, "skills", """{"skillFrontmatter":7}"""))).skills.isEmpty())
+        assertNull(ControlPayloads.contextUsage(null))
+
+        val usage = payloadOf(Fixtures.lines("parity-usage")[16])
+        for (pct in listOf("140", "\"80\"", "-1")) {
+            val day = assertNotNull(
+                ControlPayloads.usage(payloadOf(mutated("parity-usage", 17, "\"pct\":80,\"count\":7726", "\"pct\":$pct,\"count\":7726"))),
+            ).history!!.day!!
+            assertTrue(day.behaviors.none { it.key == "workflow" }, pct)
+            assertEquals(4, day.behaviors.size, pct)
+        }
+        val rounded = assertNotNull(ControlPayloads.usage(payloadOf(mutated("parity-usage", 17, "\"pct\":80,\"count\":7726", "\"pct\":99.6,\"count\":7726"))))
+        assertEquals(100, rounded.history!!.day!!.behaviors.single { it.key == "workflow" }.pct)
+        assertNull(assertNotNull(ControlPayloads.usage(with(usage, "behaviors", "7"))).history)
+        val noSession = assertNotNull(ControlPayloads.usage(with(usage, "session", "\"x\"")))
+        assertNull(noSession.session)
+        assertNotNull(noSession.history)
+        assertNull(ControlPayloads.usage(null))
+        val costText = assertNotNull(
+            ControlPayloads.usage(payloadOf(mutated("parity-usage", 16, "\"costUSD\":0.152182", "\"costUSD\":\"0.15\""))),
+        ).session!!.models
+        assertEquals("claude-sonnet-5-5", costText[1].first)
+        assertNull(costText[1].second.costUsd)
+        assertEquals(38037L, costText[1].second.cacheWrite)
+        val searchText = assertNotNull(
+            ControlPayloads.usage(
+                payloadOf(mutated("parity-usage", 16, "\"webSearchRequests\":0,\"costUSD\":0.152182", "\"webSearchRequests\":\"2\",\"costUSD\":0.152182")),
+            ),
+        ).session!!.models
+        assertNull(searchText[1].second.webSearches)
+        assertEquals(0.152182, searchText[1].second.costUsd)
+
+        val spaced = assertIs<CliMessage.SystemInit>(Ndjson.decode(mutated("parity-add-dir", 5, "\"version\":\"0.1.0\"", "\"version\":\"1 0\"")))
+        assertEquals("probe-kit" to null, spaced.plugins[0].let { it.name to it.version })
+        val beta = assertIs<CliMessage.SystemInit>(Ndjson.decode(mutated("parity-add-dir", 5, "\"version\":\"0.1.0\"", "\"version\":\"0.1.0-beta+3\"")))
+        assertEquals("0.1.0-beta+3", beta.plugins[0].version)
+        assertTrue(initWith("parity-add-dir", 5, "plugins", "{}").plugins.isEmpty())
+        assertEquals(listOf("b"), initWith("parity-add-dir", 5, "plugins", """[{"path":"x"},7,{"name":"b","version":3}]""").plugins.map { it.name })
+        assertEquals(listOf("/x"), initWith("parity-add-dir", 5, "additional_directories", """[1,"/x"]""").additionalDirectories)
+        assertTrue(initWith("parity-add-dir", 5, "skills", "{}").skills.isEmpty())
+        assertEquals(listOf("x"), initWith("parity-add-dir", 5, "skills", """[1,"x"]""").skills)
+    }
+
+    @Test
+    fun `every control answer of every fixture decodes without throwing`() {
+        var answers = 0
+        for (name in Fixtures.names()) {
+            for (line in Fixtures.lines(name)) {
+                val answer = Ndjson.decode(line) as? CliMessage.ControlResponse ?: continue
+                ControlPayloads.contextUsage(answer.payload)
+                ControlPayloads.usage(answer.payload)
+                interruptReceipt(answer.payload)
+                cancelAsyncAnswer(answer.payload)
+                answers++
+            }
+        }
+        assertTrue(answers > 0, "no control answers in the fixtures")
+    }
+
+    @Test
+    fun `docs-only agents and MCP server instructions decode in the SDK's shape`() {
+        // Docs only (sdk.d.ts): no recording has either group, so a wrong key name would hide both on a machine that has them.
+        val context = with(
+            with(
+                payloadOf(Fixtures.lines("parity-context")[16]),
+                "agents",
+                """[{"agentType":"reviewer","source":"projectSettings","tokens":919},{"agentType":"x"}]""",
+            ),
+            "mcpInstructions",
+            """[{"serverName":"echo","tokens":26},{"serverName":"docs","tokens":22},{"tokens":5}]""",
+        )
+        val breakdown = assertNotNull(ControlPayloads.contextUsage(context))
+        assertEquals(listOf(AgentUsage("reviewer", "projectSettings", 919)), breakdown.agents)
+        assertEquals(listOf(McpInstructionsUsage("echo", 26), McpInstructionsUsage("docs", 22)), breakdown.mcpInstructions)
+    }
+
+    @Test
+    fun `mutated queue shapes degrade, never throw`() {
+        val f = "<command_uuid-25>"
+        assertIs<CliMessage.Unknown>(Ndjson.decode(mutated("queue-fold", 19, "\"command_uuid\":\"$f\",", "")))
+        assertIs<CliMessage.Unknown>(Ndjson.decode(mutated("queue-fold", 19, "\"state\":\"queued\"", "\"state\":3")))
+        val paused = assertIs<CliMessage.CommandLifecycle>(Ndjson.decode(mutated("queue-fold", 19, "\"state\":\"queued\"", "\"state\":\"paused\"")))
+        assertEquals(f to "paused", paused.commandUuid to paused.state)
+        val receipt = payloadOf(Fixtures.lines("queue-cancel")[55])
+        assertTrue(interruptReceipt(with(receipt, "cancelled", "true")).cancelled.isEmpty())
+        assertTrue(interruptReceipt(with(receipt, "still_queued", "\"x\"")).stillQueued.isEmpty())
+        assertEquals(listOf("<command_uuid-68>"), interruptReceipt(with(receipt, "cancelled", "[1,\"<command_uuid-68>\"]")).cancelled)
+        assertNull(cancelAsyncAnswer(json("{\"cancelled\":\"yes\"}")))
+        assertNull(cancelAsyncAnswer(json("{}")))
+        assertEquals(InterruptReceipt(emptyList(), emptyList()), interruptReceipt(null))
+    }
 }

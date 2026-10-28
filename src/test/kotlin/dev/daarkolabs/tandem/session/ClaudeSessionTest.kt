@@ -271,6 +271,59 @@ class ClaudeSessionTest {
     }
 
     @Test
+    fun `added folders become --add-dir after --resume`() {
+        val base = listOf(
+            "claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
+            "--include-partial-messages", "--thinking-display", "summarized", "--permission-prompt-tool=stdio",
+        )
+        val disallowed = listOf("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit")
+        // "/b c" stays one argv element: no shell splits it.
+        assertEquals(
+            base + disallowed + listOf("--resume", "s2", "--add-dir", "/a", "--add-dir", "/b c"),
+            SessionConfig("claude", tmp, resumeSessionId = "s2", additionalDirectories = listOf("/a", "/b c")).argv(),
+        )
+        assertEquals(
+            base + disallowed + listOf("--session-id", "s1", "--add-dir", "/a"),
+            SessionConfig("claude", tmp, sessionId = "s1", additionalDirectories = listOf("/a")).argv(),
+        )
+        assertEquals(
+            base + disallowed + listOf("--resume", "s2", "--fork-session", "--session-id", "s3", "--add-dir", "/a"),
+            SessionConfig("claude", tmp, sessionId = "s3", resumeSessionId = "s2", forkSession = true, additionalDirectories = listOf("/a")).argv(),
+        )
+        assertTrue("--add-dir" !in SessionConfig("claude", tmp, resumeSessionId = "s2").argv())
+        assertTrue("--add-dir" !in SessionConfig("claude", tmp, sessionId = "s1").argv())
+    }
+
+    // spec: a fork at a reply ends with --resume-session-at
+    @Test
+    fun `a fork at a reply ends with --resume-session-at`() {
+        val base = listOf(
+            "claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
+            "--include-partial-messages", "--thinking-display", "summarized", "--permission-prompt-tool=stdio",
+        )
+        val disallowed = listOf("--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit")
+        val fork = listOf("--resume", "A", "--fork-session", "--session-id", "B", "--resume-session-at", "X")
+        assertEquals(
+            base + disallowed + fork,
+            SessionConfig("claude", tmp, sessionId = "B", resumeSessionId = "A", forkSession = true, resumeSessionAt = "X").argv(),
+        )
+        assertEquals(
+            base + disallowed + fork + listOf("--add-dir", "/a"),
+            SessionConfig(
+                "claude", tmp, sessionId = "B", resumeSessionId = "A", forkSession = true, resumeSessionAt = "X",
+                additionalDirectories = listOf("/a"),
+            ).argv(),
+        )
+        // Without --fork-session the CLI would branch the original's own transcript.
+        assertFailsWith<IllegalArgumentException> { SessionConfig("claude", tmp, resumeSessionId = "A", resumeSessionAt = "X") }
+        for (bad in listOf("", " ", "-x")) {
+            assertFailsWith<IllegalArgumentException>(bad) {
+                SessionConfig("claude", tmp, sessionId = "B", resumeSessionId = "A", forkSession = true, resumeSessionAt = bad)
+            }
+        }
+    }
+
+    @Test
     fun `keep_alive and unknown lines advance lastFrameAt without a state emission`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val launcher = fakeCli("echo '{\"type\":\"keep_alive\"}'; sleep 0.2; echo '{\"type\":\"no_such_type\"}'; sleep 0.2")
@@ -369,6 +422,17 @@ class ClaudeSessionTest {
 
         val kept = ClaudeSession(scope, SessionConfig("claude", tmp, resumeSessionId = "s1"), fakeCli("true"), initialState = history).state.value
         assertEquals(Triple("sonnet", PermissionMode.ACCEPT_EDITS, "low"), Triple(kept.requestedModel, kept.permissionMode, kept.effort))
+        scope.cancel()
+    }
+
+    @Test
+    fun `the spawn's --permission-mode is the launch mode`() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val auto = SessionConfig("claude", tmp, sessionId = newSessionId, permissionMode = PermissionMode.AUTO)
+        assertEquals(PermissionMode.AUTO, ClaudeSession(scope, auto, fakeCli("true")).state.value.launchPermissionMode)
+        val none = SessionConfig("claude", tmp, sessionId = newSessionId)
+        val history = ChatState(launchPermissionMode = PermissionMode.PLAN)
+        assertEquals(null, ClaudeSession(scope, none, fakeCli("true"), initialState = history).state.value.launchPermissionMode)
         scope.cancel()
     }
 
@@ -1327,5 +1391,402 @@ class ClaudeSessionTest {
         assertEquals(1, state.entries.count { it is ChatEntry.TurnEnded }, "the prompt's turn ended")
         assertTrue(state.busy, "the shell escape's reply turn is open")
         run.close()
+    }
+
+    // --- Desktop parity (spec 3.2, 4.2, 9.2): get_usage after a usage line, get_context_usage ---
+
+    /** The `response` object of the `control_response` at [line] of fixture [name], as JSON text. */
+    private fun payloadAt(name: String, line: Int): String =
+        Json.parseToJsonElement(Fixtures.lines(name)[line - 1]).jsonObject["response"]!!.jsonObject["response"].toString()
+
+    private fun ChatState.usageCard(): UsageCard? =
+        entries.filterIsInstance<ChatEntry.Notice>().lastOrNull { it.sourceUuid != null }?.usage
+
+    private suspend fun ScriptedSession.card(done: (UsageCard) -> Boolean): UsageCard =
+        withTimeout(10_000) { session.state.first { s -> s.usageCard()?.let(done) == true }.usageCard()!! }
+
+    private fun UsagePartState<*>.loading(): Boolean = this == UsagePartState.Loading
+
+    @Test
+    fun `a usage line sends both get_usage requests in order`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.write(Fixtures.lines("parity-usage")[21])
+        run.settled()
+        assertTrue(run.stdin.readLines().none { "get_usage" in it }, "nothing before the local turn's result")
+        assertEquals(UsageCard(UsagePartState.Loading, UsagePartState.Loading), run.session.state.value.usageCard())
+
+        run.write(Fixtures.lines("parity-usage")[22])
+        val first = run.requestOf("get_usage")
+        assertEquals(true, first["request"]!!.jsonObject["skip_behaviors"]!!.jsonPrimitive.boolean)
+        run.success(first["request_id"]!!.jsonPrimitive.content, payloadAt("parity-usage", 16))
+        val second = run.requestOf("get_usage", 2)
+        assertFalse("skip_behaviors" in second["request"]!!.jsonObject, second.toString())
+        run.success(second["request_id"]!!.jsonPrimitive.content, payloadAt("parity-usage", 17))
+
+        val card = run.card { !it.session.loading() && !it.history.loading() }
+        val session = assertIs<UsagePartState.Loaded<*>>(card.session).value as dev.daarkolabs.tandem.protocol.SessionUsage
+        assertEquals(0.1523063, session.totalCostUsd)
+        val history = assertIs<UsagePartState.Loaded<*>>(card.history).value as dev.daarkolabs.tandem.protocol.UsageHistory
+        assertEquals(23, history.day?.sessionCount)
+        assertEquals(2, run.stdin.readLines().count { "get_usage" in it })
+        run.close()
+    }
+
+    @Test
+    fun `the history request is not sent once the process ended`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.write(Fixtures.lines("parity-usage")[21])
+        run.write(Fixtures.lines("parity-usage")[22])
+        run.written("get_usage")
+        run.die()
+
+        val card = run.card { !it.session.loading() && !it.history.loading() }
+        assertEquals(UsageCard(UsagePartState.Failed(McpError.Ended), UsagePartState.Failed(McpError.Ended)), card)
+        withTimeout(10_000) { run.session.job.children.toList().forEach { it.join() } }
+        assertEquals(1, run.stdin.readLines().count { "get_usage" in it })
+        run.close()
+    }
+
+    // spec: contextUsage decodes off the caller's thread and times out at 30 s
+    @Test
+    fun `contextUsage times out at 30 s and a success lands in the state`() = runBlocking {
+        val quiet = ScriptedSession(tmp, newSessionId, mcpMillisPerSecond = 10) // a second is 10 ms here; nothing answers
+        quiet.session.start()
+        assertEquals(McpResult.Failed(McpError.TimedOut(30)), withTimeout(10_000) { quiet.session.contextUsage() })
+        assertEquals(null, quiet.settled().contextBreakdown)
+        quiet.close()
+
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val b17 = ControlPayloads.contextUsage(
+            (Ndjson.decode(Fixtures.lines("parity-context")[16]) as CliMessage.ControlResponse).payload,
+        )!!
+        val answered = async { run.session.contextUsage() }
+        run.success(run.requestIdOf("get_context_usage"), payloadAt("parity-context", 17))
+        assertEquals(McpResult.Ok(b17), withTimeout(10_000) { answered.await() })
+        assertEquals(b17, run.session.state.value.contextBreakdown)
+
+        val empty = async { run.session.contextUsage() }
+        run.success(run.requestIdOf("get_context_usage", 2), "{}")
+        assertEquals(McpResult.Failed(McpError.Rejected("the CLI's answer had no categories")), withTimeout(10_000) { empty.await() })
+        assertEquals(b17, run.session.state.value.contextBreakdown, "a failed answer keeps the last breakdown")
+        run.close()
+    }
+
+    @Test
+    fun `retryUsage of the history sends the full request alone`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.retryUsage("<uuid-28>", UsagePart.HISTORY)
+        val request = run.requestOf("get_usage")
+        assertFalse("skip_behaviors" in request["request"]!!.jsonObject, request.toString())
+        run.success(request["request_id"]!!.jsonPrimitive.content, payloadAt("parity-usage", 17))
+        run.settled()
+        assertEquals(1, run.stdin.readLines().count { "get_usage" in it })
+        run.close()
+    }
+
+    // --- Sending while Claude works (spec 12.3, 12.4, 9.7) ---
+
+    /** The lines [from]..[to] (1-based) of fixture [name] as written, with each placeholder of [uuids] rewritten to its value. */
+    private fun rewritten(name: String, from: Int, to: Int, uuids: Map<String, String> = emptyMap()): List<String> =
+        Fixtures.lines(name).subList(from - 1, to).map { line -> uuids.entries.fold(line) { acc, (k, v) -> acc.replace(k, v) } }
+
+    /** A session whose prompt's turn runs (its frame sent, then [name]'s lines 1..[through] written) and read. */
+    private suspend fun turnOpen(name: String = "queue-fold", through: Int = 6, mcpMillisPerSecond: Long = 1_000L): ScriptedSession {
+        val run = ScriptedSession(tmp, newSessionId, mcpMillisPerSecond = mcpMillisPerSecond)
+        run.session.start()
+        run.session.sendUserMessage("prompt")
+        run.written("\"type\":\"user\"")
+        rewritten(name, 1, through).forEach(run::write)
+        run.settled()
+        return run
+    }
+
+    private fun ChatState.stages(): List<Pair<String, PendingStage>> = pendingSends.map { it.uuid to it.stage }
+
+    /** The `user` frames once there are [count]. */
+    private suspend fun ScriptedSession.userFrames(count: Int): List<JsonObject> = withTimeout(10_000) {
+        while (userFrames().size < count) delay(20)
+        userFrames()
+    }
+
+    private fun JsonObject.uuid(): String = getValue("uuid").jsonPrimitive.content
+
+    private fun JsonObject.text(): String =
+        getValue("message").jsonObject.getValue("content").let { content ->
+            (content as? kotlinx.serialization.json.JsonPrimitive)?.content
+                ?: content.jsonArray.joinToString("") { it.jsonObject["text"]?.jsonPrimitive?.content.orEmpty() }
+        }
+
+    private suspend fun ScriptedSession.awaitState(predicate: (ChatState) -> Boolean): ChatState =
+        withTimeout(10_000) { session.state.first(predicate) }
+
+    @Test
+    fun `a message sent mid-turn goes out at once without priority`() = runBlocking {
+        val run = turnOpen(through = 18)
+        run.session.sendUserMessage("more")
+        val frame = run.userFrames(2)[1]
+        assertEquals("more", frame.text())
+        assertFalse("priority" in frame)
+        assertEquals(listOf(frame.uuid() to PendingStage.QUEUED), run.session.state.value.stages())
+        run.close()
+    }
+
+    @Test
+    fun `a later message carries priority later`() = runBlocking {
+        val run = turnOpen(through = 18)
+        run.session.sendUserMessage("more", later = true)
+        val line = run.written("\"type\":\"user\"", 2)[1]
+        val frame = Json.parseToJsonElement(line).jsonObject
+        assertTrue("\"uuid\":\"${frame.uuid()}\",\"priority\":\"later\"" in line, line)
+        assertTrue(run.session.state.value.pendingSends.single().later)
+        run.close()
+    }
+
+    @Test
+    fun `interrupt adds cancel_queued only when a message waits and the init lists the capability`() = runBlocking {
+        val run = turnOpen()
+        run.session.sendUserMessage("more")
+        val uuid = run.session.state.value.pendingSends.single().uuid
+        run.session.interrupt()
+        val request = run.requestOf("interrupt")
+        assertEquals(true, request.getValue("request").jsonObject["cancel_queued"]?.jsonPrimitive?.boolean)
+        // queue-cancel:56's payload, its uuid the send's.
+        run.success(request.getValue("request_id").jsonPrimitive.content, """{"still_queued":[],"cancelled":["$uuid"]}""")
+        val returned = run.awaitState { it.pendingSends.isEmpty() }
+        assertEquals(listOf(uuid), returned.returnedSends.map { it.uuid })
+        assertEquals(listOf("Not sent: \"more\". It is back in the composer."), returned.notices(NoticeLevel.INFO))
+        run.close()
+
+        // Nothing waiting: today's frame, byte for byte.
+        val idle = turnOpen()
+        idle.session.interrupt()
+        val plain = idle.requestOf("interrupt")
+        assertEquals(HostMessages.interrupt(plain.getValue("request_id").jsonPrimitive.content), plain)
+        idle.close()
+
+        // An init without the capability: today's frame, though a message waits.
+        val older = ScriptedSession(tmp, newSessionId)
+        older.session.start()
+        older.session.sendUserMessage("prompt")
+        older.written("\"type\":\"user\"")
+        val init = Json.parseToJsonElement(Fixtures.lines("plain-reply")[3]).jsonObject
+        val capabilities = init.getValue("capabilities").jsonArray.filter { it.jsonPrimitive.content != "interrupt_cancel_queued_v1" }
+        older.write(JsonObject(init + ("capabilities" to kotlinx.serialization.json.JsonArray(capabilities))).toString())
+        older.settled()
+        older.session.sendUserMessage("more")
+        assertEquals(1, older.session.state.value.pendingSends.size)
+        older.session.interrupt()
+        val without = older.requestOf("interrupt")
+        assertEquals(HostMessages.interrupt(without.getValue("request_id").jsonPrimitive.content), without)
+        older.close()
+    }
+
+    // spec: withdraw writes cancel_async_message; true removes; false, an error or a timeout refuses with the notice
+    @Test
+    fun `withdraw writes cancel_async_message, true removes, false, an error or a timeout refuses with the notice`() = runBlocking {
+        val refusal = "Claude had already taken \"more\"; it was not withdrawn."
+        val run = turnOpen()
+        run.session.sendUserMessage("more", later = true)
+        val uuid = run.session.state.value.pendingSends.single().uuid
+
+        run.session.withdraw(uuid, restore = true)
+        val request = run.requestOf("cancel_async_message")
+        assertEquals(
+            Json.parseToJsonElement("""{"subtype":"cancel_async_message","message_uuid":"$uuid"}"""),
+            request.getValue("request"),
+        )
+        assertEquals(listOf(uuid to PendingStage.WITHDRAWING), run.session.state.value.stages())
+        run.success(request.getValue("request_id").jsonPrimitive.content, """{"cancelled":true}""")
+        val gone = run.awaitState { it.pendingSends.isEmpty() }
+        assertEquals(listOf(uuid), gone.returnedSends.map { it.uuid })
+
+        run.session.sendUserMessage("more", later = true)
+        val second = run.session.state.value.pendingSends.single().uuid
+        run.session.withdraw(second, restore = false)
+        run.success(run.requestIdOf("cancel_async_message", 2), """{"cancelled":false}""")
+        val refused = run.awaitState { s -> s.notices(NoticeLevel.INFO).size == 1 }
+        assertEquals(listOf(second to PendingStage.QUEUED), refused.stages())
+        assertEquals(listOf(refusal), refused.notices(NoticeLevel.INFO))
+
+        run.session.withdraw(second, restore = false)
+        run.error(run.requestIdOf("cancel_async_message", 3), "boom")
+        val failed = run.awaitState { s -> s.notices(NoticeLevel.INFO).size == 2 }
+        assertEquals(listOf(second to PendingStage.QUEUED), failed.stages())
+        run.close()
+
+        // No answer: 5 s, scaled.
+        val slow = turnOpen(mcpMillisPerSecond = 10)
+        slow.session.sendUserMessage("more", later = true)
+        val waiting = slow.session.state.value.pendingSends.single().uuid
+        slow.session.withdraw(waiting, restore = true)
+        slow.requestOf("cancel_async_message")
+        val timedOut = slow.awaitState { s -> s.notices(NoticeLevel.INFO).isNotEmpty() }
+        assertEquals(listOf(waiting to PendingStage.QUEUED), timedOut.stages())
+        assertEquals(listOf(refusal), timedOut.notices(NoticeLevel.INFO))
+        slow.close()
+    }
+
+    @Test
+    fun `a prompt sent while a shell escape's output frame waits goes out right after it`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        val quiet = run.userFrames(1).single().uuid()
+        run.session.sendUserMessage("next")
+        delay(300)
+        assertEquals(1, run.userFrames().size, "the prompt waits")
+        val held = run.session.state.value.stages().single()
+        assertEquals(PendingStage.HELD, held.second)
+
+        lines("bash-mode-respond", 3, 7) { n, fields ->
+            if (n == 6) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$quiet\"]")
+        }.forEach(run::write)
+        val frames = run.userFrames(3)
+        assertEquals("<bash-input>echo hi</bash-input>", frames[0].content())
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", frames[1].content())
+        assertEquals("next", frames[2].text())
+        assertEquals(held.first, frames[2].uuid())
+        assertEquals(listOf(held.first to PendingStage.QUEUED), run.awaitState { it.stages().none { s -> s.second == PendingStage.HELD } }.stages())
+        run.close()
+    }
+
+    @Test
+    fun `a prompt sent while a ! command runs goes out after the escape's frames`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.event(SessionEvent.ShellStarted("s1", "echo hi", 0))
+        run.session.sendUserMessage("next")
+        delay(300)
+        assertEquals(0, run.userFrames().size, "no frame while the command runs")
+        val held = run.session.state.value.stages().single()
+        assertEquals(PendingStage.HELD, held.second)
+
+        run.session.sendShellEscape("s1", "echo hi", "hi\n", respond = true)
+        val quiet = run.userFrames(1).single().uuid()
+        assertEquals("<bash-input>echo hi</bash-input>", run.userFrames().single().content())
+        lines("bash-mode-respond", 3, 7) { n, fields ->
+            if (n == 6) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$quiet\"]")
+        }.forEach(run::write)
+        val frames = run.userFrames(3)
+        assertEquals("<bash-stdout>hi\n</bash-stdout><bash-stderr></bash-stderr>", frames[1].content())
+        assertEquals("next", frames[2].text())
+        assertEquals(listOf(held.first to PendingStage.QUEUED), run.awaitState { it.stages().none { s -> s.second == PendingStage.HELD } }.stages())
+        run.close()
+    }
+
+    @Test
+    fun `a prompt held behind a ! that sends nothing goes out when it ends`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.event(SessionEvent.ShellStarted("s1", "nope", 0))
+        run.session.sendUserMessage("next")
+        delay(300)
+        assertEquals(0, run.userFrames().size)
+        val uuid = run.session.state.value.stages().single().also { assertEquals(PendingStage.HELD, it.second) }.first
+        run.session.shellUnsent("s1")
+        assertEquals("next", run.userFrames(1).single().text())
+        assertEquals(listOf(uuid to PendingStage.QUEUED), run.session.state.value.stages())
+        run.close()
+    }
+
+    @Test
+    fun `a held escape waits until no queued message remains`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendUserMessage("prompt")
+        val prompt = run.userFrames(1).single().uuid()
+        run.session.sendUserMessage("more", later = true)
+        val later = run.userFrames(2)[1].uuid()
+        val uuids = mapOf("<command_uuid-4>" to prompt, "<command_uuid-25>" to later)
+        rewritten("queue-later", 1, 18, uuids).forEach(run::write)
+        run.settled()
+        assertEquals(listOf(later to PendingStage.QUEUED), run.session.state.value.stages())
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+
+        rewritten("queue-later", 19, 51, uuids).forEach(run::write)
+        run.awaitState { it.turnsEnded == 1 }
+        delay(300)
+        assertEquals(2, run.userFrames().size, "the later message waits in the CLI's queue: no escape yet")
+
+        rewritten("queue-later", 52, 63, uuids).forEach(run::write)
+        val frames = run.userFrames(3)
+        assertEquals("<bash-input>echo hi</bash-input>", frames[2].content())
+        assertEquals(2, run.session.state.value.turnsEnded)
+        run.close()
+    }
+
+    @Test
+    fun `the process ending drops held prompts and returns them`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, quietWaitMillis = 60_000)
+        run.session.start()
+        run.session.sendShellEscape("shell-1", "echo hi", "hi\n", respond = true)
+        run.userFrames(1)
+        run.session.sendUserMessage("next")
+        val uuid = run.session.state.value.stages().single().first
+        run.process.destroyForcibly()
+        val ended = run.awaitState { it.ended }
+        assertEquals(1, run.userFrames().size, "no prompt frame")
+        assertEquals(listOf(ReturnedSend(uuid, "next", emptyList())), ended.returnedSends)
+        assertTrue(ended.pendingSends.isEmpty())
+        assertEquals(
+            listOf("Not sent: \"next\": the CLI ended before reading it. It is back in the composer."),
+            ended.notices(NoticeLevel.WARNING).filter { it.startsWith("Not sent") },
+        )
+        run.close()
+    }
+
+    @Test
+    fun `a send the interrupt receipt names nowhere comes back with Stop's notice`() = runBlocking {
+        val run = turnOpen()
+        run.session.sendUserMessage("more")
+        val uuid = run.session.state.value.pendingSends.single().uuid
+        run.session.interrupt()
+        val request = run.requestOf("interrupt")
+        assertEquals(true, request.getValue("request").jsonObject["cancel_queued"]?.jsonPrimitive?.boolean)
+        run.success(request.getValue("request_id").jsonPrimitive.content, """{"still_queued":[],"cancelled":[]}""")
+        val returned = run.awaitState { it.pendingSends.isEmpty() }
+        assertEquals(listOf(ReturnedSend(uuid, "more", emptyList())), returned.returnedSends)
+        assertEquals(listOf("Not sent: \"more\". It is back in the composer."), returned.notices(NoticeLevel.INFO))
+        run.close()
+    }
+
+    @Test
+    fun `a prompt sent while a context-only escape's quiet result is due goes out after it`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.event(SessionEvent.ShellStarted("s1", "echo hi", 0))
+        run.session.sendUserMessage("next")
+        val uuid = run.session.state.value.stages().single().also { assertEquals(PendingStage.HELD, it.second) }.first
+        run.session.sendShellEscape("s1", "echo hi", "hi\n", respond = false)
+        val quiet = run.userFrames(1).single().uuid()
+        delay(300)
+        assertEquals(1, run.userFrames().size, "the prompt waits for the quiet result")
+        assertEquals(listOf(uuid to PendingStage.HELD), run.session.state.value.stages())
+        lines("bash-mode", 3, 8) { n, fields ->
+            if (n == 8) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$quiet\"]")
+        }.forEach(run::write)
+        val frames = run.userFrames(2)
+        assertTrue(frames[0].content().startsWith("<bash-input>echo hi</bash-input>"), frames[0].content())
+        assertEquals("next", frames[1].text())
+        assertEquals(listOf(uuid to PendingStage.QUEUED), run.awaitState { it.stages().none { s -> s.second == PendingStage.HELD } }.stages())
+        run.close()
+
+        // No command running: an ended command's context frame, then a prompt before its quiet result.
+        val again = ScriptedSession(tmp, newSessionId)
+        again.session.start()
+        again.session.sendShellEscape("s2", "echo hi", "hi\n", respond = false)
+        val second = again.userFrames(1).single().uuid()
+        again.session.sendUserMessage("next")
+        delay(300)
+        assertEquals(1, again.userFrames().size, "no prompt frame until the quiet result")
+        lines("bash-mode", 3, 8) { n, fields ->
+            if (n == 8) fields["user_message_uuids"] = Json.parseToJsonElement("[\"$second\"]")
+        }.forEach(again::write)
+        assertEquals("next", again.userFrames(2)[1].text())
+        again.close()
     }
 }

@@ -42,7 +42,15 @@ object Ndjson {
         "control_response" -> decodeControlResponse(o)
         "control_cancel_request" -> o.string("request_id")?.let { CliMessage.ControlCancelRequest(it, o) }
         "keep_alive" -> CliMessage.KeepAlive(o)
+        "command_lifecycle" -> decodeCommandLifecycle(o)
         else -> null
+    }
+
+    /** A missing or non-string `command_uuid` or `state` leaves the line [CliMessage.Unknown]. */
+    private fun decodeCommandLifecycle(o: JsonObject): CliMessage? {
+        val commandUuid = o.string("command_uuid") ?: return null
+        val state = o.string("state") ?: return null
+        return CliMessage.CommandLifecycle(commandUuid, state, o)
     }
 
     private fun decodeSystem(o: JsonObject): CliMessage? = when (o.string("subtype")) {
@@ -58,6 +66,9 @@ object Ndjson {
                 mcpServers = o.objects("mcp_servers").mapNotNull(::mcpServerSummary),
                 slashCommands = o.strings("slash_commands"),
                 terminalSlashCommands = o.strings("terminal_slash_commands"),
+                plugins = o.objects("plugins").mapNotNull(::pluginInfo),
+                additionalDirectories = o.strings("additional_directories"),
+                skills = o.strings("skills"),
                 raw = o,
             )
         }

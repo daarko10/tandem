@@ -8,14 +8,19 @@ import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.PermissionCard
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
+import dev.daarkolabs.tandem.session.UsagePart
 import dev.daarkolabs.tandem.ui.cards.PendingCardHost
 import dev.daarkolabs.tandem.ui.cards.answerFor
 import dev.daarkolabs.tandem.ui.cards.escapeAnswer
@@ -24,6 +29,7 @@ import dev.daarkolabs.tandem.ui.rows.ReplyHost
 import dev.daarkolabs.tandem.ui.rows.copyToClipboard
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import org.jetbrains.jewel.foundation.actionSystem.provideData
 import org.jetbrains.jewel.foundation.modifier.thenIf
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 
@@ -35,8 +41,9 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
  * [focusPrompt] the prompt box takes the focus, and then [onPromptFocused] is called. Esc in the transcript asks for the prompt box's
  * focus with [onFocusComposer]; Esc in the prompt box while a card is open gives the card's Esc answer (spec 4.18). A card that opens
  * takes the focus only when [cardTakesFocus] says so then. Under each ended turn's reply, Copy and Fork from here go through [actions].
- * Prompts, with their attached images, go out through the session's [sender]. A local `/mcp` notice's link calls [onOpenMcp], and a
- * running shell escape's `Stop command` [onStop].
+ * Prompts, with their attached images, go out through the session's [sender]. A local `/mcp` notice's link calls [onOpenMcp], a
+ * running shell escape's `Stop command` [onStop], and a usage card's `Retry` [onUsageRetry]; a waiting message's Edit and Cancel go to
+ * [manager] (desktop-parity spec 12.3).
  */
 @Composable
 internal fun ChatPane(
@@ -54,6 +61,7 @@ internal fun ChatPane(
     cardTakesFocus: () -> Boolean = { false },
     onOpenMcp: () -> Unit = {},
     onStop: () -> Unit = {},
+    onUsageRetry: (uuid: String, part: UsagePart) -> Unit = { _, _ -> },
 ) {
     val composer by presenter.composer.collectAsState()
     val pendingFlow = remember(presenter) { presenter.chat.map { it.pendingCard() }.distinctUntilChanged() }
@@ -61,31 +69,50 @@ internal fun ChatPane(
     // The plan card's feedback, for the request on screen: Esc in the composer sends it too.
     val feedback = remember(pending.card?.requestId) { TextFieldState() }
     val panel = JewelTheme.globalColors.panelBackground
-    // The replies' hover rows (polish spec 2.6): only they read the two states, so a turn's start or end recomposes nothing else.
-    val latestReply = presenter.latestReply.collectAsState()
-    val busy = presenter.busy.collectAsState()
-    val reply = remember(handle.id, actions, latestReply, busy) {
-        ReplyHost(::copyToClipboard, { actions.fork(handle.id) }, latestReply, busy)
-    }
-    Column(Modifier.fillMaxSize()) {
-        Box(
-            Modifier.weight(1f).fillMaxWidth()
-                // The dim of spec 4.12: a scrim drawn over the list, never an offscreen layer of it.
-                .thenIf(pending.card is PermissionCard) {
-                    drawWithContent {
-                        drawContent()
-                        drawRect(panel.copy(alpha = 0.5f))
-                    }
-                },
-        ) {
-            val emptyText = if (composer.ended) {
-                "This session's claude process has stopped. Send a prompt to start it again."
-            } else {
-                "Ask Claude anything about this project."
+    // The replies' hover rows (polish spec 2.6): Fork from here forks at the reply's own point (desktop-parity spec 13.1).
+    val reply = remember(handle.id, actions) { ReplyHost(::copyToClipboard) { at -> actions.fork(handle.id, at) } }
+    // The chat pane's height, which caps the context popover's (desktop-parity spec 3.1: 60 % of the tool window).
+    val density = LocalDensity.current
+    // Read only by the open popover (through the provider), so a resize recomposes neither the pane nor the prompt bar.
+    val paneHeight = remember { mutableStateOf<Dp?>(null) }
+    val paneHeightOf: () -> Dp? = remember(paneHeight) { { paneHeight.value } }
+    ChatPaneColumn(
+        Modifier.fillMaxSize().onSizeChanged { paneHeight.value = with(density) { it.height.toDp() } }
+            // `Tandem.AddFilesOrPhotos` (spec 17.4): wherever the focus is in this pane, while none of the composer's menus is open.
+            .provideData { composerAttachFor(ui.attach, ui.openMenus.intValue)?.let { set(COMPOSER_ATTACH.name, it) } },
+        chat = { chatModifier ->
+            Box(
+                chatModifier
+                    // The dim of spec 4.12: a scrim drawn over the list, never an offscreen layer of it.
+                    .thenIf(pending.card is PermissionCard) {
+                        drawWithContent {
+                            drawContent()
+                            drawRect(panel.copy(alpha = 0.5f))
+                        }
+                    },
+            ) {
+                val emptyText = if (composer.ended) {
+                    "This session's claude process has stopped. Send a prompt to start it again."
+                } else {
+                    "Ask Claude anything about this project."
+                }
+                ChatPanel(
+                    project,
+                    presenter,
+                    ui,
+                    emptyText,
+                    handle.lastFrameAtMillis,
+                    onFocusComposer,
+                    reply,
+                    onOpenMcp,
+                    onStop,
+                    onUsageRetry,
+                    onWithdraw = { uuid, restore -> manager.withdraw(handle.id, uuid, restore) },
+                )
             }
-            ChatPanel(project, presenter, ui, emptyText, handle.lastFrameAtMillis, onFocusComposer, reply, onOpenMcp, onStop)
-        }
-        pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) }
+        },
+        card = { pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) } },
+    ) {
         PromptBar(
             project,
             handle,
@@ -102,6 +129,29 @@ internal fun ChatPane(
                         ?.let { manager.answer(handle.id, card.requestId, it) }
                 }
             },
+            paneHeight = paneHeightOf,
         )
+    }
+}
+
+/**
+ * The chat pane's column: [chat] over the docked [card] over [promptBar]. The prompt bar keeps its height, the card is given at most
+ * what is left (it scrolls its own content in that, spec 4.12), and the chat, laid out with the modifier it is passed, takes the rest:
+ * none when the card needs it all, so a short tool window never pushes the card's buttons or the prompt bar off the pane.
+ */
+@Composable
+internal fun ChatPaneColumn(
+    modifier: Modifier,
+    chat: @Composable (Modifier) -> Unit,
+    card: @Composable () -> Unit,
+    promptBar: @Composable () -> Unit,
+) {
+    // A column measures its unweighted children first: the prompt bar here, then the card in the inner column.
+    Column(modifier) {
+        Column(Modifier.weight(1f).fillMaxWidth()) {
+            chat(Modifier.weight(1f).fillMaxWidth())
+            card()
+        }
+        promptBar()
     }
 }

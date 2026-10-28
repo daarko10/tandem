@@ -4,11 +4,14 @@ import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ModelOption
+import dev.daarkolabs.tandem.session.PendingStage
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.ShellEnd
 import dev.daarkolabs.tandem.session.TaskInfo
 import dev.daarkolabs.tandem.session.TurnEnd
+import dev.daarkolabs.tandem.session.UserImage
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.mutate
@@ -22,12 +25,8 @@ import java.util.IdentityHashMap
 /** What the rows show beyond the state: [showThinking] is the `Show thinking rows` setting. */
 data class RowOptions(val showThinking: Boolean)
 
-/**
- * The chat list's rows, the pending request shown as a card, and how many more requests wait behind it. [latestReply] is the entry id
- * of the last ended turn's reply (polish spec 2.6): the one reply `Fork from here` can fork; null when that turn has no reply or no
- * turn has ended. While a turn runs it is the turn's before it, so its fork waits rather than being refused.
- */
-data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, val moreWaiting: Int, val latestReply: String? = null)
+/** The chat list's rows, the pending request shown as a card, and how many more requests wait behind it. */
+data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, val moreWaiting: Int)
 
 /**
  * Builds the chat rows from a [ChatState] (spec 5.3, 5.4): one row per user message, shell escape (MCP spec 12.1), text block,
@@ -37,12 +36,13 @@ data class ChatRows(val rows: ImmutableList<ChatRow>, val card: PendingCard?, va
  * [WorkingRow] (spec 4.9); once the latest turn has ended its [TurnEndRow] stands where it ended (spec 4.10), and a failed turn's
  * `The turn failed` notice gives way to it when the footer states all the notice says (spec 4.10, 4.11). The oldest pending request
  * comes as the [ChatRows.card] ([Cards.pending]). Once a turn has ended, the last text block of its reply carries the hover row's
- * [MessageActions] (polish spec 2.6), and [ChatRows.latestReply] names the last ended turn's reply, from the entries on every build.
+ * [MessageActions] (polish spec 2.6), with the turn's fork point ([MessageActions.forkAt], desktop-parity spec 13.1).
  *
  * Rows are cached per turn (a turn runs from one user message or shell escape to the next): a closed turn is built once more when it
  * closes and then kept, and its rows are the same instances in every later build. A build checks the cache by the identity of the
  * last entry it holds and scans only the entries after it, so a long session costs no more per event than a short one. A later entry
- * that refers to a cached turn (a late result, a background agent's lines) opens that turn again; a state whose entries shrank (a
+ * that refers to a cached turn (a late result, a background agent's lines) opens that turn again, as does a new instance of a
+ * cached usage notice (its card's answer, a `Retry`); a state whose entries shrank (a
  * retraction) or whose working directory changed drops the cache. The rows and the calls of the open turns that equal the previous
  * build's keep their previous instance, a result's body is built once and a live call's body once per input instance, so unchanged
  * rows and calls compare by identity (polish spec 6).
@@ -58,6 +58,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
         val rowsBefore: PersistentList<ChatRow>,
         val rows: List<ChatRow>,
         val calls: List<String>,
+        val usageNotices: List<Pair<Int, ChatEntry.Notice>>,
     )
 
     /** A result's body and stats, built once per result entry for the call input it was built with. */
@@ -72,6 +73,9 @@ class ChatRowsBuilder(private val options: RowOptions) {
     private val frozen = ArrayList<Frozen>()
     private var frozenRows: PersistentList<ChatRow> = persistentListOf()
     private val frozenKeys = HashSet<String>()
+
+    /** The cached turns (indices into [frozen], ascending) that hold a usage notice: the only ones a card's answer reopens. */
+    private val usageTurns = ArrayList<Int>()
 
     /** The cached turn (index into [frozen]) that owns each call of the cached turns. */
     private val callOwner = HashMap<String, Int>()
@@ -115,11 +119,12 @@ class ChatRowsBuilder(private val options: RowOptions) {
             val failureInFooter = end != null && end.end == TurnEnd.FAILED && !end.textStreamed && t == region.turns.lastIndex
             val context = TurnContext(turnOpen, failureInFooter, end)
             val rows = Rows(previous, grouped = true) { reuse(withUniqueKey(it, keys)) }
-            // The reply that gets the hover row, once the turn has ended (polish spec 2.6).
+            // The reply that gets the hover row, once the turn has ended (polish spec 2.6), and where a fork at it cuts (spec 13.1).
             val reply = if (turnOpen) -1 else turn.lastWhere(entries::isReply)
+            val forkAt = if (reply < 0) null else forkPoint(entries, turn)
             for (index in turn) {
                 if (index in region.childEntries) continue
-                entryRows(entries[index], context, region, nextBodies, rows, withActions = index == reply)
+                entryRows(entries[index], context, region, nextBodies, rows, withActions = index == reply, forkAt = forkAt)
             }
             rows.flush()
             previous = rows.previous
@@ -127,37 +132,31 @@ class ChatRowsBuilder(private val options: RowOptions) {
         }
         bodies = nextBodies.results
         pendingBodies = nextBodies.pending
-        live = turnRows.flatten().associateBy { it.key }
+        // Built against the previous build's rows, so an unchanged bubble keeps its instance.
+        val queued = queuedRows(state, keys)
+        live = turnRows.flatten().associateBy { it.key } + queued.associateBy { it.key }
         liveCalls = callsOf(live.values)
 
         val all = frozenRows.mutate { list ->
             turnRows.forEach(list::addAll)
             workingRow(state, list)?.let(list::add)
+            list.addAll(queued)
         }
         freeze(region, turnRows)
         val (card, moreWaiting) = Cards.pending(state)
         lastCard = lastCard?.takeIf { it == card } ?: card
-        return ChatRows(all, lastCard, moreWaiting, latestReply(state))
+        return ChatRows(all, lastCard, moreWaiting)
     }
 
     /**
-     * The entry id of the last ended turn's reply (polish spec 2.6), from [state]'s entries, never from the cached turns: a backward
-     * scan that skips the running turn, back to and including its user message (or shell escape), then takes the last main-thread
-     * message with text before the user message before it. Null when that turn has none (an interrupt before any text) or no turn
-     * has ended.
+     * Where a fork at the reply of the turn [turn] cuts (desktop-parity spec 13.1): the [ChatEntry.Assistant.lastUuid] of the turn's
+     * last main-thread message that has one, scanning back; never a subagent's line. Null when none has (a reply drafted from deltas
+     * only, in a turn with no complete main-thread line).
      */
-    private fun latestReply(state: ChatState): String? {
-        val entries = state.entries
-        var i = entries.lastIndex
-        if (state.turn != null) {
-            while (i >= 0 && !entries[i].startsTurn()) i--
-            i--
-        }
-        while (i >= 0) {
-            val entry = entries[i]
-            if (entry.startsTurn()) return null
-            if (entries.isReply(i)) return entry.id
-            i--
+    private fun forkPoint(entries: List<ChatEntry>, turn: IntRange): String? {
+        for (index in turn.reversed()) {
+            val entry = entries[index]
+            if (entry is ChatEntry.Assistant && entry.parentToolUseId == null) entry.lastUuid?.let { return it }
         }
         return null
     }
@@ -184,8 +183,10 @@ class ChatRowsBuilder(private val options: RowOptions) {
         var marker: ChatEntry.Notice? = null
         var textStreamed = false
         for (i in entries.indices.reversed()) {
-            when (val entry = entries[i]) {
-                is ChatEntry.User, is ChatEntry.Shell -> break
+            val entry = entries[i]
+            if (entry.startsTurn()) break
+            when (entry) {
+                is ChatEntry.User, is ChatEntry.Shell -> Unit
                 is ChatEntry.TurnEnded -> if (ended == null) ended = entry
                 is ChatEntry.Notice -> if (marker == null && entry.kind == NoticeKind.INTERRUPTED) marker = entry
                 is ChatEntry.Assistant -> if (entry.parentToolUseId == null && entry.blocks.any { it is AssistantBlock.Text && it.text.isNotBlank() }) {
@@ -243,17 +244,21 @@ class ChatRowsBuilder(private val options: RowOptions) {
             liveCalls = callsOf(rows.values)
         }
         frozen.clear()
+        usageTurns.clear()
         frozenRows = persistentListOf()
         frozenKeys.clear()
         callOwner.clear()
         bodies = IdentityHashMap()
     }
 
-    /** Opens the cached turns that entries after the cache refer to again, from the earliest; their rows keep their instances. */
+    /**
+     * Opens the cached turns that entries after the cache refer to again, from the earliest, and from the earliest cached turn whose
+     * usage notice changed (its card's answer came, or `Retry` was pressed, deviation 7); their rows keep their instances.
+     */
     private fun reopenReferencedTurns(entries: List<ChatEntry>) {
         var scanFrom = frozenEnd
         while (frozen.isNotEmpty()) {
-            var earliest = Int.MAX_VALUE
+            var earliest = changedUsageTurn(entries)
             for (index in scanFrom until entries.size) {
                 val entry = entries[index]
                 val parent = parentOf(entry)
@@ -275,8 +280,17 @@ class ChatRowsBuilder(private val options: RowOptions) {
             }
             live = rows
             liveCalls = callsOf(rows.values)
+            usageTurns.removeAll { it >= earliest }
             reopened.clear()
         }
+    }
+
+    /** The earliest cached turn with a usage notice that is no longer the same instance at its index; [Int.MAX_VALUE] for none. */
+    private fun changedUsageTurn(entries: List<ChatEntry>): Int {
+        for (t in usageTurns) {
+            if (frozen[t].usageNotices.any { (index, notice) -> entries[index] !== notice }) return t
+        }
+        return Int.MAX_VALUE
     }
 
     /**
@@ -298,8 +312,12 @@ class ChatRowsBuilder(private val options: RowOptions) {
         }
         for (t in 0 until cut) {
             val turn = turns[t]
-            val cached = Frozen(turn.first, turn.last + 1, region.entries[turn.last], frozenRows, turnRows[t], region.callsOf[t])
+            val usageNotices = turn.mapNotNull { index ->
+                (region.entries[index] as? ChatEntry.Notice)?.takeIf { it.usage != null }?.let { index to it }
+            }
+            val cached = Frozen(turn.first, turn.last + 1, region.entries[turn.last], frozenRows, turnRows[t], region.callsOf[t], usageNotices)
             frozen += cached
+            if (usageNotices.isNotEmpty()) usageTurns += frozen.lastIndex
             cached.calls.forEach { callOwner[it] = frozen.lastIndex }
             turnRows[t].forEach { frozenKeys += it.key }
             frozenRows = frozenRows.mutate { it.addAll(turnRows[t]) }
@@ -315,18 +333,48 @@ class ChatRowsBuilder(private val options: RowOptions) {
         return if (key == row.key) row else row.withKey(key)
     }
 
-    /** The images of [entry], by id, in the order sent (polish spec 2.7); the shared empty list for a prompt without any. */
-    private fun imageRefs(entry: ChatEntry.User): ImmutableList<ImageRef> =
-        if (entry.images.isEmpty()) persistentListOf() else entry.images.mapIndexed { i, image -> ImageRef(image.id, image.mediaType, i) }.toImmutableList()
+    /** [images] by id, in the order sent (polish spec 2.7); the shared empty list for a prompt without any. */
+    private fun imageRefs(images: List<UserImage>): ImmutableList<ImageRef> =
+        if (images.isEmpty()) persistentListOf() else images.mapIndexed { i, image -> ImageRef(image.id, image.mediaType, i) }.toImmutableList()
+
+    /**
+     * One [QueuedRow] per message waiting in [state] (desktop-parity spec 12.1), in send order, keyed `q:<uuid>`; each the previous
+     * build's instance when it is equal. Every waiting message can be withdrawn: D8's `queue-cancel-steer` recorded a steer withdrawn
+     * as a later message is (probes 5.1, spec 12.3).
+     */
+    private fun queuedRows(state: ChatState, keys: MutableSet<String>): List<QueuedRow> = state.pendingSends.map { send ->
+        val row = QueuedRow(
+            "q:${send.uuid}",
+            send.text,
+            imageRefs(send.images),
+            queuedCaption(send),
+            withdrawable = true,
+            withdrawing = send.stage == PendingStage.WITHDRAWING,
+        )
+        reuse(withUniqueKey(row, keys)) as QueuedRow
+    }
 
     /**
      * The row of notice [entry]. A local command's notice keeps its command; `/mcp`'s (the CLI ran `mcp`) gets the link to the panel in
-     * place of the CLI's terminal hint, removed by exact match only (spec 3.5).
+     * place of the CLI's terminal hint, removed by exact match only (spec 3.5); `/context`'s is Markdown (desktop-parity spec 3.1); a
+     * `/usage` notice of the stream carries its card, labelled with the session's [models] (spec 3.2).
      */
-    private fun noticeRow(entry: ChatEntry.Notice, gap: RowGap): NoticeRow {
-        val link = if (entry.kind == NoticeKind.LOCAL_COMMAND && entry.runCommand == "mcp") NoticeLink.OPEN_MCP else null
+    private fun noticeRow(entry: ChatEntry.Notice, gap: RowGap, region: Region): NoticeRow {
+        val local = entry.kind == NoticeKind.LOCAL_COMMAND
+        val link = if (local && entry.runCommand == "mcp") NoticeLink.OPEN_MCP else null
         val text = if (link == NoticeLink.OPEN_MCP) entry.text.removeSuffix(MCP_TERMINAL_HINT) else entry.text
-        return NoticeRow("n:${entry.id}", entry.level, text, gap, entry.kind, entry.command, link)
+        return NoticeRow(
+            "n:${entry.id}",
+            entry.level,
+            text,
+            gap,
+            entry.kind,
+            entry.command,
+            link,
+            usage = entry.usage?.let { usageCard(it, entry.text, region.models, region.activeModel) },
+            markdown = local && entry.runCommand == "context",
+            sourceUuid = entry.sourceUuid,
+        )
     }
 
     /** The previous build's instance of [row] when it is equal. */
@@ -383,6 +431,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
         nextBodies: Bodies,
         rows: Rows,
         withActions: Boolean,
+        forkAt: String?,
     ) {
         val turnOpen = context.turnOpen
         when (entry) {
@@ -392,19 +441,20 @@ class ChatRowsBuilder(private val options: RowOptions) {
                     entry.text,
                     entry.text.startsWith("/") || entry.text.startsWith("!"),
                     gap(Kind.USER, it),
-                    imageRefs(entry),
+                    imageRefs(entry.images),
+                    caption = if (entry.folded) FOLDED_CAPTION else null,
                 )
             }
             // Thinking rows are the main thread's; a subagent message of an unknown agent shows its text and calls only.
             is ChatEntry.Assistant ->
-                assistantRows(entry, turnOpen, region, nextBodies, rows, thinking = entry.parentToolUseId == null, withActions = withActions)
+                assistantRows(entry, turnOpen, region, nextBodies, rows, entry.parentToolUseId == null, withActions, forkAt)
             is ChatEntry.ToolResult -> if (entry.toolUseId !in region.calls) rows.add { orphan(entry, gap(Kind.TOOL, it)) }
             // The interrupt marker shows as the turn's end, not as a row; it still closes a group.
             is ChatEntry.Notice -> when {
                 entry.kind == NoticeKind.INTERRUPTED ||
                     context.failureInFooter && entry.level == NoticeLevel.ERROR && saidByFooter(entry.text, context.end?.text.orEmpty()) ->
                     rows.add { footer(entry, context, it) }
-                else -> rows.add { noticeRow(entry, gap(Kind.NOTICE, it)) }
+                else -> rows.add { noticeRow(entry, gap(Kind.NOTICE, it), region) }
             }
             is ChatEntry.TurnEnded -> if (context.end?.entry === entry) rows.add { footer(entry, context, it) }
             is ChatEntry.Shell -> rows.add { shellRow(entry, gap(Kind.SHELL, it)) }
@@ -414,7 +464,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
     /**
      * Adds the rows of an assistant message to [rows]: its non-blank text blocks, its thinking blocks (main thread only) and its
      * visible tool calls. A thinking block closes a group whether or not it is shown, so the setting never changes grouping. With
-     * [withActions] (the reply of an ended turn) its last text block carries the hover row's [MessageActions], once it no longer streams.
+     * [withActions] (the reply of an ended turn) its last text block carries the hover row's [MessageActions], once it no longer streams,
+     * with the turn's fork point [forkAt].
      */
     private fun assistantRows(
         entry: ChatEntry.Assistant,
@@ -424,12 +475,13 @@ class ChatRowsBuilder(private val options: RowOptions) {
         rows: Rows,
         thinking: Boolean,
         withActions: Boolean = false,
+        forkAt: String? = null,
     ) {
         val actionsAt = if (withActions && !entry.streaming) entry.blocks.indexOfLast { it.isText() } else -1
         entry.blocks.forEachIndexed { index, block ->
             when (block) {
                 is AssistantBlock.Text -> if (block.text.isNotBlank()) {
-                    val actions = if (index == actionsAt) MessageActions(entry.id, entry.markdown(), entry.atMillis) else null
+                    val actions = if (index == actionsAt) MessageActions(entry.id, entry.markdown(), entry.atMillis, forkAt) else null
                     rows.add { TextRow("t:${entry.id}:$index", block.text, entry.streaming && index >= entry.completedBlocks, gap(Kind.TEXT, it), actions) }
                 }
                 is AssistantBlock.Thinking -> rows.add { if (thinking) thinkingRow(entry, index, block, it) else null }
@@ -613,6 +665,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
     private class Region(state: ChatState, start: Int) {
         val entries: List<ChatEntry> = state.entries
         val cwd: String? = state.cwd
+        val models: List<ModelOption> = state.models
+        val activeModel: String? = state.activeModel
         val pending: Set<String> = state.pendingPermissions.mapNotNullTo(HashSet()) { it.toolUseId }
         val tasks: Map<String, TaskInfo> = state.tasks.values.filter { it.toolUseId != null }.associateBy { it.toolUseId!! }
         val turns = ArrayList<IntRange>()
@@ -716,9 +770,10 @@ private fun ChatEntry.Assistant.markdown(): String = blocks.filter { it.isText()
 
 /**
  * Whether this entry starts a turn (MCP spec 12.4): a user message, or a shell escape, which stands in its place. Every check of a
- * turn's bounds reads both.
+ * turn's bounds reads both. A prompt the CLI took into a running turn ([ChatEntry.User.folded]) starts none, so one CLI turn is one
+ * visual turn with one footer (desktop-parity spec 12.1).
  */
-internal fun ChatEntry.startsTurn(): Boolean = this is ChatEntry.User || this is ChatEntry.Shell
+internal fun ChatEntry.startsTurn(): Boolean = this is ChatEntry.User && !folded || this is ChatEntry.Shell
 
 /** The call a subagent's entry belongs to, if any. */
 private fun parentOf(entry: ChatEntry): String? = when (entry) {
@@ -737,4 +792,5 @@ private fun ChatRow.withKey(key: String): ChatRow = when (this) {
     is NoticeRow -> copy(key = key)
     is TurnEndRow -> copy(key = key)
     is WorkingRow -> copy(key = key)
+    is QueuedRow -> copy(key = key)
 }

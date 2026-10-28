@@ -11,6 +11,8 @@ import com.intellij.testFramework.junit5.fixture.tempPathFixture
 import com.intellij.testFramework.openProjectAsync
 import com.intellij.testFramework.useProjectAsync
 import dev.daarkolabs.tandem.protocol.Fixtures
+import dev.daarkolabs.tandem.session.AssistantBlock
+import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.OwnFakeCliProcesses
 import dev.daarkolabs.tandem.session.ScriptedProcess
@@ -96,6 +98,8 @@ class SessionNotifierTest {
         hold: (suspend () -> Unit)? = null,
         visible: (() -> Boolean)? = null,
         lateNotifier: Boolean = false,
+        /** More variables for every process, such as `TANDEM_FAKE_LINE_DELAY_MS`. */
+        environment: Map<String, String> = emptyMap(),
         block: suspend Run.() -> T,
     ): T {
         val dir = tempDir.get().resolve(name).createDirectories()
@@ -115,7 +119,7 @@ class SessionNotifierTest {
                     },
                 )
                 val sessions = TandemSessions.get(project)
-                sessions.extraEnvironment = mapOf("TANDEM_FAKE_LOG" to log.toString(), "TANDEM_FAKE_FIXTURES" to fixtures)
+                sessions.extraEnvironment = mapOf("TANDEM_FAKE_LOG" to log.toString(), "TANDEM_FAKE_FIXTURES" to fixtures) + environment
                 when {
                     lateNotifier -> {}
                     hold == null && visible == null -> {
@@ -486,5 +490,31 @@ class SessionNotifierTest {
                 Disposer.dispose(listening)
             }
         }
+    }
+
+    @Test
+    fun `no notification while a message waits, one after the queued turn ends`() = timeoutRunBlocking(60.seconds) {
+        // The selected session, the tool window hidden: the notifier follows its turn ends itself (deviation 21).
+        val (notifications, title) = withSessions(
+            "queued-turn",
+            fixtures = "queue-later",
+            visible = { false },
+            // The second turn streams slowly enough to look between the two results.
+            environment = mapOf("TANDEM_FAKE_LINE_DELAY_MS" to "150"),
+        ) {
+            val b = manager.create(NewSessionOptions())
+            manager.select(b.id)
+            awaitSpawns(1)
+            manager.send(b.id, "Run it")
+            b.state.first { s -> s.entries.any { e -> e is ChatEntry.Assistant && e.blocks.any { it is AssistantBlock.ToolUse && it.input != null } } }
+            manager.send(b.id, "Also say the word KIWI at the end.", later = true)
+            b.state.first { it.turnsEnded == 1 }
+            delay(500)
+            assertEquals(1, b.state.value.turnsEnded, "the queued turn still runs")
+            assertEquals(emptyList(), posted.map { it.title }, "a message waited when the first turn ended")
+            b.state.first { it.turnsEnded == 2 }
+            notifications() to b.title.value
+        }
+        assertEquals(listOf("$title finished"), notifications.map { it.title })
     }
 }

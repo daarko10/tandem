@@ -19,9 +19,11 @@ data class ImageBlock(val mediaType: String, val base64: String)
 object HostMessages {
     /**
      * A prompt: a text block for [text] unless it is blank, then one base64 image block per entry of [images], in order
-     * (docs/protocol.md 3). [uuid] comes back as `user_message_uuids` so turns can be correlated.
+     * (docs/protocol.md 3). [uuid] comes back as `user_message_uuids` so turns can be correlated. With [later], `"priority":"later"`
+     * follows `uuid`: a message sent while a turn runs waits for its own turn instead of folding into the running one (spec 12.6);
+     * without it the frame is byte-identical to before.
      */
-    fun userMessage(text: String, images: List<ImageBlock>, uuid: String): JsonObject = buildJsonObject {
+    fun userMessage(text: String, images: List<ImageBlock>, uuid: String, later: Boolean = false): JsonObject = buildJsonObject {
         put("type", "user")
         put("session_id", "")
         putJsonObject("message") {
@@ -47,6 +49,7 @@ object HostMessages {
         }
         put("parent_tool_use_id", JsonNull)
         put("uuid", uuid)
+        if (later) put("priority", "later")
     }
 
     /**
@@ -76,7 +79,15 @@ object HostMessages {
         put("forwardSubagentText", true)
     }
 
-    fun interrupt(requestId: String): JsonObject = request(requestId, "interrupt") {}
+    /** Stops the running turn; with [cancelQueued] the CLI also drops the messages queued behind it (`interrupt_cancel_queued_v1`). */
+    fun interrupt(requestId: String, cancelQueued: Boolean = false): JsonObject = request(requestId, "interrupt") {
+        if (cancelQueued) put("cancel_queued", true)
+    }
+
+    /** Withdraws the queued message [messageUuid] before it starts; the answer is `{"cancelled":true|false}` ([cancelAsyncAnswer]). */
+    fun cancelAsyncMessage(requestId: String, messageUuid: String): JsonObject = request(requestId, "cancel_async_message") {
+        put("message_uuid", messageUuid)
+    }
 
     /** [model] null resets to the session default. Confirm the switch from the next `system/init`. */
     fun setModel(requestId: String, model: String?): JsonObject = request(requestId, "set_model") { put("model", model) }
@@ -115,6 +126,14 @@ object HostMessages {
     /** Starts the MCP server [serverName]'s sign-in: the answer carries the `authUrl` the host opens itself. No `redirectUri`. */
     fun mcpAuthenticate(requestId: String, serverName: String): JsonObject = request(requestId, "mcp_authenticate") {
         put("serverName", serverName)
+    }
+
+    /** Asks for the context window by category (`get_context_usage`, probes 3.2). */
+    fun getContextUsage(requestId: String): JsonObject = request(requestId, "get_context_usage") {}
+
+    /** Asks for the session's cost and, unless [skipBehaviors], the machine's usage history (`get_usage`, probes 3.2). */
+    fun getUsage(requestId: String, skipBehaviors: Boolean): JsonObject = request(requestId, "get_usage") {
+        if (skipBehaviors) put("skip_behaviors", true)
     }
 
     /** Allows a `can_use_tool` request. Always echo the (possibly edited) input. */

@@ -1,15 +1,22 @@
 package dev.daarkolabs.tandem.session
 
+import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.diagnostic.debug
+import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.CliMessage
 import dev.daarkolabs.tandem.protocol.ContentBlock
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.Delta
 import dev.daarkolabs.tandem.protocol.InboundRequest
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.McpServerSummary
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.SessionUsage
 import dev.daarkolabs.tandem.protocol.StreamEvent
 import dev.daarkolabs.tandem.protocol.TaskUsage
+import dev.daarkolabs.tandem.protocol.UsageAnswer
+import dev.daarkolabs.tandem.protocol.UsageHistory
 import dev.daarkolabs.tandem.protocol.array
 import dev.daarkolabs.tandem.protocol.asObject
 import dev.daarkolabs.tandem.protocol.boolean
@@ -31,8 +38,39 @@ sealed interface SessionEvent {
     /** [atMillis]: when the line came, on the host's clock (a loaded transcript passes the line's own timestamp); 0 when unknown. */
     data class Cli(val message: CliMessage, val atMillis: Long = 0L) : SessionEvent
 
-    /** A prompt the user sent: its [text] and the [images] attached to it. */
-    data class UserSent(val uuid: String, val text: String, val atMillis: Long = 0L, val images: List<UserImage> = emptyList()) : SessionEvent
+    /**
+     * A prompt the user sent: its [text] and the [images] attached to it. [live]: sent to a running process, which waits it in its
+     * queue while a turn is open or a message waits ([held]: Tandem holds it behind a shell escape's frames); [later]: sent with
+     * `"priority":"later"`. [folded]: a loaded transcript's message that the CLI took into a running turn (a `queued_command`).
+     */
+    data class UserSent(
+        val uuid: String,
+        val text: String,
+        val atMillis: Long = 0L,
+        val images: List<UserImage> = emptyList(),
+        val later: Boolean = false,
+        val live: Boolean = false,
+        val held: Boolean = false,
+        val folded: Boolean = false,
+    ) : SessionEvent
+
+    /** The held message [uuid] was written: [PendingStage.HELD] becomes [PendingStage.QUEUED]. */
+    data class SendReleased(val uuid: String) : SessionEvent
+
+    /** A `cancel_async_message` for [uuid] went out; [restore]: the message goes back to the composer once withdrawn. */
+    data class WithdrawRequested(val uuid: String, val restore: Boolean) : SessionEvent
+
+    /** [uuid] was withdrawn: it leaves the waiting messages, and with [restore] goes back to the composer (with [notice] when given). */
+    data class SendWithdrawn(val uuid: String, val restore: Boolean, val notice: String?) : SessionEvent
+
+    /**
+     * The CLI did not withdraw [uuid]: it answered `false`, an error ([reason]) or nothing in time. [text] is the message's, read when
+     * the withdraw started, for the notice.
+     */
+    data class WithdrawRefused(val uuid: String, val reason: String?, val text: String) : SessionEvent
+
+    /** The composer took the returned messages [uuids] back. */
+    data class ReturnedTaken(val uuids: List<String>) : SessionEvent
 
     /**
      * The user picked a model; null means the CLI default. With [requestId], the `set_model` request sent for it, whose error answer
@@ -96,17 +134,46 @@ sealed interface SessionEvent {
      * quiet result): the turn [ShellSent] opened ends as stopped, without a footer, since no model call ran.
      */
     data class ShellReplyDropped(val id: String) : SessionEvent
+
+    /** The CLI answered `get_context_usage` with [breakdown]: it replaces [ChatState.contextBreakdown]. */
+    data class ContextBreakdownListed(val breakdown: ContextBreakdown) : SessionEvent
+
+    /** [part] of the usage card of the notice whose [ChatEntry.Notice.sourceUuid] is [uuid] came to [result]. */
+    data class UsageFetched(val uuid: String, val part: UsagePart, val result: ControlResult<UsageAnswer>) : SessionEvent
+
+    /** The user asked again for [part] of [uuid]'s usage card: [UsagePart.SESSION] loads both parts again, [UsagePart.HISTORY] its own. */
+    data class UsageRetry(val uuid: String, val part: UsagePart) : SessionEvent
 }
+
+private val LOG: Logger
+    get() = logger<SessionEvent>()
+
+/**
+ * Whether this stream line is the CLI's own answer to `/usage` (or `/cost`, which runs the same command) on the main thread, with a
+ * uuid to key its card by: the reducer gives its notice a [UsageCard], and [ClaudeSession] fetches the card's numbers after the
+ * local turn's `result`. One predicate for both, so no card waits for a fetch that never starts.
+ */
+internal fun CliMessage.Assistant.isUsageLine(): Boolean = localCommand?.command == "usage" && parentToolUseId == null && uuid != null
 
 /** Pure state transition. Never throws; deterministic, so fixture replays can test it. */
 fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     is SessionEvent.Cli -> reduceCli(state, event.message, event.atMillis)
-    // A send opens a turn, replacing any still open: a loaded transcript sends again with no result between its turns.
-    is SessionEvent.UserSent -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images)).copy(
-        busy = true,
-        turnInterrupted = false,
-        turn = TurnProgress(event.uuid, event.atMillis, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
-    )
+    is SessionEvent.UserSent -> reduceUserSent(state, event)
+    is SessionEvent.SendReleased -> state.updatePending(event.uuid) { if (it.stage == PendingStage.HELD) it.copy(stage = PendingStage.QUEUED) else it }
+    is SessionEvent.WithdrawRequested ->
+        state.updatePending(event.uuid) { it.copy(stage = PendingStage.WITHDRAWING, restoreOnWithdraw = event.restore) }
+    is SessionEvent.SendWithdrawn -> {
+        val send = state.pendingSends.firstOrNull { it.uuid == event.uuid }
+        when {
+            // Its cancelled line, or its start, came first (queue-cancel:24, :25): nothing waits any more.
+            send == null -> state
+            !event.restore -> state.copy(pendingSends = state.pendingSends - send)
+            else -> state.returnSend(send).let { next -> event.notice?.let { next.notice(NoticeLevel.INFO, it) } ?: next }
+        }
+    }
+    is SessionEvent.WithdrawRefused -> state.updatePending(event.uuid) { it.copy(stage = PendingStage.QUEUED, restoreOnWithdraw = false) }
+        .notice(NoticeLevel.INFO, notWithdrawnText(event.text))
+    is SessionEvent.ReturnedTaken -> state.copy(returnedSends = state.returnedSends.filter { it.uuid !in event.uuids })
     // The CLI confirms a switch with the next system/init; until then the old model is expected, not a mismatch. A refusal takes it back.
     is SessionEvent.ModelRequested -> {
         val change = ModelChange(event.model, state.requestedModel, state.modelSwitchPending, state.modelWarning)
@@ -122,6 +189,8 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
         permissionMode = event.mode,
         permissionModeChanges = event.requestId?.let { state.permissionModeChanges + (it to PermissionModeChange(event.mode, state.permissionMode)) }
             ?: state.permissionModeChanges,
+        // A live pick: the CLI's answer to it reports a refusal itself, so the first init no longer speaks for the launch mode.
+        launchPermissionMode = if (event.requestId != null) null else state.launchPermissionMode,
     )
     is SessionEvent.EffortRequested -> state.copy(
         effort = event.level,
@@ -158,12 +227,152 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
     // As an interrupt marker shows it, but no model call ran: no footer, no turn end counted.
     is SessionEvent.ShellReplyDropped -> state.notice(NoticeLevel.INFO, "Stopped.", NoticeKind.INTERRUPTED)
         .copy(busy = false, turn = null, turnInterrupted = false)
+    is SessionEvent.ContextBreakdownListed -> state.copy(contextBreakdown = event.breakdown)
+    is SessionEvent.UsageFetched -> state.updateUsageCard(event.uuid) { card ->
+        when (event.part) {
+            UsagePart.SESSION -> card.copy(session = sessionPart(event.result))
+            UsagePart.HISTORY -> card.copy(history = historyPart(event.result))
+        }
+    }
+    is SessionEvent.UsageRetry -> state.updateUsageCard(event.uuid) { card ->
+        when (event.part) {
+            UsagePart.SESSION -> UsageCard(UsagePartState.Loading, UsagePartState.Loading)
+            UsagePart.HISTORY -> card.copy(history = UsagePartState.Loading)
+        }
+    }
+}
+
+/** The session part of a usage card for [result]: a success without a `session` object fails it (spec 3.2). */
+private fun sessionPart(result: ControlResult<UsageAnswer>): UsagePartState<SessionUsage> = when (result) {
+    is McpResult.Ok -> result.value.session?.let { UsagePartState.Loaded(it) }
+        ?: UsagePartState.Failed(McpError.Rejected("the CLI's answer had no session"))
+    is McpResult.Failed -> UsagePartState.Failed(result.error)
+}
+
+/** The history part of a usage card for [result]: a success's history, null when the CLI did not report one. */
+private fun historyPart(result: ControlResult<UsageAnswer>): UsagePartState<UsageHistory?> = when (result) {
+    is McpResult.Ok -> UsagePartState.Loaded(result.value.history)
+    is McpResult.Failed -> UsagePartState.Failed(result.error)
+}
+
+/**
+ * This state with the usage card of the notice whose source is [uuid] changed by [change], found scanning back from the end; the
+ * same instance when there is none (an answer for a notice that is gone, such as a reloaded chat's).
+ */
+private inline fun ChatState.updateUsageCard(uuid: String, change: (UsageCard) -> UsageCard): ChatState {
+    val position = entries.indexOfLast { it is ChatEntry.Notice && it.sourceUuid == uuid }
+    val notice = entries.getOrNull(position) as? ChatEntry.Notice
+    val card = notice?.usage
+    if (card == null) {
+        LOG.debug { "no usage card for $uuid" }
+        return this
+    }
+    return copy(entries = entryList().mutate { list -> list[position] = notice.copy(usage = change(card)) })
+}
+
+/** Every usage card part still loading reads [McpError.Ended]: no answer can reach it any more. Ids stay where they are. */
+private fun ChatState.endUsageCards(): ChatState {
+    if (entries.none { it is ChatEntry.Notice && it.usage != null }) return this
+    return copy(
+        entries = entryList().mutate { list ->
+            for (position in list.indices) {
+                val entry = list[position]
+                if (entry is ChatEntry.Notice) {
+                    val ended = entry.withUsageEnded()
+                    if (ended !== entry) list[position] = ended
+                }
+            }
+        },
+    )
 }
 
 /** This state with the shell entry [id] changed by [change]; unchanged without one. */
 private inline fun ChatState.updateShell(id: String, change: (ChatEntry.Shell) -> ChatEntry.Shell): ChatState {
     val shell = entries.getOrNull(positionOf(id)) as? ChatEntry.Shell ?: return this
     return upsert(change(shell))
+}
+
+/**
+ * A prompt the user sent. A loaded transcript's folded message is a folded entry and nothing else. A message sent to a live process
+ * while a turn is open or another waits, or held behind a shell escape, waits ([ChatState.pendingSends]): the CLI's lifecycle lines
+ * decide when it becomes an entry. Any other send opens a turn, replacing any still open: a loaded transcript sends again with no
+ * result between its turns.
+ */
+private fun reduceUserSent(state: ChatState, event: SessionEvent.UserSent): ChatState = when {
+    event.folded -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images, folded = true))
+    event.live && (event.held || state.turn != null || state.pendingSends.isNotEmpty()) -> state.copy(
+        pendingSends = state.pendingSends + PendingSend(
+            uuid = event.uuid,
+            text = event.text,
+            images = event.images,
+            sentAtMillis = event.atMillis,
+            later = event.later,
+            stage = if (event.held) PendingStage.HELD else PendingStage.QUEUED,
+        ),
+    )
+    else -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images)).openTurn(event.uuid, event.atMillis)
+}
+
+/** This state with a turn opened for prompt [uuid] at [at]: busy, not interrupted. */
+private fun ChatState.openTurn(uuid: String, at: Long): ChatState = copy(
+    busy = true,
+    turnInterrupted = false,
+    turn = TurnProgress(uuid, at, outputTokens = 0, thinkingEstimate = 0, lastToolUseId = null, toolCount = 0),
+)
+
+/** This state with the waiting message [uuid] changed by [change]; the same instance when none waits. */
+private inline fun ChatState.updatePending(uuid: String, change: (PendingSend) -> PendingSend): ChatState {
+    val position = pendingSends.indexOfFirst { it.uuid == uuid }
+    if (position < 0) return this
+    val changed = change(pendingSends[position])
+    return if (changed == pendingSends[position]) this else copy(pendingSends = pendingSends.toMutableList().also { it[position] = changed })
+}
+
+/** This state with [send] no longer waiting, back for the composer ([ChatState.returnedSends]). */
+private fun ChatState.returnSend(send: PendingSend): ChatState =
+    copy(pendingSends = pendingSends - send, returnedSends = returnedSends + ReturnedSend(send.uuid, send.text, send.images))
+
+/**
+ * Every waiting message back for the composer, each with a notice of [level] saying so ([text] of its text): the process that
+ * would have run them is gone (spec 12.5). The same instance when none waits.
+ */
+internal fun ChatState.returnWaiting(level: NoticeLevel, text: (String) -> String): ChatState =
+    pendingSends.fold(this) { state, send -> state.returnSend(send).notice(level, text(send.text)) }
+
+/**
+ * The CLI's lifecycle line for a waiting message (spec 12.1): `started` makes it an entry, folded into the open turn or opening its
+ * own; `cancelled` takes it out, back to the composer with Stop's notice unless a withdraw asked for it (then quietly, or dropped on
+ * Cancel). `queued`, `completed`, other states and a uuid that does not wait (the turn's own prompt) change nothing.
+ */
+private fun reduceLifecycle(state: ChatState, message: CliMessage.CommandLifecycle, at: Long): ChatState {
+    val send = state.pendingSends.firstOrNull { it.uuid == message.commandUuid } ?: return state
+    return when (message.state) {
+        "started" -> {
+            val open = state.turn != null
+            val next = state.copy(pendingSends = state.pendingSends - send)
+                .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = open))
+            if (open) next else next.openTurn(send.uuid, at)
+        }
+        "cancelled" -> when {
+            send.stage == PendingStage.WITHDRAWING && !send.restoreOnWithdraw -> state.copy(pendingSends = state.pendingSends - send)
+            send.stage == PendingStage.WITHDRAWING -> state.returnSend(send)
+            else -> state.returnSend(send).notice(NoticeLevel.INFO, notSentText(send.text))
+        }
+        else -> state
+    }
+}
+
+/**
+ * Before a result's turn end: each waiting message the result names (`user_message_uuids`) was taken into that turn, though no
+ * lifecycle line said so (a CLI that sends none). It becomes a folded entry.
+ */
+private fun ChatState.foldNamed(result: CliMessage.Result): ChatState {
+    if (pendingSends.isEmpty() || result.userMessageUuids.isEmpty()) return this
+    val named = pendingSends.filter { it.uuid in result.userMessageUuids }
+    return named.fold(this) { state, send ->
+        state.copy(pendingSends = state.pendingSends - send)
+            .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = true))
+    }
 }
 
 /**
@@ -187,7 +396,7 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
     } else {
         event.detail
     }
-    var next = state.finishStreaming()
+    var next = state.finishStreaming().endUsageCards()
     if (turn != null && end != null) {
         next = next.append(
             ChatEntry.TurnEnded(
@@ -205,6 +414,8 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
         ended = true,
         pendingPermissions = emptyList(),
         permissionModeChanges = emptyMap(),
+        rejectedPermissionModes = emptySet(),
+        launchPermissionMode = null,
         effortChanges = emptyMap(),
         modelChanges = emptyMap(),
         lastTurnEnd = end ?: state.lastTurnEnd,
@@ -213,24 +424,36 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
         turn = null,
         // No process owes those results any more: none of them may keep the session from being idle.
         quietSends = emptySet(),
+        cliCapabilities = null,
     ).notice(if (event.isError || failedTurn) NoticeLevel.ERROR else NoticeLevel.INFO, said)
+        // Nothing reads them now: each goes back to the composer, and the chat says so (spec 12.5).
+        .returnWaiting(NoticeLevel.WARNING, ::endedBeforeReadingText)
 }
 
 /** The id of the [ChatEntry.TurnEnded] that ends the next turn of [state]: every turn end counts one, so it is never reused. */
 private fun turnEndId(state: ChatState): String = "end-${state.turnsEnded + 1}"
 
 private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatState = when (message) {
-    is CliMessage.SystemInit -> state.copy(
+    is CliMessage.SystemInit -> state.checkLaunchMode(message.permissionMode).copy(
         sessionId = message.sessionId.ifEmpty { state.sessionId },
         permissionMode = message.permissionMode ?: state.permissionMode,
+        rejectedPermissionModes = state.rejectedPermissionModes - setOfNotNull(message.permissionMode),
+        launchPermissionMode = null,
         claudeCodeVersion = message.claudeCodeVersion ?: state.claudeCodeVersion,
         cwd = message.cwd ?: state.cwd,
         modelSwitchPending = false,
         mcp = state.mcp.mergedWith(message.mcpServers),
         slashCommandNames = message.slashCommands,
         terminalCommands = message.terminalSlashCommands.toSet(),
+        plugins = message.plugins,
+        skills = message.skills,
+        additionalDirectories = message.additionalDirectories,
+        cliCapabilities = message.capabilities.toSet(),
     ).checkModel(message.model)
-    is CliMessage.SystemStatus -> state.copy(permissionMode = message.permissionMode ?: state.permissionMode)
+    is CliMessage.SystemStatus -> state.copy(
+        permissionMode = message.permissionMode ?: state.permissionMode,
+        rejectedPermissionModes = state.rejectedPermissionModes - setOfNotNull(message.permissionMode),
+    )
     is CliMessage.ApiRetry -> state.notice(NoticeLevel.INFO, retryText(message))
     is CliMessage.ModelRefusalFallback -> {
         val text = "${message.originalModel} declined this request; " +
@@ -243,7 +466,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
     is CliMessage.Assistant -> reduceAssistant(state, message, at)
     is CliMessage.User -> reduceUser(state, message, at)
     is CliMessage.StreamEvent -> reduceStream(state, message, at)
-    is CliMessage.Result -> reduceQuietOr(state, message)
+    is CliMessage.Result -> reduceQuietOr(state.foldNamed(message), message)
     is CliMessage.ControlRequest -> when (val request = message.request) {
         is InboundRequest.CanUseTool -> state.copy(
             pendingPermissions = state.pendingPermissions + PendingPermission(
@@ -318,6 +541,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
         ).withUsage(message.usage)
     }
     is CliMessage.KeepAlive, is CliMessage.Unknown -> state
+    is CliMessage.CommandLifecycle -> reduceLifecycle(state, message, at)
 }
 
 /** The `source` of a claude.ai connector's entry, which a `system/init` may leave out (probes 2.5). */
@@ -358,11 +582,13 @@ private fun McpState.mergedWith(listed: List<McpServerSummary>): McpState {
  * `/`: the CLI does not echo the prompt), else after [runCommand]. The turn in progress, if any, is flagged local, so that its
  * result ends it without a footer.
  */
-private fun ChatState.localCommandNotice(text: String, runCommand: String?): ChatState {
+private fun ChatState.localCommandNotice(text: String, runCommand: String?, sourceUuid: String? = null, usage: UsageCard? = null): ChatState {
     val prompt = (entries.lastOrNull { it is ChatEntry.User } as ChatEntry.User?)?.text
     val typed = prompt?.takeIf { it.startsWith("/") }?.drop(1)?.takeWhile { !it.isWhitespace() }?.ifEmpty { null }
-    return withTurn { it.copy(localCommand = true) }
-        .notice(NoticeLevel.INFO, text, NoticeKind.LOCAL_COMMAND, command = typed ?: runCommand, runCommand = runCommand)
+    return withTurn { it.copy(localCommand = true) }.notice(
+        NoticeLevel.INFO, text, NoticeKind.LOCAL_COMMAND,
+        command = typed ?: runCommand, runCommand = runCommand, sourceUuid = sourceUuid, usage = usage,
+    )
 }
 
 /**
@@ -428,8 +654,19 @@ private fun ChatState.rejectModeChange(requestId: String, change: PermissionMode
     val reason = error?.let { " ($it)" }.orEmpty()
     // What the CLI is in now: with a later change still waiting, that change shows, but the CLI stays where it was.
     val now = (if (next == null) mode else change.previous)?.let { "; it stays ${it.wire}." } ?: "."
-    return copy(permissionMode = mode, permissionModeChanges = pending)
+    return copy(permissionMode = mode, permissionModeChanges = pending, rejectedPermissionModes = rejectedPermissionModes + change.requested)
         .notice(NoticeLevel.ERROR, "The CLI rejected the switch to permission mode ${change.requested.wire}$reason$now")
+}
+
+/**
+ * The first `system/init` after a spawn reports [reported]: when the spawn passed another `--permission-mode`
+ * ([ChatState.launchPermissionMode], still set: no live pick came first), the chat says so rather than switching the shown mode in
+ * silence (hard rule 5). An init without a mode says nothing.
+ */
+private fun ChatState.checkLaunchMode(reported: PermissionMode?): ChatState {
+    val launched = launchPermissionMode
+    if (launched == null || reported == null || launched == reported) return this
+    return notice(NoticeLevel.WARNING, "The CLI started in permission mode ${reported.wire}, not ${launched.wire} as picked.")
 }
 
 /**
@@ -491,6 +728,10 @@ private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at:
     // The CLI answered the prompt itself: what it printed is a notice, not a reply (spec 3.5).
     message.localCommand?.let { local ->
         val text = local.stdout ?: message.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+        // A stream's usage line gets the card its fetch fills (spec 3.2); a transcript's comes as LocalCommandOutput and gets none.
+        if (message.isUsageLine()) {
+            return next.localCommandNotice(text, local.command, message.uuid, UsageCard(UsagePartState.Loading, UsagePartState.Loading))
+        }
         return next.localCommandNotice(text, local.command)
     }
     message.error?.let { error ->
@@ -517,6 +758,7 @@ private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at:
             subagentType = message.subagentType,
             taskDescription = message.taskDescription,
             atMillis = at.takeIf { it > 0 },
+            lastUuid = message.uuid,
         )
     } else {
         // The Nth complete line for a message replaces the Nth drafted block (docs/protocol.md 6.4).
@@ -534,6 +776,7 @@ private fun reduceAssistant(state: ChatState, message: CliMessage.Assistant, at:
             subagentType = message.subagentType ?: existing.subagentType,
             taskDescription = message.taskDescription ?: existing.taskDescription,
             atMillis = existing.atMillis ?: at.takeIf { it > 0 },
+            lastUuid = message.uuid ?: existing.lastUuid,
         )
     }
     return next.upsert(updated).let { if (message.aborted) it.finishStreaming() else it }
@@ -934,4 +1177,7 @@ private fun ChatState.notice(
     kind: NoticeKind = NoticeKind.GENERIC,
     command: String? = null,
     runCommand: String? = null,
-): ChatState = append(ChatEntry.Notice("notice-$noticeCount", level, text, kind, command, runCommand)).copy(noticeCount = noticeCount + 1)
+    sourceUuid: String? = null,
+    usage: UsageCard? = null,
+): ChatState = append(ChatEntry.Notice("notice-$noticeCount", level, text, kind, command, runCommand, sourceUuid, usage))
+    .copy(noticeCount = noticeCount + 1)

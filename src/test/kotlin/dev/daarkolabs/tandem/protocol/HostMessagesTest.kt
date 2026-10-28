@@ -88,6 +88,19 @@ class HostMessagesTest {
     }
 
     @Test
+    fun `the parity requests match the probe frames`() {
+        assertEquals("""{"type":"control_request","request_id":"c1","request":{"subtype":"get_context_usage"}}""", wire(HostMessages.getContextUsage("c1")))
+        assertEquals(
+            """{"type":"control_request","request_id":"u1","request":{"subtype":"get_usage","skip_behaviors":true}}""",
+            wire(HostMessages.getUsage("u1", skipBehaviors = true)),
+        )
+        assertEquals(
+            """{"type":"control_request","request_id":"u2","request":{"subtype":"get_usage"}}""",
+            wire(HostMessages.getUsage("u2", skipBehaviors = false)),
+        )
+    }
+
+    @Test
     fun `the four mcp requests match the probe frames`() {
         assertEquals("""{"type":"control_request","request_id":"m1","request":{"subtype":"mcp_status"}}""", wire(HostMessages.mcpStatus("m1")))
         assertEquals(
@@ -162,5 +175,25 @@ class HostMessagesTest {
         assertEquals(sent["message"]!!.jsonObject["content"], context["message"]!!.jsonObject["content"])
         assertEquals(JsonPrimitive(false), context["shouldQuery"])
         assertEquals(JsonPrimitive("u3"), context["uuid"])
+    }
+
+    @Test
+    fun `queue frames`() {
+        val plain = """{"type":"user","session_id":"","message":{"role":"user","content":[{"type":"text","text":"ping"}]},""" +
+            """"parent_tool_use_id":null,"uuid":"u-1"}"""
+        assertEquals(plain, wire(HostMessages.userMessage("ping", emptyList(), uuid = "u-1")))
+        assertEquals(
+            plain.dropLast(1) + ""","priority":"later"}""",
+            wire(HostMessages.userMessage("ping", emptyList(), uuid = "u-1", later = true)),
+        )
+        assertEquals("""{"type":"control_request","request_id":"a1","request":{"subtype":"interrupt"}}""", wire(HostMessages.interrupt("a1")))
+        assertEquals(
+            """{"type":"control_request","request_id":"a1","request":{"subtype":"interrupt","cancel_queued":true}}""",
+            wire(HostMessages.interrupt("a1", cancelQueued = true)),
+        )
+        assertEquals(
+            """{"type":"control_request","request_id":"c1","request":{"subtype":"cancel_async_message","message_uuid":"u-1"}}""",
+            wire(HostMessages.cancelAsyncMessage("c1", "u-1")),
+        )
     }
 }

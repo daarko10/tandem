@@ -122,6 +122,12 @@ object ControlPayloads {
         return InitializeResponse(entries.mapNotNull { (it as? JsonObject)?.let(::slashCommand) })
     }
 
+    /** The context window by category (`get_context_usage`); non-null only when the payload has a `categories` array. */
+    fun contextUsage(payload: JsonObject?): ContextBreakdown? = contextBreakdown(payload)
+
+    /** This session's cost and the machine's usage history (`get_usage`); non-null for any object payload. */
+    fun usage(payload: JsonObject?): UsageAnswer? = usageAnswer(payload)
+
     /** [url] when it parses as an absolute `http` or `https` URL (any case) with a host, else null: never a `file:` or custom scheme. */
     fun browsableUrl(url: String?): String? {
         val uri = url?.let { runCatching { URI(it) }.getOrNull() } ?: return null

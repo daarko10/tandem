@@ -29,6 +29,7 @@
         <toolWindow id="Tandem"
                     anchor="right"
                     icon="AllIcons.Toolwindows.ToolWindowMessages"
+                    canCloseContents="true"
                     factoryClass="dev.daarkolabs.tandem.ui.TandemToolWindowFactory"/>
         <notificationGroup id="Tandem" displayType="BALLOON"/>
         <applicationConfigurable parentId="tools"
@@ -38,4 +39,24 @@
         <!-- Development-only: does nothing unless -Dtandem.spike or -Dtandem.autoPrompt is set. -->
         <postStartupActivity implementation="dev.daarkolabs.tandem.ui.dev.DevStartupActivity"/>
     </extensions>
+
+    <actions>
+        <action id="Tandem.CyclePermissionMode"
+                class="dev.daarkolabs.tandem.ui.CyclePermissionModeAction"
+                text="Cycle Permission Mode"
+                description="Switch the Tandem chat to the next permission mode: Manual, Accept edits, Plan, then Auto when the model supports it">
+            <keyboard-shortcut keymap="$default" first-keystroke="shift TAB"/>
+        </action>
+        <action id="Tandem.NewSession"
+                class="dev.daarkolabs.tandem.ui.NewSessionAction"
+                icon="AllIcons.General.Add"
+                text="New Session"
+                description="Start a new Tandem session with the last model, effort and permission mode"/>
+        <action id="Tandem.AddFilesOrPhotos"
+                class="dev.daarkolabs.tandem.ui.AddFilesOrPhotosAction"
+                text="Add Files or Photos"
+                description="Attach images to the Tandem prompt">
+            <keyboard-shortcut keymap="$default" first-keystroke="control alt shift O"/>
+        </action>
+    </actions>
 </idea-plugin>

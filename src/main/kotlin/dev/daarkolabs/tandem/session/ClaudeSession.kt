@@ -4,6 +4,7 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.HostMessages
 import dev.daarkolabs.tandem.protocol.ImageBlock
@@ -12,6 +13,9 @@ import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.UsageAnswer
+import dev.daarkolabs.tandem.protocol.cancelAsyncAnswer
+import dev.daarkolabs.tandem.protocol.interruptReceipt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineName
@@ -59,6 +63,24 @@ private const val MCP_STATUS_SECONDS = 15
 /** How long `mcp_reconnect` and `mcp_authenticate` wait for their answer (a guess: a reconnect that succeeds is unrecorded). */
 private const val MCP_SLOW_SECONDS = 30
 
+/** How long `get_context_usage` waits for its answer (spec 4.2). */
+private const val CONTEXT_USAGE_SECONDS = 30
+
+/** How long `get_usage` with `skip_behaviors` waits (the session block, no scan; a guess, spec 4.2). */
+private const val USAGE_SESSION_SECONDS = 15
+
+/** How long `get_usage` without `skip_behaviors` waits (it scans this machine's transcripts; a guess, spec 4.2). */
+private const val USAGE_HISTORY_SECONDS = 60
+
+/** How long `cancel_async_message` waits for its answer (spec 12.3). */
+private const val CANCEL_ASYNC_SECONDS = 5
+
+/** How long an `interrupt` with `cancel_queued` waits for its receipt (a guess: the recorded one came at once, `queue-cancel:56`). */
+private const val INTERRUPT_SECONDS = 15
+
+/** The `system/init` capability that lets an `interrupt` cancel the queued messages too (spec 12.3). */
+private const val CANCEL_QUEUED_CAPABILITY = "interrupt_cancel_queued_v1"
+
 /**
  * How long the end waits, once the process has exited, for the rest of its stderr. A normal exit's last lines are there at once; a
  * process the CLI started that outlives it (a tool's subprocess, an MCP server) can keep the stderr open for as long as it runs.
@@ -98,11 +120,21 @@ data class SessionConfig(
     val permissionMode: PermissionMode? = null,
     /** With [resumeSessionId]: continue as a new session (`--fork-session`), leaving the original untouched. */
     val forkSession: Boolean = false,
+    /** Folders the CLI may read and edit besides [workingDirectory]: one `--add-dir` each, last in the argv. */
+    val additionalDirectories: List<String> = emptyList(),
+    /** With [forkSession]: the uuid of the message the fork ends at (`--resume-session-at`); later messages stay in the original only. */
+    val resumeSessionAt: String? = null,
 ) {
     init {
         require(!forkSession || resumeSessionId != null) { "A fork needs the resumeSessionId of the session it forks." }
         require((sessionId == null) != (resumeSessionId == null) || (sessionId != null && forkSession)) {
             "Pass sessionId for a new session or resumeSessionId for an existing one; both only for a fork, never neither."
+        }
+        require(resumeSessionAt == null || forkSession) {
+            "--resume-session-at only with --fork-session: without it the CLI branches the original's transcript."
+        }
+        require(resumeSessionAt == null || (resumeSessionAt.isNotBlank() && !resumeSessionAt.startsWith("-"))) {
+            "A fork point is a message uuid, never a flag."
         }
     }
 
@@ -123,6 +155,8 @@ data class SessionConfig(
             if (forkSession) add("--fork-session")
         }
         sessionId?.let { addAll(listOf("--session-id", it)) }
+        resumeSessionAt?.let { addAll(listOf("--resume-session-at", it)) }
+        for (directory in additionalDirectories) addAll(listOf("--add-dir", directory))
     }
 }
 
@@ -173,6 +207,7 @@ class ClaudeSession(
             requestedModel = config.model ?: initialState.requestedModel,
             permissionMode = config.permissionMode ?: initialState.permissionMode,
             effort = config.effort ?: initialState.effort,
+            launchPermissionMode = config.permissionMode,
         ),
     )
     private val outbox = Channel<JsonObject>(Channel.UNLIMITED)
@@ -194,19 +229,38 @@ class ClaudeSession(
     private var killed = false
 
     /**
-     * Guards [heldEscapes] and [pendingOutput]: a shell escape's frames go out in the recorded order (spec 12.4), the output frame never
+     * Guards [held] and [pendingOutput]: a shell escape's frames go out in the recorded order (MCP spec 12.4), the output frame never
      * right behind its command frame and an escape never right behind a prompt, since the CLI batches the sends queued before it starts
-     * processing and merges them into one (`bash-mode:3-6`). A prompt is not held (spec 12.9 item 7).
+     * processing and merges them into one (`bash-mode:3-6`); a prompt never goes out right behind a quiet frame or ahead of an output
+     * frame (spec 12.4 rule 2).
      */
     private val shellLock = Any()
 
-    /** Shell escapes waiting for the turn in progress (a prompt sent just before them) to end, in order. */
-    private val heldEscapes = ArrayDeque<HeldEscape>()
+    /**
+     * What waits to go out, in order (spec 12.4): a running `!` command's place, which its escape takes once it ends; shell escapes
+     * held behind a turn or a queued message; prompts held behind either, or behind an output frame or a quiet send's result.
+     */
+    private val held = ArrayDeque<Held>()
 
     /** A responding shell escape's output frame, waiting for the quiet result of its command frame. */
     private var pendingOutput: PendingOutput? = null
 
-    private class HeldEscape(val id: String, val command: String, val output: String, val respond: Boolean)
+    /**
+     * The uuid of the latest usage line ([isUsageLine]) whose local turn has not ended yet: the next `result` launches its fetch.
+     * Read and written by the reader coroutine only.
+     */
+    private var pendingUsage: String? = null
+
+    private sealed interface Held {
+        /** The place of shell escape [id], whose command still runs: its escape comes once it ends. */
+        class Shell(val id: String) : Held
+
+        /** Shell escape [id]'s frames, still to go out. */
+        class Escape(val id: String, val command: String, val output: String, val respond: Boolean) : Held
+
+        /** The prompt [uuid], whose [frame] is still to be written. */
+        class Prompt(val uuid: String, val frame: JsonObject) : Held
+    }
 
     /** Shell escape [id]'s output [frame], to send once [quiet] has left [ChatState.quietSends]; [fallback] sends it anyway later. */
     private class PendingOutput(val id: String, val command: String, val quiet: String, val frame: JsonObject) {
@@ -243,6 +297,8 @@ class ClaudeSession(
     init {
         // A backstop: a session cancelled before its process coroutine ran never gets to that coroutine's own end.
         scope.coroutineContext.job.invokeOnCompletion { endRequests() }
+        // A process attached while a `!` command runs starts with that command's place (spec 12.4).
+        _state.value.runningShell?.let { held.addLast(Held.Shell(it)) }
     }
 
     fun start(): Job {
@@ -302,29 +358,115 @@ class ClaudeSession(
     }
 
     /**
-     * Sends a prompt: [text], then the [images] attached to it, in order. Each image's id is the prompt's uuid and its index. Blank
-     * text is left off the wire, so the entry's text is `""` then, as the reloaded line gives it.
+     * Sends a prompt: [text], then the [images] attached to it, in order, with `"priority":"later"` when [later]. Each image's id is the
+     * prompt's uuid and its index. Blank text is left off the wire, so the entry's text is `""` then, as the reloaded line gives it.
+     *
+     * Written at once, also while a turn runs: the CLI queues it and its lifecycle lines tell the rest ([reduce]). Held instead, in
+     * send order, while a `!` command runs, escapes or prompts are held, an output frame waits for its quiet result, or a quiet send's
+     * result is still due (spec 12.4 rule 2): [advanceShell] writes it once those frames are out.
      */
-    fun sendUserMessage(text: String, images: List<ImageBlock> = emptyList()) {
+    fun sendUserMessage(text: String, images: List<ImageBlock> = emptyList(), later: Boolean = false) {
         val uuid = UUID.randomUUID().toString()
         val shown = images.mapIndexed { i, image -> UserImage("$uuid#$i", image.mediaType, image.base64) }
-        dispatch(SessionEvent.UserSent(uuid, if (text.isBlank()) "" else text, clock(), shown))
-        send(HostMessages.userMessage(text, images, uuid))
+        val frame = HostMessages.userMessage(text, images, uuid, later)
+        val entry = if (text.isBlank()) "" else text
+        synchronized(shellLock) {
+            if (held.isNotEmpty() || pendingOutput != null || _state.value.quietSends.isNotEmpty()) {
+                held.addLast(Held.Prompt(uuid, frame))
+                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true, held = true))
+                LOG.info("prompt $uuid held behind shell frames")
+            } else {
+                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true))
+                send(frame)
+            }
+        }
+    }
+
+    /**
+     * Withdraws the waiting message [uuid] (spec 12.3); with [restore] it goes back to the composer (Edit), else it is dropped (Cancel).
+     * A held prompt leaves at once, with no frame. One in the CLI's queue is asked for with `cancel_async_message` (5 s): `true`
+     * withdraws it, while `false`, an error or no answer puts it back with a notice. Nothing for a uuid that does not wait.
+     */
+    fun withdraw(uuid: String, restore: Boolean) {
+        val local = synchronized(shellLock) {
+            held.firstOrNull { it is Held.Prompt && it.uuid == uuid }?.also {
+                held.remove(it)
+                dispatch(SessionEvent.SendWithdrawn(uuid, restore, notice = null))
+            }
+        }
+        if (local != null) {
+            LOG.info("held prompt $uuid withdrawn")
+            advanceShell()
+            return
+        }
+        val send = _state.value.pendingSends.firstOrNull { it.uuid == uuid && it.stage == PendingStage.QUEUED } ?: return
+        dispatch(SessionEvent.WithdrawRequested(uuid, restore))
+        scope.launch(CoroutineName("ClaudeSession.withdraw")) {
+            val result = mcpRequest(CANCEL_ASYNC_SECONDS, { HostMessages.cancelAsyncMessage(it, uuid) }) { McpResult.Ok(cancelAsyncAnswer(it)) }
+            LOG.info("cancel_async_message $uuid: ${(result as? McpResult.Ok)?.value ?: result.javaClass.simpleName}")
+            when {
+                result is McpResult.Ok && result.value == true -> dispatch(SessionEvent.SendWithdrawn(uuid, restore, notice = null))
+                // The process is over: its end gave every waiting message back already.
+                result is McpResult.Failed && result.error == McpError.Ended -> {}
+                else -> dispatch(SessionEvent.WithdrawRefused(uuid, ((result as? McpResult.Failed)?.error as? McpError.Rejected)?.message, send.text))
+            }
+            advanceShell()
+        }
     }
 
     /**
      * Interrupts the turn in progress. While a shell escape's output frame still waits for its command frame's quiet result, no model
      * call runs yet: the frame is dropped instead, the turn it would have started ends as stopped, and no request goes out.
+     *
+     * Stop stops everything (spec 12.3): held prompts go back to the composer, and while a message waits in the CLI's queue and its
+     * init listed [CANCEL_QUEUED_CAPABILITY], the `interrupt` carries `cancel_queued`; each message its receipt cancelled, and each
+     * still waiting that the receipt names nowhere, comes back too. Otherwise the frame is today's, byte for byte.
      */
     fun interrupt() {
         val dropped = synchronized(shellLock) {
+            val prompts = held.filterIsInstance<Held.Prompt>()
+            held.removeAll(prompts)
+            prompts.forEach { returnStopped(it.uuid) }
             pendingOutput?.also {
                 pendingOutput = null
                 it.fallback?.cancel()
                 dispatch(SessionEvent.ShellReplyDropped(it.id))
             }
         }
-        if (dropped == null) send(HostMessages.interrupt(newRequestId())) else advanceShell()
+        if (dropped != null) {
+            advanceShell()
+            return
+        }
+        val chat = _state.value
+        val cancelQueued = CANCEL_QUEUED_CAPABILITY in chat.cliCapabilities.orEmpty() && chat.pendingSends.any { it.stage == PendingStage.QUEUED }
+        if (!cancelQueued) {
+            send(HostMessages.interrupt(newRequestId()))
+            return
+        }
+        scope.launch(CoroutineName("ClaudeSession.interrupt")) {
+            val reply = request(INTERRUPT_SECONDS * mcpMillisPerSecond) { HostMessages.interrupt(it, cancelQueued = true) }
+            if (reply !is Reply.Answered) {
+                LOG.info("interrupt with cancel_queued: ${reply.javaClass.simpleName}")
+                return@launch
+            }
+            if (!reply.response.isSuccess) {
+                dispatch(SessionEvent.Cli(reply.response, clock())) // the chat says the CLI rejected it, as for any request
+                return@launch
+            }
+            val receipt = withContext(Dispatchers.Default) { interruptReceipt(reply.response.payload) }
+            LOG.info("interrupt receipt: ${receipt.cancelled.size} cancelled, ${receipt.stillQueued.size} still queued")
+            receipt.cancelled.forEach(::returnStopped)
+            // No longer held by the CLI, and no later line would clear it: Stop always clears what waits.
+            _state.value.pendingSends.filter { it.stage == PendingStage.QUEUED && it.uuid !in receipt.stillQueued && it.uuid !in receipt.cancelled }
+                .forEach { returnStopped(it.uuid) }
+            advanceShell()
+        }
+    }
+
+    /** The waiting message [uuid] goes back to the composer with Stop's notice; nothing once it no longer waits. */
+    private fun returnStopped(uuid: String) {
+        val send = _state.value.pendingSends.firstOrNull { it.uuid == uuid } ?: return
+        dispatch(SessionEvent.SendWithdrawn(uuid, restore = true, notice = notSentText(send.text)))
     }
 
     /**
@@ -337,20 +479,47 @@ class ClaudeSession(
      */
     fun sendShellEscape(id: String, command: String, output: String, respond: Boolean) {
         synchronized(shellLock) {
-            val escape = HeldEscape(id, command, output, respond)
+            val escape = Held.Escape(id, command, output, respond)
+            val place = held.indexOfFirst { it is Held.Shell && it.id == id }
             when {
                 // Read under shellLock: set before dropShellFrames takes it, so an escape not dropped there is seen as unsent here.
-                ended -> notice(NoticeLevel.WARNING, unsentShellText(command))
-                heldEscapes.isEmpty() && pendingOutput == null && _state.value.turn == null -> startEscapeLocked(escape)
-                else -> heldEscapes.addLast(escape)
+                ended -> {
+                    if (place >= 0) held.removeAt(place)
+                    notice(NoticeLevel.WARNING, unsentShellText(command))
+                }
+                // The escape takes its command's place, so the prompts sent while it ran go out after its frames (spec 12.4).
+                place >= 0 -> held[place] = escape
+                else -> held.addLast(escape)
             }
+        }
+        advanceShell()
+    }
+
+    /**
+     * Shell escape [id] ended without sending anything (not started, failed, killed at the IDE's exit, the session closing): its
+     * place leaves [held], so the prompts behind it go out now, never held with nothing to release them.
+     */
+    fun shellUnsent(id: String) {
+        synchronized(shellLock) { held.removeAll { it is Held.Shell && it.id == id } }
+        advanceShell()
+    }
+
+    /**
+     * Applies [event] to this chat, as one of the CLI's lines would be: a shell escape's progress, which Tandem runs itself. A command
+     * that starts takes its place among the held frames (spec 12.4).
+     */
+    internal fun event(event: SessionEvent) {
+        if (event is SessionEvent.ShellStarted) {
+            synchronized(shellLock) {
+                held.addLast(Held.Shell(event.id))
+                dispatch(event)
+            }
+        } else {
+            dispatch(event)
         }
     }
 
-    /** Applies [event] to this chat, as one of the CLI's lines would be: a shell escape's progress, which Tandem runs itself. */
-    internal fun event(event: SessionEvent): Unit = dispatch(event)
-
-    private fun startEscapeLocked(escape: HeldEscape) {
+    private fun startEscapeLocked(escape: Held.Escape) {
         if (!escape.respond) {
             val uuid = UUID.randomUUID().toString()
             dispatch(SessionEvent.ShellSent(escape.id, quiet = listOf(uuid), query = null, atMillis = clock()))
@@ -369,7 +538,7 @@ class ClaudeSession(
         }
     }
 
-    /** Sends [pending] if it still waits; then the escapes held behind it may start. */
+    /** Sends [pending] if it still waits; then what is held behind it may go. */
     private fun sendOutput(pending: PendingOutput) {
         synchronized(shellLock) {
             if (pendingOutput !== pending) return
@@ -377,11 +546,15 @@ class ClaudeSession(
             pending.fallback?.cancel()
             send(pending.frame)
         }
+        advanceShell()
     }
 
     /**
-     * After each line the reader reduced: the output frame goes out once its quiet send's result is in, and the escapes held behind a
-     * turn start, one at a time, once no turn is in progress.
+     * After each result or lifecycle line the reader reduced, and whenever something held may go: the output frame goes out once its
+     * quiet send's result is in; then, from the head of [held], prompts are written once no output frame waits and no quiet result is
+     * due, and escapes start, one at a time, once no turn is in progress and no message waits in the CLI's queue (spec 12.4 rule 1: a
+     * `later` message starts right after the running turn's result and would race the escape's quiet frame). A running command's
+     * place holds everything behind it.
      */
     private fun advanceShell() {
         synchronized(shellLock) {
@@ -391,24 +564,40 @@ class ClaudeSession(
                 pending.fallback?.cancel()
                 send(pending.frame)
             }
-            while (pendingOutput == null && heldEscapes.isNotEmpty() && _state.value.turn == null) {
-                startEscapeLocked(heldEscapes.removeFirst())
+            while (true) {
+                val chat = _state.value
+                when (val head = held.firstOrNull() ?: break) {
+                    is Held.Shell -> break
+                    is Held.Prompt -> {
+                        if (pendingOutput != null || chat.quietSends.isNotEmpty()) break
+                        held.removeFirst()
+                        send(head.frame)
+                        dispatch(SessionEvent.SendReleased(head.uuid))
+                        LOG.info("held prompt ${head.uuid} released")
+                    }
+                    is Held.Escape -> {
+                        if (pendingOutput != null || chat.turn != null || chat.pendingSends.any { it.stage == PendingStage.QUEUED }) break
+                        held.removeFirst()
+                        startEscapeLocked(head)
+                    }
+                }
             }
         }
     }
 
     /**
-     * The process is over: no shell escape frame goes out any more. Returns the commands of the escapes whose output never went out,
-     * in order: the one whose output frame waited for its quiet result if [withPending], then those still held behind a turn.
+     * The process is over: no shell escape frame goes out any more, and no held prompt is written (each comes back through the end or
+     * the settled chat). Returns the commands of the escapes whose output never went out, in order: the one whose output frame waited
+     * for its quiet result if [withPending], then those still held.
      */
     private fun dropShellFrames(withPending: Boolean): List<String> =
         synchronized(shellLock) {
             val pending = pendingOutput
             pending?.fallback?.cancel()
             pendingOutput = null
-            val held = heldEscapes.map { it.command }
-            heldEscapes.clear()
-            listOfNotNull(pending?.command?.takeIf { withPending }) + held
+            val escapes = held.filterIsInstance<Held.Escape>().map { it.command }
+            held.clear()
+            listOfNotNull(pending?.command?.takeIf { withPending }) + escapes
         }
 
     /**
@@ -531,6 +720,58 @@ class ClaudeSession(
         }
 
     /**
+     * The session's context window by category (`get_context_usage`, 30 s). A success also replaces [ChatState.contextBreakdown]; one
+     * without `categories` is [McpError.Rejected].
+     */
+    suspend fun contextUsage(): ControlResult<ContextBreakdown> {
+        val result = mcpRequest(CONTEXT_USAGE_SECONDS, HostMessages::getContextUsage) { payload ->
+            ControlPayloads.contextUsage(payload)?.let { McpResult.Ok(it) }
+                ?: McpResult.Failed(McpError.Rejected("the CLI's answer had no categories"))
+        }
+        if (result is McpResult.Ok) dispatch(SessionEvent.ContextBreakdownListed(result.value))
+        LOG.info("get_context_usage: ${result.javaClass.simpleName}")
+        return result
+    }
+
+    /**
+     * This session's usage (`get_usage`): with [skipBehaviors] the session block only (15 s), without it also the scan of this
+     * machine's transcripts (60 s). A success without an object payload is [McpError.Rejected].
+     */
+    suspend fun usage(skipBehaviors: Boolean): ControlResult<UsageAnswer> {
+        val seconds = if (skipBehaviors) USAGE_SESSION_SECONDS else USAGE_HISTORY_SECONDS
+        val result = mcpRequest(seconds, { HostMessages.getUsage(it, skipBehaviors) }) { payload ->
+            ControlPayloads.usage(payload)?.let { McpResult.Ok(it) } ?: McpResult.Failed(McpError.Rejected("the CLI's answer had no session"))
+        }
+        LOG.info("get_usage skip_behaviors=$skipBehaviors: ${result.javaClass.simpleName}")
+        return result
+    }
+
+    /**
+     * Asks again for [part] of the usage card of [uuid] ([SessionEvent.UsageRetry] first): [UsagePart.SESSION] sends both requests,
+     * as the first fetch did, [UsagePart.HISTORY] the full request alone.
+     */
+    fun retryUsage(uuid: String, part: UsagePart) {
+        dispatch(SessionEvent.UsageRetry(uuid, part))
+        when (part) {
+            UsagePart.SESSION -> fetchUsage(uuid)
+            UsagePart.HISTORY -> scope.launch(CoroutineName("ClaudeSession.usage")) {
+                dispatch(SessionEvent.UsageFetched(uuid, UsagePart.HISTORY, usage(skipBehaviors = false)))
+            }
+        }
+    }
+
+    /**
+     * Fills the usage card of [uuid], in this session's scope: the session block first, then, unless the process ended meanwhile,
+     * the full request with the scan (spec 3.2). A part whose answer cannot come any more reads [McpError.Ended].
+     */
+    private fun fetchUsage(uuid: String) {
+        scope.launch(CoroutineName("ClaudeSession.usage")) {
+            dispatch(SessionEvent.UsageFetched(uuid, UsagePart.SESSION, usage(skipBehaviors = true)))
+            if (!ended) dispatch(SessionEvent.UsageFetched(uuid, UsagePart.HISTORY, usage(skipBehaviors = false)))
+        }
+    }
+
+    /**
      * One MCP [request] of [seconds]: a success's payload goes to [decode], off the caller's thread; an error answer is
      * [McpError.Rejected] with the CLI's text.
      */
@@ -624,7 +865,17 @@ class ClaudeSession(
             }
             dispatch(SessionEvent.Cli(message, at))
             if (message is CliMessage.SystemInit && message.sessionId.isNotEmpty()) _reportedSessionId.value = message.sessionId
-            if (message is CliMessage.Result) advanceShell()
+            // A usage line's numbers are asked for once its local turn has ended, between turns, as the probes sent them (spec 3.2).
+            if (message is CliMessage.Assistant && message.isUsageLine()) pendingUsage = message.uuid
+            if (message is CliMessage.Result) {
+                pendingUsage?.let {
+                    pendingUsage = null
+                    fetchUsage(it)
+                }
+                advanceShell()
+            }
+            // A message that started or was cancelled no longer waits: an escape held behind it may start.
+            if (message is CliMessage.CommandLifecycle) advanceShell()
         }
     }
 

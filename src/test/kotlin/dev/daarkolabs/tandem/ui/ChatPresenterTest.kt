@@ -24,6 +24,7 @@ import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
 import dev.daarkolabs.tandem.session.ModelOption
+import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.UserImage
@@ -136,6 +137,32 @@ class ChatPresenterTest {
     }
 
     @Test
+    fun `a context notice's markdown is parsed off the EDT`() = runBlocking {
+        val state = MutableStateFlow(ChatState())
+        val threads: MutableList<String> = Collections.synchronizedList(ArrayList())
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)), parse = { text ->
+                threads += Thread.currentThread().name
+                MarkdownProcessor().processMarkdownDocument(text).toImmutableList()
+            })
+            val context = ChatEntry.Notice(
+                "n1", NoticeLevel.INFO, "## Context Usage\n\n| Category | Tokens |\n|---|---|\n| Messages | 10 |",
+                kind = NoticeKind.LOCAL_COMMAND, command = "context", runCommand = "context",
+            )
+            val usage = ChatEntry.Notice("n2", NoticeLevel.INFO, "Total cost: $0.15", kind = NoticeKind.LOCAL_COMMAND, command = "usage", runCommand = "usage")
+            state.value = ChatState(entries = listOf(context, usage))
+            val chat = withTimeout(TIMEOUT) { presenter.chat.first { c -> c.rows.count { it.row is NoticeRow } == 2 } }
+            val rows = chat.rows.filter { it.row is NoticeRow }
+            assertTrue(assertNotNull(rows[0].blocks).isNotEmpty())
+            assertNull(rows[1].blocks)
+            assertTrue(threads.isNotEmpty() && threads.none { it.startsWith("AWT-EventQueue") }, threads.toString())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `expanding an agent row parses its nested text`() = runBlocking {
         val threads: MutableList<String> = Collections.synchronizedList(ArrayList())
         val seen: MutableList<String> = Collections.synchronizedList(ArrayList())
@@ -176,7 +203,11 @@ class ChatPresenterTest {
             withTimeout(TIMEOUT) { presenter.chat.first { chat -> chat.rows.any { it.row is TurnEndRow } } }
             delay(PUSH_MS)
             collector.cancel()
-            val later = emissions.toList().dropWhile { it !== opened }
+            // The collector reads a conflating StateFlow, so it can miss the very value `opened` saw: start from the first emission
+            // that shows the nested text open, whichever it is.
+            val later = emissions.toList().dropWhile { chat ->
+                chat.rows.firstOrNull { it.row.key == agentKey }?.bodies?.get(childKey) == null
+            }
             assertTrue(later.size > 1, "the pushes after line 38 emitted")
             later.forEach { chat -> assertSame(blocks, chat.rows.first { it.row.key == agentKey }.bodies[childKey]) }
 
@@ -298,7 +329,8 @@ class ChatPresenterTest {
     }
 
     @Test
-    fun `a turn's start sets the latest reply's fork to WAIT, and its end moves ENABLED to the new reply and NOT_LATEST to the earlier one, without the earlier TextRow changing`() = runBlocking {
+    fun `a turn's start leaves every earlier reply ENABLED and its end gives ENABLED to all`() = runBlocking {
+        // D8's fork-at-busy matches fork-at, so the plan's WAIT during a turn reads ENABLED: the fork point alone decides.
         val states = HashMap<Int, ChatState>()
         val (final, _) = replay("permission-mode") { line, state, _ -> states[line] = state }
         fun replyId(text: String): String = final.entries.filterIsInstance<ChatEntry.Assistant>()
@@ -313,26 +345,25 @@ class ChatPresenterTest {
         val scope = CoroutineScope(SupervisorJob())
         try {
             val presenter = ChatPresenter(scope, state, MutableStateFlow(RowOptions(showThinking = true)))
-            fun replyRow(chat: RenderedChat): RenderedRow? = chat.rows.firstOrNull { (it.row as? TextRow)?.actions?.entryId == id1 }
+            fun replyRow(chat: RenderedChat, id: String): RenderedRow? = chat.rows.firstOrNull { (it.row as? TextRow)?.actions?.entryId == id }
+            fun fork(row: RenderedRow?): ForkState = forkState(assertNotNull((row?.row as? TextRow)?.actions).forkAt)
 
-            assertEquals(id1, withTimeout(TIMEOUT) { presenter.latestReply.first { it != null } })
+            val first = assertNotNull(replyRow(withTimeout(TIMEOUT) { presenter.chat.first { replyRow(it, id1) != null } }, id1))
             assertFalse(presenter.busy.value)
-            assertEquals(ForkState.ENABLED, forkState(id1, presenter.latestReply.value, presenter.busy.value))
-            val first = assertNotNull(replyRow(withTimeout(TIMEOUT) { presenter.chat.first { replyRow(it) != null } }))
+            assertEquals(ForkState.ENABLED, fork(first))
 
             state.value = secondSent
             withTimeout(TIMEOUT) { presenter.busy.first { it } }
             val running = withTimeout(TIMEOUT) { presenter.chat.first { chat -> chat.rows.any { it.row.key == "u:u21" } } }
-            assertEquals(id1, presenter.latestReply.value)
-            assertEquals(ForkState.WAIT, forkState(id1, presenter.latestReply.value, presenter.busy.value))
-            assertSame(first, replyRow(running))
+            assertEquals(ForkState.ENABLED, fork(replyRow(running, id1)))
+            assertSame(first, replyRow(running, id1))
 
             state.value = secondEnded
-            assertEquals(id2, withTimeout(TIMEOUT) { presenter.latestReply.first { it == id2 } })
+            val ended = withTimeout(TIMEOUT) { presenter.chat.first { replyRow(it, id2) != null } }
             withTimeout(TIMEOUT) { presenter.busy.first { !it } }
-            assertEquals(ForkState.ENABLED, forkState(id2, presenter.latestReply.value, presenter.busy.value))
-            assertEquals(ForkState.NOT_LATEST, forkState(id1, presenter.latestReply.value, presenter.busy.value))
-            assertSame(first, replyRow(presenter.chat.value))
+            assertEquals(ForkState.ENABLED, fork(replyRow(ended, id1)))
+            assertEquals(ForkState.ENABLED, fork(replyRow(ended, id2)))
+            assertSame(first, replyRow(ended, id1))
         } finally {
             scope.cancel()
         }

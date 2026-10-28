@@ -1120,4 +1120,71 @@ class TranscriptReaderTest {
         assertEquals(Instant.parse("2026-10-16T15:28:34.762Z").toEpochMilli(), stamped)
         assertEquals(stamped, read("history-reply").entries.filterIsInstance<ChatEntry.Assistant>().single().atMillis)
     }
+
+    // --- Sending while Claude works (spec 12.1 Reload) ---
+
+    private fun ChatState.users(): List<ChatEntry.User> = entries.filterIsInstance<ChatEntry.User>()
+
+    /** `queue-fold.jsonl` with its queued_command attachment (line 23) changed by [edit], in [dir]. */
+    private fun editedQueueFold(dir: Path, edit: (MutableMap<String, kotlinx.serialization.json.JsonElement>) -> Unit): Path {
+        val lines = Fixtures.transcript("queue-fold").readLines().toMutableList()
+        val line = Json.parseToJsonElement(lines[22]).jsonObject
+        val attachment = line.getValue("attachment").jsonObject.toMutableMap().also(edit)
+        lines[22] = JsonObject(line + ("attachment" to JsonObject(attachment))).toString()
+        return dir.resolve("queue-fold.jsonl").also { it.writeLines(*lines.toTypedArray()) }
+    }
+
+    @Test
+    fun `a queued_command attachment reads as a folded prompt`() {
+        val state = read("queue-fold")
+        val folded = state.users().single { it.folded }
+        assertEquals("Also say the word KIWI at the end.", folded.text)
+        assertEquals("<command_uuid-25>", folded.id)
+        assertEquals(1, state.users().count { !it.folded })
+        val at = state.entries.indexOf(folded)
+        val call = state.entries.indexOfFirst { e -> e is ChatEntry.Assistant && e.blocks.any { it is AssistantBlock.ToolUse } }
+        val firstResult = state.entries.indexOfFirst { it is ChatEntry.ToolResult }
+        val lastText = state.entries.indexOfLast { e -> e is ChatEntry.Assistant && e.blocks.any { it is AssistantBlock.Text } }
+        assertTrue(call in 0 until at && firstResult in 0 until at, "after the first Bash call's entries")
+        assertTrue(at < lastText, "before the reply's last text")
+    }
+
+    @Test
+    fun `a later message's user line reads as a prompt`() {
+        val state = read("queue-later")
+        val later = state.users().single { it.text == "Also say the word KIWI at the end." }
+        assertFalse(later.folded)
+        // A transcript keeps no result lines, so no TurnEnded: the later message is the second turn's prompt, as P is the first's.
+        assertEquals(2, state.users().size)
+        assertTrue(state.users().none { it.folded })
+    }
+
+    @Test
+    fun `a withdrawn message leaves nothing`() {
+        val state = read("queue-cancel")
+        assertTrue(state.users().none { it.folded })
+        assertEquals(2, state.users().size, "the two prompts")
+        assertEquals(1, state.entries.count { it is ChatEntry.Notice && it.kind == NoticeKind.INTERRUPTED }, "and the interrupt marker")
+    }
+
+    // unrecorded: queue-fold.jsonl:23 with another commandMode
+    @Test
+    fun `a queued_command with another commandMode is skipped`(@TempDir dir: Path) = runBlocking {
+        val path = editedQueueFold(dir) { it["commandMode"] = JsonPrimitive("bash") }
+        assertTrue(TranscriptReader.read(path).state.users().none { it.folded })
+    }
+
+    // unrecorded: queue-fold.jsonl:23 with an image block in its prompt
+    @Test
+    fun `image blocks in a queued_command prompt become images`(@TempDir dir: Path) = runBlocking {
+        val path = editedQueueFold(dir) {
+            it["prompt"] = Json.parseToJsonElement(
+                """[{"type":"text","text":"Also say the word KIWI at the end."},""" +
+                    """{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0"}}]""",
+            )
+        }
+        val folded = TranscriptReader.read(path).state.users().single { it.folded }
+        assertEquals("Also say the word KIWI at the end.", folded.text)
+        assertEquals(listOf(UserImage("<command_uuid-25>#0", "image/png", "iVBORw0")), folded.images)
+    }
 }

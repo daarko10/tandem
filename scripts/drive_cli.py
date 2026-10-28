@@ -14,6 +14,11 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
                    --dangerously-skip-permissions rejects, a second turn
   fork             one turn and a rename_session, then a second process resumes that session with --fork-session
                    for one more turn; its lines follow the first process's in the output
+  add-dir-spawn    a spawn with --add-dir, a turn, a stop, a --resume respawn with that folder and a second, a turn, a fork at
+                   the first reply (--resume-session-at) with the first folder, a turn, a --fork-session --session-id fork
+                   with the first folder, a turn, a --resume with the second folder only, a turn; every process without
+                   --safe-mode and with --setting-sources project,local --strict-mcp-config; record it with
+                   --model claude-sonnet-5-5
   settings         a probe, not a fixture: one turn, then update_settings and apply_flag_settings asking for effort
                    high, then a second turn; the transcript's assistant lines show the effort each turn ran with
   effort-switch    one turn, apply_flag_settings effortLevel high, then an apply_flag_settings whose settings is a
@@ -57,6 +62,23 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
                    The three MCP scenarios run without --safe-mode (it turns MCP servers off) and with
                    --mcp-config <cwd>/mcp.json --strict-mcp-config --setting-sources project,local
 
+  fork-at          three turns (the first a bare reply), the process closed, then a second process forks the session at the
+                   first reply with --resume-session-at and is asked what it remembers: only ALPHA
+  fork-at-live     fork-at with the first process still open and idle when the fork starts
+  fork-at-busy     the fork starts while the first process runs its second turn's shell command (sleep 8)
+  queue-fold       a message sent without priority while a turn runs its tools: the CLI folds it into the turn
+  queue-later      the same with priority later: it runs as its own turn
+  queue-cancel     a later message withdrawn with cancel_async_message, then another dropped by interrupt with cancel_queued
+  queue-steer-text a steer sent while the reply is plain text (no tool round left): folded, or the next turn
+  queue-cancel-steer
+                   a steer (no priority) withdrawn with cancel_async_message, and another left to interrupt with cancel_queued
+  queue-later-command
+                   "/context" and a text-and-image message, both priority later, sent while a turn runs a shell command
+  queue-during-card
+                   a later message sent while a permission request waits, answered 3 s after; it may never run (an outcome)
+  parity-requests  a turn, get_context_usage, get_usage with skip_behaviors, then the /usage command (the contract job's run)
+  Every one of these allows any permission request it gets, except queue-during-card's first.
+
 Run it from an empty directory (scripts/record-scenario.sh does this) and redact the output
 with redact_fixture.py before committing. Uses whatever sign-in the local `claude` already has.
 """
@@ -69,6 +91,9 @@ import sys
 import threading
 import time
 import queue
+import shutil
+import tempfile
+import uuid
 import zlib
 
 TIMEOUT_S = 180
@@ -97,12 +122,15 @@ def child_environment() -> dict[str, str]:
 
 
 class Cli:
-    def __init__(self, extra: list[str], model: str | None = None, first_id: int = 0, drop: list[str] = ()):
+    def __init__(self, extra: list[str], model: str | None = None, first_id: int = 0, drop: list[str] = (),
+                 safe_mode: bool = True):
         argv = ["claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
                 "--include-partial-messages", "--permission-prompt-tool=stdio",
                 # No user hooks, plugins or MCP servers: keeps fixtures reproducible and free of local setup.
                 "--safe-mode"]
         argv = [arg for arg in argv if arg not in drop]  # a scenario that needs what --safe-mode turns off
+        if not safe_mode:
+            argv = [arg for arg in argv if arg != "--safe-mode"]
         if model:
             argv += ["--model", model]
         self.extra = extra
@@ -147,19 +175,28 @@ class Cli:
             raise RuntimeError(f"claude rejected {request.get('subtype')}: {response.get('error')}")
         return message
 
-    def user(self, text: str) -> None:
-        self.user_content([{"type": "text", "text": text}])
+    def user(self, text: str) -> str:
+        """Sends one user message and returns its uuid."""
+        return self.user_content([{"type": "text", "text": text}])
 
-    def user_blocks(self, text: str, png: bytes) -> None:
+    def user_later(self, text: str) -> str:
+        """A user message queued behind the running turn (priority "later"); returns its uuid."""
+        return self.user_content([{"type": "text", "text": text}], priority="later")
+
+    def user_blocks(self, text: str, png: bytes) -> str:
         """One user message as Tandem sends an attachment: the text block, then the image as a base64 block."""
-        self.user_content([{"type": "text", "text": text},
-                           {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                                        "data": base64.b64encode(png).decode()}}])
+        return self.user_content([{"type": "text", "text": text}, image_block(png)])
 
-    def user_content(self, content: list[dict]) -> None:
+    def user_content(self, content: list[dict], priority: str | None = None) -> str:
+        """Sends a user message and returns the uuid it carries; `priority` follows "uuid" and is written only when given."""
         self.next_id += 1
-        self.send({"type": "user", "session_id": "", "parent_tool_use_id": None, "uuid": self.last_uuid(),
-                   "message": {"role": "user", "content": content}})
+        uuid = self.last_uuid()
+        msg = {"type": "user", "session_id": "", "parent_tool_use_id": None, "uuid": uuid}
+        if priority:
+            msg["priority"] = priority
+        msg["message"] = {"role": "user", "content": content}
+        self.send(msg)
+        return uuid
 
     def composed(self, content: str, quiet: bool) -> None:
         """A user frame as the terminal's `!` sends it: string content and client_composed (no @path expansion, no slash
@@ -339,6 +376,12 @@ def tiny_png() -> bytes:
     header = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)  # 2 x 2, depth 8, colour type 2 (RGB)
     rows = b"\x00" + b"\xff\x00\x00" * 2 + b"\x00" + b"\xff\x00\x00" * 2  # filter 0, then two red pixels, per row
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+
+
+def image_block(png: bytes) -> dict:
+    """The base64 image block of a user message (docs/protocol.md 3)."""
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                        "data": base64.b64encode(png).decode()}}
 
 
 def user_image(cli: Cli) -> None:
@@ -616,6 +659,386 @@ def bash_mode_context(cli: Cli, sleep=time.sleep) -> None:
     cli.until(result_of(cli.last_uuid()))
 
 
+# The queue and fork stories (docs/superpowers/specs/2026-10-22-desktop-parity-design.md 12, 13). Every one answers any
+# can_use_tool with allow (allow_tools), except queue-during-card, which holds its first one back.
+SETTLE_S = 3.0  # how long a scenario listens after its last result, to see whether an init follows
+LATE_S = 90.0   # how long a scenario waits for a message that may never run
+STEER_TEXT = "Also say the word KIWI at the end."
+QUEUE_PROMPT = ("Use the Bash tool to run exactly: sleep 6; ls. Then use the Bash tool to run exactly: sleep 6; echo second. "
+                "Then count from 1 to 30, one number per line.")
+FORK_TURN_1 = "Remember the word ALPHA. Reply with exactly one word: OK"
+FORK_TURN_2 = "Remember the word BRAVO. First run the shell command `echo hi` with the Bash tool, then reply with exactly one word: OK"
+FORK_TURN_2_BUSY = ("Remember the word BRAVO. First run the shell command `sleep 8; echo hi` with the Bash tool, then reply "
+                    "with exactly one word: OK")
+FORK_TURN_3 = "Remember the word CHARLIE. Reply with exactly one word: OK"
+FORK_QUESTION = "Which words did I ask you to remember? Answer with the words only, comma-separated, nothing else."
+
+
+def allow_request(cli: Cli, msg: dict) -> None:
+    """Answers one can_use_tool request with allow."""
+    req = msg.get("request", {})
+    body = {"behavior": "allow", "updatedInput": req.get("input", {}), "toolUseID": req.get("tool_use_id")}
+    cli.send({"type": "control_response",
+              "response": {"subtype": "success", "request_id": msg["request_id"], "response": body}})
+
+
+def is_can_use_tool(msg: dict) -> bool:
+    return msg.get("type") == "control_request" and msg.get("request", {}).get("subtype") == "can_use_tool"
+
+
+def allow_tools(cli: Cli):
+    """An on_message callback that allows every can_use_tool."""
+    return lambda msg: allow_request(cli, msg) if is_can_use_tool(msg) else None
+
+
+def is_task_started(msg: dict) -> bool:
+    return msg.get("type") == "system" and msg.get("subtype") == "task_started"
+
+
+def is_text_delta(msg: dict) -> bool:
+    event = msg.get("event") or {}
+    return msg.get("type") == "stream_event" and event.get("type") == "content_block_delta" \
+        and (event.get("delta") or {}).get("type") == "text_delta"
+
+
+def result_naming(uuid: str):
+    """The result whose user_message_uuids lists `uuid` (no fallback: a CLI that lists none never matches)."""
+    return lambda msg: is_result(msg) and uuid in (msg.get("user_message_uuids") or [])
+
+
+def wait_for(cli: Cli, predicate, seconds: float, on_message=None) -> dict | None:
+    """The first message matching `predicate` within `seconds`, None when none came (or the process ended)."""
+    deadline = time.monotonic() + seconds
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        try:
+            msg = cli.inbox.get(timeout=left)
+        except queue.Empty:
+            return None
+        if msg.get("type") == "__eof__":
+            return None
+        if on_message:
+            on_message(msg)
+        if predicate(msg):
+            return msg
+
+
+def settle(cli: Cli, forbid_init: bool, on_message=None) -> None:
+    """Listens for SETTLE_S more seconds (answering through `on_message`). Raises when `forbid_init` and an init arrives:
+    a cancelled message must not start a turn."""
+    def watch(msg: dict) -> None:
+        if forbid_init and is_init(msg):
+            raise RuntimeError("a cancelled message started a turn: an init arrived after the last result")
+        if on_message:
+            on_message(msg)
+
+    wait_for(cli, lambda msg: False, SETTLE_S, watch)
+
+
+def reply_uuid(lines: list[str]) -> str | None:
+    """The uuid of the last `assistant` stdout line of the main thread (parent_tool_use_id null), None when there is none."""
+    found = None
+    for line in lines:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(msg, dict) and msg.get("type") == "assistant" and msg.get("parent_tool_use_id") is None \
+                and isinstance(msg.get("uuid"), str):
+            found = msg["uuid"]
+    return found
+
+
+def reply_text(lines: list[str]) -> str:
+    """The text blocks of the main thread's assistant lines, joined."""
+    parts = []
+    for line in lines:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(msg, dict) and msg.get("type") == "assistant" and msg.get("parent_tool_use_id") is None:
+            content = (msg.get("message") or {}).get("content")
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text")))
+    return "\n".join(parts)
+
+
+def used_a_tool(lines: list[str]) -> bool:
+    for line in lines:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(msg, dict) and msg.get("type") == "assistant":
+            content = (msg.get("message") or {}).get("content")
+            if any(isinstance(block, dict) and block.get("type") == "tool_use"
+                   for block in (content if isinstance(content, list) else [])):
+                return True
+    return False
+
+
+def fork_at_argv(extra: list[str], origin: str, fork_id: str, cut: str) -> list[str]:
+    """The flags of a fork that keeps the origin's chain up to the message `cut` (spec 13.1)."""
+    return extra + ["--resume", origin, "--fork-session", "--session-id", fork_id, "--resume-session-at", cut]
+
+
+def first_turn_cut(cli: Cli, allow) -> tuple[str, str]:
+    """Turn 1 of the fork stories: the origin's session id and the uuid of its reply, where the fork is cut. Raises when the
+    turn used a tool (the cut must be the reply's own line) or has no reply line."""
+    start = len(cli.lines)
+    cli.user(FORK_TURN_1)
+    session_id = cli.until(is_init, allow)["session_id"]
+    cli.until(is_result, allow)
+    turn = cli.lines[start:]
+    if used_a_tool(turn):
+        raise RuntimeError("the first turn used a tool instead of replying; record the scenario again")
+    cut = reply_uuid(turn)
+    if cut is None:
+        raise RuntimeError("the first turn has no reply line to cut the fork at")
+    return session_id, cut
+
+
+def run_fork(origin: Cli, spawn, session_id: str, cut: str, forbidden: tuple[str, ...]) -> Cli:
+    """Starts the fork of `session_id` at `cut` and asks its question. Returns the fork's Cli, still open; raises, after
+    ending the fork's process, unless the reply names ALPHA and none of `forbidden`."""
+    fork_id = str(uuid.uuid4())
+    forked = spawn(fork_at_argv(origin.extra, session_id, fork_id, cut), first_id=origin.next_id)
+    try:
+        forked.call(INITIALIZE)
+        start = len(forked.lines)
+        forked.user(FORK_QUESTION)
+        forked.until(is_result, allow_tools(forked))
+        inits = []
+        for line in forked.lines[start:]:
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(msg, dict) and is_init(msg):
+                inits.append(msg)
+        print(f"fork: the fork's init carries the id passed with --session-id: "
+              f"{[m.get('session_id') for m in inits] == [fork_id] * len(inits) and bool(inits)}", file=sys.stderr)
+        reply = reply_text(forked.lines[start:])
+        if "ALPHA" not in reply or any(word in reply for word in forbidden):
+            raise RuntimeError(f"the fork should know ALPHA alone, it said: {reply!r}")
+    except BaseException:
+        forked.close()
+        raise
+    return forked
+
+
+def end_fork(origin: Cli, forked: Cli, name: str) -> None:
+    """Ends the origin's process, then the fork's, and appends the fork's lines to the origin's."""
+    print(f"{name}: origin exit code {origin.close()}", file=sys.stderr)
+    print(f"{name}: fork exit code {forked.close()}", file=sys.stderr)
+    origin.lines.extend(forked.lines)
+
+
+def fork_at(cli: Cli, spawn=Cli) -> None:
+    """Three turns, the origin closed, then a fork at the first turn's reply (the committed fork-at story)."""
+    allow = allow_tools(cli)
+    session_id, cut = first_turn_cut(cli, allow)
+    cli.user(FORK_TURN_2)
+    cli.until(is_result, allow)
+    cli.user(FORK_TURN_3)
+    cli.until(is_result, allow)
+    print(f"fork-at: origin exit code {cli.close()}", file=sys.stderr)
+    forked = run_fork(cli, spawn, session_id, cut, ("BRAVO", "CHARLIE"))
+    print(f"fork-at: fork exit code {forked.close()}", file=sys.stderr)
+    cli.lines.extend(forked.lines)
+
+
+def fork_at_live(cli: Cli, spawn=Cli) -> None:
+    """fork_at with the origin's process still open and idle when the fork starts (Tandem's usual case)."""
+    allow = allow_tools(cli)
+    session_id, cut = first_turn_cut(cli, allow)
+    cli.user(FORK_TURN_2)
+    cli.until(is_result, allow)
+    cli.user(FORK_TURN_3)
+    cli.until(is_result, allow)
+    forked = run_fork(cli, spawn, session_id, cut, ("BRAVO", "CHARLIE"))
+    end_fork(cli, forked, "fork-at-live")
+
+
+def fork_at_busy(cli: Cli, spawn=Cli) -> None:
+    """A fork while the origin runs its second turn's shell command (spec 13.1's WAIT case)."""
+    allow = allow_tools(cli)
+    session_id, cut = first_turn_cut(cli, allow)
+    cli.user(FORK_TURN_2_BUSY)
+    cli.until(is_task_started, allow)
+    forked = run_fork(cli, spawn, session_id, cut, ("BRAVO",))
+    try:
+        result = cli.until(is_result, allow)
+        if result.get("subtype") != "success":
+            raise RuntimeError(f"the origin's second turn ended {result.get('subtype')}, not success")
+    finally:
+        end_fork(cli, forked, "fork-at-busy")
+
+
+def queue_fold(cli: Cli) -> None:
+    """A message sent while a turn runs, sent without priority: the CLI folds it into the turn."""
+    allow = allow_tools(cli)
+    cli.user(QUEUE_PROMPT)
+    cli.until(is_task_started, allow)
+    cli.user(STEER_TEXT)
+    cli.until(is_result, allow)
+
+
+def queue_later(cli: Cli) -> None:
+    """The same, sent with priority later: it runs as its own turn."""
+    allow = allow_tools(cli)
+    cli.user(QUEUE_PROMPT)
+    cli.until(is_task_started, allow)
+    cli.user_later(STEER_TEXT)
+    cli.until(is_result, allow)
+    cli.until(is_result, allow)
+
+
+def queue_cancel(cli: Cli) -> None:
+    """cancel_async_message on a queued message, then interrupt with cancel_queued on another."""
+    allow = allow_tools(cli)
+    cli.user("Use the Bash tool to run exactly: sleep 8; echo first. Then reply with exactly one word: DONE")
+    cli.until(is_task_started, allow)
+    queued = cli.user_later("Reply with only the word KIWI.")
+    cli.call({"subtype": "cancel_async_message", "message_uuid": queued})
+    cli.until(is_result, allow)
+    cli.user("Use the Bash tool to run exactly: sleep 8; echo second. Then reply with exactly one word: DONE")
+    cli.until(is_task_started, allow)
+    cli.user_later("Reply with only the word MANGO.")
+    cli.call({"subtype": "interrupt", "cancel_queued": True})
+    cli.until(is_result, allow)
+    settle(cli, forbid_init=True, on_message=allow)
+
+
+def queue_steer_text(cli: Cli) -> None:
+    """A steer sent while the model writes text with no tool round left (spec 12.1): folded or next turn."""
+    allow = allow_tools(cli)
+    cli.user("Count from 1 to 150, one number per line, nothing else.")
+    cli.until(is_text_delta, allow)
+    steer = cli.user("Then say KIWI.")
+    cli.until(result_naming(steer), allow)
+
+
+def queue_cancel_steer(cli: Cli) -> None:
+    """A steer withdrawn with cancel_async_message, and one left to Stop (interrupt with cancel_queued), spec 12.3."""
+    allow = allow_tools(cli)
+    cli.user("Use the Bash tool to run exactly: sleep 8; echo first. Then use the Bash tool to run exactly: sleep 8; "
+             "echo second. Then reply with exactly one word: DONE")
+    cli.until(is_task_started, allow)
+    first = cli.user("Also say the word KIWI at the end.")
+    cli.call({"subtype": "cancel_async_message", "message_uuid": first}, allow_error=True)
+    cli.until(is_task_started, allow)
+    cli.user("Also say the word MANGO at the end.")
+    cli.call({"subtype": "interrupt", "cancel_queued": True})
+    cli.until(is_result, allow)
+    settle(cli, forbid_init=True, on_message=allow)
+
+
+def queue_later_command(cli: Cli) -> None:
+    """A slash command and an image message sent later while a turn runs (spec 12.1). The image message that never runs is
+    an outcome, not a failure."""
+    allow = allow_tools(cli)
+    cli.user("Use the Bash tool to run exactly: sleep 8; echo first. Then reply with exactly one word: DONE")
+    cli.until(is_task_started, allow)
+    cli.user_later("/context")
+    image = cli.user_content([{"type": "text", "text": "What colour is this image? Reply with one word."},
+                              image_block(tiny_png())], priority="later")
+    if wait_for(cli, result_naming(image), LATE_S, allow) is None:
+        print("queue-later-command: the image message did not run within the wait", file=sys.stderr)
+    settle(cli, forbid_init=False, on_message=allow)
+
+
+def queue_during_card(cli: Cli) -> None:
+    """A message sent later while a permission card waits (spec 12.2). The message that never runs is an outcome."""
+    allow = allow_tools(cli)
+    cli.user("Use the Bash tool to run exactly: touch tandem-queue-card.txt. Then reply with exactly one word: DONE")
+    card = cli.until(is_can_use_tool)
+    queued = cli.user_later("Reply with only the word KIWI.")
+    wait_for(cli, lambda msg: False, SETTLE_S, allow)  # the request stays unanswered
+    allow_request(cli, card)
+    if wait_for(cli, result_naming(queued), LATE_S, allow) is None:
+        print("queue-during-card: the message did not run within the wait", file=sys.stderr)
+    settle(cli, forbid_init=False, on_message=allow)
+
+
+def parity_requests(cli: Cli) -> None:
+    """The parity requests of the contract job: a context breakdown, usage without behaviours, and the /usage command."""
+    allow = allow_tools(cli)
+    cli.user("Reply with the single word: one")
+    cli.until(is_result, allow)
+    cli.call({"subtype": "get_context_usage"})
+    cli.call({"subtype": "get_usage", "skip_behaviors": True})
+    cli.user("/usage")
+    cli.until(is_result, allow)
+
+
+def add_dir_spawn(cli: Cli, dirs: list[str]) -> None:
+    """--add-dir at a spawn, on a resume, on a fork at a reply, on a plain fork, and left out of a later resume. `cli` was
+    started with the run's flags and then ["--add-dir", dirs[0]]; every later process is built from the flags before it."""
+    folder_a, folder_b = dirs
+    if cli.extra[-2:] != ["--add-dir", folder_a]:
+        raise RuntimeError("add-dir-spawn: the first process must end with --add-dir <first folder>")
+    base = cli.extra[:-2]
+
+    def run_turn(process: Cli, word: str) -> str:
+        """Initializes `process`, asks for `word`, waits for the result and returns the init's session id."""
+        process.call(INITIALIZE)
+        process.user(f"Reply with the single word: {word}")
+        session = process.until(is_init)["session_id"]
+        process.until(is_result)
+        return session
+
+    def respawn(extra: list[str], previous: Cli) -> Cli:
+        return Cli(extra, first_id=previous.next_id, safe_mode=False)
+
+    def finish(process: Cli, number: int) -> None:
+        print(f"add-dir-spawn: process {number} exit code {process.close()}", file=sys.stderr)
+        cli.lines.extend(process.lines)
+
+    # (1) the first turn, in the process main started
+    cli.user("Reply with the single word: one")
+    sid = cli.until(is_init)["session_id"]
+    cli.until(is_result)
+    print(f"add-dir-spawn: process 1 exit code {cli.close()}", file=sys.stderr)
+    first_lines = list(cli.lines)
+    previous = cli
+    # (2) a resume with both folders
+    second = respawn(base + ["--resume", sid, "--add-dir", folder_a, "--add-dir", folder_b], previous)
+    try:
+        run_turn(second, "two")
+    finally:
+        finish(second, 2)
+    # (3) a fork at the first reply (spec 13.1), with the first folder after the fork tail
+    cut = reply_uuid(first_lines)
+    if cut is None:
+        raise RuntimeError("add-dir-spawn: the first turn has no reply line to cut the fork at")
+    fork_at_id = str(uuid.uuid4())
+    third = respawn(fork_at_argv(base, sid, fork_at_id, cut) + ["--add-dir", folder_a], second)
+    try:
+        if run_turn(third, "three") != fork_at_id:
+            raise RuntimeError("add-dir-spawn: the fork at a reply did not take the --session-id it was given")
+    finally:
+        finish(third, 3)
+    # (4) a fork in Tandem's own argv
+    fork_id = str(uuid.uuid4())
+    fourth = respawn(base + ["--resume", sid, "--fork-session", "--session-id", fork_id, "--add-dir", folder_a], third)
+    try:
+        if run_turn(fourth, "four") != fork_id:
+            raise RuntimeError("add-dir-spawn: the fork did not take the --session-id it was given")
+    finally:
+        finish(fourth, 4)
+    # (5) the removal: a resume that leaves the first folder out
+    fifth = respawn(base + ["--resume", sid, "--add-dir", folder_b], fourth)
+    try:
+        run_turn(fifth, "five")
+    finally:
+        finish(fifth, 5)
+
+
 SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": model_switch,
              "permission-mode": permission_mode, "permission-mode-rejected": permission_mode_rejected, "fork": fork,
              "settings": settings, "effort-switch": effort_switch, "permission-mode-auto": permission_mode_auto,
@@ -623,7 +1046,12 @@ SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": m
              "mcp-connectors": mcp_connectors, "mcp-connectors-all": mcp_connectors_all,
              "bash-mode": bash_mode, "bash-mode-respond": bash_mode_respond,
              "bash-mode-respond-together": bash_mode_respond_together, "bash-mode-context": bash_mode_context,
-             "mcp-status": mcp_status, "mcp-tool-call": mcp_tool_call, "mcp-slash": mcp_slash}
+             "mcp-status": mcp_status, "mcp-tool-call": mcp_tool_call, "mcp-slash": mcp_slash,
+             "fork-at": fork_at, "fork-at-live": fork_at_live, "fork-at-busy": fork_at_busy,
+             "queue-fold": queue_fold, "queue-later": queue_later, "queue-cancel": queue_cancel,
+             "queue-steer-text": queue_steer_text, "queue-cancel-steer": queue_cancel_steer,
+             "queue-later-command": queue_later_command, "queue-during-card": queue_during_card,
+             "parity-requests": parity_requests, "add-dir-spawn": add_dir_spawn}
 # Scenarios whose run also takes the connector's name (connector_name).
 CONNECTOR_SCENARIOS = {"mcp-connectors", "mcp-connectors-all"}
 
@@ -635,10 +1063,17 @@ SCENARIO_FLAGS = {"settings": ["--setting-sources", "project,local"],
                   "ask-two": ["--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"],
                   # No configured server but the account's claude.ai connectors (strict mode may drop those too: then
                   # record mcp-connectors-all). Never --setting-sources: it would hide what the user's settings enable.
-                  "mcp-connectors": ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']}
+                  "mcp-connectors": ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'],
+                  # The probes' own flags: no user setting, hook, plugin or MCP server of the recording machine.
+                  "add-dir-spawn": ["--setting-sources", "project,local", "--strict-mcp-config"]}
 # Base flags a scenario removes from Cli's argv: --safe-mode turns MCP servers off.
 SCENARIO_ARGV_DROPS = {"mcp-connectors": ["--safe-mode"], "mcp-connectors-all": ["--safe-mode"],
                        **{name: ["--safe-mode"] for name in PROBE_SCENARIOS}}
+
+
+def remove_dirs(dirs: list[str]) -> None:
+    for folder in dirs:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def main(scenario: str, out: str, extra: list[str]) -> None:
@@ -657,12 +1092,23 @@ def main(scenario: str, out: str, extra: list[str]) -> None:
         except BaseException:
             servers.kill()
             raise
+    elif scenario == "add-dir-spawn":
+        # Two empty folders outside the run's cwd; the first Cli takes the first (A last, so the scenario can strip it).
+        dirs = [tempfile.mkdtemp(prefix="tandem-add-dir-"), tempfile.mkdtemp(prefix="tandem-add-dir-")]
+        args.append(dirs)
+        try:
+            cli = Cli(extra + SCENARIO_FLAGS[scenario] + ["--add-dir", dirs[0]], safe_mode=False)
+        except BaseException:
+            remove_dirs(dirs)
+            raise
     else:
         cli = Cli(extra + SCENARIO_FLAGS.get(scenario, []), model=FIRST_MODEL if scenario == "model-switch" else None)
     try:
         cli.call(INITIALIZE)
         run(cli, *args)
     finally:
+        if scenario == "add-dir-spawn":
+            remove_dirs(args[0])
         code = cli.close()
         if servers is not None:
             servers.kill()
