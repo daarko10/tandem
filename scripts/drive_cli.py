@@ -1285,8 +1285,9 @@ SCENARIO_FLAGS = {"settings": ["--setting-sources", "project,local"],
                   "mcp-connectors": ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'],
                   # The probes' own flags: no user setting, hook, plugin or MCP server of the recording machine.
                   "add-dir-spawn": ["--setting-sources", "project,local", "--strict-mcp-config"],
-                  # Tandem's argv: no file tool, so the CLI's own @path expansion is all that can reach the file.
-                  "ide-mention": ["--disallowedTools", MENTION_DISALLOWED]}
+                  # Tandem's argv: no file tool, so the CLI's own @path expansion is all that can reach the file; no user
+                  # setting of the recording machine (the probes' convention).
+                  "ide-mention": ["--disallowedTools", MENTION_DISALLOWED, "--setting-sources", "project,local"]}
 # Base flags a scenario removes from Cli's argv: --safe-mode turns MCP servers off.
 SCENARIO_ARGV_DROPS = {"mcp-connectors": ["--safe-mode"], "mcp-connectors-all": ["--safe-mode"],
                        **{name: ["--safe-mode"] for name in PROBE_SCENARIOS | IDE_EDIT_SCENARIOS}}

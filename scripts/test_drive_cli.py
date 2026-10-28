@@ -903,6 +903,8 @@ class IdeEditScenarioTest(unittest.TestCase):
         at = flags.index("--disallowedTools")
         self.assertEqual({"Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep", "Bash"},
                          set(flags[at + 1].split(",")))
+        at = flags.index("--setting-sources")
+        self.assertEqual("project,local", flags[at + 1], "no user setting of the recording machine")
         cli = FakeCli(success)
         drive_cli.ide_mention(cli)
         prompts = [m["message"]["content"][0]["text"] for m in cli.sent if m["type"] == "user"]
