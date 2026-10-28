@@ -272,14 +272,15 @@ internal fun PromptBar(
             if (last >= 0) ui.listState.animateScrollToItem(last)
         }
     }
-    val sendNow = { later: Boolean ->
-        if (sendDraft(ui, sender, later)) scrollToEnd()
+    val sendNow = { later: Boolean, command: Boolean ->
+        if (sendDraft(ui, sender, later, command)) scrollToEnd()
     }
     // The interception table (MCP spec 3.4): Tandem's own commands act here and clear the draft, sending nothing and leaving the
     // attachment strip as it is; anything else is today's send, attachments included, [later] or not (desktop-parity spec 12.1).
-    val runIntercept = { intercept: SlashIntercept, later: Boolean ->
+    // [command]: the draft is a slash command the CLI runs, which goes without the selection's block (spec 3.5).
+    val runIntercept = { intercept: SlashIntercept, later: Boolean, command: Boolean ->
         when (intercept) {
-            is SlashIntercept.Send -> sendNow(later)
+            is SlashIntercept.Send -> sendNow(later, command)
             SlashIntercept.OpenMcp -> ui.openMcpPanel()
             SlashIntercept.PickModel -> ui.menuRequest.value = FooterMenu.MODEL
             SlashIntercept.PickPermissionMode -> ui.menuRequest.value = FooterMenu.MODE
@@ -306,8 +307,9 @@ internal fun PromptBar(
                 scrollToEnd()
             }
             else -> {
-                val later = sendsLater(isSlashCommand(text, composer), ui.attachments.size, composer.busy, queueKey)
-                runIntercept(slashIntercept(text.trim(), composer.models), later)
+                val slash = isSlashCommand(text, composer)
+                val later = sendsLater(slash, ui.attachments.size, composer.busy, queueKey)
+                runIntercept(slashIntercept(text.trim(), composer.models), later, slash)
             }
         }
     }
@@ -370,7 +372,7 @@ internal fun PromptBar(
             is PaletteOutcome.Intercept -> {
                 // A row's own name never reads as text to send; should one, the send path gets that text, not the typed prefix.
                 (outcome.intercept as? SlashIntercept.Send)?.let { ui.draft.setTextAndPlaceCursorAtEnd(it.text) }
-                runIntercept(outcome.intercept, false)
+                runIntercept(outcome.intercept, false, true)
             }
             is PaletteOutcome.Insert -> ui.draft.setTextAndPlaceCursorAtEnd(outcome.text)
             is PaletteOutcome.Send -> {

@@ -173,15 +173,18 @@ internal fun canSend(text: String, attachmentCount: Int, sending: Boolean): Bool
  * is captured and cleared at once, and the sender encodes its images off it. Returns whether it sent, so that the caller scrolls the
  * list to its bottom.
  */
-internal fun sendDraft(ui: ChatUiState, sender: ComposerSender, later: Boolean = false): Boolean {
+internal fun sendDraft(ui: ChatUiState, sender: ComposerSender, later: Boolean = false, command: Boolean = false): Boolean {
     val text = ui.draft.text.toString().trim()
     if (!canSend(text, ui.attachments.size, sender.sending.value)) return false
     val images = ui.attachments.map { CapturedImage(it.mediaType, it.bytes) }
+    // The selection goes only while its chip shows (spec 3.5), captured with the prompt it belongs to before anything is cleared. A
+    // slash command ([command]) goes without it: the CLI's commands are recorded as plain text only (docs/protocol.md 4), and a
+    // leading block could make the command a prompt.
+    val selection = if (command) null else ui.chipSelection
     ui.draft.clearText()
     ui.attachments.clear()
     ui.composerNotice.value = null
-    // The selection goes only while its chip shows (spec 3.5): read before the draft is cleared, with the prompt it belongs to.
-    sender.submit(CapturedPrompt(text, images, later, ui.chipSelection))
+    sender.submit(CapturedPrompt(text, images, later, selection))
     ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
     return true
 }

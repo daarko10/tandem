@@ -303,6 +303,30 @@ class ComposerSenderTest {
         }
     }
 
+    // review: a slash command goes as plain text (docs/protocol.md 4), never behind the selection's block
+    @Test
+    fun `a slash command goes without the selection block`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val sent: MutableList<OutgoingPrompt> = Collections.synchronizedList(ArrayList())
+            val sender = ComposerSender(scope, { sent += it }, {})
+            val ui = ChatUiState()
+            ui.selectionChanged(Selection("src/A.kt", "A.kt", 1, 2, "a\nb"))
+            ui.draft.setTextAndPlaceCursorAtEnd("/compact")
+            assertTrue(sendDraft(ui, sender, command = true))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            assertEquals(OutgoingPrompt("/compact", emptyList()), sent.single(), "the command alone, no block, no chip")
+            // The chip stays for the next prompt, which carries it.
+            assertEquals("A.kt:1-2", ui.chipSelection?.label)
+            ui.draft.setTextAndPlaceCursorAtEnd("explain")
+            assertTrue(sendDraft(ui, sender))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            assertEquals(listOf("The user's selection in src/A.kt, lines 1-2:"), sent.last().context.map { it.firstLine })
+        } finally {
+            scope.cancel()
+        }
+    }
+
     private companion object {
         const val TIMEOUT = 30_000L
     }
