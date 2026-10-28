@@ -7,6 +7,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /** One test per transition of the 4.6.3 state machine, through [ToolStates.of]. */
 class ToolStatesTest {
@@ -88,5 +90,28 @@ class ToolStatesTest {
     @Test
     fun `a settled state never yields RUNNING`() {
         assertEquals(ToolState.INTERRUPTED, ToolStates.of(b, result = null, pending = false, turnOpen = false))
+    }
+
+    // spec: a rejected edit is DENIED despite the accept decision
+    @Test
+    fun `a rejected edit is DENIED despite the accept decision`() {
+        // ide-edit:105: the user's Reject, with the decision the CLI recorded for Tandem's allow.
+        val rejected = toolResultAt("ide-edit", 105)
+        assertEquals(PermissionDecision("accept", "user_temporary", null, null), rejected.decision)
+        assertEquals(ToolState.DENIED, ToolStates.of(toolUseAt("ide-edit", 101), rejected, pending = false, turnOpen = true))
+        val made = err.copy(text = "The user rejected this edit in the IDE; nothing was changed.", decision = PermissionDecision("accept", "user_temporary", null, null))
+        assertEquals(ToolState.DENIED, ToolStates.of(b, made, pending = false, turnOpen = false))
+    }
+
+    // spec: a user-rejected result is INTERRUPTED
+    @Test
+    fun `a user-rejected result is INTERRUPTED`() {
+        // ide-edit-stop:44: the CLI's synthetic result after Stop, no permission decision.
+        val stopped = toolResultAt("ide-edit-stop", 44)
+        assertNull(stopped.decision)
+        assertEquals("user-rejected", stopped.nonExecutionKind)
+        assertTrue(stopped.text.startsWith("The user doesn't want to proceed"))
+        assertEquals(ToolState.INTERRUPTED, ToolStates.of(toolUseAt("ide-edit-stop", 36), stopped, pending = false, turnOpen = true))
+        assertEquals(ToolState.INTERRUPTED, ToolStates.of(b, err.copy(nonExecutionKind = "user-rejected"), pending = false, turnOpen = false))
     }
 }

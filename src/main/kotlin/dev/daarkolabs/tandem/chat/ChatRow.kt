@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.chat
 
+import dev.daarkolabs.tandem.session.EditReview
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.TurnEnd
@@ -182,7 +183,8 @@ data class RowLabel(val text: String, val spans: ImmutableList<IntRange>)
  * built; else, while it runs or waits, its body so far ([ToolBodies.pending], polish spec 2.1); else [ToolBody.None], which a call
  * whose input still streams always has. [children] and [progress] belong to an Agent call: the subagent's rows and its sub-line.
  * [subject] is what a group sentence names: the path relative to the session's directory (reads, edits, writes) or the one-line
- * command (shell).
+ * command (shell). A Tandem edit (spec 3.4) carries its [review] while the user reviews it in the IDE, the [tag] after its label
+ * (`with your changes`, `auto-accepted`) and its row [action] (`Show diff` while its diff is open).
  */
 data class ToolCall(
     val id: String,
@@ -195,7 +197,22 @@ data class ToolCall(
     val children: ImmutableList<ChatRow>,
     val progress: String?,
     val subject: String? = null,
+    val review: EditReview? = null,
+    val tag: String? = null,
+    val action: RowAction? = null,
 )
+
+/** What a tool row offers beside its label (spec 3.4). */
+sealed interface RowAction {
+    /** `Show diff`: focuses the open diff of Tandem's edit [toolUseId]. */
+    data class ShowDiff(val toolUseId: String) : RowAction
+}
+
+/** The tag after an edit's label once the user accepted it with changes of their own (spec 3.4). */
+const val TAG_WITH_YOUR_CHANGES: String = "with your changes"
+
+/** The tag after an edit's label when it applied without a diff (spec 3.3). */
+const val TAG_AUTO_ACCEPTED: String = "auto-accepted"
 
 /** What a tool does, which picks its labels, its body and its family in a group (spec 4.6.2). */
 enum class ToolKind { READ, FIND, SEARCH, SHELL, EDIT, CREATE, WEB_FETCH, WEB_SEARCH, AGENT, QUESTION, PLAN, PLAN_ENTER, TASKS, TOOL_SEARCH, MCP, OTHER }

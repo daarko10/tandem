@@ -343,4 +343,13 @@ class ComposerModelTest {
         assertFalse(composerModel(ChatState(busy = false)).busy)
         assertTrue(composerModel(ChatState(busy = true)).busy)
     }
+
+    // spec: acceptAll is read from the state
+    @Test
+    fun `acceptAll is read from the state`() {
+        assertFalse(composerModel(ChatState()).acceptAll)
+        val on = reduce(ChatState(), SessionEvent.AcceptAll(true))
+        assertTrue(composerModel(on).acceptAll)
+        assertFalse(composerModel(reduce(on, SessionEvent.AcceptAll(false))).acceptAll)
+    }
 }

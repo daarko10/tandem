@@ -411,4 +411,18 @@ class FooterControlsTest {
         assertNull(modeMenuHint(""))
         assertNull(modeMenuHint(" "))
     }
+
+    // spec: the Accept all hint shows beside the mode name
+    @Test
+    fun `the Accept all hint shows beside the mode name`() {
+        val manual = composer(permissionMode = PermissionMode.DEFAULT)
+        assertNull(acceptAllHint(manual))
+        val on = manual.copy(acceptAll = true)
+        assertEquals("Accepting all edits this turn", acceptAllHint(on))
+        // The mode name itself is unchanged: the hint sits beside it.
+        assertEquals(modeLabel(manual), modeLabel(on))
+        // It follows the state: the turn's result clears it.
+        val state = reduce(ChatState(permissionMode = PermissionMode.DEFAULT), SessionEvent.AcceptAll(true))
+        assertEquals("Accepting all edits this turn", acceptAllHint(composerModel(state)))
+    }
 }

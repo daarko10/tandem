@@ -274,4 +274,29 @@ class ToolBodiesTest {
         assertEquals(DiffStats(0, 0), ToolBodies.stats(ToolKind.CREATE, buildJsonObject { put("content", "") }, null))
         assertNull(ToolBodies.stats(ToolKind.READ, null, patch))
     }
+
+    // spec: DiffStats from the input for an edit and a new file
+    @Test
+    fun `DiffStats from the input for an edit and a new file`() {
+        // ide-edit:35 (alpha to beta) and :101 (a new file, `new file`); their results carry no structuredPatch.
+        val edit = toolUseAt("ide-edit", 35)
+        assertEquals(DiffStats(1, 1), ToolBodies.stats(ToolKind.EDIT, edit.input, labelResult(toolResultAt("ide-edit", 41))))
+        assertEquals(DiffStats(1, 0), ToolBodies.stats(ToolKind.CREATE, toolUseAt("ide-edit", 101).input, null))
+        val lines = buildJsonObject { put("file_path", "a"); put("old_string", "a\nb\nc"); put("new_string", "x") }
+        assertEquals(DiffStats(1, 3), ToolBodies.stats(ToolKind.EDIT, lines, null))
+        val deleted = buildJsonObject { put("file_path", "a"); put("old_string", "a\n"); put("new_string", "") }
+        assertEquals(DiffStats(0, 1), ToolBodies.stats(ToolKind.EDIT, deleted, null))
+        // A structuredPatch, when a result has one, gives the better numbers.
+        val patch = buildJsonObject {
+            putJsonArray("structuredPatch") {
+                add(buildJsonObject { putJsonArray("lines") { add(JsonPrimitive("+a")); add(JsonPrimitive("+b")); add(JsonPrimitive("-c")) } })
+            }
+        }
+        assertEquals(DiffStats(2, 1), ToolBodies.stats(ToolKind.EDIT, lines, patch))
+        // The body of a Tandem edit or write is the result's text in the editor font.
+        val applied = assertIs<ToolBody.Mono>(body("ide-edit", 35, 41))
+        assertTrue(applied.lines.first().startsWith("Applied to <path>/hello.txt and saved the file."), applied.lines.first())
+        val rejected = assertIs<ToolBody.Mono>(body("ide-edit", 101, 105))
+        assertEquals("The user rejected this edit in the IDE; nothing was changed.", rejected.lines.first())
+    }
 }

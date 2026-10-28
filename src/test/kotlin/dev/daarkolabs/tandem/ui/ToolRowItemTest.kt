@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.ui
 
+import dev.daarkolabs.tandem.chat.RowAction
 import dev.daarkolabs.tandem.chat.RowGap
 import dev.daarkolabs.tandem.chat.RowLabel
 import dev.daarkolabs.tandem.chat.ToolBody
@@ -7,18 +8,25 @@ import dev.daarkolabs.tandem.chat.ToolCall
 import dev.daarkolabs.tandem.chat.ToolKind
 import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
+import dev.daarkolabs.tandem.session.EditPhase
+import dev.daarkolabs.tandem.session.EditReview
 import dev.daarkolabs.tandem.ui.rows.CommandPart
 import dev.daarkolabs.tandem.ui.rows.Marker
 import dev.daarkolabs.tandem.ui.rows.canExpand
 import dev.daarkolabs.tandem.ui.rows.clampOwners
 import dev.daarkolabs.tandem.ui.rows.commandHeader
 import dev.daarkolabs.tandem.ui.rows.commandParts
+import dev.daarkolabs.tandem.ui.rows.editRowTag
 import dev.daarkolabs.tandem.ui.rows.headerMarker
 import dev.daarkolabs.tandem.ui.rows.marker
+import dev.daarkolabs.tandem.ui.rows.showDiffClick
+import dev.daarkolabs.tandem.ui.rows.showDiffTag
 import kotlinx.collections.immutable.persistentListOf
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ToolRowItemTest {
@@ -111,5 +119,23 @@ class ToolRowItemTest {
     private companion object {
         val MONO: ToolBody = ToolBody.Mono(persistentListOf("The user denied this request."), totalLines = 1)
         val COMMAND: ToolBody = ToolBody.Command("ls", persistentListOf(), 0, firstLineError = false)
+    }
+
+    // spec: Show diff calls the local with the tool use id
+    @Test
+    fun `Show diff calls the local with the tool use id`() {
+        val shown = ArrayList<String>()
+        val open = call("t1", ToolState.RUNNING, ToolBody.None).copy(
+            review = EditReview("a.kt", EditPhase.OPEN),
+            action = RowAction.ShowDiff("t1"),
+        )
+        val click = assertNotNull(showDiffClick(open) { shown += it })
+        click()
+        assertEquals(listOf("t1"), shown)
+        assertEquals("edit-show-diff-t1", showDiffTag("t1"))
+        assertEquals("edit-row-t1", editRowTag("t1"))
+        // No action, no link.
+        assertNull(showDiffClick(call("t2", ToolState.RUNNING, ToolBody.None)) { shown += it })
+        assertEquals(listOf("t1"), shown)
     }
 }

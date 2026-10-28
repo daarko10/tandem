@@ -46,7 +46,16 @@ private fun SubRow(call: ToolCall, blocks: ImmutableList<MarkdownBlock>?, ui: Ch
     val opens = canExpand(call)
     val needsParse = parsedOnOpen(call.body) && blocks == null
     Column(Modifier.fillMaxWidth()) {
-        ToolLine(call.label, call.state, call.stats, opens, expanded && opens, minHeight = 36.dp, marker = marker(call)) {
+        ToolLine(
+            call.label,
+            call.state,
+            call.stats,
+            opens,
+            expanded && opens,
+            minHeight = 36.dp,
+            marker = marker(call),
+            tag = call.tag,
+        ) {
             ui.toggle(key, listOf(key))
         }
         if (expanded && opens) {

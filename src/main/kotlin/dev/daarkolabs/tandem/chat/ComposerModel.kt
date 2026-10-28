@@ -29,7 +29,8 @@ internal const val DEFAULT_MODEL_ENTRY: String = "default"
  * [skills] the latest init's skills, null before an init; [pluginPrefixes] the session's plugins for the palette ([pluginPrefixes]).
  * [busy] counts a message waiting in the CLI's queue too (desktop-parity spec 12.1). [midTurnSends]: the live process takes messages
  * while it works (its init listed both queue capabilities); [capabilitiesKnown]: an init of the live process came (deviation 16).
- * [returned] are the messages that came back without running, for the composer to take back (spec 12.3, 12.5).
+ * [returned] are the messages that came back without running, for the composer to take back (spec 12.3, 12.5). [acceptAll]: `Accept
+ * all` was pressed in a diff of this turn ([ChatState.acceptAll]), which the mode control's hint says (IDE-edits spec 3.4).
  */
 data class ComposerModel(
     val busy: Boolean,
@@ -57,6 +58,7 @@ data class ComposerModel(
     val midTurnSends: Boolean = false,
     val capabilitiesKnown: Boolean = false,
     val returned: ImmutableList<ReturnedSend> = persistentListOf(),
+    val acceptAll: Boolean = false,
 )
 
 /** The `system/init` capabilities that let the composer send while Claude works (desktop-parity spec 12.1's gate). */
@@ -108,6 +110,7 @@ fun composerModel(
         midTurnSends = state.cliCapabilities?.containsAll(MID_TURN_CAPABILITIES) == true && !state.ended,
         capabilitiesKnown = state.cliCapabilities != null,
         returned = state.returnedSends.toImmutableList(),
+        acceptAll = state.acceptAll,
     )
 }
 

@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.chat
 
+import dev.daarkolabs.tandem.session.EditPhase
 import kotlinx.collections.immutable.toImmutableList
 
 /**
@@ -42,13 +43,14 @@ object Grouping {
 
     /**
      * [calls] split into rows (rules 2–4): a call of a tool that is always alone, or one that failed, was denied or was interrupted,
-     * is a row of its own, and the calls between such rows form one group each. A single call is a list of one.
+     * or a Tandem edit in review (spec 3.4), is a row of its own, and the calls between such rows form one group each. A single
+     * call is a list of one.
      */
     fun fold(calls: List<ToolCall>): List<List<ToolCall>> {
         val rows = ArrayList<List<ToolCall>>()
         var group = ArrayList<ToolCall>()
         for (call in calls) {
-            if (call.kind in loneKinds || call.state in loneStates) {
+            if (call.kind in loneKinds || call.state in loneStates || call.inReview()) {
                 if (group.isNotEmpty()) rows += group
                 group = ArrayList()
                 rows += listOf(call)
@@ -148,3 +150,6 @@ object Grouping {
             members.distinctBy { if (it.kind != ToolKind.SHELL && it.subject != null) "name:${it.subject}" else "call:${it.id}" }.size
         }
 }
+
+/** A Tandem edit the user still reviews, or that waits for its diff (spec 3.4): its row of its own shows its phase and `Show diff`. */
+private fun ToolCall.inReview(): Boolean = review?.phase.let { it == EditPhase.QUEUED || it == EditPhase.OPEN }

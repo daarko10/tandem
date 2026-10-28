@@ -82,7 +82,8 @@ private const val CONNECTOR_PREFIX: String = "claude.ai "
 private const val DYNAMIC_SOURCE: String = "dynamic"
 
 /**
- * The panel of [state]. [ownServer] with source `dynamic` is Tandem's own server, read-only; a `needs-auth` row whose name is in
+ * The panel of [state]. [ownServer] with source `sdk` or `dynamic` is Tandem's own server, read-only under [McpSource.DYNAMIC]
+ * (IDE-edits spec 3.4: the CLI reports the SDK server as `sdk`); a `needs-auth` row whose name is in
  * [loginHinted] (it showed the terminal hint, spec 3.3 step 4) and whose source is not `dynamic` also offers Reconnect. When the
  * session is not [live], the rows stay as last known with no action.
  */
@@ -93,7 +94,7 @@ fun mcpPanel(
     live: Boolean = true,
 ): McpPanelModel {
     val keys = HashSet<String>()
-    val bySource = state.servers.map { server -> sourceOf(server) to server }
+    val bySource = state.servers.map { server -> (if (isOwn(server, ownServer)) McpSource.DYNAMIC else sourceOf(server)) to server }
     val groups = McpSource.entries.mapNotNull { source ->
         val rows = bySource.filter { it.first == source }.map { (_, server) -> row(server, source, ownServer, loginHinted, live, keys) }
         if (rows.isEmpty()) null else McpGroupModel(source, rows.toImmutableList())
@@ -123,6 +124,12 @@ fun mcpTooltip(state: McpState, live: Boolean = true): String = when {
     else -> "MCP servers: ${state.servers.count { it.status == McpStatus.CONNECTED }} of ${state.servers.size} connected"
 }
 
+/** The sources the CLI reports Tandem's own server under: `sdk` for the SDK server, `dynamic` for one passed with `--mcp-config`. */
+private val OWN_SOURCES: Set<String> = setOf("sdk", DYNAMIC_SOURCE)
+
+/** Whether [server] is Tandem's own ([ownServer] by name, from one of [OWN_SOURCES]), whatever else the CLI reports for it. */
+private fun isOwn(server: McpServerInfo, ownServer: String): Boolean = server.name == ownServer && server.source in OWN_SOURCES
+
 private fun sourceOf(server: McpServerInfo): McpSource = when {
     server.source == "claudeai" || server.config?.type == "claudeai-proxy" -> McpSource.CLAUDEAI
     server.source == "project" -> McpSource.PROJECT
@@ -142,7 +149,7 @@ private fun row(
     live: Boolean,
     keys: MutableSet<String>,
 ): McpRowModel {
-    val own = server.name == ownServer && server.source == DYNAMIC_SOURCE
+    val own = isOwn(server, ownServer)
     val actions = if (own || !live) persistentListOf() else actionsOf(server, loginHinted)
     val count = server.tools?.size
     return McpRowModel(

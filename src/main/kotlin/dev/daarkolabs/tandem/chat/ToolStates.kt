@@ -16,6 +16,10 @@ object ToolStates {
     fun of(block: AssistantBlock.ToolUse, result: ChatEntry.ToolResult?, pending: Boolean, turnOpen: Boolean): ToolState = when {
         result != null -> when {
             !result.isError -> ToolState.DONE
+            // The CLI's synthetic result after Stop carries no decision, only this kind (spec 3.4): not a failure.
+            result.nonExecutionKind == USER_REJECTED -> ToolState.INTERRUPTED
+            // A Reject in Tandem's diff: the CLI records the allow Tandem gave, so the text decides, before the decision.
+            isEditRejection(result) -> ToolState.DENIED
             isDenial(result) -> ToolState.DENIED
             else -> ToolState.FAILED
         }
@@ -24,6 +28,16 @@ object ToolStates {
         block.input == null -> ToolState.PENDING
         else -> ToolState.RUNNING
     }
+
+    /** The `non_execution_kind` of a call the user stopped before it ran. */
+    private const val USER_REJECTED = "user-rejected"
+
+    /** The start of the result Tandem answers when the user rejects an edit in its diff (spec 4.3). */
+    internal const val EDIT_REJECTED_PREFIX: String = "The user rejected this edit"
+
+    /** Whether an error [result] is Tandem's own rejection of an edit (spec 3.4), with or without the `<tool_use_error>` tags. */
+    private fun isEditRejection(result: ChatEntry.ToolResult): Boolean =
+        ToolBodies.withoutErrorTags(result.text).trim().removePrefix("Error: ").startsWith(EDIT_REJECTED_PREFIX)
 
     /** Whether an error [result] is the user's denial: a reject decision, or without one the CLI's denial text. */
     internal fun isDenial(result: ChatEntry.ToolResult): Boolean {

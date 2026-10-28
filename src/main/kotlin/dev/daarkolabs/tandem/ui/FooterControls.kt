@@ -116,6 +116,12 @@ internal fun modelLabel(composer: ComposerModel): ModelLabel {
     return ModelLabel(model, effort)
 }
 
+/** The hint beside the mode name while `Accept all` holds for the turn (IDE-edits spec 3.4); null otherwise. */
+internal fun acceptAllHint(composer: ComposerModel): String? = ACCEPT_ALL_HINT.takeIf { composer.acceptAll }
+
+/** What the mode control says beside the mode name while `Accept all` holds. */
+private const val ACCEPT_ALL_HINT: String = "Accepting all edits this turn"
+
 /** What the mode control reads: the session's mode by its footer label, or "Mode" while there is none. */
 internal fun modeLabel(composer: ComposerModel): String = composer.permissionMode?.let(Modes::label) ?: NO_MODE_LABEL
 
@@ -434,7 +440,15 @@ internal fun ModeControl(
         description = "Permission mode",
         alignEnd = false,
         digitPick = { digit -> byDigit(items, digit, ModeItem::digit)?.let(::pick) != null },
-        label = { Text(modeLabel(composer), style = smallTextStyle(), color = palette.secondary, maxLines = 1) },
+        label = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(modeLabel(composer), style = smallTextStyle(), color = palette.secondary, maxLines = 1)
+                // `Accept all` holds for the rest of the turn (IDE-edits spec 3.4): said beside the mode name until the turn ends.
+                acceptAllHint(composer)?.let { hint ->
+                    Text(hint, style = smallTextStyle(), color = palette.dim, maxLines = 1, modifier = Modifier.padding(start = 6.dp))
+                }
+            }
+        },
         request = menuRequest,
         requestedAs = FooterMenu.MODE,
         openMenus = openMenus,

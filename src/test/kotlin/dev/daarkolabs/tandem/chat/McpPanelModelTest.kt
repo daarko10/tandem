@@ -305,4 +305,27 @@ class McpPanelModelTest {
         val tricky = panel(server("echo#2"), server("echo"), server("echo")).rows().map { it.key }
         assertEquals(tricky.size, tricky.toSet().size, tricky.toString())
     }
+
+    // spec: Tandem's own server with source sdk is read-only
+    @Test
+    fun `Tandem's own server with source sdk is read-only`() {
+        // ide-edit:73: the mcp_status after the first turn lists echo (dynamic) and tandem (transport sdk, source sdk).
+        val answer = fixtureLine("ide-edit", 73) as CliMessage.ControlResponse
+        val model = mcpPanel(McpState(ControlPayloads.mcpStatus(answer.payload)!!.servers, detailed = true))
+        val own = model.rows().single { it.name == "tandem" }
+        assertTrue(own.readOnly)
+        assertEquals(emptyList(), own.actions)
+        assertNull(own.rawSource)
+        val group = model.groups.single { g -> g.rows.any { it.name == "tandem" } }
+        assertEquals(McpSource.DYNAMIC, group.source)
+        // The configured echo server beside it keeps its actions.
+        assertFalse(model.rows().single { it.name == "echo" }.readOnly)
+        // A foreign server named tandem from the user's settings keeps its actions.
+        val foreign = row(server("tandem", source = "user"))
+        assertFalse(foreign.readOnly)
+        assertEquals(listOf(McpAction.DISABLE), foreign.actions)
+        // Another server with source sdk is not Tandem's own.
+        val other = row(server("other", source = "sdk"))
+        assertFalse(other.readOnly)
+    }
 }
