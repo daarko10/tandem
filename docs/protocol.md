@@ -122,7 +122,7 @@ then appends optional flags in this order (SDK 0.3.300; only those Tandem cares 
 | `--tools a,b` / `--tools=default` | `tools` option | optional |
 | `--mcp-config <json>` | non-SDK MCP servers given | **no.** Tandem's own tools are an SDK server named in `initialize` (4.2, 4.5), which needs no port and no config file. The CLI refuses an SDK server given here: a `--mcp-config` entry of `type:"sdk"` is rejected with "declares type \"sdk\", which only an SDK host application can register" (**binary**, 2.1.312) |
 | `--setting-sources user,project,local` | option | optional |
-| `--strict-mcp-config` | option | no: the user's configured servers run beside Tandem's own, one `echo` stdio server and the SDK server `tandem` both `connected` (`ide-edit:8`, `:73`, 2.1.312). The probes that recorded the fixtures passed `--setting-sources project,local` so the recording machine's own servers stayed out |
+| `--strict-mcp-config` | option | no: configured servers run beside Tandem's own (recorded for one `--mcp-config` stdio server, `echo`, with the SDK server `tandem`, both `connected`: `ide-edit:8`, `:73`, 2.1.312; servers from the user's settings were left out by `--setting-sources project,local` and are unrecorded beside it) |
 | `--permission-mode <mode>` | option | yes |
 | `--allow-dangerously-skip-permissions` | option | only if user enables bypass |
 | `--fallback-model <id>` | option; SDK throws if equal to `--model` | no by default |
@@ -269,6 +269,8 @@ spawn ──► write control_request{initialize} ──► read control_respons
 ```
 
 The SDK (0.3.300) queues user messages until the `initialize` request is written (`writeAfterInitialize`); it does not wait for the response before writing. Default init timeout in the SDK is 60 s. Tandem writes `initialize` first too (4.2).
+With `sdkMcpServers` (4.2) the CLI's `mcp_message` `initialize` for the host's server arrives before the `initialize` answer
+(`ide-edit:1`, `:2`, 2.1.312): keep reading and answer it.
 
 ---
 
@@ -814,12 +816,12 @@ itself does, **binary**; the host's frames are not in the fixtures, which hold t
 | `message.method` | Seen | Tandem's reply (`result`) |
 |---|---|---|
 | `initialize` | `ide-edit:1` (`id` 0) | the request's `protocolVersion`, `capabilities:{"tools":{}}`, `serverInfo{name:"tandem", version}` |
-| `notifications/initialized` (no `id`) | `ide-edit:4` | `{"jsonrpc":"2.0","result":{},"id":0}`, which is what the Agent SDK answers a notification with (**binary**); a request frame is answered either way |
+| `notifications/initialized` (no `id`) | `ide-edit:4` | `{"jsonrpc":"2.0","result":{},"id":0}`, which is what the Agent SDK answers a notification with (**binary**); every `mcp_message` control request gets a `control_response`, a notification included |
 | `tools/list` | `ide-edit:6` (`id` 1) | `{"tools":[…]}`: `edit_file` (`file_path`, `old_string`, `new_string`, `replace_all`) and `write_file` (`file_path`, `content`), each with a JSON Schema |
 | `tools/call` | `ide-edit:38` (`id` 2) | `{"content":[{"type":"text","text":…}]}`, plus `"isError":true` for a tool error |
 | `notifications/cancelled` | `ide-edit-stop:42` | the empty result; it withdraws the call whose id is `params.requestId` (below) |
 | `ping` | not seen | `{}` (the MCP specification's answer) |
-| anything else | not seen | the JSON-RPC error `-32601` (`Method not found: <method>`); an unknown tool name `-32602`; a message with no string `method` `-32600` |
+| anything else | not seen | a request (with an `id`) for another method gets `-32601` (`Method not found: <method>`); any notification (no `id`) gets the notification reply; an unknown tool name `-32602`; a message with no string `method` `-32600` |
 
 A JSON-RPC `id` is a number in every recording (`0` to `3`) but the protocol allows a string: the reply echoes it as it came.
 A frame without a string `server_name` or an object `message` is not an `mcp_message` to Tandem and gets the usual
@@ -1371,7 +1373,8 @@ The nightly contract job records `queue-fold`, `queue-later`, `queue-cancel`, `q
 and `ContractTest` checks what Tandem switches on in them.
 
 The IDE-edit fixtures were recorded with `scripts/record-scenario.sh` on CLI 2.1.312 with `--model sonnet`, in a temporary
-working directory the redactor writes `<path>` while keeping a file's name (`"file_path":"<path>/hello.txt"`). Each has its transcript and keeps `init.tools` (the redactor empties it elsewhere), and all
+working directory the redactor writes `<path>` while keeping a file's name (`"file_path":"<path>/hello.txt"`). Each has its transcript. The three `ide-edit*` keep `init.tools` and `init.mcp_servers` (the redactor's INIT_KEEP);
+`ide-mention`'s are emptied, as in every other fixture. All
 ran with `--setting-sources project,local`; the three `ide-edit*` ran with one configured stdio server (`echo`) beside Tandem's
 SDK server. The host's frames are not in the files. The result texts the
 recording driver answered with follow Tandem's wording but not its bytes: a test asserts what Tandem builds, not these.
