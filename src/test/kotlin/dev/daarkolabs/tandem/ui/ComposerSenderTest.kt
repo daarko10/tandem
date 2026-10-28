@@ -155,6 +155,38 @@ class ComposerSenderTest {
         }
     }
 
+    @Test
+    fun `a dirty mention with a line suffix looks up its file and keeps the range`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val asked: MutableList<String> = Collections.synchronizedList(ArrayList())
+            val sender = ComposerSender(scope, {}, {}, unsaved = { asked += it; mapOf("src/A.kt" to "x\ny\n")[it] })
+            val (text, context) = sender.swapDirtyMentions("look at @src/A.kt#L2 and @src/A.kt#L5-7")
+            assertEquals("look at src/A.kt#L2 and src/A.kt#L5-7", text)
+            assertEquals(listOf(ContextBlock("src/A.kt as open in the IDE, with unsaved changes (2 lines):", "x\ny\n")), context)
+            assertEquals(listOf("src/A.kt"), asked, "the file is looked up once, without its range")
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a failing buffer lookup sends the mention as typed and the sender goes on`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val sent: MutableList<OutgoingPrompt> = Collections.synchronizedList(ArrayList())
+            val dropped: MutableList<String> = Collections.synchronizedList(ArrayList())
+            val sender = ComposerSender(scope, { sent += it }, { dropped += it }, unsaved = { error("boom") })
+            sender.submit(CapturedPrompt("read @a.kt", emptyList()))
+            sender.submit(CapturedPrompt("then @b.kt", emptyList()))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            assertEquals(listOf("read @a.kt", "then @b.kt"), sent.map { it.text })
+            assertEquals(emptyList(), dropped)
+        } finally {
+            scope.cancel()
+        }
+    }
+
     // spec: a clean mention goes out as typed
     @Test
     fun `a clean mention goes out as typed`() = runBlocking {

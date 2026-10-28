@@ -5,6 +5,8 @@ import dev.daarkolabs.tandem.protocol.ContextBlock
 import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.session.ContextBlocks
 import dev.daarkolabs.tandem.session.ContextChip
+import com.intellij.openapi.diagnostic.logger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -109,20 +111,38 @@ internal class ComposerSender(
     suspend fun swapDirtyMentions(text: String): Pair<String, List<ContextBlock>> {
         val spans = mentionsIn(text)
         if (spans.isEmpty()) return text to emptyList()
+        // A line suffix (`@a.kt#L2`) names a range of the file: the buffer is the file's, and the bare text keeps the range.
         val buffers = LinkedHashMap<String, String?>()
-        for (span in spans) if (span.path !in buffers) buffers[span.path] = unsaved(span.path)
+        for (span in spans) {
+            val file = fileOf(span.path)
+            if (file !in buffers) buffers[file] = bufferOf(file)
+        }
         val dirty = buffers.filterValues { it != null }
         if (dirty.isEmpty()) return text to emptyList()
         val out = StringBuilder(text.length)
         var at = 0
         for (span in spans) {
-            if (span.path !in dirty) continue
+            if (fileOf(span.path) !in dirty) continue
             out.append(text, at, span.start)
             at = span.start + 1
         }
         out.append(text, at, text.length)
         return out.toString() to dirty.map { (path, buffer) -> ContextBlocks.unsavedBlock(path, buffer!!) }
     }
+
+    /**
+     * [unsaved] for [file], or null (a clean file: the mention goes as typed) when it fails: a prompt is never lost to the lookup.
+     * Only the exception's class is logged.
+     */
+    private suspend fun bufferOf(file: String): String? =
+        try {
+            unsaved(file)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            LOG.warn("Unsaved-buffer lookup failed: ${e.javaClass.name}")
+            null
+        }
 
     /** Queues [prompt] for sending; on the EDT, at the capture. */
     fun submit(prompt: CapturedPrompt) {
@@ -150,6 +170,11 @@ internal class ComposerSender(
     }
 
     private companion object {
+        private val LOG = logger<ComposerSender>()
+
+        /** The file of a mention's path, less a `#…` line suffix. */
+        fun fileOf(path: String): String = path.substringBefore('#')
+
         const val NOT_SENT = "This prompt was not sent before the session closed"
     }
 }
