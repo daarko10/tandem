@@ -184,13 +184,14 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
             // The class only: the message can name the file (the plan: never log a file path).
             LOG.warn("tools/call request ${proposal.call.requestId}: showing the diff failed: ${e.javaClass.name}")
             val reason = reasonOf(e)
-            queue.fail(proposal, DiffNotOpened(reason))
+            // The notice first: the refusal it explains goes out once the call fails ([DiffNotOpened]: "the notice is shown already").
             try {
                 sessions.notice(proposal.call.session, "The diff could not be opened: $reason")
             } catch (e: Throwable) {
                 if (e is CancellationException) throw e
                 LOG.warn("tools/call request ${proposal.call.requestId}: the notice failed too: ${e.javaClass.name}")
             }
+            queue.fail(proposal, DiffNotOpened(reason))
         }
     }
 
@@ -209,8 +210,9 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
                     if (e is CancellationException) ensureActive()
                     val reason = reasonOf(e)
                     LOG.warn("tools/call request ${proposal.call.requestId}: the diff could not be opened: ${e.javaClass.name}")
-                    queue.fail(proposal, DiffNotOpened(reason))
+                    // The notice before the refusal it explains goes out ([DiffNotOpened]: "the notice is shown already").
                     sessions.notice(proposal.call.session, "The diff could not be opened: $reason")
+                    queue.fail(proposal, DiffNotOpened(reason))
                     return@launch
                 }
                 queue.resolve(proposal, decided)
