@@ -6,6 +6,8 @@
 # Example: scripts/record-scenario.sh permission
 # `settings` is a probe, not a fixture: it needs an out-dir outside the fixtures,
 # e.g. scripts/record-scenario.sh settings scratch/rec
+# ide-edit, ide-edit-two, ide-edit-stop and ide-mention record Tandem's edit tools (an SDK MCP server served over the control
+# channel) and the CLI's @path expansion; record them with --model sonnet. ide-edit-collision is a probe, like settings.
 # mcp-status, mcp-tool-call and mcp-slash start their own local MCP servers (scripts/mcp_probe_servers.py, Python's
 # standard library only) in the scenario's working directory, so they need nothing installed.
 # The connector scenarios sign in to one claude.ai connector, named in the environment and never in a file:
@@ -17,12 +19,12 @@
 # Like record-fixture.sh, this uses the local `claude` sign-in and never commits the raw transcripts.
 set -euo pipefail
 
-scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | permission-mode-rejected | fork | effort-switch | permission-mode-auto | user-image | ask-two | fork-at | fork-at-live | fork-at-busy | queue-fold | queue-later | queue-cancel | queue-steer-text | queue-cancel-steer | queue-later-command | queue-during-card | parity-requests | add-dir-spawn | bash-mode | bash-mode-respond | bash-mode-respond-together | bash-mode-context | mcp-status | mcp-tool-call | mcp-slash | mcp-connectors | mcp-connectors-all (needs TANDEM_PROBE_CONNECTOR=\"claude.ai <Name>\"; the redactor renames the connector) | settings (a probe: give an out-dir outside the fixtures)}"
+scenario="${1:?scenario: permission | interrupt | model-switch | permission-mode | permission-mode-rejected | fork | effort-switch | permission-mode-auto | user-image | ask-two | fork-at | fork-at-live | fork-at-busy | queue-fold | queue-later | queue-cancel | queue-steer-text | queue-cancel-steer | queue-later-command | queue-during-card | parity-requests | add-dir-spawn | ide-edit | ide-edit-two | ide-edit-stop | ide-mention | ide-edit-collision (a probe: give an out-dir outside the fixtures) | bash-mode | bash-mode-respond | bash-mode-respond-together | bash-mode-context | mcp-status | mcp-tool-call | mcp-slash | mcp-connectors | mcp-connectors-all (needs TANDEM_PROBE_CONNECTOR=\"claude.ai <Name>\"; the redactor renames the connector) | settings (a probe: give an out-dir outside the fixtures)}"
 out_dir="${2:-src/test/resources/fixtures}"
-if [[ "$scenario" == settings ]]; then
+if [[ "$scenario" == settings || "$scenario" == ide-edit-collision ]]; then
   case "${2:-}" in
     "" | *src/test/resources/fixtures*)
-      echo "settings is a probe, not a fixture: give an out-dir outside src/test/resources/fixtures, e.g. scratch/rec" >&2
+      echo "$scenario is a probe, not a fixture: give an out-dir outside src/test/resources/fixtures, e.g. scratch/rec" >&2
       exit 2 ;;
   esac
 fi

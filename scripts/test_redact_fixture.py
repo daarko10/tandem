@@ -230,6 +230,37 @@ class RedactTest(unittest.TestCase):
             self.assertEqual([{"name": "mcp", "description": "Manage MCP servers"}], answer["response"]["response"]["commands"])
             self.assertEqual([], answer["response"]["response"]["agents"])
 
+    def test_tool_use_id_meta_is_an_id(self):
+        tool_use = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_01X", "name": "t",
+                                                                  "input": {}}]}}
+        call = {"type": "control_request", "request_id": "r1", "request": {
+            "subtype": "mcp_message", "server_name": "tandem",
+            "message": {"method": "tools/call", "params": {"_meta": {"claudecode/toolUseId": "toolu_01X",
+                                                                      "progressToken": 2}}}}}
+        (use, out), err = self.redact(tool_use, call)
+        placeholder = use["message"]["content"][0]["id"]
+        self.assertEqual(placeholder, out["request"]["message"]["params"]["_meta"]["claudecode/toolUseId"])
+        self.assertNotIn("leaked", json.dumps(out))
+        self.assertEqual("", err)
+
+    def test_turn_attribution_key_is_an_id(self):
+        key = "0b0e5c1a-3f2d-4c6b-9a8e-7d6c5b4a3f2e"
+        (out,), err = self.redact({"type": "user", "turnAttributionKey": key})
+        self.assertEqual("<turnAttributionKey-1>", out["turnAttributionKey"])
+        self.assertEqual("", err)
+
+    def test_init_tools_survive_for_ide_edit_and_not_for_history_reply(self):
+        tools = ["Bash", "mcp__tandem__edit_file", "mcp__tandem__write_file"]
+        for name in ("ide-edit", "ide-edit-two", "ide-edit-stop", "transcripts/ide-edit"):
+            importlib.reload(redact_fixture)
+            (out,), _ = self.redact({**init(), "tools": tools, "mcp_servers": [{"name": "tandem"}, {"name": "echo"}]},
+                                    name=name)
+            self.assertEqual(tools, out["tools"], name)
+            self.assertEqual(["tandem", "echo"], [s["name"] for s in out["mcp_servers"]], name)
+        importlib.reload(redact_fixture)
+        (out,), _ = self.redact({**init(), "tools": tools}, name="history-reply")
+        self.assertEqual([], out["tools"])
+
     def test_submit_uuid_gets_an_id_placeholder(self):
         (out,), err = self.redact({"type": "system", "subtype": "local_command", "content": "/help",
                                    "uuid": "11111111-2222-4333-8444-555555555555",

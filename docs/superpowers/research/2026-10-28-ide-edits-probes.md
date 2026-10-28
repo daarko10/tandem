@@ -130,3 +130,76 @@ The write side is the platform's usual: `WriteCommandAction.writeCommandAction(p
 7. The probes ran with `--strict-mcp-config --setting-sources project,local`, so the SDK server was alone; Tandem spawns without those flags (`ClaudeSession.argv`). Coexistence with configured servers and a name collision with a user server called `tandem` are **unrecorded** (spec 9.1 records both).
 
 Open (carried into the spec's section 11): `MCP_TOOL_TIMEOUT`'s default for an SDK server's call; `bypassPermissions` and `sdkMcpServerConfigs`; whether `sdkMcpServerManifests` lifts the deferral or saves the `tools/list` round trip; the http alternative; mentions with spaces, directories, during a turn.
+
+---
+
+## 5. Recordings (F1): the fixtures and their line map
+
+Recorded 2026-10-28 with `scripts/record-scenario.sh` against `claude` 2.1.312 on `sonnet`, redacted, each with its CLI transcript under `src/test/resources/fixtures/transcripts/`. Every number below is a 1-based line of `src/test/resources/fixtures/<name>.ndjson` and was opened while writing this. Tests cite this map, never a probe line (`r1:38` and the like). The numbers differ from the probes' because the SDK server now sits beside a configured one, so the MCP handshake starts before the CLI's `initialize` answer and the first `mcp_status` is an extra line.
+
+Two facts the spec did not expect, both visible in the lines below:
+
+- **`<path>` is the whole path.** The redactor's `PATH_RE` swallows the file name with the directory, so a recorded `tools/call` reads `"file_path":"<path>"`, not `"<path>/hello.txt"` (spec 9.6): the fake CLI substitutes the project's file for `<path>` itself and cannot tell two files apart by the recorded argument. The same holds for the paths inside a result's text (`Applied to <path> and saved the file.`).
+- **`init.tools` was kept by every fixture before this round.** Spec 9.1 and the plan's deviation 1 assume the redactor drops it. It did not; it now does for every fixture but the ones in `INIT_KEEP` (the `ide-edit*` three, the four MCP fixtures, `mcp-connectors*`), which is what makes the version gate's "a non-empty `tools` lacking `mcp__tandem__edit_file`" safe for **newly recorded** fixtures. The fixtures committed before F1 (for example `history-reply`, `permission`) still hold their full `tools` lists, so the gate reads them as "a CLI that did not take the server": F3 must not let that raise the notice in the existing tests (see the task report).
+
+### `ide-edit` (117 lines; the transcript is `transcripts/ide-edit.jsonl`, 47 lines)
+
+| Frame | Line |
+|---|---|
+| `mcp_message` `initialize` (`id` 0, `protocolVersion` `2025-11-25`), before the CLI's `initialize` answer at `:2` | `ide-edit:1` |
+| `mcp_status` before the first prompt: `echo` `pending`, **no** `tandem` row | `ide-edit:3` |
+| `mcp_message` `notifications/initialized` (no `id`) | `ide-edit:4` |
+| `mcp_message` `tools/list` (`id` 1) | `ide-edit:6` |
+| `system/init`: `tools` holds `mcp__echo__echo`, `mcp__tandem__edit_file`, `mcp__tandem__write_file` (no built-in `Edit`/`Write`); `mcp_servers` holds `echo` (`dynamic`) and `tandem` (`sdk`), both `connected` | `ide-edit:8` |
+| `ToolSearch` `tool_use`, its `tool_reference` result for `mcp__tandem__edit_file` | `ide-edit:19`, `:21` |
+| first `tool_use` (`mcp__tandem__edit_file`, with `tool_use_meta`) | `ide-edit:35` |
+| its `can_use_tool` (`mcp_server {name:"tandem", source:"sdk"}`, `server_policy_ask_only`) | `ide-edit:37` |
+| its `tools/call` (`_meta["claudecode/toolUseId"]` equals `:35`'s block id; `file_path` is `<path>`) | `ide-edit:40` |
+| its result: `tool_result.content` a block array, no `is_error`, `permission_decision {accept, user_temporary}`; the text is the changed-proposal text with the unified diff and the file `beta!` | `ide-edit:41` |
+| `result` `success` of the first turn | `ide-edit:66` |
+| `mcp_status` after the first turn: `echo` (`stdio`, `dynamic`) and `tandem` (`transport:"sdk"`, `source:"sdk"`, `serverInfo.version` `0.4.0`, tools `edit_file`, `write_file`) | `ide-edit:68` |
+| second `system/init` (the next turn of the same process) | `ide-edit:71` |
+| `write_file`: `tool_use`, `can_use_tool`, `tools/call` | `ide-edit:96`, `:98`, `:99` |
+| the rejected `write_file`'s result: `content` a string, `is_error:true`, the text `The user rejected this edit in the IDE; nothing was changed.\nThe user says: not now` | `ide-edit:102` |
+| `result` `success` of the second turn | `ide-edit:116` |
+
+### `ide-edit-two` (86 lines; transcript 38)
+
+| Frame | Line |
+|---|---|
+| `initialize`, `notifications/initialized`, `tools/list` | `ide-edit-two:1`, `:3`, `:5` |
+| first call: `tool_use`, `can_use_tool`, `tools/call` (`alpha` to `beta`), result | `ide-edit-two:41`, `:43`, `:44`, `:45` |
+| second call in the same turn: `tool_use`, `can_use_tool`, `tools/call` (`line two` to `line 2`), result | `ide-edit-two:61`, `:63`, `:64`, `:65` |
+| `result` `success` | `ide-edit-two:85` |
+
+### `ide-edit-stop` (121 lines; transcript 49)
+
+| Frame | Line |
+|---|---|
+| `initialize`, `notifications/initialized`, `tools/list`, `system/init` | `ide-edit-stop:1`, `:3`, `:5`, `:7` |
+| held call: `tool_use`, `can_use_tool`, `tools/call` (JSON-RPC `id` 2, never answered by the host) | `ide-edit-stop:36`, `:38`, `:39` |
+| `notifications/cancelled` (`requestId` 2, `reason` `AbortError: remote-cancel`) | `ide-edit-stop:42` |
+| the interrupt's receipt (`still_queued: []`) | `ide-edit-stop:43` |
+| the synthetic rejection: `is_error:true`, `tool_use_result` `User rejected tool use`, `tool_result_meta [{id, non_execution_kind:"user-rejected"}]` with **no** `permission_decision` | `ide-edit-stop:44` |
+| the text line `[Request interrupted by user for tool use]` | `ide-edit-stop:45` |
+| `result` `error_during_execution`, `is_error:true`, `terminal_reason` `aborted_tools` (the only error result of the four fixtures) | `ide-edit-stop:46` |
+| the `set_permission_mode acceptEdits` answer (`{mode}`), then the next `system/init` | `ide-edit-stop:48`, `:52` |
+| under `acceptEdits`: `tool_use`, `can_use_tool` (the request still arrives), `tools/call`, result (applied, `permission_decision {accept, user_temporary}`) | `ide-edit-stop:64`, `:66`, `:67`, `:70` |
+| `result` `success` of that turn | `ide-edit-stop:79` |
+| the `set_permission_mode default` answer, then `system/init` | `ide-edit-stop:81`, `:85` |
+| the stale `old_string`: `tool_use`, `can_use_tool`, `tools/call`, the not-found result (`is_error:true`, text `old_string was not found in <path> …` followed by the numbered file) | `ide-edit-stop:99`, `:101`, `:102`, `:103` |
+| `result` `success` | `ide-edit-stop:120` |
+
+The host's `set_permission_mode` requests themselves are not in a fixture (the files hold the CLI's stdout); the fake CLI answers them from the `{mode}` lines above.
+
+### `ide-mention` (36 lines; transcript 34)
+
+The prompts are host frames and not in the stdout. The CLI answered both without a tool (`tools` disallowed): the first prompt `What does @hello.txt say?` ends at the reply `ide-mention:16` and `result` `ide-mention:20`; the second, `What is on @hello.txt#L2?`, at the reply `ide-mention:31` (`Line 2 of hello.txt is line two.`) and `result` `ide-mention:35`; a `system/init` precedes each (`:5`, `:24`). In `transcripts/ide-mention.jsonl` the user lines are `:6` and `:29`; the expansion is an `attachment` line right after each: `:7` (`type: file`) and `:30` (`type: already_read_file`). The redactor reduces every attachment to its `type`, so the transcript does not carry the file's text.
+
+### Other numbers the spec's 9.2 names
+
+For `FixtureDecodeTest`: the `init` is `ide-edit:8`, the `McpTest` answer with `transport:"sdk"` is `ide-edit:68`, the block-array result is `ide-edit:41` and the error result with the `tool_use_result` string is `ide-edit:102`; the `permission_decision` of the unchanged accept in `ide-edit-two:45` and `:65` reads `{accept, user_temporary}`.
+
+### The collision probe (`ide-edit-collision`, `scratch/probes/ide-edits/r4/ide-edit-collision.ndjson`, 81 lines, not committed)
+
+`ide-edit`'s spawn with the configured stdio server **named `tandem`** (the echo server, so a call to it would answer `echo`): the CLI keeps **the SDK server for dispatch**. The MCP handshake and the `edit_file` call arrive as `mcp_message` frames for `tandem` (`r4:1`, `:6`, `:42`), `init.tools` lists `mcp__tandem__edit_file` and `mcp__tandem__write_file` and no `mcp__tandem__echo`, and the call is answered by the host (`r4:45`). But the status lists **one** row, and it reads as the configured server: `init.mcp_servers` has `{name:"tandem", status:"connected", source:"dynamic"}` (`r4:8`, not `sdk`), and `mcp_status` after the turn (`r4:81`) has `tandem` with `transport:"stdio"`, `source:"dynamic"`, the configured `config`, `serverInfo {name:"echo"}` (the configured server was spawned and connected) and the SDK server's tools `edit_file` and `write_file`; before the first prompt it is `pending` with the stdio config (`r4:3`). So spec 11 item 12's assumption holds: the SDK server wins and the panel shows one `tandem` row; Tandem need not refuse or rename its server. The one correction is the row's source: in a collision it is `dynamic`, not `sdk`, which `McpPanelModel`'s own-server rule (`name == ownServer && source == "dynamic"`, the plan's base) already treats as read-only, so the panel never offers to toggle or reconnect the shadowed user server; a user's own server called `tandem` is unreachable while the session lives.

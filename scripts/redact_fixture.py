@@ -11,8 +11,8 @@ Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
 - Replaces absolute paths with <path>, e-mail addresses with <email>, git branch names with <branch> and the
   entrypoint (how the recording was started) with <entrypoint>.
 - Empties environment-specific lists in system/init and in the initialize control_response
-  (MCP servers, plugins, skills, agents, commands) and masks account details. The MCP fixtures keep the lists their
-  tests read (INIT_KEEP, by fixture name: the output path's file name without its extension, for a stream and its
+  (tools, MCP servers, plugins, skills, agents, commands) and masks account details. The MCP and ide-edit fixtures keep
+  the lists their tests read (INIT_KEEP, by fixture name: the output path's file name without its extension, for a stream and its
   transcript alike).
 - Replaces the OAuth nonces of an mcp_authenticate answer (its `state` and `code_challenge`, also as query values of
   its `authUrl`) with URL-safe placeholders, REDACTED_STATE and REDACTED_CODE_CHALLENGE, so the link still parses.
@@ -54,16 +54,21 @@ ID_KEYS = {
     "parentUuid", "sessionId", "promptId", "leafUuid", "requestId", "toolUseID", "agentId", "sourceToolUseID",
     "sourceToolAssistantUUID", "serverClassifierRequest", "commandUuid", "deliveryId",
     "organizationUuid",  # credential_org attachment: the signed-in account's organization
+    "turnAttributionKey",  # transcript lines of CLI 2.1.312 (ide-edit)
+    "claudecode/toolUseId",  # tools/call's params._meta: the tool_use block's id (ide-edit)
 }
+ID_KEY_NAMES = {"claudecode/toolUseId": "tool_use_id"}  # the placeholder's name: a slash would not match PLACEHOLDER_RE
 ID_LIST_KEYS = {"user_message_uuids", "retracted_message_uuids", "supersedes",
                 "still_queued", "cancelled",  # the interrupt receipt
                 "mergedSendUuids"}  # a transcript's merged quiet sends (transcripts/bash-mode.jsonl:5)
 KEPT_ATTACHMENTS = {"queued_command"}  # protocol, not a description of the recording machine
-INIT_LISTS = {"mcp_servers", "plugins", "skills", "agents", "slash_commands", "terminal_slash_commands", "commands"}
+INIT_LISTS = {"mcp_servers", "plugins", "skills", "agents", "slash_commands", "terminal_slash_commands", "commands", "tools"}
 # The INIT_LISTS a fixture keeps, by fixture name: what the MCP fixtures' tests read (mcp probes 3.6).
-INIT_KEEP = {"mcp-status": {"mcp_servers"}, "mcp-tool-call": {"mcp_servers"},
-             "mcp-slash": {"mcp_servers", "slash_commands", "terminal_slash_commands", "commands"},
-             "mcp-connectors": {"mcp_servers"}, "mcp-connectors-all": {"mcp_servers"}}
+INIT_KEEP = {"mcp-status": {"mcp_servers", "tools"}, "mcp-tool-call": {"mcp_servers", "tools"},
+             "mcp-slash": {"mcp_servers", "slash_commands", "terminal_slash_commands", "commands", "tools"},
+             "mcp-connectors": {"mcp_servers", "tools"}, "mcp-connectors-all": {"mcp_servers", "tools"},
+             # The version gate reads init.tools for Tandem's own tools, and the panel the two servers (ide-edits spec 9.1).
+             **{name: {"tools", "mcp_servers"} for name in ("ide-edit", "ide-edit-two", "ide-edit-stop", "ide-edit-collision")}}
 CONNECTOR_FIXTURES = {"mcp-connectors", "mcp-connectors-all"}
 CONNECTOR_VARIABLE = "TANDEM_PROBE_CONNECTOR"  # the probe's connector, as drive_cli.py reads it
 # Values that name a connector or carry an OAuth nonce. filter_connectors makes each REDACTED_<KEY> (a URL's query values
@@ -150,7 +155,7 @@ def scrub(node, key=None):
         return [scrub(v, key) for v in node]
     if isinstance(node, str):
         if (key in ID_KEYS or key in ID_LIST_KEYS) and node:
-            return stable_id(node, key)
+            return stable_id(node, ID_KEY_NAMES.get(key, key))
         if key == "gitBranch" and node:
             return "<branch>"
         if key == "entrypoint":

@@ -79,6 +79,17 @@ Scenarios (each is the smallest exchange that exercises one part of docs/protoco
   parity-requests  a turn, get_context_usage, get_usage with skip_behaviors, then the /usage command (the contract job's run)
   Every one of these allows any permission request it gets, except queue-during-card's first.
 
+  ide-edit         Tandem's own edit tools as an SDK MCP server over the control channel (initialize.sdkMcpServers ["tandem"],
+                   served through mcp_message), beside the configured echo server; an edit_file call answered with the file
+                   as the user changed it, then a write_file call answered with a rejection; mcp_status around both
+  ide-edit-two     ide-edit's spawn; one prompt asking for two edit_file calls in one turn, both answered applied
+  ide-edit-stop    a call held 3 s and interrupted (notifications/cancelled), a call under acceptEdits, a call under default
+                   whose old_string is stale
+  ide-mention      @hello.txt and @hello.txt#L2 in two prompts with every file tool disallowed
+  ide-edit-collision
+                   a probe, not a fixture: ide-edit's first turn with the configured stdio server named tandem
+                   Record the ide-edit scenarios with --model sonnet (or claude-sonnet-5-5); they run without --safe-mode.
+
 Run it from an empty directory (scripts/record-scenario.sh does this) and redact the output
 with redact_fixture.py before committing. Uses whatever sign-in the local `claude` already has.
 """
@@ -122,6 +133,9 @@ def child_environment() -> dict[str, str]:
 
 
 class Cli:
+    # Looks at every message `until` reads, before the caller's own on_message (serve_tandem installs one).
+    on_every = None
+
     def __init__(self, extra: list[str], model: str | None = None, first_id: int = 0, drop: list[str] = (),
                  safe_mode: bool = True):
         argv = ["claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
@@ -212,11 +226,18 @@ class Cli:
         """The uuid of the user message sent last."""
         return f"00000000-0000-4000-8000-{self.next_id:012d}"
 
+    def respond(self, request_id: str, body: dict) -> None:
+        """Answers the CLI's control request `request_id` with a success carrying `body`."""
+        self.send({"type": "control_response",
+                   "response": {"subtype": "success", "request_id": request_id, "response": body}})
+
     def until(self, predicate, on_message=None) -> dict:
         while True:
             msg = self.inbox.get(timeout=TIMEOUT_S)
             if msg.get("type") == "__eof__":
                 raise RuntimeError("claude exited before the scenario finished")
+            if self.on_every:
+                self.on_every(msg)
             if on_message:
                 on_message(msg)
             if predicate(msg):
@@ -615,6 +636,193 @@ def mcp_tool_call(cli: Cli) -> None:
 def mcp_slash(cli: Cli) -> None:
     """Three local commands the CLI answers without the model, then a project command, which runs a turn."""
     for prompt in ("/mcp", "/model", "/help", "/hello"):
+        cli.user(prompt)
+        cli.until(result_of(cli.last_uuid()))
+
+
+# Tandem's SDK MCP server (docs/superpowers/specs/2026-10-28-ide-edits-design.md 4.1): the host serves it over the control
+# channel, the CLI never sees a port. TANDEM_TOOLS is the JSON `tools/list` answers with, byte for byte the golden file.
+SDK_INITIALIZE = {**INITIALIZE, "forwardSubagentText": True, "sdkMcpServers": ["tandem"]}
+TANDEM_TOOLS_JSON = r"""{"name":"edit_file","description":"Replace one occurrence of old_string with new_string in the file at file_path (every occurrence with replace_all). The match is exact and runs against the file as open in the IDE, unsaved changes included. The user reviews the change in a diff and may alter it before it lands; the result tells you what was applied.","inputSchema":{"type":"object","properties":{"file_path":{"type":"string","description":"Absolute path, inside the project or an added folder"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"]}}
+{"name":"write_file","description":"Create the file at file_path with content, or replace an existing file's content. The user reviews it in a diff and may alter it before it lands; the result tells you what was applied.","inputSchema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"]}}"""
+TANDEM_TOOLS: list[dict] = [json.loads(line) for line in TANDEM_TOOLS_JSON.splitlines()]
+TANDEM_VERSION = "0.4.0"
+IDE_EDIT_SCENARIOS = {"ide-edit", "ide-edit-two", "ide-edit-stop", "ide-edit-collision"}
+BUILTIN_EDIT_TOOLS = "Edit,Write,MultiEdit,NotebookEdit"
+MENTION_DISALLOWED = BUILTIN_EDIT_TOOLS + ",Read,Glob,Grep,Bash"
+HELLO_TEXT = "alpha\nline two\n"
+
+
+def write_ide_config(work: str, scenario: str) -> None:
+    """<work>/mcp.json for the ide-edit scenarios: the echo server beside the SDK one (no --strict-mcp-config), or, for the
+    collision probe, a configured stdio server named tandem."""
+    name = "tandem" if scenario == "ide-edit-collision" else "echo"
+    with open(os.path.join(work, "mcp.json"), "w", encoding="utf-8") as f:
+        json.dump({"mcpServers": {name: echo_config()}}, f)
+
+
+def ide_edit_flags(work: str) -> list[str]:
+    """The ide-edit scenarios' flags: no user settings, the configured server beside the SDK one, Tandem's disallowed
+    built-in edit tools."""
+    return ["--setting-sources", "project,local", "--mcp-config", os.path.join(work, "mcp.json"),
+            "--disallowedTools", BUILTIN_EDIT_TOOLS]
+
+
+def write_hello(work: str) -> str:
+    path = os.path.join(work, "hello.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(HELLO_TEXT)
+    return path
+
+
+def cat_n(text: str) -> str:
+    """The file as the CLI's Read shows it: `%6d<TAB>line`."""
+    return "\n".join(f"{number:6d}\t{line}" for number, line in enumerate(text.splitlines(), 1))
+
+
+def file_block(text: str) -> str:
+    count = len(text.splitlines())
+    return f"The file now reads (lines 1-{count} of {count}):\n{cat_n(text)}"
+
+
+def unified(before: str, after: str) -> str:
+    import difflib
+    return "".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True), "proposal", "applied"))
+
+
+def text_result(text: str, is_error: bool = False) -> dict:
+    result = {"content": [{"type": "text", "text": text}]}
+    return {"isError": True, **result} if is_error else result
+
+
+def serve_tandem(cli: Cli, on_call) -> None:
+    """Answers every mcp_message `until` reads for the tandem server: initialize (the version echoed), a notification (the
+    empty result the Agent SDK answers), tools/list (TANDEM_TOOLS), tools/call (`on_call(params)`'s result, wrapped as
+    JSON-RPC; None sends no reply at all, a call the host withdrew), anything else -32601."""
+    def handle(msg: dict) -> None:
+        request = msg.get("request", {})
+        if msg.get("type") != "control_request" or request.get("subtype") != "mcp_message":
+            return
+        message = request.get("message", {})
+        method, rpc_id = message.get("method"), message.get("id")
+        if "id" not in message:
+            reply = {"jsonrpc": "2.0", "result": {}, "id": 0}
+        elif method == "initialize":
+            reply = {"jsonrpc": "2.0", "id": rpc_id, "result": {
+                "protocolVersion": message.get("params", {}).get("protocolVersion"),
+                "capabilities": {"tools": {}}, "serverInfo": {"name": "tandem", "version": TANDEM_VERSION}}}
+        elif method == "tools/list":
+            reply = {"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": TANDEM_TOOLS}}
+        elif method == "tools/call":
+            result = on_call(message.get("params", {}))
+            if result is None:
+                return
+            reply = {"jsonrpc": "2.0", "id": rpc_id, "result": result}
+        else:
+            reply = {"jsonrpc": "2.0", "id": rpc_id,
+                     "error": {"code": -32601, "message": f"Method not found: {method}"}}
+        cli.respond(msg["request_id"], {"mcp_response": reply})
+    cli.on_every = handle
+
+
+def refuse_call(params: dict):
+    raise RuntimeError(f"a tools/call arrived before the scenario served it: {params.get('name')}")
+
+
+def allow_permissions(msg: dict, cli: Cli) -> None:
+    if msg.get("type") == "control_request" and msg.get("request", {}).get("subtype") == "can_use_tool":
+        allow_request(cli, msg)
+
+
+def applied_edit(path: str, params: dict) -> dict:
+    """What the user's Accept sends for edit_file when the diff is accepted as proposed (the spec's 4.3), applied to the disk
+    here; an old_string that is not there gets the not-found text with the file."""
+    arguments = params.get("arguments", {})
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    old, new = arguments.get("old_string", ""), arguments.get("new_string", "")
+    if old not in text:
+        return text_result(f"old_string was not found in {path}. The file as open in the IDE (unsaved changes included) "
+                           f"reads:\n{cat_n(text)}", True)
+    text = text.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return text_result(f"Applied the edit to {path} and saved the file.\n{file_block(text)}")
+
+
+def ide_edit(cli: Cli, rejection: bool = True) -> None:
+    """edit_file answered as if the user changed the proposal by hand (beta becomes beta!), then write_file rejected."""
+    work = os.getcwd()
+    hello = write_hello(work)
+    new_file = os.path.join(work, "new.txt")
+
+    def on_call(params: dict):
+        arguments = params.get("arguments", {})
+        if params.get("name") == "edit_file":
+            proposal = HELLO_TEXT.replace(arguments["old_string"], arguments["new_string"], 1)
+            final = proposal.replace(arguments["new_string"], arguments["new_string"] + "!", 1)
+            with open(hello, "w", encoding="utf-8") as f:
+                f.write(final)
+            return text_result(f"Applied to {arguments['file_path']} and saved the file. The user changed your proposal in "
+                               "the diff before accepting it.\nWhat changed between your proposal and what was applied:\n"
+                               f"{unified(proposal, final)}\n{file_block(final)}")
+        return text_result("The user rejected this edit in the IDE; nothing was changed.\nThe user says: not now", True)
+
+    serve_tandem(cli, on_call)
+    cli.call({"subtype": "mcp_status"})  # before the first prompt the SDK server is not listed yet (r1:3)
+    cli.user(f"Use mcp__tandem__edit_file to change alpha to beta in {hello}, then stop.")
+    cli.until(result_of(cli.last_uuid()), lambda m: allow_permissions(m, cli))
+    cli.call({"subtype": "mcp_status"})
+    if not rejection:
+        return
+    cli.user(f"Use mcp__tandem__write_file to create {new_file} with the content: new file. If the tool refuses, say so "
+             "in one line and stop.")
+    cli.until(result_of(cli.last_uuid()), lambda m: allow_permissions(m, cli))
+
+
+def ide_edit_two(cli: Cli) -> None:
+    """Two edit_file calls in one turn, both answered applied."""
+    hello = write_hello(os.getcwd())
+    serve_tandem(cli, lambda params: applied_edit(hello, params))
+    cli.user(f"Use mcp__tandem__edit_file twice on {hello}, one after the other, in this turn: first change alpha to "
+             "beta, then change line two to line 2. Then stop.")
+    cli.until(result_of(cli.last_uuid()), lambda m: allow_permissions(m, cli))
+
+
+def ide_edit_stop(cli: Cli, sleep=time.sleep) -> None:
+    """A call held 3 s and interrupted (the CLI withdraws it with notifications/cancelled; the host sends no reply), a call
+    under acceptEdits, and under default a call whose old_string is no longer in the file (the not-found round trip)."""
+    hello = write_hello(os.getcwd())
+    held = []
+
+    def on_call(params: dict):
+        if not held:
+            held.append(params)
+            sleep(3.0)
+            cli.request({"subtype": "interrupt"})
+            return None
+        return applied_edit(hello, params)
+
+    serve_tandem(cli, on_call)
+    cli.user(f"Use mcp__tandem__edit_file to change alpha to beta in {hello}, then say done.")
+    cli.until(result_of(cli.last_uuid()), lambda m: allow_permissions(m, cli))
+    cli.call({"subtype": "set_permission_mode", "mode": "acceptEdits"})
+    cli.user(f"Use mcp__tandem__edit_file to change alpha to gamma in {hello}, then say done.")
+    cli.until(result_of(cli.last_uuid()), lambda m: allow_permissions(m, cli))
+    cli.call({"subtype": "set_permission_mode", "mode": "default"})
+    cli.user(f"Use mcp__tandem__edit_file to change the word alpha to delta in {hello}. If the tool says the word is not "
+             "there, do not retry: say in one line what the file contains.")
+    cli.until(result_of(cli.last_uuid()), lambda m: allow_permissions(m, cli))
+
+
+def ide_edit_collision(cli: Cli) -> None:
+    ide_edit(cli, rejection=False)
+
+
+def ide_mention(cli: Cli) -> None:
+    """@path in a plain user message, with every file tool disallowed: the CLI expands the mention itself."""
+    write_hello(os.getcwd())
+    for prompt in ("What does @hello.txt say?", "What is on @hello.txt#L2?"):
         cli.user(prompt)
         cli.until(result_of(cli.last_uuid()))
 
@@ -1051,7 +1259,9 @@ SCENARIOS = {"permission": permission, "interrupt": interrupt, "model-switch": m
              "queue-fold": queue_fold, "queue-later": queue_later, "queue-cancel": queue_cancel,
              "queue-steer-text": queue_steer_text, "queue-cancel-steer": queue_cancel_steer,
              "queue-later-command": queue_later_command, "queue-during-card": queue_during_card,
-             "parity-requests": parity_requests, "add-dir-spawn": add_dir_spawn}
+             "parity-requests": parity_requests, "add-dir-spawn": add_dir_spawn,
+             "ide-edit": ide_edit, "ide-edit-two": ide_edit_two, "ide-edit-stop": ide_edit_stop,
+             "ide-edit-collision": ide_edit_collision, "ide-mention": ide_mention}
 # Scenarios whose run also takes the connector's name (connector_name).
 CONNECTOR_SCENARIOS = {"mcp-connectors", "mcp-connectors-all"}
 
@@ -1065,10 +1275,12 @@ SCENARIO_FLAGS = {"settings": ["--setting-sources", "project,local"],
                   # record mcp-connectors-all). Never --setting-sources: it would hide what the user's settings enable.
                   "mcp-connectors": ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'],
                   # The probes' own flags: no user setting, hook, plugin or MCP server of the recording machine.
-                  "add-dir-spawn": ["--setting-sources", "project,local", "--strict-mcp-config"]}
+                  "add-dir-spawn": ["--setting-sources", "project,local", "--strict-mcp-config"],
+                  # Tandem's argv: no file tool, so the CLI's own @path expansion is all that can reach the file.
+                  "ide-mention": ["--disallowedTools", MENTION_DISALLOWED]}
 # Base flags a scenario removes from Cli's argv: --safe-mode turns MCP servers off.
 SCENARIO_ARGV_DROPS = {"mcp-connectors": ["--safe-mode"], "mcp-connectors-all": ["--safe-mode"],
-                       **{name: ["--safe-mode"] for name in PROBE_SCENARIOS}}
+                       **{name: ["--safe-mode"] for name in PROBE_SCENARIOS | IDE_EDIT_SCENARIOS}}
 
 
 def remove_dirs(dirs: list[str]) -> None:
@@ -1092,6 +1304,10 @@ def main(scenario: str, out: str, extra: list[str]) -> None:
         except BaseException:
             servers.kill()
             raise
+    elif scenario in IDE_EDIT_SCENARIOS:
+        work = os.getcwd()
+        write_ide_config(work, scenario)
+        cli = Cli(extra + ide_edit_flags(work), drop=SCENARIO_ARGV_DROPS[scenario])
     elif scenario == "add-dir-spawn":
         # Two empty folders outside the run's cwd; the first Cli takes the first (A last, so the scenario can strip it).
         dirs = [tempfile.mkdtemp(prefix="tandem-add-dir-"), tempfile.mkdtemp(prefix="tandem-add-dir-")]
@@ -1104,7 +1320,11 @@ def main(scenario: str, out: str, extra: list[str]) -> None:
     else:
         cli = Cli(extra + SCENARIO_FLAGS.get(scenario, []), model=FIRST_MODEL if scenario == "model-switch" else None)
     try:
-        cli.call(INITIALIZE)
+        if scenario in IDE_EDIT_SCENARIOS:
+            serve_tandem(cli, refuse_call)  # the MCP handshake starts before the CLI answers initialize (r1:1)
+            cli.call(SDK_INITIALIZE)
+        else:
+            cli.call(INITIALIZE)
         run(cli, *args)
     finally:
         if scenario == "add-dir-spawn":

@@ -732,6 +732,201 @@ class ProbeScenarioTest(unittest.TestCase):
                           "structuredContent": {"result": "hello tandem"}, "isError": False}, answers[2]["result"])
         self.assertEqual(-32601, answers[3]["error"]["code"])
 
+class SdkCli(FakeCli):
+    """A CLI that, on each user message, plays `script(n, msg)`: frames for the host to read before the result. The control
+    requests are answered by `success`; every host frame lands in `sent`."""
+
+    def __init__(self, script):
+        super().__init__(success)
+        self.script = script
+        self.prompts = 0
+
+    def send(self, msg: dict) -> None:
+        self.sent.append(msg)
+        if msg.get("type") == "control_request":
+            self.inbox.put(self.answer(msg["request_id"], msg["request"]))
+        elif msg.get("type") == "user":
+            self.prompts += 1
+            for frame in self.script(self.prompts, msg):
+                self.inbox.put(frame)
+            self.inbox.put({"type": "result", "user_message_uuids": [msg["uuid"]]})
+
+
+def mcp_frame(number: int, message: dict) -> dict:
+    return {"type": "control_request", "request_id": f"cli-mcp-{number}",
+            "request": {"subtype": "mcp_message", "server_name": "tandem", "message": {"jsonrpc": "2.0", **message}}}
+
+
+def tool_use_frames(number: int, name: str, arguments: dict) -> list[dict]:
+    tool_use_id = f"toolu_{number}"
+    return [{"type": "control_request", "request_id": f"cli-perm-{number}",
+             "request": {"subtype": "can_use_tool", "tool_name": f"mcp__tandem__{name}", "input": arguments,
+                         "mcp_server": {"name": "tandem", "source": "sdk"}, "tool_use_id": tool_use_id}},
+            mcp_frame(100 + number, {"id": 10 + number, "method": "tools/call",
+                                     "params": {"name": name, "arguments": arguments,
+                                                "_meta": {"claudecode/toolUseId": tool_use_id, "progressToken": number}}})]
+
+
+def mcp_responses(cli: FakeCli) -> list[dict]:
+    """The JSON-RPC replies the host sent, in order."""
+    return [m["response"]["response"]["mcp_response"] for m in cli.sent
+            if m["type"] == "control_response" and "mcp_response" in m["response"].get("response", {})]
+
+
+class IdeEditScenarioTest(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.TemporaryDirectory()
+        self.addCleanup(self.work.cleanup)
+        self.enterContext(contextlib.chdir(self.work.name))
+
+    def handshake(self) -> list[dict]:
+        return [mcp_frame(1, {"id": 0, "method": "initialize",
+                              "params": {"protocolVersion": "2025-11-25", "capabilities": {}}}),
+                mcp_frame(2, {"method": "notifications/initialized"}),
+                mcp_frame(3, {"id": 1, "method": "tools/list"})]
+
+    def test_the_ide_edit_scenario_answers_the_handshake_and_a_call(self):
+        path = os.path.join(self.work.name, "hello.txt")
+
+        def script(n: int, msg: dict) -> list[dict]:
+            if n == 1:
+                return self.handshake() + tool_use_frames(4, "edit_file", {"file_path": path, "old_string": "alpha",
+                                                                           "new_string": "beta"})
+            return tool_use_frames(5, "write_file", {"file_path": os.path.join(self.work.name, "new.txt"),
+                                                     "content": "x\n"})
+
+        cli = SdkCli(script)
+        drive_cli.serve_tandem(cli, lambda params: self.fail("the handshake has no call"))
+        drive_cli.ide_edit(cli)
+        replies = mcp_responses(cli)
+        self.assertEqual("2025-11-25", replies[0]["result"]["protocolVersion"], "the version is echoed")
+        self.assertEqual({"name": "tandem", "version": "0.4.0"}, replies[0]["result"]["serverInfo"])
+        self.assertEqual({"jsonrpc": "2.0", "result": {}, "id": 0}, replies[1])
+        self.assertEqual(drive_cli.TANDEM_TOOLS, replies[2]["result"]["tools"])
+        self.assertEqual(["edit_file", "write_file"], [t["name"] for t in replies[2]["result"]["tools"]])
+        allowed = [m["response"]["response"] for m in cli.sent
+                   if m["type"] == "control_response" and "behavior" in m["response"].get("response", {})]
+        self.assertEqual(["allow", "allow"], [a["behavior"] for a in allowed])
+        applied = replies[3]
+        self.assertEqual(14, applied["id"])
+        self.assertNotIn("isError", applied["result"])
+        text = applied["result"]["content"][0]["text"]
+        self.assertTrue(text.startswith(f"Applied to {path} and saved the file. The user changed your proposal in the diff "
+                                        "before accepting it.\n"), text)
+        self.assertIn("     1\tbeta!\n     2\tline two", text)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual("beta!\nline two\n", f.read())
+        rejected = replies[4]["result"]
+        self.assertIs(True, rejected["isError"])
+        self.assertEqual("The user rejected this edit in the IDE; nothing was changed.\nThe user says: not now",
+                         rejected["content"][0]["text"])
+        self.assertFalse(os.path.exists(os.path.join(self.work.name, "new.txt")))
+        statuses = [m for m in cli.sent if m["type"] == "control_request" and m["request"]["subtype"] == "mcp_status"]
+        self.assertEqual(2, len(statuses))
+        prompts = [m["message"]["content"][0]["text"] for m in cli.sent if m["type"] == "user"]
+        self.assertEqual(f"Use mcp__tandem__edit_file to change alpha to beta in {path}, then stop.", prompts[0])
+        self.assertIn("mcp__tandem__write_file", prompts[1])
+        self.assertIn(os.path.join(self.work.name, "new.txt"), prompts[1])
+
+    def test_the_stop_scenario_interrupts_a_held_call(self):
+        path = os.path.join(self.work.name, "hello.txt")
+        arguments = {"file_path": path, "old_string": "alpha", "new_string": "beta"}
+
+        def script(n: int, msg: dict) -> list[dict]:
+            if n == 1:
+                return tool_use_frames(1, "edit_file", arguments)
+            if n == 2:
+                return tool_use_frames(2, "edit_file", {**arguments, "new_string": "gamma"})
+            return tool_use_frames(3, "edit_file", {**arguments, "new_string": "delta"})
+
+        cli = SdkCli(script)
+        slept = []
+        drive_cli.serve_tandem(cli, lambda params: None)
+        drive_cli.ide_edit_stop(cli, sleep=slept.append)
+        self.assertEqual([3.0], slept)
+        kinds = []
+        for m in cli.sent:
+            if m["type"] == "control_request":
+                kinds.append(m["request"]["subtype"])
+            elif m["type"] == "control_response" and "mcp_response" in m["response"].get("response", {}):
+                kinds.append("mcp_response:" + str(m["response"]["response"]["mcp_response"]["id"]))
+        held = kinds.index("interrupt")
+        self.assertNotIn("mcp_response:11", kinds, "the held call gets no reply")
+        self.assertLess(kinds.index("interrupt"), kinds.index("mcp_response:12"))
+        self.assertLess(held, kinds.index("set_permission_mode"))
+        modes = [m["request"]["mode"] for m in cli.sent
+                 if m["type"] == "control_request" and m["request"]["subtype"] == "set_permission_mode"]
+        self.assertEqual(["acceptEdits", "default"], modes)
+        last = mcp_responses(cli)[-1]["result"]
+        self.assertIs(True, last["isError"])
+        self.assertIn("old_string was not found in " + path, last["content"][0]["text"])
+        self.assertIn("     1\tgamma", last["content"][0]["text"])
+
+    def test_the_two_scenario_answers_two_calls(self):
+        path = os.path.join(self.work.name, "hello.txt")
+
+        def script(n: int, msg: dict) -> list[dict]:
+            return (tool_use_frames(1, "edit_file", {"file_path": path, "old_string": "alpha", "new_string": "beta"})
+                    + tool_use_frames(2, "edit_file", {"file_path": path, "old_string": "line two",
+                                                       "new_string": "line 2"}))
+
+        cli = SdkCli(script)
+        drive_cli.serve_tandem(cli, lambda params: None)
+        drive_cli.ide_edit_two(cli)
+        applied = [r["result"]["content"][0]["text"] for r in mcp_responses(cli)]
+        self.assertEqual(2, len(applied))
+        self.assertTrue(applied[0].startswith(f"Applied the edit to {path} and saved the file."), applied[0])
+        self.assertIn("     2\tline 2", applied[1])
+        prompts = [m["message"]["content"][0]["text"] for m in cli.sent if m["type"] == "user"]
+        self.assertEqual(1, len(prompts))
+        self.assertIn("one after the other, in this turn", prompts[0])
+
+    def test_the_mention_scenario_disallows_every_file_tool(self):
+        flags = drive_cli.SCENARIO_FLAGS["ide-mention"]
+        at = flags.index("--disallowedTools")
+        self.assertEqual({"Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep", "Bash"},
+                         set(flags[at + 1].split(",")))
+        cli = FakeCli(success)
+        drive_cli.ide_mention(cli)
+        prompts = [m["message"]["content"][0]["text"] for m in cli.sent if m["type"] == "user"]
+        self.assertEqual(["What does @hello.txt say?", "What is on @hello.txt#L2?"], prompts)
+        with open(os.path.join(self.work.name, "hello.txt"), encoding="utf-8") as f:
+            self.assertEqual("alpha\nline two\n", f.read())
+
+    def test_the_collision_probe_names_a_configured_server_tandem(self):
+        drive_cli.write_ide_config(self.work.name, "ide-edit-collision")
+        with open(os.path.join(self.work.name, "mcp.json"), encoding="utf-8") as f:
+            servers = json.load(f)["mcpServers"]
+        self.assertEqual(["tandem"], list(servers))
+        self.assertEqual(drive_cli.echo_config(), servers["tandem"])
+        drive_cli.write_ide_config(self.work.name, "ide-edit")
+        with open(os.path.join(self.work.name, "mcp.json"), encoding="utf-8") as f:
+            self.assertEqual(["echo"], list(json.load(f)["mcpServers"]))
+
+    def test_the_ide_edit_spawn_keeps_the_sdk_server_beside_a_configured_one(self):
+        argvs = []
+
+        class Popen:  # a claude that exits at once: main fails on initialize, after the argv is built
+            def __init__(self, argv, **kwargs):
+                argvs.append(argv)
+                self.stdin, self.stdout = io.StringIO(), io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+        for scenario in ("ide-edit", "ide-edit-two", "ide-edit-stop", "ide-edit-collision", "ide-mention"):
+            with mock.patch.object(drive_cli.subprocess, "Popen", Popen), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaisesRegex(RuntimeError, "exited"):
+                drive_cli.main(scenario, os.path.join(self.work.name, "out.ndjson"), ["--model", "m"])
+        for argv in argvs[:4]:
+            self.assertNotIn("--safe-mode", argv)
+            self.assertNotIn("--strict-mcp-config", argv, "the configured server stays beside the SDK server")
+            at = argv.index("--setting-sources")
+            self.assertEqual(["--setting-sources", "project,local", "--mcp-config",
+                              os.path.join(os.getcwd(), "mcp.json")], argv[at:at + 4])
+        self.assertIn("--safe-mode", argvs[4])
+
+
 class StoryCli(drive_cli.Cli):
     """A Cli whose process is replaced by `react(cli, frame) -> messages`: what the host sends is kept in `sent`, every
     message the CLI emits is also a line in `lines`, and `events` (shared between the origin and a fork) orders them."""
