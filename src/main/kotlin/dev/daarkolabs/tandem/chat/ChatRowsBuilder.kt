@@ -573,8 +573,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
         val built = if (review == null) {
             ToolCall(block.id, block.name, kind, state, label, stats, body, children, progress, subject)
         } else {
-            val (shown, tag, action) = reviewed(block, named, state, label, result != null, turnOpen, review, region.cwd)
-            ToolCall(block.id, block.name, kind, state, shown, stats, body, children, progress, subject, review, tag, action)
+            val (reviewLabel, tag, action) = reviewed(block, named, state, label, result != null, turnOpen, review, region.cwd)
+            ToolCall(block.id, block.name, kind, state, reviewLabel, stats, body, children, progress, subject, review, tag, action)
         }
         return liveCalls[block.id]?.takeIf { it == built } ?: built
     }

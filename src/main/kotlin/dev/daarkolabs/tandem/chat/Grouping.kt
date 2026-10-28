@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.chat
 
+import dev.daarkolabs.tandem.session.EditOutcome
 import dev.daarkolabs.tandem.session.EditPhase
 import kotlinx.collections.immutable.toImmutableList
 
@@ -149,7 +150,15 @@ object Grouping {
         } else {
             members.distinctBy { if (it.kind != ToolKind.SHELL && it.subject != null) "name:${it.subject}" else "call:${it.id}" }.size
         }
-}
 
-/** A Tandem edit the user still reviews, or that waits for its diff (spec 3.4): its row of its own shows its phase and `Show diff`. */
-private fun ToolCall.inReview(): Boolean = review?.phase.let { it == EditPhase.QUEUED || it == EditPhase.OPEN }
+    /**
+     * A Tandem edit whose row speaks for its review (spec 3.4), so it keeps a row of its own: one that waits for its diff or is in review
+     * (with `Show diff`), one the user decided that still waits for its result (`Edited …` / `Rejected …`), and one Claude stopped waiting
+     * for (`Claude stopped waiting for this edit.`).
+     */
+    private fun ToolCall.inReview(): Boolean {
+        val review = review ?: return false
+        return review.phase == EditPhase.QUEUED || review.phase == EditPhase.OPEN || state in liveStates ||
+            review.outcome == EditOutcome.STOPPED
+    }
+}
