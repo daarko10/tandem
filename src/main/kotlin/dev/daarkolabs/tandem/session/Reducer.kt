@@ -52,6 +52,8 @@ sealed interface SessionEvent {
         val live: Boolean = false,
         val held: Boolean = false,
         val folded: Boolean = false,
+        /** The context blocks sent before its text, as chips (spec 3.5). */
+        val context: List<ContextChip> = emptyList(),
     ) : SessionEvent
 
     /** The held message [uuid] was written: [PendingStage.HELD] becomes [PendingStage.QUEUED]. */
@@ -310,7 +312,7 @@ private inline fun ChatState.updateShell(id: String, change: (ChatEntry.Shell) -
  * result between its turns.
  */
 private fun reduceUserSent(state: ChatState, event: SessionEvent.UserSent): ChatState = when {
-    event.folded -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images, folded = true))
+    event.folded -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images, folded = true, context = event.context))
     event.live && (event.held || state.turn != null || state.pendingSends.isNotEmpty()) -> state.copy(
         pendingSends = state.pendingSends + PendingSend(
             uuid = event.uuid,
@@ -319,9 +321,11 @@ private fun reduceUserSent(state: ChatState, event: SessionEvent.UserSent): Chat
             sentAtMillis = event.atMillis,
             later = event.later,
             stage = if (event.held) PendingStage.HELD else PendingStage.QUEUED,
+            context = event.context,
         ),
     )
-    else -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images)).openTurn(event.uuid, event.atMillis)
+    else -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images, context = event.context))
+        .openTurn(event.uuid, event.atMillis)
 }
 
 /** This state with a turn opened for prompt [uuid] at [at]: busy, not interrupted. */
@@ -361,7 +365,7 @@ private fun reduceLifecycle(state: ChatState, message: CliMessage.CommandLifecyc
         "started" -> {
             val open = state.turn != null
             val next = state.copy(pendingSends = state.pendingSends - send)
-                .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = open))
+                .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = open, context = send.context))
             if (open) next else next.openTurn(send.uuid, at)
         }
         "cancelled" -> when {
@@ -382,7 +386,7 @@ private fun ChatState.foldNamed(result: CliMessage.Result): ChatState {
     val named = pendingSends.filter { it.uuid in result.userMessageUuids }
     return named.fold(this) { state, send ->
         state.copy(pendingSends = state.pendingSends - send)
-            .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = true))
+            .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = true, context = send.context))
     }
 }
 

@@ -13,6 +13,8 @@ import dev.daarkolabs.tandem.protocol.timestampMillis
 import dev.daarkolabs.tandem.protocol.unwrapLocalCommandOutput
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ContextBlocks
+import dev.daarkolabs.tandem.session.ContextChip
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.UserImage
 import dev.daarkolabs.tandem.session.isInterrupt
@@ -352,11 +354,15 @@ private class MetaBuilder(private val sessionId: String) {
  * A user line as Tandem shows it: an interrupt marker ([interrupted]), else what the user typed, if anything ([typed]), and the
  * images sent with it ([images]).
  */
-private class UserLine(val interrupted: Boolean, val typed: Typed?, val images: List<UserImage>)
+private class UserLine(val interrupted: Boolean, val typed: Typed?, val images: List<UserImage>, val context: List<ContextChip>)
 
-/** [user] as Tandem shows it; its images get the ids `<uuid>#<index>`, as the live send gives them. */
+/**
+ * [user] as Tandem shows it; its images get the ids `<uuid>#<index>`, as the live send gives them. Its leading context blocks (an
+ * unsaved file's, spec 3.5) are its [UserLine.context] chips, not typed text.
+ */
 private fun userLineOf(user: CliMessage.User, uuid: String): UserLine {
-    val text = user.content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+    val (context, texts) = ContextBlocks.split(user.content.filterIsInstance<ContentBlock.Text>().map { it.text })
+    val text = texts.joinToString("\n")
     // The reducer's own test, so that a loaded line shows as the live one did.
     val interrupted = user.isInterrupt()
     val typed = if (interrupted) null else typedText(text)
@@ -366,7 +372,7 @@ private fun userLineOf(user: CliMessage.User, uuid: String): UserLine {
     } else {
         user.content.filterIsInstance<ContentBlock.Image>().mapIndexed { i, b -> UserImage("$uuid#$i", b.mediaType, b.data) }
     }
-    return UserLine(interrupted, typed, images)
+    return UserLine(interrupted, typed, images, if (interrupted) emptyList() else context)
 }
 
 /**
@@ -409,14 +415,14 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
         val uuid = attachment.string("source_uuid") ?: raw.string("uuid") ?: "line-$lineCount"
         val prompt = attachment["prompt"]
         val blocks = (prompt as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
-        val text = (prompt as? JsonPrimitive)?.takeIf { it.isString }?.content
-            ?: blocks.filter { it.string("type") == "text" }.mapNotNull { it.string("text") }.joinToString("\n")
+        val (context, texts) = ContextBlocks.split(blocks.filter { it.string("type") == "text" }.mapNotNull { it.string("text") })
+        val text = (prompt as? JsonPrimitive)?.takeIf { it.isString }?.content ?: texts.joinToString("\n")
         val images = blocks.filter { it.string("type") == "image" }.mapNotNull { it.obj("source") }
             .filter { it.string("type") == "base64" }
             .mapNotNull { source -> source.string("media_type")?.let { type -> source.string("data")?.let { type to it } } }
             .mapIndexed { i, (type, data) -> UserImage("$uuid#$i", type, data) }
-        if (text.isEmpty() && images.isEmpty()) return
-        state = reduce(state, SessionEvent.UserSent(uuid, text, timestampMillis(raw) ?: 0L, images, folded = true))
+        if (text.isEmpty() && images.isEmpty() && context.isEmpty()) return
+        state = reduce(state, SessionEvent.UserSent(uuid, text, timestampMillis(raw) ?: 0L, images, folded = true, context = context))
     }
 
     /**
@@ -447,8 +453,8 @@ private class Scan(sessionId: String, private val abandoned: BitSet) {
         val atMillis = user.timestampMillis ?: 0L
         if (shown.interrupted || user.content.any { it is ContentBlock.ToolResult }) state = reduce(state, SessionEvent.Cli(user, atMillis))
         // A line with images is a prompt even without typed text (images only), as it was when sent.
-        if (shown.typed == null && shown.images.isEmpty()) return
-        state = reduce(state, SessionEvent.UserSent(uuid, shown.typed?.text ?: "", atMillis, shown.images))
+        if (shown.typed == null && shown.images.isEmpty() && shown.context.isEmpty()) return
+        state = reduce(state, SessionEvent.UserSent(uuid, shown.typed?.text ?: "", atMillis, shown.images, context = shown.context))
     }
 
     /**

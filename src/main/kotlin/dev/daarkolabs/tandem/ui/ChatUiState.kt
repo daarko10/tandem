@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.graphics.ImageBitmap
 import dev.daarkolabs.tandem.chat.FollowState
+import dev.daarkolabs.tandem.chat.MentionQuery
 
 /**
  * What one session's chat remembers on screen (spec 5.6): which rows are open, whether the list follows its bottom, the prompt
@@ -109,7 +110,11 @@ internal class ChatUiState {
      */
     fun draftChanged(draft: String) {
         if (draft != paletteDismissedFor.value) paletteDismissedFor.value = null
+        if (draft != mention.dismissedFor.value) mention.dismissedFor.value = null
     }
+
+    /** The `@` palette's state (spec 3.5): the last lookup's rows, the selection and Esc's dismissal. */
+    val mention: MentionPaletteState = MentionPaletteState()
 
     /**
      * The uuids of the returned messages already put back in the composer and still listed by the session (desktop-parity spec 12.3,
@@ -185,6 +190,18 @@ internal class ChatUiState {
         shown = true
         return ListChange(pin = pin, appended = if (keys != null && (added > 0 || tailChanged)) added else null)
     }
+}
+
+/**
+ * What the `@` palette remembers for one session's composer (spec 3.5): the files the last lookup ranked for the query being typed
+ * ([ranked], best first, the open editors' files first), the selected row on the query it was made on ([selection], so that an
+ * Enter right after a keystroke never picks by a stale index) and the committed draft Esc closed it on ([dismissedFor]: it stays
+ * closed until the draft changes). Used on the EDT only.
+ */
+internal class MentionPaletteState {
+    val ranked: MutableState<List<String>> = mutableStateOf(emptyList())
+    val selection: MutableState<Pair<MentionQuery, Int>?> = mutableStateOf(null)
+    val dismissedFor: MutableState<String?> = mutableStateOf(null)
 }
 
 /**

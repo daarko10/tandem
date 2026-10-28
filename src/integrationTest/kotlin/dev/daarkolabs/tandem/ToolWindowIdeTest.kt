@@ -1573,6 +1573,34 @@ class ToolWindowIdeTest {
         assertImagePrompt(sent)
     }
 
+    // spec: typing at opens the file palette
+    @Test
+    fun `typing at opens the file palette`() {
+        val project = newProject()
+        project.resolve("hello.txt").writeText("alpha\nline two\n")
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("mention-palette", fixtures = listOf("ide-mention"), project = project, sentLog = log) {
+            newSession()
+            focusPromptBox()
+            promptBox().keyboard { typeText("What does @hel", 20) }
+            // The `@` palette (spec 3.5): the project's files matching what follows `@`, read off the EDT after the debounce.
+            waitFor("the file palette", 1.minutes) { described("Files").present() }
+            waitFor("hello.txt listed", 30.seconds) { described("hello.txt").present() }
+            takeScreenshot("mention-palette")
+            ui.keyboard { enter() }
+            waitFor("the mention inserted", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='What does @hello.txt ']").present() }
+            waitFor("the palette closed after the pick", 30.seconds) { !described("Files").present() }
+            promptBox().keyboard { typeText("say?", 20) }
+            waitFor("prompt box holds the prompt", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='What does @hello.txt say?']").present() }
+            ui.keyboard { enter() }
+            waitFor("prompt box cleared after Enter", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
+            waitFor("the prompt reached the CLI", 1.minutes) { log.readLines().any { it.contains("\"type\":\"user\"") } }
+        }
+        // The mention goes as typed: the CLI expands it from the disk (the file has no unsaved changes).
+        val content = sent.single { it.type == "user" }["message"]!!.jsonObject["content"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("What does @hello.txt say?"), content.map { it["text"]!!.jsonPrimitive.content })
+    }
+
     @Test
     fun `a dropped image file is attached`() {
         // Open item 10. The drag starts in the IDE's own Project view, as a user drags a file from it: a drag from another process
@@ -1833,6 +1861,8 @@ class ToolWindowIdeTest {
             waitForIndicators(5.minutes)
             // IDE balloons (e.g. about JVM options) can cover the prompt box and swallow clicks.
             closeAndDisableAllBalloonNotifications()
+            // A locally cached IDE whose trial has run a few days asks for feedback in a modal dialog that covers everything.
+            dismissTrialFeedback()
             openToolWindow("Tandem")
             waitFor("tool window shown", 2.minutes) { newSessionButton().present() }
             script()
@@ -1845,6 +1875,19 @@ class ToolWindowIdeTest {
         assertTrue(logs.isNotEmpty(), "no idea.log under ${context.paths.testHome}")
         val pluginErrors = logs.flatMap { it.readLines() }.filter { "Plugin: dev.daarkolabs.tandem" in it }
         assertTrue(pluginErrors.isEmpty(), "errors attributed to Tandem:\n" + pluginErrors.joinToString("\n"))
+    }
+
+    /**
+     * Closes the trial's `Tell us about your experience` dialog with `No, Thanks` if it shows within a few seconds: a JetBrains
+     * dialog of a locally cached IDE, not Tandem's, which would take every click and key of the test.
+     */
+    private fun Driver.dismissTrialFeedback() {
+        val noThanks = ui.x("//div[@class='JButton' and @visible_text='No, Thanks']")
+        val shown = runCatching { waitFor("the trial feedback dialog", 10.seconds) { noThanks.present() } }.isSuccess
+        if (shown) {
+            noThanks.click()
+            waitFor("the trial feedback dialog closed", 30.seconds) { !noThanks.present() }
+        }
     }
 
     // Compose semantics nodes appear in the Driver's UI hierarchy as ComposeNode, with their text and role. They

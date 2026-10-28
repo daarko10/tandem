@@ -116,10 +116,14 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.PlatformDataKeys
 import com.intellij.openapi.components.service
+import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
 import dev.daarkolabs.tandem.chat.Attachments
+import dev.daarkolabs.tandem.chat.MENTION_ROWS
+import dev.daarkolabs.tandem.chat.MentionPalette
+import dev.daarkolabs.tandem.chat.MentionQuery
 import dev.daarkolabs.tandem.chat.Modes
 import dev.daarkolabs.tandem.chat.PaletteItem
 import dev.daarkolabs.tandem.chat.PaletteOutcome
@@ -135,34 +139,43 @@ import dev.daarkolabs.tandem.chat.composerPlaceholder
 import dev.daarkolabs.tandem.chat.displayPath
 import dev.daarkolabs.tandem.chat.intercepts
 import dev.daarkolabs.tandem.chat.isSlashCommand
+import dev.daarkolabs.tandem.chat.mentionPalette
+import dev.daarkolabs.tandem.chat.mentionQuery
 import dev.daarkolabs.tandem.chat.moved
 import dev.daarkolabs.tandem.chat.paletteFor
 import dev.daarkolabs.tandem.chat.pick
 import dev.daarkolabs.tandem.chat.sendNowTooltip
 import dev.daarkolabs.tandem.chat.sendsLater
 import dev.daarkolabs.tandem.chat.shellCommand
+import dev.daarkolabs.tandem.chat.shownMention
 import dev.daarkolabs.tandem.chat.slashIntercept
 import dev.daarkolabs.tandem.chat.stopTarget
+import dev.daarkolabs.tandem.chat.visibleMention
 import dev.daarkolabs.tandem.chat.withCommand
 import dev.daarkolabs.tandem.ide.CONNECTORS_URL
 import dev.daarkolabs.tandem.ide.FolderCheck
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.ide.checkFolder
+import dev.daarkolabs.tandem.ide.context.ProjectFiles
 import dev.daarkolabs.tandem.ide.laterOnEdt
 import dev.daarkolabs.tandem.session.AddedFolder
 import dev.daarkolabs.tandem.session.FolderState
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
 import kotlinx.collections.immutable.ImmutableList
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -330,6 +343,22 @@ internal fun PromptBar(
     val palette = remember(ui, presenter) { derivedStateOf { paletteOf(inputFocused.value) } }
     // Esc keeps the palette closed until the draft changes.
     LaunchedEffect(ui) { snapshotFlow { committedText(ui) }.collect(ui::draftChanged) }
+    // The `@` palette (spec 3.5): the mention under the caret, over the files the last lookup ranked, while the text area has the
+    // focus. The lookup runs 100 ms after the mention's text last changed, off the EDT (ProjectFiles reads in a readAction).
+    val projectFiles = remember(project) { ProjectFiles.getInstance(project) }
+    val mentionOf = { focused: Boolean ->
+        val query = visibleMention(committedText(ui), caretOf(ui), ui.mention.dismissedFor.value)
+        if (focused) shownMention(query, ui.mention.ranked.value, ui.mention.selection.value) else null
+    }
+    val mention = remember(ui, presenter) { derivedStateOf { mentionOf(inputFocused.value) } }
+    LaunchedEffect(ui, projectFiles) {
+        snapshotFlow { mentionQuery(committedText(ui), caretOf(ui))?.text }
+            .distinctUntilChanged()
+            .collectLatest { text -> if (text != null) ui.mention.ranked.value = lookUpMention(projectFiles, text) }
+    }
+    val pickMentionAt = { shown: MentionPalette?, index: Int? ->
+        if (shown != null && pickMention(ui.draft, index?.let { shown.copy(selected = it) } ?: shown)) ui.mention.selection.value = null
+    }
     // A pick's outcome (MCP spec 4.3): the composer only executes it.
     val execute = { outcome: PaletteOutcome ->
         when (outcome) {
@@ -471,6 +500,8 @@ internal fun PromptBar(
             onFocused,
             inputFocused = inputFocused,
             palette = { palette.value },
+            mention = { mention.value },
+            onMentionPick = { index -> pickMentionAt(mentionOf(true), index) },
             interceptable = { intercepts(ui.draft.text.toString(), composer.models) },
             onPalettePick = { item -> pickFrom(paletteOf(true), item, false) },
             modes = modes,
@@ -497,11 +528,18 @@ internal fun PromptBar(
                     ComposerAction.PasteImage -> scope.launch { paste(ui) }
                     ComposerAction.RemoveLastImage -> ui.attachments.removeLastOrNull()
                     ComposerAction.ClosePanel -> ui.mcpPanelOpen.value = false
-                    ComposerAction.PaletteUp -> palette.value?.let { ui.paletteSelection.value = it.query to it.moved(-1).selected }
-                    ComposerAction.PaletteDown -> palette.value?.let { ui.paletteSelection.value = it.query to it.moved(1).selected }
-                    ComposerAction.PalettePick -> pickFrom(palette.value, null, false)
-                    ComposerAction.PaletteInsert -> pickFrom(palette.value, null, true)
-                    ComposerAction.PaletteClose -> palette.value?.let { ui.paletteDismissedFor.value = it.query }
+                    // The `@` palette's keys first, when it is the one open: Enter and Tab both insert the mention (spec 3.5).
+                    ComposerAction.PaletteUp -> mention.value?.let { ui.mention.selection.value = it.query to it.moved(-1).selected }
+                        ?: palette.value?.let { ui.paletteSelection.value = it.query to it.moved(-1).selected }
+                    ComposerAction.PaletteDown -> mention.value?.let { ui.mention.selection.value = it.query to it.moved(1).selected }
+                        ?: palette.value?.let { ui.paletteSelection.value = it.query to it.moved(1).selected }
+                    ComposerAction.PalettePick -> mention.value?.let { pickMentionAt(it, null) } ?: pickFrom(palette.value, null, false)
+                    ComposerAction.PaletteInsert -> mention.value?.let { pickMentionAt(it, null) } ?: pickFrom(palette.value, null, true)
+                    ComposerAction.PaletteClose -> if (mention.value != null) {
+                        ui.mention.dismissedFor.value = committedText(ui)
+                    } else {
+                        palette.value?.let { ui.paletteDismissedFor.value = it.query }
+                    }
                     ComposerAction.FocusNext -> focusManager.moveFocus(FocusDirection.Next)
                 }
             },
@@ -571,6 +609,8 @@ private fun PromptBox(
     onFocused: () -> Unit,
     inputFocused: MutableState<Boolean>,
     palette: () -> SlashPalette?,
+    mention: () -> MentionPalette?,
+    onMentionPick: (Int) -> Unit,
     interceptable: () -> Boolean,
     onPalettePick: (PaletteItem) -> Unit,
     modes: ComposerModes,
@@ -722,7 +762,7 @@ private fun PromptBox(
                                     composerModesFor(modes, ui.openMenus.intValue)?.let { set(COMPOSER_MODES.name, it) }
                                 }
                                 .onPreviewKeyEvent { event ->
-                                    composerKeyEvent(event, busy || sending, cardOpen, midTurn, shellOnly, ui, palette() != null, interceptable, onAction)
+                                    composerKeyEvent(event, busy || sending, cardOpen, midTurn, shellOnly, ui, palette() != null || mention() != null, interceptable, onAction)
                                 },
                             lineLimits = TextFieldLineLimits.MultiLine(1, 8),
                             undecorated = true,
@@ -762,9 +802,16 @@ private fun PromptBox(
                 }
             },
         )
-        // Placed in the box, so that the popup is anchored to the box's own edges.
+        // Placed in the box, so that the popup is anchored to the box's own edges. The `@` palette, when open, in place of the slash one.
+        val shownMention = mention()
         val shown = palette()
-        if (shown != null && boxWidth > 0) {
+        if (shownMention != null && boxWidth > 0) {
+            val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
+            MentionPaletteView(shownMention, boxWidthPx = boxWidth, maxHeightPx = boxTop - gap) { index ->
+                onMentionPick(index)
+                inputFocus.requestFocus()
+            }
+        } else if (shown != null && boxWidth > 0) {
             val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
             SlashPaletteView(shown, boxWidthPx = boxWidth, maxHeightPx = boxTop - gap) { item ->
                 onPalettePick(item)
@@ -1555,6 +1602,28 @@ private suspend fun attach(ui: ChatUiState, name: String, bytes: ByteArray?) {
  */
 private fun committedText(ui: ChatUiState): String =
     committedDraft(ui.draft.text.toString(), ui.draft.composition?.let { it.min until it.max })
+
+/** The caret in [ui]'s draft, or -1 while text is selected (no mention opens then). */
+private fun caretOf(ui: ChatUiState): Int = ui.draft.selection.takeIf { it.collapsed }?.end ?: -1
+
+/** How long the `@` palette waits after the mention's text last changed before it looks the files up (spec 3.5). */
+private const val MENTION_DEBOUNCE_MS: Long = 100
+
+/**
+ * The files for the mention text [text], best first and the open editors' files first, at most [MENTION_ROWS]: after the debounce,
+ * from [files] off the EDT. A lookup that fails lists nothing and is logged by its class only.
+ */
+private suspend fun lookUpMention(files: ProjectFiles, text: String): List<String> {
+    delay(MENTION_DEBOUNCE_MS)
+    return try {
+        withContext(Dispatchers.Default) { mentionPalette(MentionQuery(0, text), files.matching(text, MENTION_ROWS), files.openFirst).rows }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        logger<ProjectFiles>().warn("the @ palette's lookup failed: ${e.javaClass.name}")
+        emptyList()
+    }
+}
 
 /** The chat column's width before the prompt bar measured it: the `+` menu takes its widest bounds. */
 private val UNMEASURED_COLUMN: Dp = 376.dp

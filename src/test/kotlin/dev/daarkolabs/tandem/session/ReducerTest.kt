@@ -2257,6 +2257,23 @@ class ReducerTest {
         assertEquals("accept", accepted.decision?.decision)
         assertNull(accepted.nonExecutionKind)
     }
+
+    // spec: a sent message keeps its chips
+    @Test
+    fun `a sent message keeps its chips`() {
+        val chip = ContextChip(ContextChipKind.UNSAVED_FILE, "A.kt (unsaved)", "src/A.kt")
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "fix src/A.kt", live = true, context = listOf(chip)))
+        assertEquals(listOf(chip), sent.entries.filterIsInstance<ChatEntry.User>().single().context)
+        // One sent while a turn runs waits with its chips, and its entry takes them when it starts, or folds.
+        val waiting = reduce(sent, SessionEvent.UserSent("u2", "again", live = true, context = listOf(chip)))
+        assertEquals(listOf(chip), waiting.pendingSends.single().context)
+        val started = reduce(waiting, cli("""{"type":"command_lifecycle","command_uuid":"u2","state":"started"}"""))
+        assertEquals(listOf(chip), started.entries.filterIsInstance<ChatEntry.User>().last().context)
+        val folded = reduce(ChatState(), SessionEvent.UserSent("u3", "loaded", folded = true, context = listOf(chip)))
+        assertEquals(listOf(chip), folded.entries.filterIsInstance<ChatEntry.User>().single().context)
+        // Without chips, none.
+        assertEquals(emptyList(), reduce(ChatState(), SessionEvent.UserSent("u4", "plain")).entries.filterIsInstance<ChatEntry.User>().single().context)
+    }
 }
 
 /** A complete main-thread `assistant` line with one text block. */

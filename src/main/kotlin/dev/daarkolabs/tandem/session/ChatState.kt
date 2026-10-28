@@ -170,6 +170,8 @@ data class PendingSend(
     val later: Boolean,
     val stage: PendingStage,
     val restoreOnWithdraw: Boolean = false,
+    /** The context blocks sent before its text, as chips (spec 3.5); its entry takes them once it starts. */
+    val context: List<ContextChip> = emptyList(),
 )
 
 /** Where a [PendingSend] stands. */

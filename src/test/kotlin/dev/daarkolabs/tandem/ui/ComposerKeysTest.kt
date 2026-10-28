@@ -5,7 +5,11 @@ import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.text.TextRange
+import dev.daarkolabs.tandem.chat.MentionPalette
+import dev.daarkolabs.tandem.chat.MentionQuery
 import dev.daarkolabs.tandem.chat.intercepts
+import dev.daarkolabs.tandem.chat.shownMention
+import dev.daarkolabs.tandem.chat.visibleMention
 import dev.daarkolabs.tandem.session.ModelOption
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -368,7 +372,7 @@ class ComposerKeysTest {
                 Base64.getEncoder().encodeToString(it)
             }
             val sent: MutableList<String> = Collections.synchronizedList(ArrayList())
-            val sender = ComposerSender(scope, { text, _, _ -> sent += text }, {}, encode)
+            val sender = ComposerSender(scope, { sent += it.text }, {}, encode)
             val ui = ChatUiState()
             ui.draft.setTextAndPlaceCursorAtEnd(" first ")
             ui.attachments += image("a")
@@ -433,6 +437,48 @@ class ComposerKeysTest {
         assertFalse(canSend("x", 1, sending = true))
         assertEquals(ComposerFallback.Swallow, fallback(enter, busy = true))
     }
+
+    // spec: Enter with the palette closed sends
+    @Test
+    fun `Enter with the palette closed sends`() {
+        // A draft whose `@` mention lists no file has no palette open: Enter sends it as typed (spec 3.5).
+        assertNull(shownMentionFor("@nothing", listOf("hello.txt")))
+        assertEquals(ComposerAction.Send, composer(enter, paletteOpen = false))
+    }
+
+    // spec: Enter with the palette open picks
+    @Test
+    fun `Enter with the palette open picks`() {
+        val draft = TextFieldState()
+        draft.setTextAndPlaceCursorAtEnd("read @hel")
+        val palette = shownMentionFor(draft.text.toString(), listOf("hello.txt", "help.md"))!!
+        assertEquals(ComposerAction.PalettePick, composer(enter, paletteOpen = true))
+        // Busy or with a card open, Enter still picks: it never sends through the palette.
+        assertEquals(ComposerAction.PalettePick, composer(enter, paletteOpen = true, busy = true, cardOpen = true))
+        assertTrue(pickMention(draft, palette.moved(1)))
+        assertEquals("read @help.md ", draft.text.toString())
+        assertEquals(TextRange(14), draft.selection)
+    }
+
+    // spec: Tab inserts and keeps the palette closed
+    @Test
+    fun `Tab inserts and keeps the palette closed`() {
+        val draft = TextFieldState()
+        draft.setTextAndPlaceCursorAtEnd("@hel")
+        val palette = shownMentionFor(draft.text.toString(), listOf("hello.txt"))!!
+        assertEquals(ComposerAction.PaletteInsert, composer(tab, paletteOpen = true))
+        assertTrue(pickMention(draft, palette))
+        assertEquals("@hello.txt ", draft.text.toString())
+        // The caret after the space: no mention under it, so the palette stays closed.
+        assertNull(shownMentionFor(draft.text.toString(), listOf("hello.txt"), draft.selection.end))
+        // A palette with no row inserts nothing.
+        assertFalse(pickMention(draft, MentionPalette(MentionQuery(0, ""), emptyList(), 0)))
+        assertEquals("@hello.txt ", draft.text.toString())
+    }
+
+    /** The `@` palette the composer shows for [draft] with the caret at [caret] (its end by default), over [ranked]. */
+    private fun shownMentionFor(draft: String, ranked: List<String>, caret: Int = draft.length): MentionPalette? =
+        shownMention(visibleMention(draft, caret, null), ranked, null)
 
     private fun fallback(
         key: Key,

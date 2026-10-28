@@ -443,6 +443,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
                     gap(Kind.USER, it),
                     imageRefs(entry.images),
                     caption = if (entry.folded) FOLDED_CAPTION else null,
+                    chips = entry.context.toImmutableList(),
                 )
             }
             // Thinking rows are the main thread's; a subagent message of an unknown agent shows its text and calls only.

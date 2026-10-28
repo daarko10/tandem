@@ -2,6 +2,7 @@ package dev.daarkolabs.tandem.session
 
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.logger
+import dev.daarkolabs.tandem.protocol.ContextBlock
 import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.McpAuthStart
@@ -391,13 +392,20 @@ class SessionManager internal constructor(
     }
 
     /**
-     * Sends a prompt: [text] and the [images] attached to it, in order, with `"priority":"later"` when [later]. A stopped session
-     * starts a process first, and gets the prompt once it is up.
+     * Sends a prompt: [text] and the [images] attached to it, in order, with `"priority":"later"` when [later], after the [context]
+     * blocks, which its bubble shows as [chips] (spec 3.5). A stopped session starts a process first, and gets the prompt once it is up.
      */
-    fun send(id: SessionId, text: String, images: List<ImageBlock> = emptyList(), later: Boolean = false) {
+    fun send(
+        id: SessionId,
+        text: String,
+        images: List<ImageBlock> = emptyList(),
+        later: Boolean = false,
+        context: List<ContextBlock> = emptyList(),
+        chips: List<ContextChip> = emptyList(),
+    ) {
         val handle = handle(id) ?: return
         handle.lastUsed = clock()
-        if (handle.sendOrQueue(Outbound.Prompt(text, images, later))) spawner.startInBackground(handle, forPrompts = true)
+        if (handle.sendOrQueue(Outbound.Prompt(text, images, later, context, chips))) spawner.startInBackground(handle, forPrompts = true)
     }
 
     /**

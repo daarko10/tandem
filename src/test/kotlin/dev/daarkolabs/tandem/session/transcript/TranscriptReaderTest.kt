@@ -7,6 +7,8 @@ import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ContextChip
+import dev.daarkolabs.tandem.session.ContextChipKind
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.PendingPermission
@@ -971,6 +973,35 @@ class TranscriptReaderTest {
             ),
             running.settled(),
         )
+    }
+
+    // spec: ide-mention's transcript reloads with the mention as typed and no chip
+    @Test
+    fun `ide-mention's transcript reloads with the mention as typed and no chip`() {
+        val state = read("ide-mention")
+        // transcripts/ide-mention.jsonl:5 and :29: the prompts as typed, the CLI's file attachments not shown.
+        assertEquals(listOf("What is on @hello.txt#L2?", "What does @hello.txt say?"), state.userTexts())
+        assertTrue(state.entries.filterIsInstance<ChatEntry.User>().all { it.context.isEmpty() })
+    }
+
+    // spec: a user line with an unsaved-file block reloads with the chip
+    @Test
+    fun `a user line with an unsaved-file block reloads with the chip`(@TempDir dir: Path) = runBlocking<Unit> {
+        val block = "src/A.kt as open in the IDE, with unsaved changes (2 lines):\n```\nx\ny\n```"
+        val content = """[{"type":"text","text":${Json.encodeToString(JsonPrimitive(block))}},{"type":"text","text":"fix src/A.kt"}]"""
+        val queued = """[{"type":"text","text":${Json.encodeToString(JsonPrimitive(block))}},{"type":"text","text":"and again"}]"""
+        val f = dir.resolve("s.jsonl")
+        f.writeLines(
+            """{"type":"user","uuid":"u1","timestamp":"2026-10-28T12:00:00.000Z","message":{"role":"user","content":$content}}""",
+            """{"type":"attachment","uuid":"a1","parentUuid":"u1","timestamp":"2026-10-28T12:00:01.000Z","attachment":{"type":"queued_command","prompt":$queued,"source_uuid":"u2"}}""",
+        )
+        val loaded = TranscriptReader.read(f)
+        val users = loaded.state.entries.filterIsInstance<ChatEntry.User>()
+        val chip = ContextChip(ContextChipKind.UNSAVED_FILE, "A.kt (unsaved)", "src/A.kt")
+        assertEquals(listOf("fix src/A.kt", "and again"), users.map { it.text })
+        assertEquals(listOf(listOf(chip), listOf(chip)), users.map { it.context })
+        // The title is the typed text, never the block.
+        assertEquals("fix src/A.kt", loaded.meta.firstPrompt)
     }
 
     private fun read(name: String): ChatState = runBlocking { TranscriptReader.read(Fixtures.transcript(name)) }.state

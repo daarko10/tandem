@@ -1,12 +1,20 @@
 package dev.daarkolabs.tandem.ui
 
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import dev.daarkolabs.tandem.protocol.ContextBlock
+import dev.daarkolabs.tandem.protocol.HostMessages
 import dev.daarkolabs.tandem.protocol.ImageBlock
+import dev.daarkolabs.tandem.session.ContextChip
+import dev.daarkolabs.tandem.session.ContextChipKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
 import java.util.Base64
 import java.util.Collections
@@ -14,6 +22,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** A session's sender: prompts captured on the EDT are encoded off it and sent in order (polish spec 2.7, 3.4). */
@@ -34,7 +43,7 @@ class ComposerSenderTest {
                 if (calls.getAndIncrement() == 0) Thread.sleep(50)
                 Base64.getEncoder().encodeToString(it)
             }
-            val sender = ComposerSender(scope, { text, images, _ -> sent += Sent(text, images) }, { dropped += it }, encode)
+            val sender = ComposerSender(scope, { sent += Sent(it.text, it.images) }, { dropped += it }, encode)
             sender.submit(CapturedPrompt("a", listOf(CapturedImage("image/png", bytes))))
             assertTrue(sender.sending.value, "sending from the capture on")
             sender.submit(CapturedPrompt("b", listOf(CapturedImage("image/png", bytes))))
@@ -58,7 +67,7 @@ class ComposerSenderTest {
                 if (calls.getAndIncrement() == 0) Thread.sleep(50)
                 Base64.getEncoder().encodeToString(it)
             }
-            val sender = ComposerSender(scope, { text, images, later -> sent += Sent(text, images, later) }, {}, encode)
+            val sender = ComposerSender(scope, { sent += Sent(it.text, it.images, it.later) }, {}, encode)
             sender.submit(CapturedPrompt("A", listOf(CapturedImage("image/png", bytes))))
             sender.submit(CapturedPrompt("B", emptyList(), later = true))
             withTimeout(TIMEOUT) { sender.sending.first { !it } }
@@ -75,7 +84,7 @@ class ComposerSenderTest {
         try {
             val inSend = CountDownLatch(1)
             val release = CountDownLatch(1)
-            val sender = ComposerSender(scope, { _, _, _ ->
+            val sender = ComposerSender(scope, {
                 inSend.countDown()
                 release.await(TIMEOUT, TimeUnit.MILLISECONDS)
             }, {})
@@ -104,7 +113,7 @@ class ComposerSenderTest {
             latch.await(TIMEOUT, TimeUnit.MILLISECONDS)
             "x"
         }
-        val sender = ComposerSender(scope, { text, _, _ -> sent += text }, {
+        val sender = ComposerSender(scope, { sent += it.text }, {
             dropped += it
             droppedOnce.countDown()
         }, encode)
@@ -120,6 +129,66 @@ class ComposerSenderTest {
         sender.submit(CapturedPrompt("b", emptyList()))
         assertEquals(2, dropped.size)
         assertEquals(emptyList(), sent)
+    }
+
+    // spec: a dirty mention is sent as a bare path with its block first
+    @Test
+    fun `a dirty mention is sent as a bare path with its block first`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val sent: MutableList<OutgoingPrompt> = Collections.synchronizedList(ArrayList())
+            val buffers = mapOf("src/A.kt" to "x\ny\n")
+            val sender = ComposerSender(scope, { sent += it }, {}, unsaved = { buffers[it] })
+            sender.submit(CapturedPrompt("fix @src/A.kt, then @src/A.kt and @b.kt", emptyList()))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            val prompt = sent.single()
+            // The dirty file loses its `@` everywhere (the CLI would read the stale disk); the clean one keeps it.
+            assertEquals("fix src/A.kt, then src/A.kt and @b.kt", prompt.text)
+            assertEquals(listOf(ContextBlock("src/A.kt as open in the IDE, with unsaved changes (2 lines):", "x\ny\n")), prompt.context)
+            assertEquals(listOf(ContextChip(ContextChipKind.UNSAVED_FILE, "A.kt (unsaved)", "src/A.kt")), prompt.chips)
+            // On the wire the block goes before the prompt's own text.
+            val content = HostMessages.userMessage(prompt.text, prompt.images, "u", context = prompt.context)["message"]!!
+                .jsonObject["content"]!!.jsonArray.map { it.jsonObject["text"]!!.jsonPrimitive.content }
+            assertEquals(listOf("src/A.kt as open in the IDE, with unsaved changes (2 lines):\n```\nx\ny\n\n```", prompt.text), content)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    // spec: a clean mention goes out as typed
+    @Test
+    fun `a clean mention goes out as typed`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val asked: MutableList<String> = Collections.synchronizedList(ArrayList())
+            val sent: MutableList<OutgoingPrompt> = Collections.synchronizedList(ArrayList())
+            val sender = ComposerSender(scope, { sent += it }, {}, unsaved = { asked += it; null })
+            sender.submit(CapturedPrompt("What does @hello.txt say? Mail a@b.c", emptyList()))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            assertEquals(OutgoingPrompt("What does @hello.txt say? Mail a@b.c", emptyList()), sent.single())
+            // Only the mention was looked up, once.
+            assertEquals(listOf("hello.txt"), asked)
+            assertEquals("no mention" to emptyList(), sender.swapDirtyMentions("no mention"))
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    // spec: a context-only message is refused as an empty draft
+    @Test
+    fun `a context-only message is refused as an empty draft`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val sent: MutableList<OutgoingPrompt> = Collections.synchronizedList(ArrayList())
+            val sender = ComposerSender(scope, { sent += it }, {}, unsaved = { "buffer" })
+            val ui = ChatUiState()
+            ui.draft.setTextAndPlaceCursorAtEnd("  ")
+            assertFalse(sendDraft(ui, sender), "a blank draft sends nothing, whatever context there is")
+            assertFalse(sender.sending.value)
+            assertEquals(emptyList(), sent)
+        } finally {
+            scope.cancel()
+        }
     }
 
     private companion object {

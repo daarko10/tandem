@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -33,11 +35,17 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.daarkolabs.tandem.chat.Attachments
 import dev.daarkolabs.tandem.chat.ImageRef
 import dev.daarkolabs.tandem.chat.UserRow
+import dev.daarkolabs.tandem.chat.mentionsIn
+import dev.daarkolabs.tandem.session.ContextChip
 import dev.daarkolabs.tandem.ui.RenderedRow
 import dev.daarkolabs.tandem.ui.bottomFade
 import dev.daarkolabs.tandem.ui.chatColumn
@@ -72,6 +80,32 @@ internal fun bubbleClamp(lineCount: Int, shown: Boolean): BubbleClamp = when {
     else -> BubbleClamp.CLAMPED
 }
 
+/**
+ * The project's files, relative to its base directory, as last read ([dev.daarkolabs.tandem.ide.context.ProjectFiles.known]): a
+ * bubble draws an `@path` naming one of them as a chip (spec 3.5). Empty where none is provided.
+ */
+internal val LocalKnownPaths: ProvidableCompositionLocal<Set<String>> = compositionLocalOf { emptySet() }
+
+/** A piece of a bubble's text: plain, or an `@path` of an existing file ([mention]), drawn as an inline chip. */
+internal data class BubbleSegment(val text: String, val mention: Boolean)
+
+/**
+ * [text] cut into its plain pieces and its `@path` mentions of the [known] files (spec 3.5, edge 17): a mention of a path the project
+ * does not have, or that is not a mention (`a@b`), stays text. A line suffix (`@hello.txt#L2`) names its file.
+ */
+internal fun bubbleSegments(text: String, known: Set<String>): List<BubbleSegment> {
+    val segments = ArrayList<BubbleSegment>()
+    var at = 0
+    for (span in mentionsIn(text)) {
+        if (span.path.substringBefore('#') !in known) continue
+        if (span.start > at) segments += BubbleSegment(text.substring(at, span.start), mention = false)
+        segments += BubbleSegment(text.substring(span.start, span.end), mention = true)
+        at = span.end
+    }
+    if (at < text.length || segments.isEmpty()) segments += BubbleSegment(text.substring(at), mention = false)
+    return segments
+}
+
 /** Whether a prompt's bubble draws its text box: an images-only prompt shows its thumbnails alone (polish spec 2.7, edge 8). */
 internal fun showsTextBox(row: UserRow): Boolean = row.text.isNotBlank()
 
@@ -95,6 +129,10 @@ internal fun UserBubble(rendered: RenderedRow) {
     Box(Modifier.chatColumn().padding(top = row.gap.dp.dp), contentAlignment = Alignment.TopEnd) {
         Box(Modifier.fillMaxWidth(BUBBLE_WIDTH), contentAlignment = Alignment.TopEnd) {
             Column(horizontalAlignment = Alignment.End) {
+                if (row.chips.isNotEmpty()) {
+                    ContextChips(row.chips)
+                    Spacer(Modifier.height(6.dp))
+                }
                 if (row.images.isNotEmpty()) ImageStrip(row.images, rendered.images)
                 if (showsTextBox(row)) {
                     if (row.images.isNotEmpty()) Spacer(Modifier.height(8.dp))
@@ -107,7 +145,7 @@ internal fun UserBubble(rendered: RenderedRow) {
                         SelectionContainer {
                             Box(if (clamped) Modifier.clipToBounds().bottomFade(FADE_HEIGHT) else Modifier) {
                                 Text(
-                                    row.text,
+                                    bubbleText(row.text, LocalKnownPaths.current),
                                     style = style,
                                     color = JewelTheme.globalColors.text.normal,
                                     // Unbounded, so that the text lays out all its lines whether clamped or not.
@@ -127,6 +165,45 @@ internal fun UserBubble(rendered: RenderedRow) {
                 row.caption?.let { caption ->
                     Text(caption, style = smallTextStyle(), color = chatPalette().dim, modifier = Modifier.padding(top = 4.dp))
                 }
+            }
+        }
+    }
+}
+
+/** [text] with each `@path` of a [known] file drawn as an inline chip: the accent colour on the box fill ([bubbleSegments]). */
+@Composable
+private fun bubbleText(text: String, known: Set<String>): AnnotatedString {
+    val palette = chatPalette()
+    return remember(text, known, palette) {
+        buildAnnotatedString {
+            for (segment in bubbleSegments(text, known)) {
+                if (segment.mention) {
+                    withStyle(SpanStyle(color = palette.accent, background = palette.boxFill)) { append(segment.text) }
+                } else {
+                    append(segment.text)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The context blocks a prompt carried (spec 3.5), above its bubble and right-aligned: one small bordered chip each, reading its label
+ * (`<name> (unsaved)`, `<name>:<start>-<end>`), described as that label.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun ContextChips(chips: ImmutableList<ContextChip>) {
+    val shape = RoundedCornerShape(6.dp)
+    val border = JewelTheme.globalColors.borders.normal
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        chips.forEach { chip ->
+            Box(
+                Modifier.border(1.dp, border, shape)
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .semantics { contentDescription = chip.label },
+            ) {
+                Text(chip.label, style = smallTextStyle(), color = chatPalette().secondary, maxLines = 1)
             }
         }
     }

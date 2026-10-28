@@ -5,7 +5,10 @@ import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.text.TextRange
+import dev.daarkolabs.tandem.chat.MentionPalette
 import dev.daarkolabs.tandem.chat.ScrollEvent
+import dev.daarkolabs.tandem.chat.insertMention
 import dev.daarkolabs.tandem.session.ReturnedSend
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -139,6 +142,21 @@ private fun paletteKey(key: Key, modified: Boolean): ComposerAction? = when (key
     Key.Enter, Key.NumPadEnter -> if (modified) null else ComposerAction.PalettePick
     Key.Tab -> if (modified) null else ComposerAction.PaletteInsert
     else -> null
+}
+
+/**
+ * Enter or Tab on the open `@` palette (spec 3.5): [palette]'s selected path replaces the typed `@…` in [draft] as `@<path> `, the
+ * caret after its space, so the palette stays closed until another `@` is typed. Both keys insert: the mention is plain text that
+ * the CLI expands when the prompt is sent. False when the palette lists nothing.
+ */
+internal fun pickMention(draft: TextFieldState, palette: MentionPalette): Boolean {
+    val path = palette.pick ?: return false
+    val (text, caret) = insertMention(draft.text.toString(), palette.query, path)
+    draft.edit {
+        replace(0, length, text)
+        selection = TextRange(caret)
+    }
+    return true
 }
 
 /**
