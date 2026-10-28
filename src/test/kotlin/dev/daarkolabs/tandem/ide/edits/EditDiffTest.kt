@@ -154,6 +154,9 @@ class EditDiffTest {
     fun `the bottom panel has three buttons and the field with their names`() = withDiff({ editProposal().first }) { shown, decision ->
         val bar = shown.request.getUserData(DiffUserDataKeysEx.BOTTOM_PANEL)
         assertEquals(shown.bar, bar)
+        // The diff's processor reads BOTTOM_PANEL from its context once, when it is built: the chain the diff file carries (seen in the
+        // A5 IDE test: a bar on the request alone never shows).
+        assertEquals(shown.bar, shown.file.chain.getUserData(DiffUserDataKeysEx.BOTTOM_PANEL))
         val buttons = UIUtil.uiTraverser(shown.bar).filter(JButton::class.java).toList()
         assertEquals(listOf("Accept", "Accept all", "Reject"), buttons.map { it.text })
         assertEquals(listOf("tandem.edit.accept", "tandem.edit.acceptAll", "tandem.edit.reject"), buttons.map { it.name })

@@ -152,7 +152,10 @@ class EditDiff(private val project: Project) : DiffPresenter {
         accept.registerCustomShortcutSet(acceptShortcuts(), bar)
         reject.registerCustomShortcutSet(CommonShortcuts.ESCAPE, bar)
 
-        val file = ChainDiffVirtualFile(SimpleDiffRequestChain(request), title)
+        // The diff's processor reads the bar from its context, the chain, once when it is built; the request keeps it too.
+        val chain = SimpleDiffRequestChain(request)
+        chain.putUserData(DiffUserDataKeysEx.BOTTOM_PANEL, bar)
+        val file = ChainDiffVirtualFile(chain, title)
         val disposable = Disposer.newDisposable("Tandem edit diff")
         project.messageBus.connect(disposable).subscribe(
             FileEditorManagerListener.FILE_EDITOR_MANAGER,
