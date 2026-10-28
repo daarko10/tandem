@@ -2,6 +2,7 @@ package dev.daarkolabs.tandem.ide.context
 
 import com.intellij.diff.util.DiffUtil
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -14,11 +15,15 @@ import com.intellij.openapi.editor.event.EditorFactoryListener
 import com.intellij.openapi.editor.event.SelectionEvent
 import com.intellij.openapi.editor.event.SelectionListener
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.fileEditor.FileEditorManagerEvent
+import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
+import dev.daarkolabs.tandem.session.ContextBlocks
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -26,10 +31,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.jetbrains.annotations.VisibleForTesting
 
 /**
  * The editor's selection as the composer's chip shows it (spec 3.5): the file's [path] (relative to the project's base directory,
- * `/`-separated, or absolute outside it), its [name], the 1-based lines [startLine] to [endLine] and the selected [text].
+ * `/`-separated, or absolute outside it), its [name], the 1-based lines [startLine] to [endLine] and the selected [text], at most
+ * `ContextBlocks.MAX_BODY_BYTES + 1` characters of it: more than the block carries, so the block still says it was cut, and the
+ * line count the cut reports comes from [startLine] and [endLine].
  */
 data class Selection(val path: String, val name: String, val startLine: Int, val endLine: Int, val text: String) {
     /** The chip's label: `<name>:<start>-<end>`, with an ASCII hyphen. */
@@ -37,10 +45,12 @@ data class Selection(val path: String, val name: String, val startLine: Int, val
 }
 
 /**
- * The project's current selection (spec 3.5): set while a text editor of the project has a selection of at least one character, and
- * cleared when that editor's selection goes (a caret move) or the editor closes. Only the IDE's main editors count: a diff editor
- * (`DiffUtil.isDiffEditor`), a console, a preview and an editor without a `VirtualFile` are ignored, so a selection there neither
- * sets nor clears it.
+ * The project's current selection (spec 3.5): the selection of the editor the IDE reports as `FileEditorManager.selectedTextEditor`,
+ * while it has at least one character selected. It is read when the service starts (a selection made before the tool window opened
+ * shows), again whenever another editor tab is selected (a tab without a selection clears it, a tab with one shows it), and on every
+ * change of that editor's selection; it clears when that selection goes (a caret move) or the editor closes. Only the selected
+ * tab's editor of a file counts ([counts]): a diff editor (`DiffUtil.isDiffEditor`), a console, a preview, an editor without a `VirtualFile` and any
+ * editor but the selected one are ignored, so a selection there neither sets nor clears it.
  *
  * The listener runs on the EDT and only notes the editor's document, file and range; the lines and the text are read in a
  * `readAction` on [Dispatchers.Default], one change at a time and the latest only, so a drag that fires many events reads once.
@@ -63,6 +73,9 @@ class EditorSelection(private val project: Project, scope: CoroutineScope) : Dis
 
     private object Cleared
 
+    /** The editor the IDE reports as selected, read on the EDT; tests read the same. */
+    private fun selectedEditor(): Editor? = FileEditorManager.getInstance(project).selectedTextEditor
+
     init {
         val factory = EditorFactory.getInstance()
         factory.eventMulticaster.addSelectionListener(
@@ -79,15 +92,45 @@ class EditorSelection(private val project: Project, scope: CoroutineScope) : Dis
             },
             this,
         )
+        project.messageBus.connect(this).subscribe(
+            FileEditorManagerListener.FILE_EDITOR_MANAGER,
+            object : FileEditorManagerListener {
+                override fun selectionChanged(event: FileEditorManagerEvent) = seed()
+            },
+        )
         scope.launch(Dispatchers.Default) {
             for (change in changes) mutableCurrent.value = if (change is Change) read(change) else null
         }
+        // A selection made before the service started (before the tool window first opened) shows too.
+        scope.launch(Dispatchers.EDT) { seed() }
     }
+
+    /** On the EDT: the selected editor's selection as it is now, or none when it has none or does not count. */
+    private fun seed() {
+        val editor = selectedEditor()
+        if (editor == null || !counts(editor) || !editor.selectionModel.hasSelection()) {
+            clear()
+            return
+        }
+        val model = editor.selectionModel
+        onSelection(editor, model.selectionStart, model.selectionEnd)
+    }
+
+    /**
+     * Whether a selection in [editor] is the project's selection: the editor is this project's editor of a file, not a diff editor,
+     * a console or a preview, and it is the one the IDE reports as selected. On the EDT.
+     */
+    @VisibleForTesting
+    internal fun counts(editor: Editor): Boolean =
+        editor.project === project && editor.editorKind !in IGNORED_KINDS && !DiffUtil.isDiffEditor(editor) &&
+            fileOf(editor) != null && editor === selectedEditor()
+
+    private fun fileOf(editor: Editor): VirtualFile? = editor.virtualFile ?: FileDocumentManager.getInstance().getFile(editor.document)
 
     /** On the EDT: a selection of [start] to [end] in [editor], noted when the editor counts (see the class). */
     private fun onSelection(editor: Editor, start: Int, end: Int) {
-        if (editor.project !== project || editor.editorKind != EditorKind.MAIN_EDITOR || DiffUtil.isDiffEditor(editor)) return
-        val file = editor.virtualFile ?: FileDocumentManager.getInstance().getFile(editor.document) ?: return
+        if (!counts(editor)) return
+        val file = fileOf(editor) ?: return
         if (end <= start) {
             if (editor === owner) clear()
             return
@@ -110,7 +153,10 @@ class EditorSelection(private val project: Project, scope: CoroutineScope) : Dis
         // A selection that ends at a line's start (whole lines picked) ends on the line before.
         val startLine = document.getLineNumber(start) + 1
         val endLine = document.getLineNumber(end - 1) + 1
-        Selection(pathOf(change.file), change.file.name, startLine, endLine, document.getText(TextRange(start, end)))
+        // At most one character past the block's bound: the block is cut there anyway, and a select-all in a large file copies
+        // no more than that on each change.
+        val text = document.getText(TextRange(start, minOf(end, start + ContextBlocks.MAX_BODY_BYTES + 1)))
+        Selection(pathOf(change.file), change.file.name, startLine, endLine, text)
     }
 
     /** [file]'s path relative to the project's base directory, or its absolute path outside it. */
@@ -124,6 +170,9 @@ class EditorSelection(private val project: Project, scope: CoroutineScope) : Dis
     }
 
     companion object {
+        /** The kinds of editor whose selection is never the chip's (spec 3.5): the diff's sides, consoles and previews. */
+        private val IGNORED_KINDS: Set<EditorKind> = setOf(EditorKind.DIFF, EditorKind.CONSOLE, EditorKind.PREVIEW)
+
         fun getInstance(project: Project): EditorSelection = project.service()
     }
 }

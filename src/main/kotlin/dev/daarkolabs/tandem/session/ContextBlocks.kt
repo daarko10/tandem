@@ -20,10 +20,12 @@ object ContextBlocks {
 
     /**
      * The block for the editor's selection [text] in [path], lines [startLine] to [endLine] (1-based): its first line names them, and
-     * its body is the selected text, cut at [MAX_BODY_BYTES] with the line `… truncated: <T> lines in all` after the cut (spec 3.5).
+     * its body is the selected text, cut at [MAX_BODY_BYTES] with the line `… truncated: <T> lines in all` after the cut (spec 3.5),
+     * `T` being the selection's lines, [startLine] to [endLine]: [text] may itself be cut already (the editor reads no more than the
+     * bound and one character).
      */
     fun selectionBlock(path: String, startLine: Int, endLine: Int, text: String): ContextBlock =
-        ContextBlock(selectionFirstLine(path, startLine, endLine), bounded(text, lineCount(text)))
+        ContextBlock(selectionFirstLine(path, startLine, endLine), bounded(text, endLine - startLine + 1))
 
     /** The chip of a selection's block: `<name>:<start>-<end>`, the form of the composer's chip. */
     fun selectionChip(path: String, startLine: Int, endLine: Int): ContextChip =
