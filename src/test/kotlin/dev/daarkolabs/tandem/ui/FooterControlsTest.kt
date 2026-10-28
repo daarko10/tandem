@@ -422,7 +422,9 @@ class FooterControlsTest {
         // The mode name itself is unchanged: the hint sits beside it.
         assertEquals(modeLabel(manual), modeLabel(on))
         // It follows the state: the turn's result clears it.
-        val state = reduce(ChatState(permissionMode = PermissionMode.DEFAULT), SessionEvent.AcceptAll(true))
+        val state = reduce(ChatState(permissionMode = PermissionMode.DEFAULT, busy = true), SessionEvent.AcceptAll(true))
         assertEquals("Accepting all edits this turn", acceptAllHint(composerModel(state)))
+        val cleared = reduce(state, SessionEvent.Cli(fixtureLine("ide-edit", 71)))
+        assertNull(acceptAllHint(composerModel(cleared)), "the turn's result (ide-edit:71) takes the hint away")
     }
 }
