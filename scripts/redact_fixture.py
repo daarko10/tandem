@@ -9,7 +9,9 @@ Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
 - Replaces long base64 payloads (the `data` of a base64 source and the `base64` of an image tool_use_result) with
   "<base64>". Only a `data` or `base64` value of at least 256 base64 characters counts, so short strings are never touched.
 - Replaces absolute paths with <path>, e-mail addresses with <email>, git branch names with <branch> and the
-  entrypoint (how the recording was started) with <entrypoint>.
+  entrypoint (how the recording was started) with <entrypoint>. A path under the recording's working directory (a
+  line's top-level `cwd`, its resolved path and its macOS /private twin) keeps its tail: `<path>/hello.txt`, when that
+  directory is a temporary one (the recorders' mktemp -d), so a recording made in a project never shows its file names.
 - Empties environment-specific lists in system/init and in the initialize control_response
   (tools, MCP servers, plugins, skills, agents, commands) and masks account details. The MCP and ide-edit fixtures keep
   the lists their tests read (INIT_KEEP, by fixture name: the output path's file name without its extension, for a stream and its
@@ -25,7 +27,7 @@ Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
 - Keeps the `id` of a get_context_usage category (system_prompt, messages, ...: a protocol name), renames the entries
   of a get_usage answer's behaviors.<window> agents, skills, plugins and mcp_servers to agent-a, skill-a, plugin-a,
   server-a, ... per kind in order of first appearance (the agent types general-purpose and workflow-subagent stay), and
-  ends a path before a backtick and before a trailing colon.
+  ends a path before a backtick and before a trailing colon or period.
 - Keeps every message type, field name and ordering, which is what the protocol tests care about.
 - Also redacts the CLI's on-disk transcripts (<session id>.jsonl), which hold one JSON object per line as well.
   Pass a stream and its transcripts in one call: they share the placeholders, so an id reads the same in all of them.
@@ -42,6 +44,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import urllib.parse
 
 ID_KEYS = {
@@ -76,8 +79,9 @@ CONNECTOR_VARIABLE = "TANDEM_PROBE_CONNECTOR"  # the probe's connector, as drive
 URL_KEYS = ("code_challenge", "state", "config.id", "config.url", "authUrl")
 NONCE_KEYS = URL_KEYS[:2]
 REDACTED_RE = re.compile(r"REDACTED_[A-Z0-9_]+")
-# A path ends before a quote or backtick and leaves a trailing colon out ("rule to `/home/u/CLAUDE.md`: when").
-PATH_RE = re.compile(r"(?:/(?:root|home|Users|tmp|private|var|opt)|[A-Za-z]:\\\\)(?:[^\s\"'`]*[^\s\"'`:])?")
+# A path ends before a quote or backtick and leaves a trailing colon or period out ("rule to `/home/u/CLAUDE.md`: when",
+# "not found in /home/u/a.txt. The file"); one right after a placeholder (<path>/tmp/x) is a work-dir file's tail, kept.
+PATH_RE = re.compile(r"(?<!<path>)(?:/(?:root|home|Users|tmp|private|var|opt)|[A-Za-z]:\\\\)(?:[^\s\"'`]*[^\s\"'`:.])?")
 API_ID_RE = re.compile(r"^(?:toolu|srvtoolu|msg|req)_[A-Za-z0-9]+$")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PLACEHOLDER_RE = re.compile(r"<[A-Za-z_]\w*-\d+>")
@@ -92,11 +96,36 @@ USAGE_SHARE_KINDS = {"agents": "agent", "skills": "skill", "plugins": "plugin", 
 USAGE_KEPT_NAMES = {"agents": {"general-purpose", "workflow-subagent"}}
 USAGE_PLACEHOLDER_RE = re.compile(r"(?:agent|skill|plugin|server)-[a-z]{1,3}")
 
+TEMP_ROOTS = ("/tmp", "/var/folders", tempfile.gettempdir())  # where mktemp -d puts the recording's directory
+work_dirs: set[str] = set()  # the recording's working directory and its twins, learnt from the lines' top-level `cwd`
+work_dir_re: re.Pattern | None = None
 ids: dict[str, str] = {}
 usage_names: dict[tuple[str, str], str] = {}  # (list, real name) -> "server-a", shared across a run's lines
 leaked: dict[str, str] = {}
 connectors: dict[str, str] = {}  # a connector's name -> "claude.ai Connector-N", shared by a stream and its transcripts
 hosts: dict[str, str] = {}  # a connector URL's host -> "connector-N.invalid"
+
+
+def learn_work_dir(cwd) -> None:
+    """The recording ran in `cwd` (an init's or a transcript line's `cwd`): a path under it keeps its tail after <path>, so
+    `<path>/hello.txt` and `<path>/new.txt` stay apart. Its twins are the resolved path and the macOS /private form."""
+    global work_dir_re
+    if not isinstance(cwd, str) or not cwd.startswith("/") or cwd.rstrip("/") == "" or PLACEHOLDER_RE.search(cwd):
+        return
+    cwd = cwd.rstrip("/")
+    if not any(os.path.realpath(cwd).startswith(os.path.realpath(t) + "/") for t in TEMP_ROOTS):
+        return  # the recorders run in an empty mktemp directory; a project's file names stay hidden
+    twins = {cwd, os.path.realpath(cwd)}
+    for d in list(twins):
+        if d.startswith("/private/"):
+            twins.add(d[len("/private"):])
+        elif d.startswith(("/tmp/", "/var/")):
+            twins.add("/private" + d)
+    if twins <= work_dirs:
+        return
+    work_dirs.update(twins)
+    alternatives = "|".join(re.escape(d) for d in sorted(work_dirs, key=len, reverse=True))
+    work_dir_re = re.compile(rf"(?<![\w.-])(?:{alternatives})(?![\w-])")
 
 
 def stable_id(value: str, key: str) -> str:
@@ -162,6 +191,8 @@ def scrub(node, key=None):
             return "<entrypoint>"
         if key in BASE64_KEYS and len(node) >= BASE64_MIN_LENGTH and BASE64_RE.fullmatch(node):
             return "<base64>"
+        if work_dir_re:
+            node = work_dir_re.sub("<path>", node)
         node = PATH_RE.sub("<path>", node)
         return EMAIL_RE.sub("<email>", node)
     return node
@@ -359,6 +390,8 @@ def redact(src: str, dst: str) -> None:
             connectors.setdefault(probe, f"claude.ai Connector-{len(connectors) + 1}")
     sub = renamer()
     out = []
+    for _, msg in lines:
+        learn_work_dir(msg.get("cwd"))
     for number, msg in lines:
         if fixture in CONNECTOR_FIXTURES:
             filter_connectors(msg)
