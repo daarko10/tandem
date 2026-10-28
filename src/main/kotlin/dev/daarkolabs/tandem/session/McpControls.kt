@@ -139,5 +139,11 @@ sealed interface McpError {
     data object Ended : McpError
 }
 
-/** The MCP server Tandem itself gives the CLI (`mcp__tandem__edit`); Tandem's own only with `source == "dynamic"`. */
+/**
+ * The MCP server Tandem itself gives the CLI (`mcp__tandem__edit_file`, `mcp__tandem__write_file`): `source` `sdk`, or `dynamic` when
+ * a configured server of the same name shadows its row (the collision probe, spec 11 item 12).
+ */
 const val TANDEM_MCP_SERVER: String = "tandem"
+
+/** What toggling or reconnecting Tandem's own server answers, without a request (spec 3.4). */
+internal val OWN_SERVER_REFUSED: McpResult<Nothing> = McpResult.Failed(McpError.Rejected("Tandem's own server cannot be changed"))

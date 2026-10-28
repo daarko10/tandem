@@ -13,9 +13,13 @@ import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.McpServerInfo
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.TandemTools
+import dev.daarkolabs.tandem.protocol.ToolReply
 import dev.daarkolabs.tandem.protocol.UsageAnswer
 import dev.daarkolabs.tandem.protocol.cancelAsyncAnswer
 import dev.daarkolabs.tandem.protocol.interruptReceipt
+import dev.daarkolabs.tandem.protocol.jsonRpcError
+import dev.daarkolabs.tandem.protocol.jsonRpcRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineName
@@ -44,6 +48,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import java.io.IOException
 import java.nio.file.Path
@@ -51,6 +56,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /** Looked up on every use, as [ShellRunner]'s is: a test's capturing factory must see every record of a shell escape's run. */
@@ -77,6 +83,12 @@ private const val CANCEL_ASYNC_SECONDS = 5
 
 /** How long an `interrupt` with `cancel_queued` waits for its receipt (a guess: the recorded one came at once, `queue-cancel:56`). */
 private const val INTERRUPT_SECONDS = 15
+
+/** The JSON-RPC error for a method, or a server, Tandem does not serve (spec 4.1). */
+private const val METHOD_NOT_FOUND = -32601
+
+/** What a `tools/call` answers when no [HostTools] serve Tandem's tools in this session (a test's, or one without the IDE side). */
+internal const val NO_HOST_TOOLS_TEXT = "Tandem's edit tools are not available in this session."
 
 /** The `system/init` capability that lets an `interrupt` cancel the queued messages too (spec 12.3). */
 private const val CANCEL_QUEUED_CAPABILITY = "interrupt_cancel_queued_v1"
@@ -189,6 +201,10 @@ class DefaultProcessLauncher(private val parentEnvironment: () -> Map<String, St
  *
  * [initialState] is the chat so far when a transcript is resumed; the picks in [config] win over what it recorded. [clock] stamps
  * every line, prompt and end ([SessionEvent.Cli], [SessionEvent.UserSent], [SessionEvent.Ended]) and [lastFrameAtMillis].
+ *
+ * Tandem's own MCP server (`tandem`, spec 4.1, 4.2): its `mcp_message` requests are answered by [TandemTools], a `tools/call` by
+ * [hostTools] in a child job of its own, so the reader goes on; its permission requests are allowed at once (the diff is the
+ * question), and an init whose `tools` lists others but not Tandem's edit tool says so once per process (the version gate).
  */
 class ClaudeSession(
     parentScope: CoroutineScope,
@@ -200,6 +216,10 @@ class ClaudeSession(
     private val mcpMillisPerSecond: Long = 1_000L,
     /** How long a shell escape's output frame waits for the quiet result of its command frame before it goes out anyway. */
     private val quietWaitMillis: Long = 5_000L,
+    /** What serves Tandem's tools; null answers each `tools/call` with [NO_HOST_TOOLS_TEXT]. */
+    private val hostTools: HostTools? = null,
+    /** The plugin's version, as Tandem's server names itself in its `initialize` answer. */
+    private val version: String = "dev",
 ) {
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext.job) + CoroutineName("ClaudeSession"))
     private val _state = MutableStateFlow(
@@ -250,6 +270,15 @@ class ClaudeSession(
      * Read and written by the reader coroutine only.
      */
     private var pendingUsage: String? = null
+
+    /** The `tools/call` jobs still running, by JSON-RPC id: whoever removes a job's entry owns its end (its reply, or its withdrawal). */
+    private val calls = ConcurrentHashMap<JsonElement, Job>()
+
+    /** Set once the open calls were ended with the process ([endCalls]): [HostTools.cancelAll] runs once per process. */
+    private val callsEnded = AtomicBoolean()
+
+    /** Set once an init raised the version gate's notice: once per process. Read and written by the reader coroutine only. */
+    private var gateRaised = false
 
     private sealed interface Held {
         /** The place of shell escape [id], whose command still runs: its escape comes once it ends. */
@@ -794,6 +823,86 @@ class ClaudeSession(
         ended = true
         replies.values.forEach { it.complete(Reply.Ended) }
         replies.clear()
+        endCalls()
+    }
+
+    /**
+     * The process is over: every `tools/call` still open is cancelled with no reply (nobody reads it), and [hostTools] closes this
+     * session's diffs and queued calls ([HostTools.cancelAll]); once per process (spec 7.11).
+     */
+    private fun endCalls() {
+        if (!callsEnded.compareAndSet(false, true)) return
+        val open = calls.keys.toList()
+        open.forEach { calls.remove(it)?.cancel() }
+        LOG.info("process over: ${open.size} tool calls withdrawn")
+        hostTools?.cancelAll(sessionKey())
+    }
+
+    /** The session the calls of this process belong to: the id its init reported, else the one it was started for. */
+    private fun sessionKey(): SessionId = _reportedSessionId.value ?: config.sessionId ?: config.resumeSessionId.orEmpty()
+
+    /**
+     * Answers [request], an `mcp_message` of control request [requestId]: one for Tandem's server goes to [TandemTools], each
+     * `tools/call` in a job of its own keyed by its JSON-RPC id (the reader goes on); any other server's gets `-32601`, never nothing.
+     */
+    private suspend fun serveMcp(requestId: String, request: InboundRequest.McpMessage) {
+        val rpc = jsonRpcRequest(request.message)
+        if (request.serverName != TandemTools.SERVER_NAME) {
+            LOG.info("mcp_message for unknown server ${request.serverName}: ${rpc?.method}")
+            send(HostMessages.mcpResponse(requestId, jsonRpcError(rpc?.id, METHOD_NOT_FOUND, "Method not found: ${rpc?.method.orEmpty()}")))
+            return
+        }
+        LOG.debug { "mcp_message ${rpc?.method} id=${rpc?.id}" }
+        val reply = TandemTools.answer(request.message, version, ::callHostTools, ::cancelCall)
+        val id = rpc?.id
+        if (rpc?.method != "tools/call" || id == null) {
+            reply()?.let { send(HostMessages.mcpResponse(requestId, it)) }
+            return
+        }
+        val job = scope.launch(Dispatchers.Default + CoroutineName("ClaudeSession.toolCall"), start = CoroutineStart.LAZY) {
+            val answer = reply() ?: return@launch
+            // Withdrawn meanwhile (notifications/cancelled, the process's end): the cancel took the entry, and no reply goes out.
+            if (calls.remove(id, currentCoroutineContext().job)) send(HostMessages.mcpResponse(requestId, answer))
+        }
+        if (calls.put(id, job) != null) LOG.info("tools/call id=$id again while one runs: only the newer one answers")
+        if (callsEnded.get()) {
+            // The process ended meanwhile: a lazy job cancelled before its start never runs, so the host never sees the call.
+            calls.remove(id, job)
+            job.cancel()
+            return
+        }
+        job.invokeOnCompletion { calls.remove(id, job) }
+        job.start()
+    }
+
+    /** [hostTools]' answer to the call [name] with [arguments]; a host that fails answers an error, so the CLI never waits. */
+    private suspend fun callHostTools(name: String, arguments: JsonObject, toolUseId: String?, id: JsonElement?): ToolReply? {
+        val tools = hostTools ?: return ToolReply(NO_HOST_TOOLS_TEXT, isError = true)
+        val requestId = id ?: return null
+        return try {
+            tools.call(ToolCall(name, arguments, toolUseId, requestId, sessionKey()))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            LOG.warn("tools/call $name id=$requestId tool_use=$toolUseId failed in the IDE", e)
+            ToolReply("Tandem could not run $name: ${e.javaClass.simpleName}.", isError = true)
+        }
+    }
+
+    /** `notifications/cancelled` for [requestId]: its job is cancelled with no reply, and [hostTools] withdraws the call. */
+    private fun cancelCall(requestId: JsonElement) {
+        val job = calls.remove(requestId)
+        LOG.info("tools/call id=$requestId cancelled by the CLI${if (job == null) " (not open)" else ""}")
+        hostTools?.cancel(sessionKey(), requestId) // first: the host knows the call is withdrawn before its job sees the cancellation
+        job?.cancel()
+    }
+
+    /** The version gate (spec 4.2, deviation 1): an init that lists tools, none of them Tandem's edit tool, says so once per process. */
+    private fun checkEditTools(init: CliMessage.SystemInit) {
+        if (gateRaised || init.tools.isEmpty() || TANDEM_EDIT_TOOL in init.tools) return
+        gateRaised = true
+        LOG.info("init without $TANDEM_EDIT_TOOL (claude ${init.claudeCodeVersion})")
+        notice(NoticeLevel.WARNING, editsOffNotice(init.claudeCodeVersion))
     }
 
     /**
@@ -851,13 +960,24 @@ class ClaudeSession(
             val message = Ndjson.decode(line)
             when (message) {
                 is CliMessage.Unknown -> LOG.debug { "unhandled line type=${message.type} subtype=${message.subtype} length=${line.length}" }
-                // An `mcp_message` is answered as unsupported, so the CLI never waits on it, until the host serves its tools.
-                is CliMessage.ControlRequest -> if (message.request !is InboundRequest.CanUseTool) {
-                    LOG.info("unsupported control request ${message.request.subtype}")
-                    send(HostMessages.error(message.requestId, "Unsupported request: ${message.request.subtype}"))
-                    // An MCP server's question (spec 2): answered as unsupported, as before, and no longer silently.
-                    if (message.request.subtype == "elicitation") {
-                        notice(NoticeLevel.WARNING, "An MCP server asked for input Tandem cannot show yet.")
+                is CliMessage.ControlRequest -> when (val request = message.request) {
+                    // Tandem's own tool: allowed at once with its input, never a card (the diff is the question, spec 4.2).
+                    is InboundRequest.CanUseTool -> if (request.toolName.startsWith(TANDEM_TOOL_PREFIX)) {
+                        LOG.info("can_use_tool ${request.toolName} tool_use=${request.toolUseId}: allowed")
+                        send(HostMessages.allow(message.requestId, request.toolUseId, request.input))
+                        continue
+                    }
+                    is InboundRequest.McpMessage -> {
+                        serveMcp(message.requestId, request)
+                        continue
+                    }
+                    is InboundRequest.Other -> {
+                        LOG.info("unsupported control request ${request.subtype}")
+                        send(HostMessages.error(message.requestId, "Unsupported request: ${request.subtype}"))
+                        // An MCP server's question (spec 2): answered as unsupported, as before, and no longer silently.
+                        if (request.subtype == "elicitation") {
+                            notice(NoticeLevel.WARNING, "An MCP server asked for input Tandem cannot show yet.")
+                        }
                     }
                 }
                 // The answer to a request() that waits for it is that call's alone; any other goes to the reducer.
@@ -865,7 +985,10 @@ class ClaudeSession(
                 else -> {}
             }
             dispatch(SessionEvent.Cli(message, at))
-            if (message is CliMessage.SystemInit && message.sessionId.isNotEmpty()) _reportedSessionId.value = message.sessionId
+            if (message is CliMessage.SystemInit) {
+                if (message.sessionId.isNotEmpty()) _reportedSessionId.value = message.sessionId
+                checkEditTools(message)
+            }
             // A usage line's numbers are asked for once its local turn has ended, between turns, as the probes sent them (spec 3.2).
             if (message is CliMessage.Assistant && message.isUsageLine()) pendingUsage = message.uuid
             if (message is CliMessage.Result) {

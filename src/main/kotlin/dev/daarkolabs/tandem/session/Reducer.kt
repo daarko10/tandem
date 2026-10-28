@@ -143,6 +143,12 @@ sealed interface SessionEvent {
 
     /** The user asked again for [part] of [uuid]'s usage card: [UsagePart.SESSION] loads both parts again, [UsagePart.HISTORY] its own. */
     data class UsageRetry(val uuid: String, val part: UsagePart) : SessionEvent
+
+    /** The review of Tandem edit [toolUseId] moved on to [review] (from the IDE's `TandemEdits`): it replaces [ChatState.edits]' entry. */
+    data class EditPhase(val toolUseId: String, val review: EditReview) : SessionEvent
+
+    /** `Accept all` was pressed ([on]): the turn's later edits apply without a diff until its `result` ([ChatState.acceptAll]). */
+    data class AcceptAll(val on: Boolean) : SessionEvent
 }
 
 private val LOG: Logger
@@ -240,6 +246,8 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
             UsagePart.HISTORY -> card.copy(history = UsagePartState.Loading)
         }
     }
+    is SessionEvent.EditPhase -> state.copy(edits = state.edits + (event.toolUseId to event.review))
+    is SessionEvent.AcceptAll -> state.copy(acceptAll = event.on)
 }
 
 /** The session part of a usage card for [result]: a success without a `session` object fails it (spec 3.2). */
@@ -422,6 +430,7 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
         turnsEnded = if (end != null) state.turnsEnded + 1 else state.turnsEnded,
         turnInterrupted = false,
         turn = null,
+        acceptAll = false,
         // No process owes those results any more: none of them may keep the session from being idle.
         quietSends = emptySet(),
         cliCapabilities = null,
@@ -466,8 +475,11 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
     is CliMessage.Assistant -> reduceAssistant(state, message, at)
     is CliMessage.User -> reduceUser(state, message, at)
     is CliMessage.StreamEvent -> reduceStream(state, message, at)
-    is CliMessage.Result -> reduceQuietOr(state.foldNamed(message), message)
+    // Accept all lasts for the turn it was pressed in (spec 3.3).
+    is CliMessage.Result -> reduceQuietOr(state.foldNamed(message), message).let { if (it.acceptAll) it.copy(acceptAll = false) else it }
     is CliMessage.ControlRequest -> when (val request = message.request) {
+        // Tandem's own tools ask no question: the diff is the question, and ClaudeSession allows the call at once (spec 4.2).
+        is InboundRequest.CanUseTool if request.toolName.startsWith(TANDEM_TOOL_PREFIX) -> state
         is InboundRequest.CanUseTool -> state.copy(
             pendingPermissions = state.pendingPermissions + PendingPermission(
                 requestId = message.requestId,
@@ -795,22 +807,25 @@ private fun reduceUser(state: ChatState, message: CliMessage.User, at: Long): Ch
     var next = state
     for (block in message.content) {
         next = when (block) {
-            is ContentBlock.ToolResult -> next.append(
-                ChatEntry.ToolResult(
-                    id = "result-${block.toolUseId}",
-                    toolUseId = block.toolUseId,
-                    text = toolResultText(block),
-                    isError = block.isError,
-                    content = block.content,
-                    result = result,
-                    decision = message.toolResultMeta.firstOrNull { it.id == block.toolUseId }?.let { meta ->
-                        meta.decision?.let { PermissionDecision(it, meta.source, meta.reasonType, meta.nonExecutionKind) }
-                    },
-                    parentToolUseId = message.parentToolUseId,
-                    agentId = message.agentId,
-                    atMillis = at,
-                ),
-            )
+            is ContentBlock.ToolResult -> {
+                // The meta's kind is kept with or without a decision: Stop's synthetic result carries none (ide-edit-stop:44).
+                val meta = message.toolResultMeta.firstOrNull { it.id == block.toolUseId }
+                next.append(
+                    ChatEntry.ToolResult(
+                        id = "result-${block.toolUseId}",
+                        toolUseId = block.toolUseId,
+                        text = toolResultText(block),
+                        isError = block.isError,
+                        content = block.content,
+                        result = result,
+                        decision = meta?.decision?.let { PermissionDecision(it, meta.source, meta.reasonType, meta.nonExecutionKind) },
+                        parentToolUseId = message.parentToolUseId,
+                        agentId = message.agentId,
+                        atMillis = at,
+                        nonExecutionKind = meta?.nonExecutionKind,
+                    ),
+                )
+            }
             is ContentBlock.Text -> if (isInterruptMarker(block.text)) {
                 next.notice(NoticeLevel.INFO, "Stopped.", NoticeKind.INTERRUPTED).copy(turnInterrupted = true)
             } else {

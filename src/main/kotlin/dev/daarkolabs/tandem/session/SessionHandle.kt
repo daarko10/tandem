@@ -90,6 +90,11 @@ class SessionHandle internal constructor(
     internal val forkAt: String? = null,
     /** A title the CLI is still to be told, such as a fork's: shown at once, and sent once a process reports its `system/init`. */
     pendingTitle: String? = null,
+    /**
+     * What serves Tandem's own tools to this session's processes (the project's `TandemEdits`), or null. Each process cancels its
+     * open calls here when it ends ([HostTools.cancelAll]): by [stop], by [close], or by itself.
+     */
+    val hostTools: HostTools? = null,
 ) {
     /**
      * How many turns had ended in the chat this handle was made with: who follows its turns counts from here, so that a turn that

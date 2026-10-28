@@ -151,6 +151,10 @@ class SessionManager internal constructor(
     private val respondToShell: () -> Boolean = { true },
     /** Runs the shell escapes ([runShell]). */
     private val shell: ShellRunner = ShellRunner(environment = System::getenv),
+    /** What serves Tandem's own tools to every session's process (the project's `TandemEdits`); null serves none. */
+    private val hostTools: HostTools? = null,
+    /** The plugin's version, as Tandem's server names itself to the CLI. */
+    private val hostVersion: String = "dev",
 ) : McpControls, ContextControls {
     /** Reads histories with [TranscriptReader]. */
     constructor(
@@ -226,6 +230,8 @@ class SessionManager internal constructor(
         sessions = { mutableSessions.value },
         addTakenOver = ::addTakenOver,
         beforeAddTakenOver = { beforeTakenOverAdded(it) },
+        hostTools = hostTools,
+        hostVersion = hostVersion,
     )
 
     /** Runs between a resumed-as-new session's row taking its process over and its being added: tests let a turn end there. */
@@ -721,10 +727,19 @@ class SessionManager internal constructor(
     }
 
     override suspend fun toggleMcp(id: SessionId, server: String, enabled: Boolean): McpResult<Unit> =
-        mcpAction(id) { it.mcpToggle(server, enabled) }
+        if (server == TANDEM_MCP_SERVER) OWN_SERVER_REFUSED else mcpAction(id) { it.mcpToggle(server, enabled) }
 
     override suspend fun reconnectMcp(id: SessionId, server: String): McpResult<Unit> =
-        mcpAction(id) { it.mcpReconnect(server) }
+        if (server == TANDEM_MCP_SERVER) OWN_SERVER_REFUSED else mcpAction(id) { it.mcpReconnect(server) }
+
+    /**
+     * Shows a Tandem edit's progress in session [id]'s chat: [SessionEvent.EditPhase] or [SessionEvent.AcceptAll], from the IDE's
+     * `TandemEdits`; through the running process's state, or straight in the chat without one. Any other event is ignored.
+     */
+    fun editEvent(id: SessionId, event: SessionEvent) {
+        if (event !is SessionEvent.EditPhase && event !is SessionEvent.AcceptAll) return
+        handle(id)?.pick(live = { it.event(event) }, stopped = event)
+    }
 
     override suspend fun startMcpAuth(id: SessionId, server: String, open: suspend (url: String) -> Unit): McpResult<McpAuthStart> {
         val handle = handle(id) ?: return McpResult.Failed(McpError.NotRunning)
@@ -1015,7 +1030,7 @@ class SessionManager internal constructor(
         pendingTitle: String? = null,
     ): Pair<SessionHandle, Boolean> {
         handle(id)?.let { return it to false }
-        val handle = SessionHandle(id, scope, state, listing, clock(), forkOf, forkAt, pendingTitle)
+        val handle = SessionHandle(id, scope, state, listing, clock(), forkOf, forkAt, pendingTitle, hostTools)
         addLocked(handle)
         return handle to true
     }

@@ -2203,6 +2203,59 @@ class ReducerTest {
         assertTrue(agents.assistants().any { "<uuid-50>" in it.uuids && it.parentToolUseId != null }, "agent-sync:42 is a subagent's line")
         assertNull(agents.forkedAt("<uuid-50>"))
     }
+
+    // spec: EditPhase events set edits and clear clears them
+    @Test
+    fun `EditPhase events set edits and clear clears them`() {
+        val queued = EditReview("hello.txt", EditPhase.QUEUED)
+        var state = reduce(ChatState(), SessionEvent.EditPhase("t1", queued))
+        assertEquals(mapOf("t1" to queued), state.edits)
+        val done = EditReview("hello.txt", EditPhase.DONE, EditOutcome.ACCEPTED_CHANGED)
+        state = reduce(reduce(state, SessionEvent.EditPhase("t1", EditReview("hello.txt", EditPhase.OPEN))), SessionEvent.EditPhase("t1", done))
+        assertEquals(mapOf("t1" to done), state.edits, "each phase replaces the call's review")
+        assertEquals(state.edits, state.settled().edits, "a stopped process keeps the reviews with the entries")
+
+        // Tandem keeps the entries over a /clear (no conversation_reset is decoded), so the reviews go only where the entries go:
+        // a fork cut drops the reviews of the calls it leaves out.
+        val origin = forkAtOrigin().copy(edits = mapOf("<id-28>" to done))
+        assertEquals(emptyMap(), assertNotNull(origin.forkedAt("<uuid-14>")).edits)
+    }
+
+    // spec: AcceptAll sets and the result resets acceptAll
+    @Test
+    fun `AcceptAll sets and the result resets acceptAll`() {
+        val on = reduce(ChatState(busy = true), SessionEvent.AcceptAll(true))
+        assertTrue(on.acceptAll)
+        assertFalse(reduce(on, SessionEvent.AcceptAll(false)).acceptAll)
+        val result = Fixtures.lines("ide-edit")[71 - 1]
+        assertFalse(reduce(on, cli(result)).acceptAll, "the turn's result ends it (ide-edit:71)")
+        assertFalse(reduce(on, SessionEvent.Ended("The claude CLI exited.", isError = false)).acceptAll, "so does the process's end")
+        assertFalse(on.settled().acceptAll)
+    }
+
+    // spec: the Tandem can_use_tool is dropped
+    @Test
+    fun `the Tandem can_use_tool is dropped`() {
+        val request = Fixtures.lines("ide-edit")[37 - 1]
+        val state = reduce(ChatState(busy = true), cli(request))
+        assertEquals(emptyList(), state.pendingPermissions)
+        // Another MCP tool's request still raises its card.
+        val foreign = request.replace("mcp__tandem__edit_file", "mcp__echo__echo")
+        assertEquals(listOf("mcp__echo__echo"), reduce(ChatState(busy = true), cli(foreign)).pendingPermissions.map { it.toolName })
+    }
+
+    // spec: a user-rejected result without a decision keeps its kind
+    @Test
+    fun `a user-rejected result without a decision keeps its kind`() {
+        val result = reduce(ChatState(), cli(Fixtures.lines("ide-edit-stop")[44 - 1])).entries.filterIsInstance<ChatEntry.ToolResult>().single()
+        assertEquals("user-rejected", result.nonExecutionKind)
+        assertNull(result.decision)
+        assertTrue(result.isError)
+        // An accepted call keeps its decision and has no kind (ide-edit:41).
+        val accepted = reduce(ChatState(), cli(Fixtures.lines("ide-edit")[41 - 1])).entries.filterIsInstance<ChatEntry.ToolResult>().single()
+        assertEquals("accept", accepted.decision?.decision)
+        assertNull(accepted.nonExecutionKind)
+    }
 }
 
 /** A complete main-thread `assistant` line with one text block. */
