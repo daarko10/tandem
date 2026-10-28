@@ -6,10 +6,12 @@ import com.intellij.driver.client.service
 import com.intellij.driver.model.OnDispatcher
 import com.intellij.driver.model.RemoteMouseButton
 import com.intellij.driver.sdk.ActionManager
+import com.intellij.driver.sdk.FileEditorManager
 import com.intellij.driver.sdk.closeAndDisableAllBalloonNotifications
 import com.intellij.driver.sdk.getOpenProjects
 import com.intellij.driver.sdk.invokeAction
 import com.intellij.driver.sdk.isPluginLoaded
+import com.intellij.driver.sdk.openFile
 import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.singleProject
 import com.intellij.driver.sdk.ui.components.UiComponent
@@ -1599,6 +1601,42 @@ class ToolWindowIdeTest {
         // The mention goes as typed: the CLI expands it from the disk (the file has no unsaved changes).
         val content = sent.single { it.type == "user" }["message"]!!.jsonObject["content"]!!.jsonArray.map { it.jsonObject }
         assertEquals(listOf("What does @hello.txt say?"), content.map { it["text"]!!.jsonPrimitive.content })
+    }
+
+    // spec: a selection goes with the prompt
+    @Test
+    fun `a selection goes with the prompt`() {
+        val project = newProject()
+        project.resolve("hello.txt").writeText("alpha\nline two\n")
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat("selection-chip", fixtures = listOf("ide-mention"), project = project, sentLog = log) {
+            newSession()
+            openFile("hello.txt", waitForCodeAnalysis = false)
+            // Both lines, the second's newline included (spec 3.5): the chip reads `<name>:<start>-<end>`.
+            withContext(OnDispatcher.EDT) {
+                service<FileEditorManager>(singleProject()).getSelectedTextEditor()!!.getSelectionModel().setSelection(0, 15)
+            }
+            waitFor("the selection chip", 1.minutes) { described("hello.txt:1-2").present() }
+            takeScreenshot("selection-chip")
+            typePrompt("Explain this")
+            waitFor("the first prompt reached the CLI", 1.minutes) { log.readLines().count { it.contains("\"type\":\"user\"") } == 1 }
+            waitForTextContaining("Line 2 of")
+            waitFor("Send is offered again", 1.minutes) { iconButton("Send").present() }
+            waitFor("the chip stays while the selection does", 30.seconds) { described("Remove the selection from the message").present() }
+            // The trial's feedback dialog can open a few minutes into the run, over the composer.
+            dismissTrialFeedback()
+            // `×` drops the chip for the next message: nothing of the selection goes with it. (The sent bubble keeps its own chip.)
+            described("Remove the selection from the message").click(Point(8, 8))
+            waitFor("the chip removed", 30.seconds) { !described("Remove the selection from the message").present() }
+            typePrompt("And now?")
+            waitFor("the second prompt reached the CLI", 1.minutes) { log.readLines().count { it.contains("\"type\":\"user\"") } == 2 }
+        }
+        val (first, second) = sent.filter { it.type == "user" }.map { frame ->
+            frame["message"]!!.jsonObject["content"]!!.jsonArray.map { it.jsonObject["text"]!!.jsonPrimitive.content }
+        }
+        assertTrue(first.first().startsWith("The user's selection in hello.txt, lines 1-2:\n```\nalpha\nline two\n"), first.first())
+        assertEquals("Explain this", first.last())
+        assertEquals(listOf("And now?"), second)
     }
 
     @Test

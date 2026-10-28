@@ -52,6 +52,7 @@ import dev.daarkolabs.tandem.ui.chatColumn
 import dev.daarkolabs.tandem.ui.chatPalette
 import dev.daarkolabs.tandem.ui.monoTextStyle
 import dev.daarkolabs.tandem.ui.smallTextStyle
+import dev.daarkolabs.tandem.ui.WithTooltip
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.ImmutableMap
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -187,9 +188,15 @@ private fun bubbleText(text: String, known: Set<String>): AnnotatedString {
     }
 }
 
+/** What a context chip shows (spec 3.5): its [label] (`<name> (unsaved)`, `<name>:<start>-<end>`) and its file's path as [tooltip]. */
+internal data class ChipLook(val label: String, val tooltip: String)
+
+/** The look of [chip], in the bubble as in the composer. */
+internal fun chipLook(chip: ContextChip): ChipLook = ChipLook(chip.label, chip.path)
+
 /**
  * The context blocks a prompt carried (spec 3.5), above its bubble and right-aligned: one small bordered chip each, reading its label
- * (`<name> (unsaved)`, `<name>:<start>-<end>`), described as that label.
+ * (`<name> (unsaved)`, `<name>:<start>-<end>`), described as that label, with the file's path as its tooltip ([chipLook]).
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -198,12 +205,15 @@ internal fun ContextChips(chips: ImmutableList<ContextChip>) {
     val border = JewelTheme.globalColors.borders.normal
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         chips.forEach { chip ->
-            Box(
-                Modifier.border(1.dp, border, shape)
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                    .semantics { contentDescription = chip.label },
-            ) {
-                Text(chip.label, style = smallTextStyle(), color = chatPalette().secondary, maxLines = 1)
+            val look = chipLook(chip)
+            WithTooltip(look.tooltip) {
+                Box(
+                    Modifier.border(1.dp, border, shape)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .semantics { contentDescription = look.label },
+                ) {
+                    Text(look.label, style = smallTextStyle(), color = chatPalette().secondary, maxLines = 1)
+                }
             }
         }
     }

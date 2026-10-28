@@ -12,6 +12,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.graphics.ImageBitmap
 import dev.daarkolabs.tandem.chat.FollowState
 import dev.daarkolabs.tandem.chat.MentionQuery
+import dev.daarkolabs.tandem.ide.context.Selection
 
 /**
  * What one session's chat remembers on screen (spec 5.6): which rows are open, whether the list follows its bottom, the prompt
@@ -111,6 +112,27 @@ internal class ChatUiState {
     fun draftChanged(draft: String) {
         if (draft != paletteDismissedFor.value) paletteDismissedFor.value = null
         if (draft != mention.dismissedFor.value) mention.dismissedFor.value = null
+    }
+
+    /** The editor's selection as the project last reported it (spec 3.5), whether or not its chip shows. */
+    val selection: MutableState<Selection?> = mutableStateOf(null)
+
+    /** Whether `×` dropped the chip of [selection]; the next selection brings it back ([selectionChanged]). */
+    val selectionRemoved: MutableState<Boolean> = mutableStateOf(false)
+
+    /** The selection whose chip the composer shows, and which a send carries: none once `×` dropped it. */
+    val chipSelection: Selection?
+        get() = selection.value.takeUnless { selectionRemoved.value }
+
+    /** The project's selection is now [next]: a new selection (not the one `×` dropped) shows its chip again. */
+    fun selectionChanged(next: Selection?) {
+        if (next != null && next != selection.value) selectionRemoved.value = false
+        selection.value = next
+    }
+
+    /** `×` on the chip: the selection stays out of the messages until the next selection. */
+    fun removeSelection() {
+        selectionRemoved.value = true
     }
 
     /** The `@` palette's state (spec 3.5): the last lookup's rows, the selection and Esc's dismissal. */

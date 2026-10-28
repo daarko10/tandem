@@ -12,6 +12,23 @@ object ContextBlocks {
 
     private val UNSAVED_FIRST_LINE = Regex("""^(.+) as open in the IDE, with unsaved changes \((\d+) lines\):$""")
 
+    private val SELECTION_FIRST_LINE = Regex("""^The user's selection in (.+), lines (\d+)-(\d+):$""")
+
+    /** The first line of the selection's block: `The user's selection in <path>, lines <start>-<end>:` (an ASCII hyphen). */
+    fun selectionFirstLine(path: String, startLine: Int, endLine: Int): String =
+        "The user's selection in $path, lines $startLine-$endLine:"
+
+    /**
+     * The block for the editor's selection [text] in [path], lines [startLine] to [endLine] (1-based): its first line names them, and
+     * its body is the selected text, cut at [MAX_BODY_BYTES] with the line `… truncated: <T> lines in all` after the cut (spec 3.5).
+     */
+    fun selectionBlock(path: String, startLine: Int, endLine: Int, text: String): ContextBlock =
+        ContextBlock(selectionFirstLine(path, startLine, endLine), bounded(text, lineCount(text)))
+
+    /** The chip of a selection's block: `<name>:<start>-<end>`, the form of the composer's chip. */
+    fun selectionChip(path: String, startLine: Int, endLine: Int): ContextChip =
+        ContextChip(ContextChipKind.SELECTION, "${fileName(path)}:$startLine-$endLine", path)
+
     /** The first line of an unsaved file's block: `<path> as open in the IDE, with unsaved changes (N lines):`. */
     fun unsavedFirstLine(path: String, lines: Int): String = "$path as open in the IDE, with unsaved changes ($lines lines):"
 
@@ -31,6 +48,13 @@ object ContextBlocks {
     fun chipOf(blockText: String): ContextChip? {
         val first = blockText.lineSequence().first()
         UNSAVED_FIRST_LINE.matchEntire(first)?.let { return unsavedChip(it.groupValues[1]) }
+        SELECTION_FIRST_LINE.matchEntire(first)?.let {
+            val (path, start, end) = it.destructured
+            // Line numbers past Int are no block Tandem wrote: the text stays text.
+            val startLine = start.toIntOrNull() ?: return null
+            val endLine = end.toIntOrNull() ?: return null
+            return selectionChip(path, startLine, endLine)
+        }
         return null
     }
 

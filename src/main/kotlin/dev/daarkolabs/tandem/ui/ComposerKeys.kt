@@ -180,7 +180,8 @@ internal fun sendDraft(ui: ChatUiState, sender: ComposerSender, later: Boolean =
     ui.draft.clearText()
     ui.attachments.clear()
     ui.composerNotice.value = null
-    sender.submit(CapturedPrompt(text, images, later))
+    // The selection goes only while its chip shows (spec 3.5): read before the draft is cleared, with the prompt it belongs to.
+    sender.submit(CapturedPrompt(text, images, later, ui.chipSelection))
     ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
     return true
 }

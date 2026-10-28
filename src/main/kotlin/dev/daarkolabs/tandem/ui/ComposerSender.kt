@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.ui
 
 import dev.daarkolabs.tandem.chat.mentionsIn
+import dev.daarkolabs.tandem.ide.context.Selection
 import dev.daarkolabs.tandem.protocol.ContextBlock
 import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.session.ContextBlocks
@@ -24,9 +25,14 @@ internal class CapturedImage(val mediaType: String, val bytes: ByteArray)
 
 /**
  * A prompt as the composer captured it on Enter: its text and its attachments, in order; [later] to send it with
- * `"priority":"later"` (desktop-parity spec 12.1).
+ * `"priority":"later"` (desktop-parity spec 12.1); [selection], the editor's selection when its chip was in the composer (spec 3.5).
  */
-internal class CapturedPrompt(val text: String, val images: List<CapturedImage>, val later: Boolean = false)
+internal class CapturedPrompt(
+    val text: String,
+    val images: List<CapturedImage>,
+    val later: Boolean = false,
+    val selection: Selection? = null,
+)
 
 /**
  * A prompt ready for `manager.send`: its [text], its encoded [images], its `later` flag, and the [context] blocks sent before its
@@ -86,7 +92,9 @@ internal class ComposerSender(
                     }
                     inFlight = null
                     try {
-                        val (text, context) = swap
+                        val (text, mentioned) = swap
+                        // The selection's block goes first, then the unsaved buffers', then the prompt (spec 3.5). No chip, no block.
+                        val context = listOfNotNull(prompt.selection?.let(::selectionBlock)) + mentioned
                         val chips = context.mapNotNull { ContextBlocks.chipOf(it.firstLine) }
                         send(OutgoingPrompt(text, blocks, prompt.later, context, chips, typed = prompt.text))
                     } finally {
@@ -132,6 +140,10 @@ internal class ComposerSender(
         out.append(text, at, text.length)
         return out.toString() to dirty.map { (path, buffer) -> ContextBlocks.unsavedBlock(path, buffer!!) }
     }
+
+    /** The block of [selection]: `The user's selection in <path>, lines <start>-<end>:` and the text, bounded at 64 KB. */
+    private fun selectionBlock(selection: Selection): ContextBlock =
+        ContextBlocks.selectionBlock(selection.path, selection.startLine, selection.endLine, selection.text)
 
     /**
      * [unsaved] for [file], or null (a clean file: the mention goes as typed) when it fails: a prompt is never lost to the lookup, and

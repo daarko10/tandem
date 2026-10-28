@@ -1,6 +1,7 @@
 package dev.daarkolabs.tandem.ui
 
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import dev.daarkolabs.tandem.ide.context.Selection
 import dev.daarkolabs.tandem.protocol.ContextBlock
 import dev.daarkolabs.tandem.protocol.HostMessages
 import dev.daarkolabs.tandem.protocol.ImageBlock
@@ -230,6 +231,73 @@ class ComposerSenderTest {
             assertFalse(sendDraft(ui, sender), "a blank draft sends nothing, whatever context there is")
             assertFalse(sender.sending.value)
             assertEquals(emptyList(), sent)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    // spec: the selection block goes first with its first line
+    @Test
+    fun `the selection block goes first with its first line`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val sent: MutableList<OutgoingPrompt> = Collections.synchronizedList(ArrayList())
+            val sender = ComposerSender(scope, { sent += it }, {}, unsaved = { if (it == "src/B.kt") "dirty\n" else null })
+            val selection = Selection("src/A.kt", "A.kt", 2, 3, "two\nthree")
+            sender.submit(CapturedPrompt("why @src/B.kt?", emptyList(), selection = selection))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            val prompt = sent.single()
+            // The selection's block first, then the unsaved buffer's, then the prompt; a chip for each, in that order.
+            assertEquals(
+                listOf(
+                    ContextBlock("The user's selection in src/A.kt, lines 2-3:", "two\nthree"),
+                    ContextBlock("src/B.kt as open in the IDE, with unsaved changes (1 lines):", "dirty\n"),
+                ),
+                prompt.context,
+            )
+            assertEquals(
+                listOf(ContextChip(ContextChipKind.SELECTION, "A.kt:2-3", "src/A.kt"), ContextChip(ContextChipKind.UNSAVED_FILE, "B.kt (unsaved)", "src/B.kt")),
+                prompt.chips,
+            )
+            assertEquals(selection.label, prompt.chips.first().label, "the bubble's chip reads as the composer's did")
+            val content = HostMessages.userMessage(prompt.text, prompt.images, "u", context = prompt.context)["message"]!!
+                .jsonObject["content"]!!.jsonArray.map { it.jsonObject["text"]!!.jsonPrimitive.content }
+            assertEquals("The user's selection in src/A.kt, lines 2-3:\n```\ntwo\nthree\n```", content.first())
+            assertEquals("why src/B.kt?", content.last())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    // spec: no block goes out without the chip
+    @Test
+    fun `no block goes out without the chip`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val sent: MutableList<OutgoingPrompt> = Collections.synchronizedList(ArrayList())
+            val sender = ComposerSender(scope, { sent += it }, {})
+            val ui = ChatUiState()
+            ui.selectionChanged(Selection("src/A.kt", "A.kt", 1, 1, "secret"))
+            ui.removeSelection()
+            ui.draft.setTextAndPlaceCursorAtEnd("hello")
+            assertTrue(sendDraft(ui, sender))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            assertEquals(OutgoingPrompt("hello", emptyList()), sent.single(), "no selection block, no chip")
+            // With no selection at all, none either; with the chip, one.
+            ui.selectionChanged(null)
+            ui.draft.setTextAndPlaceCursorAtEnd("again")
+            assertTrue(sendDraft(ui, sender))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            assertEquals(emptyList(), sent.last().context)
+            ui.selectionChanged(Selection("src/A.kt", "A.kt", 4, 4, "shown"))
+            ui.draft.setTextAndPlaceCursorAtEnd("with it")
+            assertTrue(sendDraft(ui, sender))
+            withTimeout(TIMEOUT) { sender.sending.first { !it } }
+            assertEquals(listOf("The user's selection in src/A.kt, lines 4-4:"), sent.last().context.map { it.firstLine })
+            // A chip with a blank draft is a context-only message: refused as an empty draft (spec 3.5).
+            ui.draft.setTextAndPlaceCursorAtEnd(" ")
+            assertFalse(sendDraft(ui, sender))
+            assertEquals(3, sent.size)
         } finally {
             scope.cancel()
         }

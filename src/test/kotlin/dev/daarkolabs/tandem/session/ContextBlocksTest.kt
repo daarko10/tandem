@@ -45,4 +45,22 @@ class ContextBlocksTest {
         assertEquals("A.kt", ContextBlocks.fileName("src\\A.kt"))
         assertEquals("dir", ContextBlocks.fileName("a/dir/"))
     }
+
+    @Test
+    fun `a selection's block names its lines and reads back as its chip`() {
+        val block = ContextBlocks.selectionBlock("src/A.kt", 3, 5, "a\nb\nc")
+        assertEquals("The user's selection in src/A.kt, lines 3-5:", block.firstLine)
+        assertEquals("a\nb\nc", block.body)
+        val chip = ContextChip(ContextChipKind.SELECTION, "A.kt:3-5", "src/A.kt")
+        assertEquals(chip, ContextBlocks.selectionChip("src/A.kt", 3, 5))
+        assertEquals(chip, ContextBlocks.chipOf("The user's selection in src/A.kt, lines 3-5:\n```\na\n```"))
+        // A path holding ", lines" keeps it; numbers past Int, or no numbers, are text.
+        assertEquals("x, lines 1-2/B.kt", ContextBlocks.chipOf("The user's selection in x, lines 1-2/B.kt, lines 7-7:")!!.path)
+        assertNull(ContextBlocks.chipOf("The user's selection in a.kt, lines 99999999999-1:"))
+        assertNull(ContextBlocks.chipOf("The user's selection in a.kt, lines 1-99999999999:"))
+        assertNull(ContextBlocks.chipOf("The user's selection in a.kt, lines a-b:"))
+        // Bounded as an unsaved buffer is.
+        val big = "x".repeat(ContextBlocks.MAX_BODY_BYTES + 10)
+        assertTrue(ContextBlocks.selectionBlock("a.kt", 1, 1, big).body.endsWith("\n… truncated: 1 lines in all"))
+    }
 }

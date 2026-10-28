@@ -157,7 +157,9 @@ import dev.daarkolabs.tandem.ide.FolderCheck
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
 import dev.daarkolabs.tandem.ide.checkFolder
+import dev.daarkolabs.tandem.ide.context.EditorSelection
 import dev.daarkolabs.tandem.ide.context.ProjectFiles
+import dev.daarkolabs.tandem.ide.context.Selection
 import dev.daarkolabs.tandem.ide.laterOnEdt
 import dev.daarkolabs.tandem.session.AddedFolder
 import dev.daarkolabs.tandem.session.FolderState
@@ -343,6 +345,9 @@ internal fun PromptBar(
     val palette = remember(ui, presenter) { derivedStateOf { paletteOf(inputFocused.value) } }
     // Esc keeps the palette closed until the draft changes.
     LaunchedEffect(ui) { snapshotFlow { committedText(ui) }.collect(ui::draftChanged) }
+    // The editor's selection (spec 3.5): the project's flow, read off the EDT by the service, mirrored into this session's composer,
+    // which shows it as a chip unless `×` dropped it.
+    LaunchedEffect(ui, project) { EditorSelection.getInstance(project).current.collect(ui::selectionChanged) }
     // The `@` palette (spec 3.5): the mention under the caret, over the files the last lookup ranked, while the text area has the
     // focus. The lookup runs 100 ms after the mention's text last changed, off the EDT (ProjectFiles reads in a readAction).
     val projectFiles = remember(project) { ProjectFiles.getInstance(project) }
@@ -736,6 +741,7 @@ private fun PromptBox(
             strips = {
                 Column(Modifier.fillMaxWidth()) {
                     FolderStrip(folders, onRemoveFolder)
+                    ui.chipSelection?.let { SelectionChip(it, ui::removeSelection) }
                     if (ui.attachments.isNotEmpty()) AttachmentStrip(ui.attachments)
                 }
             },
@@ -1504,6 +1510,40 @@ private fun folderStateText(state: FolderState): String = when (state) {
     FolderState.PENDING -> "Applies with the next prompt."
     FolderState.ACTIVE -> "Added to this session."
     FolderState.MISSING -> "The CLI did not add this folder."
+}
+
+/**
+ * The editor's selection that goes with the next message (spec 3.5): a small bordered chip reading `<name>:<start>-<end>`, described
+ * as that label with the file's path as its tooltip, and a 16 dp `×` (`Remove the selection from the message`) that drops it
+ * ([onRemove]) until the next selection.
+ */
+@Composable
+private fun SelectionChip(selection: Selection, onRemove: () -> Unit) {
+    val shape = RoundedCornerShape(6.dp)
+    Row(Modifier.padding(start = 8.dp, top = 8.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.testTag("selection-chip").border(1.dp, JewelTheme.globalColors.borders.normal, shape)
+                .padding(start = 6.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            WithTooltip(selection.path) {
+                Text(
+                    selection.label,
+                    Modifier.semantics { contentDescription = selection.label },
+                    style = smallTextStyle(),
+                    color = chatPalette().secondary,
+                    maxLines = 1,
+                )
+            }
+            IconButton(
+                onClick = onRemove,
+                modifier = Modifier.padding(start = 4.dp).size(16.dp).testTag("selection-chip-remove")
+                    .semantics { contentDescription = "Remove the selection from the message" },
+            ) {
+                Icon(AllIconsKeys.General.Close, contentDescription = null)
+            }
+        }
+    }
 }
 
 /**

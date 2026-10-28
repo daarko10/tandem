@@ -1004,6 +1004,26 @@ class TranscriptReaderTest {
         assertEquals("fix src/A.kt", loaded.meta.firstPrompt)
     }
 
+    // spec: a user line with a selection block reloads with the chip
+    @Test
+    fun `a user line with a selection block reloads with the chip`(@TempDir dir: Path) = runBlocking<Unit> {
+        val selection = "The user's selection in src/A.kt, lines 3-5:\n```\nx\ny\nz\n```"
+        val unsaved = "src/B.kt as open in the IDE, with unsaved changes (1 lines):\n```\nb\n```"
+        val content = listOf(selection, unsaved, "why src/B.kt?").joinToString(",", "[", "]") {
+            """{"type":"text","text":${Json.encodeToString(JsonPrimitive(it))}}"""
+        }
+        val f = dir.resolve("s.jsonl")
+        f.writeLines("""{"type":"user","uuid":"u1","timestamp":"2026-10-28T12:00:00.000Z","message":{"role":"user","content":$content}}""")
+        val loaded = TranscriptReader.read(f)
+        val user = loaded.state.entries.filterIsInstance<ChatEntry.User>().single()
+        assertEquals("why src/B.kt?", user.text)
+        assertEquals(
+            listOf(ContextChip(ContextChipKind.SELECTION, "A.kt:3-5", "src/A.kt"), ContextChip(ContextChipKind.UNSAVED_FILE, "B.kt (unsaved)", "src/B.kt")),
+            user.context,
+        )
+        assertEquals("why src/B.kt?", loaded.meta.firstPrompt)
+    }
+
     private fun read(name: String): ChatState = runBlocking { TranscriptReader.read(Fixtures.transcript(name)) }.state
 
     private fun result(state: ChatState, id: String): ChatEntry.ToolResult =

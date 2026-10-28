@@ -2,10 +2,14 @@ package dev.daarkolabs.tandem.ui
 
 import dev.daarkolabs.tandem.chat.ImageRef
 import dev.daarkolabs.tandem.chat.UserRow
+import dev.daarkolabs.tandem.session.ContextBlocks
+import dev.daarkolabs.tandem.session.ContextChipKind
 import dev.daarkolabs.tandem.ui.rows.BubbleClamp
 import dev.daarkolabs.tandem.ui.rows.BubbleSegment
 import dev.daarkolabs.tandem.ui.rows.bubbleClamp
 import dev.daarkolabs.tandem.ui.rows.bubbleSegments
+import dev.daarkolabs.tandem.ui.rows.ChipLook
+import dev.daarkolabs.tandem.ui.rows.chipLook
 import dev.daarkolabs.tandem.ui.rows.showsTextBox
 import kotlinx.collections.immutable.persistentListOf
 import org.junit.jupiter.api.Test
@@ -52,5 +56,16 @@ class UserBubbleTest {
         assertEquals(listOf(BubbleSegment("mail a@hello.txt", false)), bubbleSegments("mail a@hello.txt", known))
         assertEquals(listOf(BubbleSegment("@hello.txt", true)), bubbleSegments("@hello.txt", known))
         assertEquals(listOf(BubbleSegment("", false)), bubbleSegments("", known))
+    }
+
+    // spec: a selection chip is drawn
+    @Test
+    fun `a selection chip is drawn`() {
+        // The chip a sent or reloaded selection block gives back is drawn with its label and the file's path as its tooltip.
+        val chip = ContextBlocks.chipOf("The user's selection in src/A.kt, lines 3-5:\n```\nx\n```")!!
+        val row = UserRow("u1", "why?", false, chips = persistentListOf(chip))
+        assertEquals(listOf(ChipLook("A.kt:3-5", "src/A.kt")), row.chips.map(::chipLook))
+        assertEquals(ContextChipKind.SELECTION, chip.kind)
+        assertTrue(showsTextBox(row))
     }
 }
