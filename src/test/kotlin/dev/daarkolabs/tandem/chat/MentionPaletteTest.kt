@@ -56,6 +56,9 @@ class MentionPaletteTest {
         // A space already after the typed text is kept, not doubled; the caret goes after it.
         assertEquals("see @src/A.kt now" to 14, insertMention("see @A now", MentionQuery(4, "A"), "src/A.kt"))
         assertNull(mentionQuery("@hello.txt ", 11), "the palette stays closed after the pick")
+        // With the caret inside a word, the rest of the word goes too.
+        assertEquals("@hello.txt " to 11, insertMention("@hello", MentionQuery(0, "he"), "hello.txt"))
+        assertEquals("a @hello.txt b" to 13, insertMention("a @hello b", MentionQuery(2, "he"), "hello.txt"))
     }
 
     // spec: Esc closes until the draft changes

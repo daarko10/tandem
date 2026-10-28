@@ -64,11 +64,12 @@ fun matchesMention(path: String, text: String): Boolean {
 }
 
 /**
- * [draft] with [query]'s `@…` replaced by `@<path> `, and the caret after that space (spec 3.5). A space already after the typed text
- * is kept, not doubled.
+ * [draft] with [query]'s `@…` replaced by `@<path> `, and the caret after that space (spec 3.5). The whole word goes, up to the next
+ * whitespace, also with the caret inside it (`@he|llo`). A space already after the word is kept, not doubled.
  */
 fun insertMention(draft: String, query: MentionQuery, path: String): Pair<String, Int> {
-    val end = query.start + 1 + query.text.length
+    var end = query.start + 1 + query.text.length
+    while (end < draft.length && !draft[end].isWhitespace()) end++
     val mention = "@$path"
     val spaced = end < draft.length && draft[end] == ' '
     val text = draft.substring(0, query.start) + mention + (if (spaced) "" else " ") + draft.substring(end)
