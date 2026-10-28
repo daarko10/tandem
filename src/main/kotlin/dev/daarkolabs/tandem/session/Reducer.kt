@@ -483,7 +483,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
                 blockedPath = request.blockedPath,
             ),
         )
-        is InboundRequest.Other -> state
+        is InboundRequest.McpMessage, is InboundRequest.Other -> state
     }
     is CliMessage.ControlCancelRequest -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != message.requestId })
     is CliMessage.ControlResponse -> {

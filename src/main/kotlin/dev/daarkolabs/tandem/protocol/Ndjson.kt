@@ -345,6 +345,11 @@ object Ndjson {
                 )
             }
         }
+        if (subtype == "mcp_message") {
+            val serverName = r.string("server_name")
+            val message = r.obj("message")
+            if (serverName != null && message != null) return InboundRequest.McpMessage(serverName, message)
+        }
         return InboundRequest.Other(subtype, r)
     }
 

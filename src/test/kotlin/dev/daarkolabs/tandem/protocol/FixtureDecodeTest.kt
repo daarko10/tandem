@@ -1327,4 +1327,133 @@ class FixtureDecodeTest {
         assertEquals("assistant", reply.rawString("type"))
         assertEquals(assertIs<CliMessage.Assistant>(at("fork-at-busy", 40)).uuid, reply.rawString("uuid"))
     }
+
+    private fun mcpMessage(name: String, line: Int): InboundRequest.McpMessage =
+        assertIs<InboundRequest.McpMessage>(assertIs<CliMessage.ControlRequest>(at(name, line)).request)
+
+    private fun rpc(name: String, line: Int): JsonRpcRequest = assertNotNull(jsonRpcRequest(mcpMessage(name, line).message))
+
+    private fun toolResult(name: String, line: Int): Pair<CliMessage.User, ContentBlock.ToolResult> {
+        val user = assertIs<CliMessage.User>(at(name, line))
+        return user to user.content.filterIsInstance<ContentBlock.ToolResult>().single()
+    }
+
+    // spec: ide-edit: the handshake decodes as McpMessage
+    @Test
+    fun `ide-edit - the handshake decodes as McpMessage`() {
+        assertEquals("tandem", mcpMessage("ide-edit", 1).serverName)
+        val initialize = rpc("ide-edit", 1)
+        assertEquals("initialize", initialize.method)
+        assertEquals(JsonPrimitive(0), initialize.id)
+        assertEquals(JsonPrimitive("2025-11-25"), initialize.params!!["protocolVersion"])
+        val initialized = rpc("ide-edit", 4)
+        assertEquals("notifications/initialized", initialized.method)
+        assertNull(initialized.id)
+        val list = rpc("ide-edit", 6)
+        assertEquals("tools/list", list.method)
+        assertEquals(JsonPrimitive(1), list.id)
+    }
+
+    // spec: ide-edit: a tools/call carries the tool use id
+    @Test
+    fun `ide-edit - a tools call carries the tool use id`() {
+        val call = rpc("ide-edit", 38)
+        assertEquals("tools/call", call.method)
+        assertEquals(JsonPrimitive(2), call.id)
+        val params = assertNotNull(call.params)
+        assertEquals(JsonPrimitive("edit_file"), params["name"])
+        val toolUse = assertIs<CliMessage.Assistant>(at("ide-edit", 35)).content.filterIsInstance<ContentBlock.ToolUse>().single()
+        assertEquals("mcp__tandem__edit_file", toolUse.name)
+        assertEquals(JsonPrimitive(toolUse.id), params["_meta"]!!.jsonObject["claudecode/toolUseId"])
+        val arguments = params["arguments"]!!.jsonObject
+        assertEquals(setOf("file_path", "old_string", "new_string"), arguments.keys)
+        assertEquals(JsonPrimitive("<path>/hello.txt"), arguments["file_path"])
+    }
+
+    // spec: ide-edit: the permission request names the sdk server
+    @Test
+    fun `ide-edit - the permission request names the sdk server`() {
+        val ask = request("ide-edit", 37)
+        assertEquals("mcp__tandem__edit_file", ask.toolName)
+        assertEquals(McpServerRef("tandem", "sdk"), ask.mcpServer)
+        assertEquals("sdk", ask.mcpServer!!.source)
+        assertTrue(ask.serverPolicyAskOnly)
+    }
+
+    // spec: ide-edit: the result lines decode
+    @Test
+    fun `ide-edit - the result lines decode`() {
+        val (_, applied) = toolResult("ide-edit", 41)
+        assertIs<JsonArray>(applied.content)
+        assertFalse(applied.isError)
+
+        val (user, rejected) = toolResult("ide-edit", 105)
+        assertTrue(rejected.isError)
+        assertEquals("The user rejected this edit in the IDE; nothing was changed.\nThe user says: not now", rejected.content!!.jsonPrimitive.content)
+        assertEquals(JsonPrimitive("Error: The user rejected this edit in the IDE; nothing was changed.\nThe user says: not now"), user.toolUseResult)
+        assertEquals("accept", user.toolResultMeta[0].decision)
+        assertEquals("user_temporary", user.toolResultMeta[0].source)
+    }
+
+    // spec: ide-edit: init lists both tools and both servers
+    @Test
+    fun `ide-edit - init lists both tools and both servers`() {
+        val init = init("ide-edit", 8)
+        assertTrue("mcp__tandem__edit_file" in init.tools, init.tools.toString())
+        assertTrue("mcp__tandem__write_file" in init.tools, init.tools.toString())
+        assertEquals(setOf("tandem", "echo"), init.mcpServers.map { it.name }.toSet())
+        assertEquals("sdk", init.mcpServers.single { it.name == "tandem" }.source)
+    }
+
+    // spec: ide-edit-stop: cancelled, the synthetic result and aborted_tools
+    @Test
+    fun `ide-edit-stop - cancelled, the synthetic result and aborted_tools`() {
+        val cancelled = rpc("ide-edit-stop", 42)
+        assertEquals("notifications/cancelled", cancelled.method)
+        assertNull(cancelled.id)
+        assertEquals(JsonPrimitive(2), cancelled.params!!["requestId"])
+        assertEquals(rpc("ide-edit-stop", 39).id, cancelled.params!!["requestId"], "the cancel names the held call")
+
+        val (user, synthetic) = toolResult("ide-edit-stop", 44)
+        assertTrue(synthetic.isError)
+        assertEquals("user-rejected", user.toolResultMeta[0].nonExecutionKind)
+        assertNull(user.toolResultMeta[0].decision)
+
+        val result = assertIs<CliMessage.Result>(at("ide-edit-stop", 46))
+        assertEquals("error_during_execution", result.subtype)
+        assertTrue(result.isError)
+        assertEquals("aborted_tools", result.terminalReason)
+    }
+
+    // spec: ide-mention: the prompt is expanded without a tool
+    @Test
+    fun `ide-mention - the prompt is expanded without a tool`() {
+        val lines = Fixtures.lines("ide-mention")
+        assertTrue(lines.none { "@hello.txt" in it }, "the prompts are host frames, not stdout")
+        for (line in listOf(13, 31)) {
+            val text = assertIs<CliMessage.Assistant>(at("ide-mention", line)).content.filterIsInstance<ContentBlock.Text>()
+            assertTrue(text.any { it.text.isNotEmpty() }, "ide-mention:$line")
+        }
+        assertTrue(
+            Fixtures.decode("ide-mention").filterIsInstance<CliMessage.Assistant>().none { a -> a.content.any { it is ContentBlock.ToolUse } },
+            "no tool_use in ide-mention",
+        )
+        for (line in listOf(17, 35)) {
+            val result = assertIs<CliMessage.Result>(at("ide-mention", line))
+            assertEquals("success", result.subtype)
+            assertFalse(result.isError)
+        }
+    }
+
+    // spec: McpTest: an sdk server entry with transport decodes
+    @Test
+    fun `an sdk server entry with transport decodes`() {
+        val tandem = servers("ide-edit", 73).single { it.name == "tandem" }
+        assertEquals("sdk", tandem.source)
+        assertEquals(McpStatus.CONNECTED, tandem.status)
+        assertEquals("connected", tandem.statusText)
+        assertEquals(listOf(McpTool("edit_file"), McpTool("write_file")), tandem.tools)
+        assertNull(tandem.config)
+        assertEquals("stdio", servers("ide-edit", 73).single { it.name == "echo" }.config!!.type)
+    }
 }

@@ -851,7 +851,8 @@ class ClaudeSession(
             val message = Ndjson.decode(line)
             when (message) {
                 is CliMessage.Unknown -> LOG.debug { "unhandled line type=${message.type} subtype=${message.subtype} length=${line.length}" }
-                is CliMessage.ControlRequest -> if (message.request is InboundRequest.Other) {
+                // An `mcp_message` is answered as unsupported, so the CLI never waits on it, until the host serves its tools.
+                is CliMessage.ControlRequest -> if (message.request !is InboundRequest.CanUseTool) {
                     LOG.info("unsupported control request ${message.request.subtype}")
                     send(HostMessages.error(message.requestId, "Unsupported request: ${message.request.subtype}"))
                     // An MCP server's question (spec 2): answered as unsupported, as before, and no longer silently.
