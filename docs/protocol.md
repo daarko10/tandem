@@ -79,7 +79,7 @@ A row that cites a fixture was recorded (versions in Sources); the others come f
 | Batched and merged sends | The CLI batches the user frames queued before it starts processing (`bash-mode.ndjson:3-6`: both queued, then both started) and merges quiet ones (`shouldQuery:false`) into one transcript line with `mergedSendUuids` (`transcripts/bash-mode.jsonl:5`), answered by one zero-turn `result` naming both (`bash-mode.ndjson:8`, 2.1.306). A `result` can end several sends: read `user_message_uuids` (section 3, 7). |
 | `mcp_status` before the first prompt | The stdio servers are still `pending` (`mcp-status.ndjson:2`, 2.1.306); the first `init` already has settled states (`:6`). Ask again later (4.4). |
 | `mcp_set_servers` | Replaces only the servers it added itself, though every server of `--mcp-config` reports `source:"dynamic"` too: `{}` removes `echo2` alone (`mcp-status.ndjson:44`) and `echo`, `broken`, `authy` stay (`:45`, 2.1.306). The source does not tell the two apart (4.4). |
-| SDK MCP server | A host's own tools reach the CLI as `initialize.sdkMcpServers` plus `mcp_message` control requests, not as a `--mcp-config` entry (4.5). The CLI connects the server lazily: an `mcp_status` before the first prompt lists no row for it (`ide-edit:3`), and the server's `initialize` request arrives before the CLI answers the host's own `initialize` (`ide-edit:1`, then `:2`). A call the user has not answered when `interrupt` arrives is withdrawn with `notifications/cancelled`; an answer to it is ignored (`ide-edit-stop:42`). Every `mcp_message` needs exactly one answer or the CLI waits. |
+| SDK MCP server | A host's own tools reach the CLI as `initialize.sdkMcpServers` plus `mcp_message` control requests, not as a `--mcp-config` entry (4.5). The CLI connects the server lazily: an `mcp_status` before the first prompt lists no row for it (`ide-edit:3`), and the server's `initialize` request arrives before the CLI answers the host's own `initialize` (`ide-edit:1`, then `:2`). A call the user has not answered when `interrupt` arrives is withdrawn with `notifications/cancelled`; an answer to it is ignored (`ide-edit-stop:42`). Every `mcp_message` needs exactly one answer or the CLI waits, except a `tools/call` the CLI withdrew with `notifications/cancelled`, which gets none. |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
 | Ordering | complete `assistant` precedes `content_block_stop` (`plain-reply.ndjson:10,11`; section 6.4). |
 | stdin close | Closing stdin = end of input. The SDK only calls `endInput()` after the last result when no bidirectional needs (permissions, hooks, MCP) remain. **Keep stdin open for the whole session**; close it to shut down gracefully, then wait for exit. |
@@ -332,14 +332,15 @@ Exact line the SDK (0.3.300) writes for a string prompt:
 | `priority` | `"now" \| "next" \| "later"` optional queueing hint |
 | `shouldQuery` | `false` appends without starting a turn |
 | `client_composed` | `true` disables `@path` expansion and slash-command dispatch |
+| `timestamp` | ISO string, optional |
 
 **`@path` in a prompt.** A plain `text` block that holds `@hello.txt` (a path relative to the working directory) is expanded by
 the CLI itself, from the disk: the model answered a question about the file's line with no tool call (`ide-mention:13`, 2.1.312,
-after `What is on @hello.txt#L2?`: the reply names line 2, but what `#L2` sent, one line or the whole file, is not recorded). Nothing of the expansion shows on stdout; the CLI's own transcript has an `attachment` line right after the
-user line, of `type:"file"` (`transcripts/ide-mention.jsonl:6`, `:29`; the redactor keeps only that `type`). The expansion
-reads the **disk**, so an editor buffer with unsaved changes is not what the model sees. Not recorded: a path with spaces, a
-directory, a path that does not exist, and a message sent while a turn runs.
-| `timestamp` | ISO string, optional |
+after `What is on @hello.txt#L2?`: the reply names line 2, but what `#L2` sent, one line or the whole file, is not recorded).
+Nothing of the expansion shows on stdout; the CLI's own transcript has an `attachment` line right after the user line, of
+`type:"file"` (`transcripts/ide-mention.jsonl:6`, `:29`; the redactor keeps only that `type`). The expansion reads the **disk**,
+so an editor buffer with unsaved changes is not what the model sees. Not recorded: a path with spaces, a directory, a path that
+does not exist, and a message sent while a turn runs.
 
 Images (base64 content block, Anthropic format):
 
