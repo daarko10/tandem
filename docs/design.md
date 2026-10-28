@@ -70,7 +70,12 @@ The existing options were studied in October 2026:
  protocol/  pure Kotlin. Json tree → sealed CliMessage; unknown types → Unknown(raw)
  chat/      pure Kotlin. ChatState → chat rows (ChatRowsBuilder): tool labels, states, bodies; no Compose, no IntelliJ
         ▲
- ide/ (Milestone 2)  Tandem MCP server (edit tools via WriteCommandAction), diff preview, file/selection context
+ ide/ (Milestone 2)  TandemEdits and IdeEditTools (ide/edits/): Tandem's edit tools (edit_file, write_file) applied with
+                     WriteCommandAction on the Document and saved, behind the editable native diff (EditDiff, one at a time
+                     through EditQueue); ProjectFiles and EditorSelection (ide/context/): the `@` file palette's candidates
+                     and the editor's selection. The tools are an SDK MCP server served over the control channel
+                     (session/ routes mcp_message to protocol/ TandemTools; session/edits/ holds the matcher and the
+                     result texts).
 ```
 
 Key choices:
@@ -87,8 +92,12 @@ Key choices:
   message replaces the draft. Never render both.
 - **Permissions answered by the host** over the control channel (see `protocol.md`), shown as native, non-modal UI
   inside the chat, with "allow once / always for this session / deny".
-- **Edits through the IDE.** Built-in `Edit`, `Write`, `MultiEdit`, `NotebookEdit` are disallowed; Tandem's MCP server
-  exposes equivalent tools that apply via `WriteCommandAction` on the open `Document`.
+- **Edits through the IDE.** Built-in `Edit`, `Write`, `MultiEdit`, `NotebookEdit` are disallowed; Tandem serves
+  equivalent tools, `edit_file` and `write_file`, as an in-process SDK MCP server named `tandem` over the control channel it
+  already has (`initialize.sdkMcpServers`, then `mcp_message` requests: no port, no sidecar, no `--mcp-config`). A call opens
+  the IDE's diff with the file's own `Document` on the left and the proposal editable on the right; Accept applies the right
+  side with one `WriteCommandAction`, saves the file, and answers the CLI with the file as it now is, so a hand change in
+  the diff reaches the model.
 
 ## Milestones
 0. **Jewel spike (2–3 days).** Streaming markdown + code blocks in a Jewel tool window at 60fps on a long transcript.
@@ -150,7 +159,26 @@ Key choices:
    (`protocol.md` 1.1, 3, 4.4, 5.1, 6.1, 8, 11); unrecorded: the subscriber shapes of `get_usage`, a claude.ai connector's
    row and switch, requests made while a turn runs, a message during a subagent, and the connectors address.
    **Status: implemented on feat/desktop-parity; the manual pass in `runIde` is the owner's.**
-2. **IDE-native edits.** MCP edit tools, diff preview, undo.
+2. **IDE-native edits** (spec docs/superpowers/specs/2026-10-28-ide-edits-design.md). Claude's edits go through the IDE.
+   `edit_file` and `write_file` are served over the control channel (`protocol.md` 4.2, 4.5); each call opens the platform's
+   diff, the file's `Document` read-only on the left and the proposal editable on the right, with Accept (Ctrl+S, ⌘S, which
+   inside the diff never means Save All), Accept all, and Reject with an optional reason. Accept writes the right side with
+   one `WriteCommandAction` (one undo step, one Local History entry), saves the file to disk before the CLI is answered, and
+   the answer carries the file as it now is, hand changes included. In `acceptEdits` and `bypassPermissions`, or after Accept
+   all (for the rest of the turn), edits apply without a diff, and the checks (the project's folders, binary, size, plan mode)
+   never widen. Pending edits queue one diff at a time across the project's sessions; the chat rows say where each is, and
+   Stop withdraws a waiting call. A CLI that did not take the server shows the notice `Edits are off in this session`. `@` in
+   the composer opens a file palette that inserts the CLI's own `@path` mention (a file with unsaved changes goes as a text
+   block of the editor's buffer instead), and the editor's selection travels with the prompt as a chip the user can remove.
+   Recorded with CLI 2.1.312 (`ide-edit`, `ide-edit-two`, `ide-edit-stop`, `ide-mention`; `protocol.md` 3, 4.5, 6.2); the
+   server sits beside configured servers, and a configured server also named `tandem` loses dispatch to Tandem's but shows as
+   the one `tandem` row (recorded only for a `--mcp-config` server; one from the user's, project's or local settings is
+   unrecorded). The MCP panel treats the row as Tandem's own and never offers to turn it off. Deferred (spec 2.2): a
+   `read_file` tool that sees unsaved buffers (an edit matches the editor's text, and a miss returns it), `multi_edit`,
+   per-hunk accept, the CLI's own IDE integration (lock file, `--ide`), and mirroring the CLI's `Edit` quote normalisation.
+   Unrecorded: `MCP_TOOL_TIMEOUT`'s default for a held call, the frames of `bypassPermissions`, subagent edits, and mentions
+   with spaces or of directories. **Status: implemented on feat/ide-edits; the manual pass in `runIde` (focus on the right
+   side, Ctrl+S in the diff, the editor-tab preference, undo as one step, Enter in the mention palette) is the owner's.**
 3. **Parity.** Slash commands, plan mode, AskUserQuestion, rewind, subagent status.
 4. **Hardening.** Windows/WSL, Remote Development, IDE matrix in CI, published benchmarks.
 

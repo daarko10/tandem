@@ -3,14 +3,18 @@
 A fast, native JetBrains plugin for Claude Code. Free and open source.
 
 > Status: early development. macOS and Linux today; Windows in progress. Not on the JetBrains Marketplace yet.
-> IDE-native edits are the next milestone; until then the CLI's Edit and Write tools are disabled in Tandem.
+> Edits go through the IDE: the CLI's own Edit and Write tools are disabled in Tandem, which serves its own. The editable
+> diff is tested against a fake CLI that replays real recordings, and has not had a pass in a real project yet.
 
 ## Why
 - **Native UI.** Built with Jewel (Compose), not an embedded browser. No black screens after IDE updates.
 - **No Node, no bundled SDK.** Tandem drives the `claude` CLI you already have, so new models and features
   work the day the CLI ships them.
-- **Edits through the IDE** (next milestone, not in `main` yet). Changes will land via the editor, so undo, unsaved
-  buffers and the native diff viewer work.
+- **Edits through the IDE.** Every edit Claude proposes opens in the IDE's own diff, and you can change the proposal
+  by hand there. Accept (Ctrl+S, ⌘S in the diff) writes it through the editor, so undo, unsaved buffers and local
+  history work, saves the file, and tells Claude what the file now says, your changes included. Reject sends your reason.
+  The Accept edits mode, or Accept all in a diff (for the rest of that turn), skips the diff. `@` in the prompt picks a project file
+  (a file with unsaved changes is sent from the editor), and the editor's selection goes with the prompt as a chip you can remove.
 - **Honest status.** If your model is unavailable and the CLI falls back to another, you see it.
 - **Your sign-in stays with the CLI.** Tandem never reads credentials or API keys.
 
