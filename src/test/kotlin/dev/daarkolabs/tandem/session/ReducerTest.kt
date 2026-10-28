@@ -2205,6 +2205,8 @@ class ReducerTest {
     }
 
     // spec: EditPhase events set edits and clear clears them
+    // The "clear" half is a fork cut, not a /clear: Tandem decodes no conversation_reset and keeps the entries over a /clear, and
+    // spec 4.2 says the reviews are cleared with the entries, so they go only where the entries go (plan deviation 11).
     @Test
     fun `EditPhase events set edits and clear clears them`() {
         val queued = EditReview("hello.txt", EditPhase.QUEUED)
@@ -2215,8 +2217,7 @@ class ReducerTest {
         assertEquals(mapOf("t1" to done), state.edits, "each phase replaces the call's review")
         assertEquals(state.edits, state.settled().edits, "a stopped process keeps the reviews with the entries")
 
-        // Tandem keeps the entries over a /clear (no conversation_reset is decoded), so the reviews go only where the entries go:
-        // a fork cut drops the reviews of the calls it leaves out.
+        // A fork cut drops the reviews of the calls it leaves out.
         val origin = forkAtOrigin().copy(edits = mapOf("<id-28>" to done))
         assertEquals(emptyMap(), assertNotNull(origin.forkedAt("<uuid-14>")).edits)
     }
