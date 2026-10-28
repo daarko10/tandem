@@ -687,7 +687,11 @@ def file_block(text: str) -> str:
 
 def unified(before: str, after: str) -> str:
     import difflib
-    return "".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True), "proposal", "applied"))
+    # difflib's last line ends in a newline: cut it, so the text goes on right under the diff (spec 4.3's layout).
+    return "".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True), "proposal", "applied")).rstrip("\n")
+
+
+MALFORMED_EDIT = "edit_file needs file_path, old_string and new_string as strings."  # spec 4.3's malformed-arguments text
 
 
 def text_result(text: str, is_error: bool = False) -> dict:
@@ -757,13 +761,17 @@ def ide_edit(cli: Cli, rejection: bool = True) -> None:
     new_file = os.path.join(work, "new.txt")
 
     def on_call(params: dict):
-        arguments = params.get("arguments", {})
+        arguments = params.get("arguments")
+        arguments = arguments if isinstance(arguments, dict) else {}
         if params.get("name") == "edit_file":
-            proposal = HELLO_TEXT.replace(arguments["old_string"], arguments["new_string"], 1)
-            final = proposal.replace(arguments["new_string"], arguments["new_string"] + "!", 1)
+            path, old, new = (arguments.get(key) for key in ("file_path", "old_string", "new_string"))
+            if not all(isinstance(value, str) for value in (path, old, new)):  # a model quirk is a tool error, not a crash
+                return text_result(MALFORMED_EDIT, True)
+            proposal = HELLO_TEXT.replace(old, new, 1)
+            final = proposal.replace(new, new + "!", 1)
             with open(hello, "w", encoding="utf-8") as f:
                 f.write(final)
-            return text_result(f"Applied to {arguments['file_path']} and saved the file. The user changed your proposal in "
+            return text_result(f"Applied to {path} and saved the file. The user changed your proposal in "
                                "the diff before accepting it.\nWhat changed between your proposal and what was applied:\n"
                                f"{unified(proposal, final)}\n{file_block(final)}")
         return text_result("The user rejected this edit in the IDE; nothing was changed.\nThe user says: not now", True)
@@ -822,7 +830,8 @@ def ide_edit_collision(cli: Cli) -> None:
 def ide_mention(cli: Cli) -> None:
     """@path in a plain user message, with every file tool disallowed: the CLI expands the mention itself."""
     write_hello(os.getcwd())
-    for prompt in ("What does @hello.txt say?", "What is on @hello.txt#L2?"):
+    # The line range first: once the whole file is attached the CLI writes already_read_file for a later mention.
+    for prompt in ("What is on @hello.txt#L2?", "What does @hello.txt say?"):
         cli.user(prompt)
         cli.until(result_of(cli.last_uuid()))
 

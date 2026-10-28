@@ -135,14 +135,15 @@ Open (carried into the spec's section 11): `MCP_TOOL_TIMEOUT`'s default for an S
 
 ## 5. Recordings (F1): the fixtures and their line map
 
-Recorded 2026-10-28 with `scripts/record-scenario.sh` against `claude` 2.1.312 on `sonnet`, redacted, each with its CLI transcript under `src/test/resources/fixtures/transcripts/`. Every number below is a 1-based line of `src/test/resources/fixtures/<name>.ndjson` and was opened while writing this. Tests cite this map, never a probe line (`r1:38` and the like). The numbers differ from the probes' because the SDK server now sits beside a configured one, so the MCP handshake starts before the CLI's `initialize` answer and the first `mcp_status` is an extra line.
+Recorded 2026-10-28 with `scripts/record-scenario.sh` against `claude` 2.1.312 on `sonnet`, redacted, each with its CLI transcript under `src/test/resources/fixtures/transcripts/`. Re-recorded the same day after review round 1, once the redactor kept a working-directory file's name (below); every number here is from that second recording. Every number below is a 1-based line of `src/test/resources/fixtures/<name>.ndjson` and was opened while writing this. Tests cite this map, never a probe line (`r1:38` and the like). The numbers differ from the probes' because the SDK server now sits beside a configured one, so the MCP handshake starts before the CLI's `initialize` answer and the first `mcp_status` is an extra line.
 
-Two facts the spec did not expect, both visible in the lines below:
+Three facts about the redacted text, all visible in the lines below:
 
-- **`<path>` is the whole path.** The redactor's `PATH_RE` swallows the file name with the directory, so a recorded `tools/call` reads `"file_path":"<path>"`, not `"<path>/hello.txt"` (spec 9.6): the fake CLI substitutes the project's file for `<path>` itself and cannot tell two files apart by the recorded argument. The same holds for the paths inside a result's text (`Applied to <path> and saved the file.`).
-- **`init.tools` was kept by every fixture before this round.** Spec 9.1 and the plan's deviation 1 assume the redactor drops it. It did not; it now does for every fixture but the ones in `INIT_KEEP` (the `ide-edit*` three, the four MCP fixtures, `mcp-connectors*`), which is what makes the version gate's "a non-empty `tools` lacking `mcp__tandem__edit_file`" safe for **newly recorded** fixtures. The fixtures committed before F1 (for example `history-reply`, `permission`) still hold their full `tools` lists, so the gate reads them as "a CLI that did not take the server": F3 must not let that raise the notice in the existing tests (see the task report).
+- **A path under the recording's working directory keeps its file name.** `redact_fixture.py` learns the working directory from a line's top-level `cwd` (the init's, a transcript line's) with its resolved path and macOS `/private` twin, and, when it is a temporary directory (the recorders' `mktemp -d`; a project's file names never show), writes it `<path>` while keeping the tail, so a recorded `tools/call` reads `"file_path":"<path>/hello.txt"` (`edit_file`) or `"<path>/new.txt"` (`write_file`), as spec 9.6 expects; `init.cwd` is `<path>` itself. Any other absolute path is still the whole `<path>` (the echo server's script in `mcp_status`, `args:["-I","<path>","echo"]`), and a path no longer swallows a sentence's period (`not found in <path>/hello.txt. The file`). The fake substitutes `<path>` with its working directory (9.6).
+- **`init.tools` is empty in every fixture but the `INIT_KEEP` ones** (the `ide-edit*` three, the four MCP fixtures, `mcp-connectors*`). The redactor empties it on recording (`INIT_LISTS`), and the fixtures committed before this round, which still held the recording machine's whole list, were emptied in one pass with the same rule; `test_redact_fixture.py` (`test_every_committed_fixture_outside_init_keep_has_no_init_tools`) fails if a fixture outside `INIT_KEEP` holds a non-empty `init.tools`. So the plan's deviation 1 holds: the version gate's "a non-empty `tools` lacking `mcp__tandem__edit_file`" never fires on a replayed fixture without Tandem's tools.
+- **The result texts come from `drive_cli.py`, not from `EditResults`.** They follow spec 4.3's wording but not its bytes everywhere (the unified diff carries difflib's `--- proposal` / `+++ applied` headers; the not-found and file blocks use `drive_cli`'s `cat_n`). `EditResultsTest` owns the exact texts; no test compares a recorded result with `EditResults` output verbatim.
 
-### `ide-edit` (117 lines; the transcript is `transcripts/ide-edit.jsonl`, 47 lines)
+### `ide-edit` (122 lines; the transcript is `transcripts/ide-edit.jsonl`, 47 lines)
 
 | Frame | Line |
 |---|---|
@@ -154,25 +155,25 @@ Two facts the spec did not expect, both visible in the lines below:
 | `ToolSearch` `tool_use`, its `tool_reference` result for `mcp__tandem__edit_file` | `ide-edit:19`, `:21` |
 | first `tool_use` (`mcp__tandem__edit_file`, with `tool_use_meta`) | `ide-edit:35` |
 | its `can_use_tool` (`mcp_server {name:"tandem", source:"sdk"}`, `server_policy_ask_only`) | `ide-edit:37` |
-| its `tools/call` (`_meta["claudecode/toolUseId"]` equals `:35`'s block id; `file_path` is `<path>`) | `ide-edit:40` |
-| its result: `tool_result.content` a block array, no `is_error`, `permission_decision {accept, user_temporary}`; the text is the changed-proposal text with the unified diff and the file `beta!` | `ide-edit:41` |
-| `result` `success` of the first turn | `ide-edit:66` |
-| `mcp_status` after the first turn: `echo` (`stdio`, `dynamic`) and `tandem` (`transport:"sdk"`, `source:"sdk"`, `serverInfo.version` `0.4.0`, tools `edit_file`, `write_file`) | `ide-edit:68` |
-| second `system/init` (the next turn of the same process) | `ide-edit:71` |
-| `write_file`: `tool_use`, `can_use_tool`, `tools/call` | `ide-edit:96`, `:98`, `:99` |
-| the rejected `write_file`'s result: `content` a string, `is_error:true`, the text `The user rejected this edit in the IDE; nothing was changed.\nThe user says: not now` | `ide-edit:102` |
-| `result` `success` of the second turn | `ide-edit:116` |
+| its `tools/call` (JSON-RPC `id` 2; `_meta["claudecode/toolUseId"]` equals `:35`'s block id; `file_path` is `<path>/hello.txt`) | `ide-edit:38` |
+| its result: `tool_result.content` a block array, no `is_error`, `permission_decision {accept, user_temporary}`; the text is the changed-proposal text with the unified diff (no blank line before `The file now reads`) and the file `beta!` | `ide-edit:41` |
+| `result` `success` of the first turn | `ide-edit:71` |
+| `mcp_status` after the first turn: `echo` (`stdio`, `dynamic`) and `tandem` (`transport:"sdk"`, `source:"sdk"`, `serverInfo.version` `0.4.0`, tools `edit_file`, `write_file`) | `ide-edit:73` |
+| second `system/init` (the next turn of the same process) | `ide-edit:76` |
+| `write_file`: `tool_use`, `can_use_tool`, `tools/call` (`id` 3, `file_path` `<path>/new.txt`) | `ide-edit:101`, `:103`, `:104` |
+| the rejected `write_file`'s result: `content` a string, `is_error:true`, the text `The user rejected this edit in the IDE; nothing was changed.\nThe user says: not now` (`tool_use_result` the same text after `Error: `) | `ide-edit:105` |
+| `result` `success` of the second turn | `ide-edit:121` |
 
-### `ide-edit-two` (86 lines; transcript 38)
+### `ide-edit-two` (78 lines; transcript 38)
 
 | Frame | Line |
 |---|---|
-| `initialize`, `notifications/initialized`, `tools/list` | `ide-edit-two:1`, `:3`, `:5` |
-| first call: `tool_use`, `can_use_tool`, `tools/call` (`alpha` to `beta`), result | `ide-edit-two:41`, `:43`, `:44`, `:45` |
-| second call in the same turn: `tool_use`, `can_use_tool`, `tools/call` (`line two` to `line 2`), result | `ide-edit-two:61`, `:63`, `:64`, `:65` |
-| `result` `success` | `ide-edit-two:85` |
+| `initialize`, `notifications/initialized`, `tools/list`, `system/init` | `ide-edit-two:1`, `:3`, `:5`, `:7` |
+| first call: `tool_use`, `can_use_tool`, `tools/call` (`alpha` to `beta`, `id` 2), result | `ide-edit-two:34`, `:36`, `:37`, `:40` |
+| second call in the same turn: `tool_use`, `can_use_tool`, `tools/call` (`line two` to `line 2`, `id` 3), result | `ide-edit-two:52`, `:54`, `:55`, `:56` |
+| `result` `success` | `ide-edit-two:77` |
 
-### `ide-edit-stop` (121 lines; transcript 49)
+### `ide-edit-stop` (122 lines; transcript 49)
 
 | Frame | Line |
 |---|---|
@@ -184,21 +185,21 @@ Two facts the spec did not expect, both visible in the lines below:
 | the text line `[Request interrupted by user for tool use]` | `ide-edit-stop:45` |
 | `result` `error_during_execution`, `is_error:true`, `terminal_reason` `aborted_tools` (the only error result of the four fixtures) | `ide-edit-stop:46` |
 | the `set_permission_mode acceptEdits` answer (`{mode}`), then the next `system/init` | `ide-edit-stop:48`, `:52` |
-| under `acceptEdits`: `tool_use`, `can_use_tool` (the request still arrives), `tools/call`, result (applied, `permission_decision {accept, user_temporary}`) | `ide-edit-stop:64`, `:66`, `:67`, `:70` |
-| `result` `success` of that turn | `ide-edit-stop:79` |
-| the `set_permission_mode default` answer, then `system/init` | `ide-edit-stop:81`, `:85` |
-| the stale `old_string`: `tool_use`, `can_use_tool`, `tools/call`, the not-found result (`is_error:true`, text `old_string was not found in <path> …` followed by the numbered file) | `ide-edit-stop:99`, `:101`, `:102`, `:103` |
-| `result` `success` | `ide-edit-stop:120` |
+| under `acceptEdits`: `tool_use`, `can_use_tool` (the request still arrives), `tools/call`, result (applied, `permission_decision {accept, user_temporary}`) | `ide-edit-stop:66`, `:68`, `:69`, `:70` |
+| `result` `success` of that turn | `ide-edit-stop:81` |
+| the `set_permission_mode default` answer, then `system/init` | `ide-edit-stop:83`, `:87` |
+| the stale `old_string`: `tool_use`, `can_use_tool`, `tools/call`, the not-found result (`is_error:true`, text `old_string was not found in <path>/hello.txt. The file as open in the IDE (unsaved changes included) reads:` followed by the numbered file) | `ide-edit-stop:101`, `:103`, `:104`, `:105` |
+| `result` `success` | `ide-edit-stop:121` |
 
 The host's `set_permission_mode` requests themselves are not in a fixture (the files hold the CLI's stdout); the fake CLI answers them from the `{mode}` lines above.
 
-### `ide-mention` (36 lines; transcript 34)
+### `ide-mention` (36 lines; transcript 33)
 
-The prompts are host frames and not in the stdout. The CLI answered both without a tool (`tools` disallowed): the first prompt `What does @hello.txt say?` ends at the reply `ide-mention:16` and `result` `ide-mention:20`; the second, `What is on @hello.txt#L2?`, at the reply `ide-mention:31` (`Line 2 of hello.txt is line two.`) and `result` `ide-mention:35`; a `system/init` precedes each (`:5`, `:24`). In `transcripts/ide-mention.jsonl` the user lines are `:6` and `:29`; the expansion is an `attachment` line right after each: `:7` (`type: file`) and `:30` (`type: already_read_file`). The redactor reduces every attachment to its `type`, so the transcript does not carry the file's text.
+The prompts are host frames and not in the stdout. The line range goes first, so the CLI expands both mentions instead of writing `already_read_file` for the second. The CLI answered both without a tool (`tools` disallowed): the first prompt `What is on @hello.txt#L2?` ends at the reply `ide-mention:13` (`line two`) and `result` `ide-mention:17`; the second, `What does @hello.txt say?`, at the reply `ide-mention:31` and `result` `ide-mention:35`; a `system/init` precedes each (`:5`, `:21`). In `transcripts/ide-mention.jsonl` the user lines are `:5` and `:28`; the expansion is an `attachment` line right after each, both `type: file` (`:6`, `:29`). The redactor reduces every attachment to its `type`, so the transcript does not carry the expanded text: what `#L2` sends (the one line, or the file) is **unrecorded**; the reply only shows that the model was given line 2.
 
 ### Other numbers the spec's 9.2 names
 
-For `FixtureDecodeTest`: the `init` is `ide-edit:8`, the `McpTest` answer with `transport:"sdk"` is `ide-edit:68`, the block-array result is `ide-edit:41` and the error result with the `tool_use_result` string is `ide-edit:102`; the `permission_decision` of the unchanged accept in `ide-edit-two:45` and `:65` reads `{accept, user_temporary}`.
+For `FixtureDecodeTest`: the `init` is `ide-edit:8`, the `McpTest` answer with `transport:"sdk"` is `ide-edit:73`, the block-array result is `ide-edit:41` and the error result with the `tool_use_result` string is `ide-edit:105`; the `permission_decision` of the unchanged accept in `ide-edit-two:40` and `:56` reads `{accept, user_temporary}`.
 
 ### The collision probe (`ide-edit-collision`, `scratch/probes/ide-edits/r4/ide-edit-collision.ndjson`, 81 lines, not committed)
 

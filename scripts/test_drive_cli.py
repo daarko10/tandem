@@ -814,6 +814,7 @@ class IdeEditScenarioTest(unittest.TestCase):
         self.assertTrue(text.startswith(f"Applied to {path} and saved the file. The user changed your proposal in the diff "
                                         "before accepting it.\n"), text)
         self.assertIn("     1\tbeta!\n     2\tline two", text)
+        self.assertIn("+beta!\n line two\nThe file now reads (lines 1-2 of 2):\n", text, "no blank line between the diff and the file")
         with open(path, encoding="utf-8") as f:
             self.assertEqual("beta!\nline two\n", f.read())
         rejected = replies[4]["result"]
@@ -827,6 +828,22 @@ class IdeEditScenarioTest(unittest.TestCase):
         self.assertEqual(f"Use mcp__tandem__edit_file to change alpha to beta in {path}, then stop.", prompts[0])
         self.assertIn("mcp__tandem__write_file", prompts[1])
         self.assertIn(os.path.join(self.work.name, "new.txt"), prompts[1])
+
+    def test_a_malformed_edit_call_gets_the_malformed_arguments_error(self):
+        def script(n: int, msg: dict) -> list[dict]:
+            if n == 1:
+                return tool_use_frames(4, "edit_file", {"file_path": os.path.join(self.work.name, "hello.txt"),
+                                                        "old_string": "alpha"})
+            return []
+
+        cli = SdkCli(script)
+        drive_cli.serve_tandem(cli, lambda params: self.fail("the handshake has no call"))
+        drive_cli.ide_edit(cli, rejection=False)
+        reply = mcp_responses(cli)[-1]["result"]
+        self.assertIs(True, reply["isError"])
+        self.assertEqual("edit_file needs file_path, old_string and new_string as strings.", reply["content"][0]["text"])
+        with open(os.path.join(self.work.name, "hello.txt"), encoding="utf-8") as f:
+            self.assertEqual("alpha\nline two\n", f.read())
 
     def test_the_stop_scenario_interrupts_a_held_call(self):
         path = os.path.join(self.work.name, "hello.txt")
@@ -889,7 +906,7 @@ class IdeEditScenarioTest(unittest.TestCase):
         cli = FakeCli(success)
         drive_cli.ide_mention(cli)
         prompts = [m["message"]["content"][0]["text"] for m in cli.sent if m["type"] == "user"]
-        self.assertEqual(["What does @hello.txt say?", "What is on @hello.txt#L2?"], prompts)
+        self.assertEqual(["What is on @hello.txt#L2?", "What does @hello.txt say?"], prompts, "the range before the whole file")
         with open(os.path.join(self.work.name, "hello.txt"), encoding="utf-8") as f:
             self.assertEqual("alpha\nline two\n", f.read())
 
