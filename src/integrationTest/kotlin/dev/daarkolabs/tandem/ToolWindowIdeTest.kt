@@ -6,10 +6,14 @@ import com.intellij.driver.client.service
 import com.intellij.driver.model.OnDispatcher
 import com.intellij.driver.model.RemoteMouseButton
 import com.intellij.driver.sdk.ActionManager
+import com.intellij.driver.sdk.Document
+import com.intellij.driver.sdk.VirtualFile
 import com.intellij.driver.sdk.closeAndDisableAllBalloonNotifications
+import com.intellij.driver.sdk.findFile
 import com.intellij.driver.sdk.getOpenProjects
 import com.intellij.driver.sdk.invokeAction
 import com.intellij.driver.sdk.isPluginLoaded
+import com.intellij.driver.sdk.openFile
 import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.singleProject
 import com.intellij.driver.sdk.ui.components.UiComponent
@@ -1609,6 +1613,221 @@ class ToolWindowIdeTest {
         assertImagePrompt(sent)
     }
 
+    @Test
+    fun `an edit opens the diff and Accept applies it`() {
+        val project = newProject()
+        val hello = writeHello(project)
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        var diskAtReply: String? = null
+        val sent = runChat("edit-accept", fixtures = listOf("ide-edit"), project = project, sentLog = log) {
+            openFile("hello.txt", waitForCodeAnalysis = false)
+            newSession()
+            typePrompt("Change alpha to beta in hello.txt")
+            editWait("the diff tab", 1.minutes) { diffTabShown() && diffButton(ACCEPT_BUTTON).present() }
+            diffButton(ACCEPT_BUTTON).click()
+            // Spec 9.7: the disk holds the applied text before the reply goes out. The log is read before the disk on each poll, so a
+            // reply that went out before the save would be caught with the old text on the disk.
+            editWait("the edit's reply in the fake's log", 30.seconds) {
+                val replied = toolReplies(readLog(log)).isNotEmpty()
+                val disk = hello.readText()
+                if (replied) diskAtReply = disk
+                replied
+            }
+            editWait("the diff closed", 30.seconds) { !diffButton(ACCEPT_BUTTON).present() }
+            editWait("the editor shows beta", 30.seconds) { documentText("hello.txt") == BETA }
+            editWait("the row", 1.minutes) { described("Edited hello.txt").present() }
+            // Ctrl+Z (⌘Z) in the file's editor undoes the whole edit, once the editor has the focus back from the closed diff.
+            editWait("the file's editor focused", 30.seconds) {
+                if (helloEditorFocused()) {
+                    true
+                } else {
+                    ui.x(EDITOR).click(Point(20, 10))
+                    false
+                }
+            }
+            ui.keyboard { hotKey(if (isMac) KeyEvent.VK_META else KeyEvent.VK_CONTROL, KeyEvent.VK_Z) }
+            editWait("one undo restored alpha", 30.seconds) { documentText("hello.txt") == HELLO }
+        }
+        assertEquals(BETA, diskAtReply, "the file on disk read beta when the reply was in the log")
+        val reply = toolReplies(sent).single()
+        assertTrue("Applied the edit to" in reply.replyText() && "saved" in reply.replyText(), reply.toString())
+        assertFalse(reply.isErrorReply())
+    }
+
+    @Test
+    fun `a hand change in the diff reaches Claude`() {
+        val project = newProject()
+        val hello = writeHello(project)
+        val sent = runChat("edit-hand-change", fixtures = listOf("ide-edit"), project = project) {
+            newSession()
+            typePrompt("Change alpha to beta in hello.txt")
+            editWait("the diff", 1.minutes) { diffButton(ACCEPT_BUTTON).present() }
+            // The right side, the proposal: the diff's editor furthest to the right. `!` after `beta`, then Ctrl+S (⌘S) accepts.
+            val right = ui.xx(EDITOR).list().maxBy { it.component.getLocationOnScreen().x }
+            right.click(Point(20, 10))
+            val primary = if (isMac) KeyEvent.VK_META else KeyEvent.VK_CONTROL
+            ui.keyboard {
+                hotKey(primary, KeyEvent.VK_HOME)
+                key(KeyEvent.VK_END)
+                typeText("!", 20)
+                hotKey(primary, KeyEvent.VK_S)
+            }
+            editWait("beta! on disk", 30.seconds) { hello.readText() == "beta!\nline two\n" }
+            editWait("the diff closed", 30.seconds) { !diffButton(ACCEPT_BUTTON).present() }
+            editWait("the row with its tag", 1.minutes) { described("Edited hello.txt").present() && containing("with your changes").present() }
+        }
+        val text = toolReplies(sent).single().replyText()
+        assertTrue("The user changed your proposal" in text && "beta!" in text, text)
+    }
+
+    @Test
+    fun `Reject with a reason sends an error result`() {
+        val project = newProject()
+        val hello = writeHello(project)
+        val sent = runChat("edit-reject", fixtures = listOf("ide-edit"), project = project) {
+            newSession()
+            typePrompt("Change alpha to beta in hello.txt")
+            editWait("the diff", 1.minutes) { diffButton(REASON_FIELD).present() }
+            diffButton(REASON_FIELD).click()
+            diffButton(REASON_FIELD).keyboard { typeText("not now", 20) }
+            diffButton(REJECT_BUTTON).click()
+            editWait("the diff closed", 30.seconds) { !diffButton(REJECT_BUTTON).present() }
+            editWait("the rejected row and the turn's footer", 1.minutes) {
+                described("Rejected edit of hello.txt").present() && ui.x(FOOTER).present()
+            }
+        }
+        val reply = toolReplies(sent).single()
+        assertTrue(reply.isErrorReply(), reply.toString())
+        assertTrue("not now" in reply.replyText(), reply.toString())
+        assertEquals(HELLO, hello.readText(), "nothing changed on disk")
+    }
+
+    @Test
+    fun `Accept all skips the next diffs`() {
+        val project = newProject()
+        val hello = writeHello(project)
+        // ide-edit-two: two edit_file calls in one turn. Its stream lines are slowed so that the turn runs for a while after Accept all.
+        val sent = runChat("edit-accept-all", fixtures = listOf("ide-edit-two"), project = project, lineDelayMs = 300) {
+            newSession()
+            typePrompt("Make both edits to hello.txt")
+            editWait("the first diff", 2.minutes) { diffButton(ACCEPT_ALL_BUTTON).present() }
+            diffButton(ACCEPT_ALL_BUTTON).click()
+            editWait("the Accept all hint while the turn runs", 30.seconds) { containing(ACCEPT_ALL_HINT).present() }
+            // The second call waits for nobody: a diff would hold it, so the file can only read `line 2` without one.
+            editWait("both edits on disk", 1.minutes) { hello.readText() == "beta\nline 2\n" }
+            editWait("the turn's footer", 2.minutes) { ui.x(FOOTER).present() }
+            assertFalse(diffButton(ACCEPT_BUTTON).present(), "no second diff")
+            editWait("the hint gone with the turn", 30.seconds) { !containing(ACCEPT_ALL_HINT).present() }
+            // The two edits of the turn are one group row; opened, its rows name the file, the second with its tag.
+            described("Edited a file").click(Point(10, 10))
+            editWait("the group's two edit rows, the second auto-accepted", 30.seconds) {
+                ui.xx("//div[@class='ComposeNode' and @contentdescription='Edited hello.txt']").list().size == 2 &&
+                    containing("auto-accepted").present()
+            }
+        }
+        val replies = toolReplies(sent)
+        assertEquals(2, replies.size, replies.toString())
+        assertTrue("accepted with Accept all" in replies[1].replyText(), replies[1].toString())
+    }
+
+    @Test
+    fun `acceptEdits applies without a diff`() {
+        val project = newProject()
+        val hello = writeHello(project)
+        // ide-edit-stop records the mode switch: its first turn is stopped, then `set_permission_mode acceptEdits` and an edit.
+        val sent = runChat("edit-accept-edits", fixtures = listOf("ide-edit-stop"), project = project) {
+            newSession()
+            typePrompt("Change alpha to beta in hello.txt")
+            editWait("the first turn's diff", 1.minutes) { diffButton(ACCEPT_BUTTON).present() }
+            iconButton("Stop").click(Point(10, 10))
+            editWait("the first turn stopped", 1.minutes) { !diffButton(ACCEPT_BUTTON).present() && iconButton("Send").present() }
+            // Accept edits picked in the footer: its digit in the open mode menu.
+            picker("Permission mode", "Manual").click(Point(10, 10))
+            editWait("the mode menu open", 30.seconds) { menuItemContaining(PLAN_DESCRIPTION).present() }
+            ui.keyboard { key(KeyEvent.VK_3) }
+            editWait("the mode control shows Accept edits", 30.seconds) { picker("Permission mode", "Accept edits").present() }
+            typePrompt("Change alpha to gamma in hello.txt")
+            editWait("the edit on disk", 1.minutes) { hello.readText() == "gamma\nline two\n" }
+            editWait("the auto-accepted row", 1.minutes) {
+                described("Edited hello.txt").present() && containing("auto-accepted").present()
+            }
+            assertFalse(diffButton(ACCEPT_BUTTON).present(), "no diff under acceptEdits")
+        }
+        val modes = sent.filter { it.type == "control_request" }.map { it["request"]!!.jsonObject }
+            .filter { it["subtype"]!!.jsonPrimitive.content == "set_permission_mode" }.map { it["mode"]!!.jsonPrimitive.content }
+        assertEquals(listOf("acceptEdits"), modes)
+        val reply = toolReplies(sent).single()
+        assertTrue("auto-accepted by the user's mode" in reply.replyText(), reply.toString())
+    }
+
+    @Test
+    fun `Stop closes the diff`() {
+        val project = newProject()
+        val hello = writeHello(project)
+        val sent = runChat("edit-stop", fixtures = listOf("ide-edit-stop"), project = project) {
+            newSession()
+            typePrompt("Change alpha to beta in hello.txt")
+            editWait("the diff", 1.minutes) { diffTabShown() && diffButton(ACCEPT_BUTTON).present() }
+            iconButton("Stop").click(Point(10, 10))
+            editWait("the diff closed", 30.seconds) { !diffButton(ACCEPT_BUTTON).present() && !diffTabShown() }
+            editWait("the interrupted row", 1.minutes) { described("Edit hello.txt · Interrupted").present() }
+            assertFalse(described("Failed to edit hello.txt").present())
+            editWait("Send is offered again", 1.minutes) { iconButton("Send").present() }
+        }
+        assertTrue(sent.any { it.type == "control_request" && it["request"]!!.jsonObject["subtype"]!!.jsonPrimitive.content == "interrupt" })
+        assertTrue(toolReplies(sent).isEmpty(), "no mcp_response for the withdrawn call")
+        assertEquals(HELLO, hello.readText(), "the file unchanged on disk")
+    }
+
+    /**
+     * [waitFor] for the edit tests, which spend long in the diff: a locally cached IDE in its trial may cover the window with JetBrains'
+     * modal feedback dialog at any time, which is dismissed (`No, Thanks`) on every poll; it is never Tandem's.
+     */
+    private fun Driver.editWait(what: String, timeout: kotlin.time.Duration, condition: () -> Boolean) {
+        waitFor(what, timeout) {
+            ui.xx(TRIAL_FEEDBACK_NO).list().forEach { it.click() }
+            condition()
+        }
+    }
+
+    /** Writes `hello.txt` (`alpha\nline two\n`) into [project], the file the `ide-edit*` fixtures' calls name (spec 9.6). */
+    private fun writeHello(project: Path): Path = project.resolve("hello.txt").also { it.writeText(HELLO) }
+
+    /** The frames in the fake's log [log] so far. */
+    private fun readLog(log: Path): List<JsonObject> =
+        log.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+
+    /** The `result`s of the host's `mcp_response`s to `tools/call`s, in order: those that carry `content` (a handshake's do not). */
+    private fun toolReplies(sent: List<JsonObject>): List<JsonObject> = sent.filter { it.type == "control_response" }.mapNotNull { frame ->
+        val reply = frame["response"]?.jsonObject?.get("response") as? JsonObject
+        ((reply?.get("mcp_response") as? JsonObject)?.get("result") as? JsonObject)?.takeIf { "content" in it }
+    }
+
+    /** A tool reply's text blocks, joined. */
+    private fun JsonObject.replyText(): String =
+        this["content"]!!.jsonArray.mapNotNull { (it as? JsonObject)?.get("text")?.jsonPrimitive?.content }.joinToString("\n")
+
+    private fun JsonObject.isErrorReply(): Boolean = this["isError"]?.jsonPrimitive?.booleanOrNull == true
+
+    /** A Swing control of the diff's bar, by its name (IDE-edits spec 3.8) or, failing that, its accessible name. */
+    private fun Driver.diffButton(control: Pair<String, String>): UiComponent =
+        ui.x("//div[@name='${control.first}' or @accessiblename='${control.second}']")
+
+    /** Whether the diff's editor tab (or window), titled `Tandem: hello.txt`, is shown: the tabs and the tab's label both name it. */
+    private fun Driver.diffTabShown(): Boolean =
+        ui.xx("//div[contains(@visible_text, 'Tandem: hello.txt') or contains(@accessiblename, 'Tandem: hello.txt')]").list().isNotEmpty()
+
+    /** Whether the selected text editor is `hello.txt`'s and holds the keyboard focus. */
+    private fun Driver.helloEditorFocused(): Boolean = withContext(OnDispatcher.EDT) {
+        val editor = service<FileEditorManagerRef>(singleProject()).getSelectedTextEditor()
+        editor?.getVirtualFile()?.getName() == "hello.txt" && editor.getContentComponent().isFocusOwner()
+    }
+
+    /** The text of [relativePath]'s `Document` in the IDE: what its editor shows. */
+    private fun Driver.documentText(relativePath: String): String? = withContext(OnDispatcher.EDT) {
+        findFile(relativePath)?.let { service<FileDocumentManagerRef>().getDocument(it) }?.getText()
+    }
+
     /** The one prompt sent: `What colour?` as its text block, then a PNG image block with data. */
     private fun assertImagePrompt(sent: List<JsonObject>) {
         val content = sent.single { it.type == "user" }["message"]!!.jsonObject["content"]!!.jsonArray.map { it.jsonObject }
@@ -2148,6 +2367,25 @@ class ToolWindowIdeTest {
         /** The most key presses a test makes to move the focus or a menu's selection to a control. */
         const val MAX_PRESSES = 40
 
+        /** `hello.txt` as the `ide-edit*` IDE tests write it, and after the recorded `alpha` → `beta` edit. */
+        const val HELLO = "alpha\nline two\n"
+        const val BETA = "beta\nline two\n"
+
+        /** The diff bar's controls: their Swing names and accessible names (IDE-edits spec 3.8). */
+        val ACCEPT_BUTTON: Pair<String, String> = "tandem.edit.accept" to "Accept"
+        val ACCEPT_ALL_BUTTON: Pair<String, String> = "tandem.edit.acceptAll" to "Accept all"
+        val REJECT_BUTTON: Pair<String, String> = "tandem.edit.reject" to "Reject"
+        val REASON_FIELD: Pair<String, String> = "tandem.edit.reason" to "Reason for rejecting"
+
+        /** The footer's hint while `Accept all` holds for the turn. */
+        const val ACCEPT_ALL_HINT = "Accepting all edits this turn"
+
+        /** The `No, Thanks` button of JetBrains' trial feedback dialog (`Tell us about your experience`). */
+        const val TRIAL_FEEDBACK_NO = "//div[@class='JButton' and (@visible_text='No, Thanks' or @accessiblename='No, Thanks')]"
+
+        /** A text editor: a file's, or a side of a diff. */
+        const val EDITOR = "//div[@class='EditorComponentImpl']"
+
         /** A turn's footer. */
         const val FOOTER = "//div[@class='ComposeNode' and starts-with(@visible_text, 'Worked for')]"
 
@@ -2214,6 +2452,30 @@ interface ContentManagerRef {
 @Remote("com.intellij.ui.content.Content")
 interface ContentRef {
     fun getDisplayName(): String
+}
+
+/** The platform's `FileDocumentManager`, for a file's `Document` as its editor shows it. */
+@Remote("com.intellij.openapi.fileEditor.FileDocumentManager")
+interface FileDocumentManagerRef {
+    fun getDocument(file: VirtualFile): Document?
+}
+
+/** The project's `FileEditorManager`, for the selected text editor. */
+@Remote("com.intellij.openapi.fileEditor.FileEditorManager")
+interface FileEditorManagerRef {
+    fun getSelectedTextEditor(): TextEditorRef?
+}
+
+@Remote("com.intellij.openapi.editor.Editor")
+interface TextEditorRef {
+    fun getVirtualFile(): VirtualFile?
+
+    fun getContentComponent(): FocusableRef
+}
+
+@Remote("javax.swing.JComponent")
+interface FocusableRef {
+    fun isFocusOwner(): Boolean
 }
 
 @Remote("javax.swing.JComponent")

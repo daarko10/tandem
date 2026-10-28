@@ -33,6 +33,8 @@ Reads --session-id <id>, --resume <id>, --fork-session and --add-dir <dir> from 
                           `--add-dir`, as a CLI that keeps a folder a resume left out
   TANDEM_FAKE_EXIT_DELAY_MS  once the host closes stdin, sleep this long before exiting (unset or 0: exit at once), so that a
                           test can hold a stop (the host waits for the exit) while something else happens
+  TANDEM_FAKE_EDIT_CANCEL_MS  rule (p): a replayed `tools/call` left unanswered this long is withdrawn as on an `interrupt`, without
+                          the interrupt's receipt (the CLI's own MCP_TOOL_TIMEOUT; unset or 0: never)
 
 Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
 with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
@@ -103,12 +105,33 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
       `control_request`. The wait before an `init` is met by a frame a line has named since the last `result` (bound then or
       before: `queue-later:53` names F, bound at `:19`, ahead of the `init` at `:54`). Rule (g) is off for these fixtures.
       `--resume-session-at` needs no rule: it is logged with the argv in `__spawn__`, like any other argument.
+  (n) The CLI's `mcp_message` control requests (Tandem's own server, `ide-edit*`) replay in the recorded order, each waiting for the
+      host's `control_response` to it (`tools/list` before the first turn's `init`, as recorded). The host's `mcp_response` to a
+      `tools/call` is kept under the call's `_meta["claudecode/toolUseId"]`, and the replayed `user` line holding that tool use's
+      `tool_result` is rewritten with it: `content` from the reply's `result.content` (its text joined into one string when the
+      reply `isError`, as the CLI writes an error), `is_error` from `isError`, and the line's `tool_use_result` the content blocks,
+      or `Error: <text>` for an error; a JSON-RPC error reply becomes an error with its message. So a test sees the text Tandem
+      produced, never the recorded one. A `can_use_tool` for a Tandem tool is sent as recorded and its answer is not checked.
+  (o) In a fixture with `mcp_message` frames, `<path>` (the redactor's name for the recording's working directory) becomes this
+      process's working directory (`os.getcwd()`, the project the host spawned it in) in every replayed frame: the `tools/call`
+      arguments, the `can_use_tool` input, `init.cwd` and the result lines. Other fixtures keep `<path>` as recorded (rows such
+      as `Read <path>` in `tools-read` are drawn from it).
+  (p) A host `interrupt` read while a replayed `tools/call` waits for its reply withdraws the call when the fixture recorded the
+      withdrawal (a `notifications/cancelled` for that call's JSON-RPC id before the next `tools/call`, `ide-edit-stop:42`): the
+      fake, without waiting for an `mcp_response`, sends the recorded lines from the call to the turn's `result` in order (the
+      `stream_event`s the CLI had streamed, `notifications/cancelled` (`:42`), the interrupt's receipt `{"still_queued":[]}` (`:43`)
+      answering the host's `interrupt`, the synthetic `tool_result` with `non_execution_kind:"user-rejected"` (`:44`),
+      `[Request interrupted by user for tool use]` (`:45`) and the `aborted_tools` result (`:46`)), none of them waiting for the
+      host, then goes on after that `result`. A late `mcp_response` for the withdrawn id is logged and ignored, as the CLI does.
+      Without a recorded withdrawal an `interrupt` there is handled as anywhere else. TANDEM_FAKE_EDIT_CANCEL_MS does the same
+      once the call has waited that long, and sends no receipt (there is no interrupt to answer).
 """
 import copy
 import fcntl
 import json
 import os
 import re
+import select
 import sys
 import time
 import uuid
@@ -138,6 +161,38 @@ add_dirs = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--add-dir"]
 skip_add_dir = os.environ.get("TANDEM_FAKE_SKIP_ADD_DIR") or None
 keep_add_dir = os.environ.get("TANDEM_FAKE_KEEP_ADD_DIR") or None
 exit_delay_ms = int(os.environ.get("TANDEM_FAKE_EXIT_DELAY_MS") or 0)
+edit_cancel_ms = int(os.environ.get("TANDEM_FAKE_EDIT_CANCEL_MS") or 0)  # rule (p)
+PATH_PLACEHOLDER = "<path>"  # rule (o)
+escaped_cwd = json.dumps(os.getcwd())[1:-1]  # rule (o): the working directory as it appears inside a JSON string
+host_replies = {}  # rule (n): tool use id -> the host's mcp_response to its tools/call
+TIMED_OUT = object()  # read_host's answer when its timeout passed with no frame
+stdin_buffer = bytearray()  # what was read from stdin and not yet split into lines: read with select, so a wait can time out (rule (p))
+stdin_closed = [False]
+
+
+def next_host_line(deadline):
+    """The host's next stdin line (bytes, without its newline), None at the end of stdin, TIMED_OUT past [deadline] (monotonic)."""
+    while True:
+        end = stdin_buffer.find(b"\n")
+        if end >= 0:
+            line = bytes(stdin_buffer[:end])
+            del stdin_buffer[:end + 1]
+            return line
+        if stdin_closed[0]:
+            if stdin_buffer:
+                line = bytes(stdin_buffer)
+                del stdin_buffer[:]
+                return line
+            return None
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([0], [], [], remaining)[0]:
+                return TIMED_OUT
+        chunk = os.read(0, 65536)
+        if chunk:
+            stdin_buffer.extend(chunk)
+        else:
+            stdin_closed[0] = True
 
 
 def option(name):
@@ -181,10 +236,16 @@ def fixture_name(spawn_index):
     return names[min(spawn_index, len(names) - 1)]
 
 
-def read_host():
-    """Next JSON frame from the host, or None at end of input."""
-    for line in sys.stdin:
-        line = line.strip()
+def read_host(timeout=None):
+    """Next JSON frame from the host, None at end of input, or TIMED_OUT when [timeout] seconds passed without one."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        raw = next_host_line(deadline)
+        if raw is TIMED_OUT:
+            return TIMED_OUT
+        if raw is None:
+            break
+        line = raw.decode("utf-8", errors="replace").strip()
         if not line:
             continue
         if log_path:
@@ -229,15 +290,19 @@ def emit(message):
     if queue_fixture:
         line = SESSION_PLACEHOLDER.sub(lambda _: escaped_session_id, json.dumps(message, separators=(",", ":")))
         line = COMMAND_PLACEHOLDER.sub(lambda m: bound.get(m.group(0), m.group(0)), line)
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+        write_line(line)
         return
     if message.get("type") == "result":
         message["user_message_uuids"] = list(read_user_uuids)
         del read_user_uuids[:]
     elif message.get("type") == "system" and message.get("subtype") == "status" and "user_message_uuids" in message:
         message["user_message_uuids"] = list(read_user_uuids)
-    line = SESSION_PLACEHOLDER.sub(lambda _: escaped_session_id, json.dumps(message, separators=(",", ":")))
+    write_line(SESSION_PLACEHOLDER.sub(lambda _: escaped_session_id, json.dumps(message, separators=(",", ":"))))
+
+
+def write_line(line):
+    if edit_fixture:
+        line = line.replace(PATH_PLACEHOLDER, escaped_cwd)  # rule (o)
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
 
@@ -435,6 +500,19 @@ parity_fixture = fixture.startswith("parity-")
 queue_fixture = fixture.startswith("queue-")
 
 
+def is_mcp_message(message):
+    return message.get("type") == "control_request" and (message.get("request") or {}).get("subtype") == "mcp_message"
+
+
+def rpc_of(message):
+    """The JSON-RPC message an `mcp_message` control request carries, or {}."""
+    rpc = (message.get("request") or {}).get("message")
+    return rpc if isinstance(rpc, dict) else {}
+
+
+edit_fixture = any(is_mcp_message(message) for message in lines)  # rules (n) and (o)
+
+
 def is_full_breakdown(payload):
     """A `get_context_usage` answer with its `messages` category: the full one, not the summary (`parity-context:18`)."""
     categories = payload.get("categories")
@@ -470,8 +548,104 @@ if mcp_fixture or parity_fixture:
 else:
     replay = [message for message in lines if message is not initialize_line]
 
+def tool_call_of(message):
+    """Rule (n): (JSON-RPC id, tool use id) of a replayed `tools/call`, or None for any other line."""
+    rpc = rpc_of(message) if is_mcp_message(message) else {}
+    if rpc.get("method") != "tools/call":
+        return None
+    meta = (rpc.get("params") or {}).get("_meta") or {}
+    return rpc.get("id"), meta.get("claudecode/toolUseId")
+
+
+def is_cancel_of(message, rpc_id):
+    rpc = rpc_of(message) if is_mcp_message(message) else {}
+    return rpc.get("method") == "notifications/cancelled" and (rpc.get("params") or {}).get("requestId") == rpc_id
+
+
+def recorded_withdrawal(index, rpc_id):
+    """Rule (p): the index of the `result` that ends the recorded withdrawal of the call at replay[index], or None."""
+    for j in range(index + 1, len(replay)):
+        if tool_call_of(replay[j]) is not None:
+            return None
+        if is_cancel_of(replay[j], rpc_id):
+            return next((k for k in range(j, len(replay)) if replay[k].get("type") == "result"), None)
+    return None
+
+
+def with_host_reply(message):
+    """Rule (n): a `user` line whose `tool_result` answers a call the host replied to carries the host's reply."""
+    content = (message.get("message") or {}).get("content")
+    if message.get("type") != "user" or not isinstance(content, list):
+        return message
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") in host_replies):
+            continue
+        reply = host_replies[block["tool_use_id"]]
+        result = reply.get("result")
+        error = reply.get("error")
+        if isinstance(result, dict):
+            blocks = [b for b in result.get("content") or [] if isinstance(b, dict)]
+            is_error = result.get("isError") is True
+        elif isinstance(error, dict):
+            blocks = [{"type": "text", "text": str(error.get("message", ""))}]
+            is_error = True
+        else:
+            continue
+        if is_error:
+            text = "\n".join(str(b.get("text", "")) for b in blocks if b.get("type") == "text")
+            block["content"] = text
+            block["is_error"] = True
+            message["tool_use_result"] = "Error: " + text
+        else:
+            block["content"] = blocks
+            block.pop("is_error", None)
+            message["tool_use_result"] = copy.deepcopy(blocks)
+    return message
+
+
+def await_tool_reply(index, message):
+    """
+    Rule (n) and (p): waits for the host's reply to the `tools/call` at replay[index] and keeps it; returns the replay index to
+    go on from: index + 1, or past the recorded withdrawal when an `interrupt` (or TANDEM_FAKE_EDIT_CANCEL_MS) withdrew the call.
+    """
+    rpc_id, tool_use_id = tool_call_of(message)
+    end = recorded_withdrawal(index, rpc_id)
+    deadline = time.monotonic() + edit_cancel_ms / 1000 if edit_cancel_ms and end is not None else None
+    while True:
+        frame = read_host(None if deadline is None else max(0.0, deadline - time.monotonic()))
+        if frame is TIMED_OUT:
+            return withdraw(index, end, None)
+        if frame is None:
+            sys.exit(0)  # the host closed stdin: end like the real CLI
+        request = frame.get("request") or {}
+        if end is not None and frame.get("type") == "control_request" and request.get("subtype") == "interrupt":
+            return withdraw(index, end, frame.get("request_id"))
+        if answer_inline(frame):
+            continue
+        response = frame.get("response") or {}
+        if frame.get("type") == "control_response" and response.get("request_id") == message.get("request_id"):
+            reply = (response.get("response") or {}).get("mcp_response")
+            if isinstance(reply, dict) and tool_use_id is not None:
+                host_replies[tool_use_id] = reply
+            return index + 1
+
+
+def withdraw(index, end, interrupt_id):
+    """Rule (p): sends replay[index + 1 .. end] as recorded, waiting for nothing; the receipt answers [interrupt_id] (none without)."""
+    for message in replay[index + 1:end + 1]:
+        if message.get("type") == "control_response":
+            if interrupt_id is None:
+                continue
+            message["response"]["request_id"] = interrupt_id
+        emit(message)
+    return end + 1
+
+
 cancel_request_id = None  # rule (m): the request a waited-for cancelled line's control_response answers
-for message in replay:
+position = 0
+while position < len(replay):
+    message = replay[position]
+    position += 1
     kind = message.get("type")
     if kind == "system" and message.get("subtype") == "init":
         if not (queue_fixture and named_since_result[0]):
@@ -500,10 +674,14 @@ for message in replay:
         wait_for_gate()
     if kind == "stream_event" and line_delay_ms:
         time.sleep(line_delay_ms / 1000)
+    if kind == "user" and host_replies:
+        message = with_host_reply(message)
     emit(message)
     if kind == "result":
         named_since_result[0] = False
-    if kind == "control_request":
+    if tool_call_of(message) is not None:
+        position = await_tool_reply(position - 1, message)
+    elif kind == "control_request":
         wait_for(lambda m: m.get("type") == "control_response"
                  and m.get("response", {}).get("request_id") == message.get("request_id"))
 
