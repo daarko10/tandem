@@ -160,7 +160,8 @@ data class ContextChip(val kind: ContextChipKind, val label: String, val path: S
 /**
  * A message sent while Claude worked, not started yet: its [text] and [images] are Tandem's own copy (the CLI never echoes it),
  * [later] whether it was sent with `"priority":"later"`. [restoreOnWithdraw]: while [PendingStage.WITHDRAWING], whether it goes
- * back to the composer (Edit) or is dropped (Cancel).
+ * back to the composer (Edit) or is dropped (Cancel). [typed] is the draft as the user typed it (`@src/A.kt`, where [text] holds the
+ * bare path of a dirty mention, spec 3.5): what goes back to the composer, so that the next send swaps against the buffer as it is then.
  */
 data class PendingSend(
     val uuid: String,
@@ -170,6 +171,9 @@ data class PendingSend(
     val later: Boolean,
     val stage: PendingStage,
     val restoreOnWithdraw: Boolean = false,
+    /** The context blocks sent before its text, as chips (spec 3.5); its entry takes them once it starts. */
+    val context: List<ContextChip> = emptyList(),
+    val typed: String = text,
 )
 
 /** Where a [PendingSend] stands. */
@@ -184,7 +188,7 @@ enum class PendingStage {
     WITHDRAWING,
 }
 
-/** A message that came back without running, for the composer to put back ahead of the draft. */
+/** A message that came back without running, for the composer to put back ahead of the draft: its [text] as typed. */
 data class ReturnedSend(val uuid: String, val text: String, val images: List<UserImage>)
 
 /** How many characters of a message's first line a notice quotes (spec 12.5). */

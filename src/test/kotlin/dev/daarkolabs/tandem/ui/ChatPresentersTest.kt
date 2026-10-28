@@ -31,10 +31,10 @@ class ChatPresentersTest {
             val entered = CountDownLatch(1)
             val latch = CountDownLatch(1)
             val sent: MutableList<String> = Collections.synchronizedList(ArrayList())
-            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()), send = { _, text, _, _ ->
+            val presenters = ChatPresenters(scope, MutableStateFlow(RowOptions(showThinking = true)), MutableStateFlow(emptyList()), send = { _, prompt ->
                 entered.countDown()
                 latch.await(TIMEOUT, TimeUnit.MILLISECONDS)
-                sent += text
+                sent += prompt.text
             })
             // As SessionSpawner.takeOver makes one: no process, so a notice goes straight into the chat.
             val handle = SessionHandle("a", scope, ChatState(), MutableStateFlow(emptyList()), 0L)

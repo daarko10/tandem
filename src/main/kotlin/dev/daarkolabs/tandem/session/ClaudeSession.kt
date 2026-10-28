@@ -4,6 +4,7 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
 import dev.daarkolabs.tandem.protocol.CliMessage
+import dev.daarkolabs.tandem.protocol.ContextBlock
 import dev.daarkolabs.tandem.protocol.ContextBreakdown
 import dev.daarkolabs.tandem.protocol.ControlPayloads
 import dev.daarkolabs.tandem.protocol.HostMessages
@@ -387,25 +388,34 @@ class ClaudeSession(
     }
 
     /**
-     * Sends a prompt: [text], then the [images] attached to it, in order, with `"priority":"later"` when [later]. Each image's id is the
+     * Sends a prompt: the [context] blocks first (the bubble shows them as [chips], spec 3.5), then [text], then the [images] attached
+     * to it, in order, with `"priority":"later"` when [later]. [typed] is the draft as typed (a dirty mention keeps its `@` there),
+     * which a withdrawn send restores. Each image's id is the
      * prompt's uuid and its index. Blank text is left off the wire, so the entry's text is `""` then, as the reloaded line gives it.
      *
      * Written at once, also while a turn runs: the CLI queues it and its lifecycle lines tell the rest ([reduce]). Held instead, in
      * send order, while a `!` command runs, escapes or prompts are held, an output frame waits for its quiet result, or a quiet send's
      * result is still due (spec 12.4 rule 2): [advanceShell] writes it once those frames are out.
      */
-    fun sendUserMessage(text: String, images: List<ImageBlock> = emptyList(), later: Boolean = false) {
+    fun sendUserMessage(
+        text: String,
+        images: List<ImageBlock> = emptyList(),
+        later: Boolean = false,
+        context: List<ContextBlock> = emptyList(),
+        chips: List<ContextChip> = emptyList(),
+        typed: String = text,
+    ) {
         val uuid = UUID.randomUUID().toString()
         val shown = images.mapIndexed { i, image -> UserImage("$uuid#$i", image.mediaType, image.base64) }
-        val frame = HostMessages.userMessage(text, images, uuid, later)
+        val frame = HostMessages.userMessage(text, images, uuid, later, context)
         val entry = if (text.isBlank()) "" else text
         synchronized(shellLock) {
             if (held.isNotEmpty() || pendingOutput != null || _state.value.quietSends.isNotEmpty()) {
                 held.addLast(Held.Prompt(uuid, frame))
-                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true, held = true))
+                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true, held = true, context = chips, typed = typed))
                 LOG.info("prompt $uuid held behind shell frames")
             } else {
-                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true))
+                dispatch(SessionEvent.UserSent(uuid, entry, clock(), shown, later = later, live = true, context = chips, typed = typed))
                 send(frame)
             }
         }

@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.session
 
+import dev.daarkolabs.tandem.protocol.ContextBlock
 import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.session.transcript.SessionSummary
@@ -777,8 +778,18 @@ private fun ChatEntry.asTitle(): String? = when (this) {
 
 /** What waits for a process, in order: a prompt, or a shell escape's frames. */
 internal sealed interface Outbound {
-    /** A prompt: [text] and the [images] attached to it; [later]: sent with `"priority":"later"` (spec 12.1). */
-    data class Prompt(val text: String, val images: List<ImageBlock> = emptyList(), val later: Boolean = false) : Outbound
+    /**
+     * A prompt: [text] and the [images] attached to it; [later]: sent with `"priority":"later"` (spec 12.1); [context]: the blocks
+     * sent before its text, which its bubble shows as [chips] (spec 3.5); [typed]: the draft as typed, restored when it is withdrawn.
+     */
+    data class Prompt(
+        val text: String,
+        val images: List<ImageBlock> = emptyList(),
+        val later: Boolean = false,
+        val context: List<ContextBlock> = emptyList(),
+        val chips: List<ContextChip> = emptyList(),
+        val typed: String = text,
+    ) : Outbound
 
     /**
      * Shell escape [id]'s frames: its [command] and [output] (with Tandem's note for a stopped or capped one), and whether Claude
@@ -790,7 +801,7 @@ internal sealed interface Outbound {
 /** Hands [outbound] to this process: a prompt as a user message, a shell escape as its frames. */
 private fun ClaudeSession.deliver(outbound: Outbound) {
     when (outbound) {
-        is Outbound.Prompt -> sendUserMessage(outbound.text, outbound.images, outbound.later)
+        is Outbound.Prompt -> sendUserMessage(outbound.text, outbound.images, outbound.later, outbound.context, outbound.chips, outbound.typed)
         is Outbound.ShellEscape -> sendShellEscape(outbound.id, outbound.command, outbound.output, outbound.respond)
     }
 }

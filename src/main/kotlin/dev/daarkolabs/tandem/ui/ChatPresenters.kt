@@ -5,7 +5,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import dev.daarkolabs.tandem.chat.RowOptions
-import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.session.CommandCatalogue
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.NoticeLevel
@@ -26,9 +25,23 @@ import kotlinx.coroutines.plus
  * process has not offered its commands [SessionManager.commands].
  */
 @Composable
-internal fun rememberChatPresenters(manager: SessionManager, open: List<SessionHandle>, options: StateFlow<RowOptions>): ChatPresenters {
+internal fun rememberChatPresenters(
+    manager: SessionManager,
+    open: List<SessionHandle>,
+    options: StateFlow<RowOptions>,
+    unsaved: suspend (path: String) -> String? = { null },
+): ChatPresenters {
     val scope = rememberCoroutineScope()
-    val presenters = remember(scope, manager, options) { ChatPresenters(scope, options, manager.models, manager::send, manager.commands) }
+    val presenters = remember(scope, manager, options) {
+        ChatPresenters(
+            scope,
+            options,
+            manager.models,
+            { id, prompt -> manager.send(id, prompt.text, prompt.images, prompt.later, prompt.context, prompt.chips, prompt.typed) },
+            manager.commands,
+            unsaved,
+        )
+    }
     LaunchedEffect(presenters, open) { presenters.retain(open) }
     return presenters
 }
@@ -44,17 +57,20 @@ internal class ChatPresenters(
     private val options: StateFlow<RowOptions>,
     /** The models another process listed, for a session whose own process has not ([ChatPresenter]): [SessionManager.models]. */
     private val models: StateFlow<List<ModelOption>>,
-    private val send: (SessionId, String, List<ImageBlock>, Boolean) -> Unit = { _, _, _, _ -> },
+    private val send: (SessionId, OutgoingPrompt) -> Unit = { _, _ -> },
     /** The commands another process offered, for a session whose own process has not: [SessionManager.commands]. */
     private val commands: StateFlow<CommandCatalogue> = MutableStateFlow(CommandCatalogue()),
+    /** The IDE's buffer of a mentioned file with unsaved changes, else null ([ComposerSender.swapDirtyMentions]). */
+    private val unsaved: suspend (path: String) -> String? = { null },
 ) {
     private inner class Entry(val handle: SessionHandle, val job: Job, val presenter: ChatPresenter) {
         /** Made on the first prompt: a session never typed in has none. */
         val sender: ComposerSender by lazy(LazyThreadSafetyMode.NONE) {
             ComposerSender(
                 scope + job,
-                send = { text, images, later -> send(handle.id, text, images, later) },
+                send = { prompt -> send(handle.id, prompt) },
                 dropped = { handle.notice(NoticeLevel.WARNING, it) },
+                unsaved = unsaved,
             )
         }
     }

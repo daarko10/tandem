@@ -13,6 +13,7 @@ import dev.daarkolabs.tandem.chat.ToolRow
 import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.chat.UserRow
 import dev.daarkolabs.tandem.chat.paletteFor
+import dev.daarkolabs.tandem.ide.context.Selection
 import dev.daarkolabs.tandem.session.ReturnedSend
 import dev.daarkolabs.tandem.session.UserImage
 import kotlinx.collections.immutable.persistentListOf
@@ -407,6 +408,32 @@ class ChatUiStateTest {
         assertEquals("first", ui.draft.text.toString())
         assertEquals(listOf(listOf("a")), taken)
         assertEquals(listOf(0, 1), attached)
+    }
+
+    // spec: × drops the chip for this message and the next selection brings it back
+    @Test
+    fun `× drops the chip for this message and the next selection brings it back`() {
+        val ui = ChatUiState()
+        assertNull(ui.chipSelection, "no selection, no chip")
+        val first = Selection("src/A.kt", "A.kt", 1, 2, "a\nb")
+        ui.selectionChanged(first)
+        assertEquals(first, ui.chipSelection)
+        assertEquals("A.kt:1-2", ui.chipSelection!!.label)
+        // × drops it; the same selection reported again (the flow re-collected on a session switch) does not bring it back.
+        ui.removeSelection()
+        assertNull(ui.chipSelection)
+        ui.selectionChanged(first)
+        assertNull(ui.chipSelection)
+        assertEquals(first, ui.selection.value, "the selection is still known, only its chip is dropped")
+        // The next selection brings it back, as does the same range picked again after a caret move.
+        val next = Selection("src/A.kt", "A.kt", 3, 3, "c")
+        ui.selectionChanged(next)
+        assertEquals(next, ui.chipSelection)
+        ui.removeSelection()
+        ui.selectionChanged(null)
+        assertNull(ui.chipSelection)
+        ui.selectionChanged(next)
+        assertEquals(next, ui.chipSelection)
     }
 
     private fun image(uuid: String): UserImage =

@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.chat
 
+import dev.daarkolabs.tandem.session.ContextChip
 import dev.daarkolabs.tandem.session.EditReview
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
@@ -32,7 +33,7 @@ enum class RowGap(val dp: Int) {
  * What the user sent, `u:<entry id>`. [mono]: a slash command or a `!` shell line, drawn in the editor font. [images]: the images
  * sent with it, in order, by id only (polish spec 2.7); an images-only prompt has a blank [text]. [caption]: the line under the
  * bubble, [FOLDED_CAPTION] for a prompt the CLI took into the running turn (desktop-parity spec 12.1); null for a prompt that
- * started its own turn.
+ * started its own turn. [chips]: the context blocks sent before its text (an unsaved file, the selection; spec 3.5).
  */
 data class UserRow(
     override val key: String,
@@ -41,6 +42,7 @@ data class UserRow(
     override val gap: RowGap = RowGap.TURN,
     val images: ImmutableList<ImageRef> = persistentListOf(),
     val caption: String? = null,
+    val chips: ImmutableList<ContextChip> = persistentListOf(),
 ) : ChatRow
 
 /**

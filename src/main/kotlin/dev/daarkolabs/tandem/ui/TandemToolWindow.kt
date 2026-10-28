@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.ide.TandemSessions
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
+import dev.daarkolabs.tandem.ide.context.ProjectFiles
 import dev.daarkolabs.tandem.session.SessionId
 import dev.daarkolabs.tandem.ui.rows.LocalReducedMotion
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -91,7 +92,9 @@ internal fun TandemToolWindow(project: Project, sessions: TandemSessions) {
     val open by manager.sessions.collectAsState()
     val selectedId by manager.selected.collectAsState()
     val selected = open.firstOrNull { it.id == selectedId }
-    val presenters = rememberChatPresenters(manager, open, sessions.rowOptions)
+    // A mention of a file with unsaved changes goes as its buffer (spec 3.5): the sender asks the project's files, off the EDT.
+    val projectFiles = remember(project) { ProjectFiles.getInstance(project) }
+    val presenters = rememberChatPresenters(manager, open, sessions.rowOptions, projectFiles::unsavedText)
     val reduceMotion by sessions.reduceMotion.collectAsState()
     var collapsed by remember { mutableStateOf(workspace.state.sidebarCollapsed) }
     // The sidebar over the chat, in a window too narrow to dock it.

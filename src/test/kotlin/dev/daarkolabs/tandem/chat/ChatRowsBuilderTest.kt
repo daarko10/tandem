@@ -11,6 +11,8 @@ import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ContextChip
+import dev.daarkolabs.tandem.session.ContextChipKind
 import dev.daarkolabs.tandem.session.EditOutcome
 import dev.daarkolabs.tandem.session.EditPhase
 import dev.daarkolabs.tandem.session.EditReview
@@ -57,6 +59,15 @@ class ChatRowsBuilderTest {
 
     /** The row of the lone Agent call. */
     private fun agent(rows: ChatRows): ToolRow = rows.rows.toolRows().single { it.calls.singleOrNull()?.kind == ToolKind.AGENT }
+
+    // spec: a user row carries its chips
+    @Test
+    fun `a user row carries its chips`() {
+        val chip = ContextChip(ContextChipKind.UNSAVED_FILE, "A.kt (unsaved)", "src/A.kt")
+        val state = ChatState(entries = listOf(ChatEntry.User("u1", "fix src/A.kt", context = listOf(chip)), ChatEntry.User("u2", "plain")))
+        val rows = ChatRowsBuilder(options).build(state).rows.filterIsInstance<UserRow>()
+        assertEquals(listOf(listOf(chip), emptyList()), rows.map { it.chips.toList() })
+    }
 
     @Test
     fun `a user row lists its images in order`() {

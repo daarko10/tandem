@@ -11,6 +11,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -377,21 +378,7 @@ private fun ListFrame(
  */
 @Composable
 private fun PaletteRow(item: PaletteItem, selected: Boolean, height: Dp, scrollbarPadding: Dp, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth()
-            .padding(horizontal = ROW_INSET)
-            .height(height)
-            .clip(RoundedCornerShape(6.dp))
-            .background(if (selected) chatPalette().bubbleFill else Color.Transparent)
-            .clickable(onClick = onClick)
-            .semantics {
-                contentDescription = "/${item.name}"
-                this.selected = selected
-            }
-            .padding(horizontal = TEXT_INSET)
-            .padding(end = scrollbarPadding),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    PaletteRowShell("/${item.name}", selected, height, scrollbarPadding, Modifier, onClick) {
         Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
         val trailing = rowTrailing(item, selected)
         if (trailing.isNotEmpty()) {
@@ -404,6 +391,39 @@ private fun PaletteRow(item: PaletteItem, selected: Boolean, height: Dp, scrollb
             )
         }
     }
+}
+
+/**
+ * A palette's row, the slash palette's and the `@` palette's alike (spec 3.5): [height] tall, inset from the list's edges, the
+ * [selected] row on a rounded fill, described as [description] to assistive technology; a click calls [onClick]. Its [content] keeps
+ * [scrollbarPadding] clear at its end, where the scrollbar's track may be drawn.
+ */
+@Composable
+internal fun PaletteRowShell(
+    description: String,
+    selected: Boolean,
+    height: Dp,
+    scrollbarPadding: Dp,
+    modifier: Modifier,
+    onClick: () -> Unit,
+    content: @Composable RowScope.() -> Unit,
+) {
+    Row(
+        modifier.fillMaxWidth()
+            .padding(horizontal = ROW_INSET)
+            .height(height)
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (selected) chatPalette().bubbleFill else Color.Transparent)
+            .clickable(onClick = onClick)
+            .semantics {
+                contentDescription = description
+                this.selected = selected
+            }
+            .padding(horizontal = TEXT_INSET)
+            .padding(end = scrollbarPadding),
+        verticalAlignment = Alignment.CenterVertically,
+        content = content,
+    )
 }
 
 /**
