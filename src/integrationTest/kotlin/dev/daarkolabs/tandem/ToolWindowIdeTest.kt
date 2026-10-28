@@ -1878,12 +1878,12 @@ class ToolWindowIdeTest {
     }
 
     /**
-     * Closes the trial's `Tell us about your experience` dialog with `No, Thanks` if it shows within a few seconds: a JetBrains
+     * Closes the trial's `Tell us about your experience` dialog with `No, Thanks` if it shows within 2 s (the IDE is idle by then): a JetBrains
      * dialog of a locally cached IDE, not Tandem's, which would take every click and key of the test.
      */
     private fun Driver.dismissTrialFeedback() {
         val noThanks = ui.x("//div[@class='JButton' and @visible_text='No, Thanks']")
-        val shown = runCatching { waitFor("the trial feedback dialog", 10.seconds) { noThanks.present() } }.isSuccess
+        val shown = runCatching { waitFor("the trial feedback dialog", 2.seconds) { noThanks.present() } }.isSuccess
         if (shown) {
             noThanks.click()
             waitFor("the trial feedback dialog closed", 30.seconds) { !noThanks.present() }
