@@ -23,7 +23,8 @@ object EditResults {
      * The edit landed and the file was saved. [file] is the file's text now, [ranges] where the edit sits in it (for the region past
      * the bound; the file's start when empty); for [AcceptMode.USER_CHANGED], [proposal] and [applied] are the whole texts the
      * model proposed and the user accepted, whose diff the model is shown (both required for that mode). When that diff is past
-     * [EditMatcher.unifiedDiff]'s bound it is left out, with its line, and the file block follows alone.
+     * [EditMatcher.unifiedDiff]'s bound it is left out, with its line, and a sentence says the change is too large to show; when the
+     * two texts differ only in a final newline (which the line diff cannot show) a sentence says that instead.
      */
     fun accepted(path: String, file: String, ranges: List<IntRange>, proposal: String?, applied: String?, mode: AcceptMode): ToolReply {
         val lineCount = EditMatcher.lines(file).size
@@ -35,7 +36,12 @@ object EditResults {
             val accepted = requireNotNull(applied) { "USER_CHANGED needs the applied text" }
             val diff = EditMatcher.unifiedDiff(proposed, accepted, "proposal", "applied")
             val head = "Applied to $path and saved the file. The user changed your proposal in the diff before accepting it." +
-                if (diff.isEmpty()) "" else "\nWhat changed between your proposal and what was applied:\n"
+                when {
+                    diff.isNotEmpty() -> "\nWhat changed between your proposal and what was applied:\n"
+                    proposed == accepted -> ""
+                    EditMatcher.lines(proposed) == EditMatcher.lines(accepted) -> " They differ only in the final newline."
+                    else -> " The change is too large to show as a diff."
+                }
             val middle = if (whole) "\n${fileHeader(lineCount)}" else "\nThe file has $lineCount lines; the edited region:\n"
             fit(head, diff, middle, if (whole) EditMatcher.numbered(file) else region, closing)
         } else {
@@ -143,18 +149,19 @@ object EditResults {
         var shrunkDiff = diff
         var shrunkBody = body
         if (fixed + utf8Size(diff) + utf8Size(body) > RESULT_BYTES) {
-            shrunkDiff = shrinkLines(diff, RESULT_BYTES - fixed - utf8Size(body))
-            shrunkBody = shrinkLines(body, RESULT_BYTES - fixed - utf8Size(shrunkDiff))
+            shrunkDiff = shrinkLines(diff, maxOf(0, RESULT_BYTES - fixed - utf8Size(body)))
+            shrunkBody = shrinkLines(body, maxOf(0, RESULT_BYTES - fixed - utf8Size(shrunkDiff)))
         }
         return head + shrunkDiff + middle + shrunkBody + tail
     }
 
     /**
-     * [block]'s first lines that fit [budget] UTF-8 bytes with a last line `… <n> more lines`; [block] itself when it fits. A block
-     * already cut that way (the diff's 400 lines) has its own count added, so `<n>` stays the number of lines really left out.
+     * [block]'s first lines that fit [budget] UTF-8 bytes with a last line `… <n> more lines`; [block] itself when it fits, and an
+     * empty block (no diff) stays empty whatever the budget. A block already cut that way (the diff's 400 lines) has its own count
+     * added, so `<n>` stays the number of lines really left out.
      */
     private fun shrinkLines(block: String, budget: Int): String {
-        if (utf8Size(block) <= budget) return block
+        if (block.isEmpty() || utf8Size(block) <= budget) return block
         val all = block.split('\n')
         val earlierCut = MORE_LINES.matchEntire(all.last())?.groupValues?.get(1)?.toIntOrNull()
         val lines = if (earlierCut != null) all.dropLast(1) else all

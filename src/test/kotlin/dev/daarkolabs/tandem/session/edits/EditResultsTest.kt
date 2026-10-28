@@ -20,6 +20,7 @@ class EditResultsTest {
 
     private fun bytes(text: String): Int = text.encodeToByteArray().size
 
+    // spec: accepted … unchanged proposal (spec 4.3: Accept, proposal unchanged)
     @Test
     fun `accepted, unchanged proposal`() {
         assertEquals(
@@ -28,6 +29,7 @@ class EditResultsTest {
         )
     }
 
+    // spec: Accept, proposal changed by the user
     @Test
     fun `accepted, proposal changed by the user`() {
         assertEquals(
@@ -50,13 +52,26 @@ class EditResultsTest {
         val text = EditResults.accepted(path, applied, listOf(0 until 2), proposal, applied, AcceptMode.USER_CHANGED).text
         assertTrue(
             text.startsWith(
-                "Applied to /p/a.kt and saved the file. The user changed your proposal in the diff before accepting it.\n" +
-                    "The file has 10001 lines; the edited region:\n     1\ta1\n",
+                "Applied to /p/a.kt and saved the file. The user changed your proposal in the diff before accepting it. " +
+                    "The change is too large to show as a diff.\nThe file has 10001 lines; the edited region:\n     1\ta1\n",
             ),
             text.take(300),
         )
         assertFalse(text.contains("What changed"))
         assertTrue(text.endsWith("\nRead /p/a.kt for the rest."))
+        // The line diff cannot show a final newline: the texts' only difference is named instead.
+        assertEquals(
+            ok(
+                "Applied to /p/a.kt and saved the file. The user changed your proposal in the diff before accepting it. " +
+                    "They differ only in the final newline.\n$whole",
+            ),
+            EditResults.accepted(path, file, beta, "beta\nline two", file, AcceptMode.USER_CHANGED),
+        )
+        // Identical texts: no diff and no sentence.
+        assertEquals(
+            ok("Applied to /p/a.kt and saved the file. The user changed your proposal in the diff before accepting it.\n$whole"),
+            EditResults.accepted(path, file, beta, file, file, AcceptMode.USER_CHANGED),
+        )
     }
 
     @Test
@@ -69,6 +84,7 @@ class EditResultsTest {
         )
     }
 
+    // spec: Auto-accepted
     @Test
     fun `auto-accepted by the mode and with Accept all`() {
         assertEquals(
@@ -116,6 +132,7 @@ class EditResultsTest {
         )
     }
 
+    // spec: Reject
     @Test
     fun `reject, with and without a reason`() {
         assertEquals(error("The user rejected this edit in the IDE; nothing was changed."), EditResults.rejected(null))
@@ -126,6 +143,7 @@ class EditResultsTest {
         )
     }
 
+    // spec: the file changed while the diff was open (3.2's check fails)
     @Test
     fun `the file changed while the diff was open`() {
         assertEquals(
@@ -160,6 +178,7 @@ class EditResultsTest {
         assertTrue(EditResults.fileChanged(path, long).text.endsWith("… 2001 lines in all; Read the file for the rest"))
     }
 
+    // spec: `old_string` found `n` > 1 times, no `replace_all`
     @Test
     fun `old_string found more than once without replace_all`() {
         assertEquals(
@@ -173,6 +192,7 @@ class EditResultsTest {
         assertEquals(error("old_string and new_string are the same; nothing to change."), EditResults.same())
     }
 
+    // spec: the file does not exist (`edit_file`)
     @Test
     fun `the file does not exist`() {
         assertEquals(error("/p/a.kt does not exist. Use write_file to create it."), EditResults.missing(path))
@@ -216,11 +236,13 @@ class EditResultsTest {
         )
     }
 
+    // spec: plan mode (7.9)
     @Test
     fun `plan mode`() {
         assertEquals(error("The session is in plan mode: Tandem applies no edits until the plan is approved."), EditResults.planMode())
     }
 
+    // spec: malformed arguments (a missing or non-string field)
     @Test
     fun `malformed arguments`() {
         assertEquals(error("edit_file needs file_path, old_string and new_string as strings."), EditResults.malformed("edit_file"))
@@ -321,5 +343,30 @@ class EditResultsTest {
         val wide = EditResults.notFound(path, "é😀".repeat(60_000)).text
         assertTrue(bytes(wide) <= cap)
         assertEquals(wide, wide.encodeToByteArray().decodeToString())
+        // No diff block and a region over the bound (a replace_all on every line of 3000 lines): the head stays verbatim, the
+        // region shrinks, and the closing line stays.
+        val dense = (1..3000).joinToString("\n") { "x".repeat(40) + it.toString().padStart(5, '0') } + "\n"
+        val everyLine = (0 until 3000).map { it * 46 until it * 46 + 1 }
+        val plain = EditResults.accepted(path, dense, everyLine, null, null, AcceptMode.USER).text
+        assertTrue(bytes(plain) <= cap, "${bytes(plain)}")
+        assertTrue(
+            plain.startsWith(
+                "Applied the edit to /p/a.kt and saved the file. The file has 3000 lines; the edited region (line numbers as in the file):\n" +
+                    "     1\t",
+            ),
+            plain.take(200),
+        )
+        assertTrue(plain.endsWith("more lines\nRead /p/a.kt for the rest."), plain.takeLast(100))
+        // The same with a changed proposal whose diff is empty (identical texts).
+        val changed = EditResults.accepted(path, dense, everyLine, dense, dense, AcceptMode.USER_CHANGED).text
+        assertTrue(bytes(changed) <= cap, "${bytes(changed)}")
+        assertTrue(
+            changed.startsWith(
+                "Applied to /p/a.kt and saved the file. The user changed your proposal in the diff before accepting it.\n" +
+                    "The file has 3000 lines; the edited region:\n     1\t",
+            ),
+            changed.take(200),
+        )
+        assertTrue(changed.endsWith("more lines\nRead /p/a.kt for the rest."), changed.takeLast(100))
     }
 }

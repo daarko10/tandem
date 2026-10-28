@@ -51,6 +51,9 @@ class EditMatcherTest {
         assertEquals(Match.Found(listOf(8 until 19)), match)
         assertEquals("fun a() {\n    y()\n}\n", EditMatcher.apply(text, match as Match.Found, "{\r\n    y()\r\n}"))
         assertEquals(listOf(8 until 19), EditMatcher.appliedRanges(match, "{\r\n    y()\r\n}"))
+        // The text A2 writes into the Document per range: the Document rejects \r.
+        assertEquals("{\n    y()\n}", EditMatcher.normalizeNewlines("{\r\n    y()\r\n}"))
+        assertEquals("a\nb", EditMatcher.normalizeNewlines("a\rb"))
         // A lone \r is a line break too.
         assertEquals(Match.Found(listOf(0 until 3)), EditMatcher.match("a\nb\n", "a\rb", replaceAll = false))
     }

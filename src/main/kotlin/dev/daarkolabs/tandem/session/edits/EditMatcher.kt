@@ -153,7 +153,11 @@ object EditMatcher {
         return if (parts.last().isEmpty()) parts.dropLast(1) else parts
     }
 
-    private fun normalizeNewlines(text: String): String =
+    /**
+     * [text] with `\r\n` and a lone `\r` read as `\n`: what [match] looks for, what [apply] and [appliedRanges] measure, and the text
+     * to write into the `Document` (which rejects `\r`) for each range of a [Match.Found].
+     */
+    fun normalizeNewlines(text: String): String =
         if ('\r' in text) text.replace("\r\n", "\n").replace('\r', '\n') else text
 
     private fun numberedLine(number: Int, line: String): String = number.toString().padStart(6) + "\t" + line
