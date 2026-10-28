@@ -3,6 +3,7 @@ package dev.daarkolabs.tandem.session.edits
 import dev.daarkolabs.tandem.protocol.ToolReply
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -37,6 +38,34 @@ class EditResultsTest {
                     "The file now reads (lines 1-2 of 2):\n     1\tbeta!\n     2\tline two",
             ),
             EditResults.accepted(path, "beta!\nline two\n", listOf(0 until 5), "beta\nline two\n", "beta!\nline two\n", AcceptMode.USER_CHANGED),
+        )
+    }
+
+    @Test
+    fun `a changed proposal needs both texts, and a diff past its bound leaves the file block alone`() {
+        assertFailsWith<IllegalArgumentException> { EditResults.accepted(path, file, beta, null, file, AcceptMode.USER_CHANGED) }
+        assertFailsWith<IllegalArgumentException> { EditResults.accepted(path, file, beta, file, null, AcceptMode.USER_CHANGED) }
+        val proposal = (1..10_001).joinToString("\n") { "p$it" } + "\n"
+        val applied = (1..10_001).joinToString("\n") { "a$it" } + "\n"
+        val text = EditResults.accepted(path, applied, listOf(0 until 2), proposal, applied, AcceptMode.USER_CHANGED).text
+        assertTrue(
+            text.startsWith(
+                "Applied to /p/a.kt and saved the file. The user changed your proposal in the diff before accepting it.\n" +
+                    "The file has 10001 lines; the edited region:\n     1\ta1\n",
+            ),
+            text.take(300),
+        )
+        assertFalse(text.contains("What changed"))
+        assertTrue(text.endsWith("\nRead /p/a.kt for the rest."))
+    }
+
+    @Test
+    fun `a one-line change to a long file counts one line`() {
+        val previous = (1..12_000).joinToString("\n") { "l$it" } + "\n"
+        val now = previous.replace("l6000\n", "x\n")
+        assertEquals(
+            ok("Replaced the content of /p/a.kt (12000 lines; +1 −1 against the previous content) and saved it."),
+            EditResults.replaced(path, now, previous, changed = false),
         )
     }
 
@@ -271,6 +300,11 @@ class EditResultsTest {
         val first = EditResults.accepted(path, applied, listOf(0 until 1), proposal, applied, AcceptMode.USER_CHANGED).text
         assertTrue(bytes(first) <= cap, "${bytes(first)}")
         assertTrue(first.contains("more lines\nThe file now reads (lines 1-900 of 900):\n"))
+        // The diff was cut to 400 lines and then shrunk again: the count still names every line left out (3 + 1800 in all).
+        val diffBlock = first.substringAfter("applied:\n").substringBefore("\nThe file now reads").split('\n')
+        val leftOut = Regex("… (\\d+) more lines").matchEntire(diffBlock.last())!!.groupValues[1].toInt()
+        assertTrue(diffBlock.size - 1 < 399, "${diffBlock.size}")
+        assertEquals(1803, diffBlock.size - 1 + leftOut)
         assertTrue(first.endsWith("   900\t" + "a".repeat(60) + "00900"), "the file block is whole")
         // Lines too long for any region: the diff goes first, then the file block shrinks; the closing line stays.
         val huge = (1..10).joinToString("\n") { "y".repeat(30_000) }

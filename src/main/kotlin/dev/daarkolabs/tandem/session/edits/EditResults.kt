@@ -17,11 +17,13 @@ object EditResults {
     private const val HEAD_LINES = 200
     private const val RESULT_BYTES = 100 * 1024
     private const val CUT_MARK = "\n… cut to stay under 100 KB"
+    private val MORE_LINES = Regex("… (\\d+) more lines")
 
     /**
      * The edit landed and the file was saved. [file] is the file's text now, [ranges] where the edit sits in it (for the region past
      * the bound; the file's start when empty); for [AcceptMode.USER_CHANGED], [proposal] and [applied] are the whole texts the
-     * model proposed and the user accepted, whose diff the model is shown.
+     * model proposed and the user accepted, whose diff the model is shown (both required for that mode). When that diff is past
+     * [EditMatcher.unifiedDiff]'s bound it is left out, with its line, and the file block follows alone.
      */
     fun accepted(path: String, file: String, ranges: List<IntRange>, proposal: String?, applied: String?, mode: AcceptMode): ToolReply {
         val lineCount = EditMatcher.lines(file).size
@@ -29,9 +31,11 @@ object EditResults {
         val region = if (whole) "" else region(file, ranges)
         val closing = if (whole) "" else "\nRead $path for the rest."
         val text = if (mode == AcceptMode.USER_CHANGED) {
-            val head = "Applied to $path and saved the file. The user changed your proposal in the diff before accepting it.\n" +
-                "What changed between your proposal and what was applied:\n"
-            val diff = if (proposal != null && applied != null) EditMatcher.unifiedDiff(proposal, applied, "proposal", "applied") else ""
+            val proposed = requireNotNull(proposal) { "USER_CHANGED needs the proposal" }
+            val accepted = requireNotNull(applied) { "USER_CHANGED needs the applied text" }
+            val diff = EditMatcher.unifiedDiff(proposed, accepted, "proposal", "applied")
+            val head = "Applied to $path and saved the file. The user changed your proposal in the diff before accepting it." +
+                if (diff.isEmpty()) "" else "\nWhat changed between your proposal and what was applied:\n"
             val middle = if (whole) "\n${fileHeader(lineCount)}" else "\nThe file has $lineCount lines; the edited region:\n"
             fit(head, diff, middle, if (whole) EditMatcher.numbered(file) else region, closing)
         } else {
@@ -145,11 +149,17 @@ object EditResults {
         return head + shrunkDiff + middle + shrunkBody + tail
     }
 
-    /** [block]'s first lines that fit [budget] UTF-8 bytes with a last line `… <n> more lines`; [block] itself when it fits. */
+    /**
+     * [block]'s first lines that fit [budget] UTF-8 bytes with a last line `… <n> more lines`; [block] itself when it fits. A block
+     * already cut that way (the diff's 400 lines) has its own count added, so `<n>` stays the number of lines really left out.
+     */
     private fun shrinkLines(block: String, budget: Int): String {
         if (utf8Size(block) <= budget) return block
-        val lines = block.split('\n')
-        val markRoom = utf8Size("… ${lines.size} more lines")
+        val all = block.split('\n')
+        val earlierCut = MORE_LINES.matchEntire(all.last())?.groupValues?.get(1)?.toIntOrNull()
+        val lines = if (earlierCut != null) all.dropLast(1) else all
+        val total = lines.size + (earlierCut ?: 0)
+        val markRoom = utf8Size("… $total more lines")
         var used = 0
         var kept = 0
         while (kept < lines.size) {
@@ -158,7 +168,7 @@ object EditResults {
             used += next
             kept++
         }
-        return (lines.subList(0, kept) + "… ${lines.size - kept} more lines").joinToString("\n")
+        return (lines.subList(0, kept) + "… ${total - kept} more lines").joinToString("\n")
     }
 
     /** [text] cut, inside a line if need be and never inside a character, so that it and [CUT_MARK] stay under 100 KB. */
