@@ -144,11 +144,14 @@ sealed interface SessionEvent {
     /** The user asked again for [part] of [uuid]'s usage card: [UsagePart.SESSION] loads both parts again, [UsagePart.HISTORY] its own. */
     data class UsageRetry(val uuid: String, val part: UsagePart) : SessionEvent
 
+    /** An event of a Tandem edit from the IDE's `TandemEdits`, the only ones `SessionManager.editEvent` takes. */
+    sealed interface EditEvent : SessionEvent
+
     /** The review of Tandem edit [toolUseId] moved on to [review] (from the IDE's `TandemEdits`): it replaces [ChatState.edits]' entry. */
-    data class EditPhase(val toolUseId: String, val review: EditReview) : SessionEvent
+    data class EditPhase(val toolUseId: String, val review: EditReview) : EditEvent
 
     /** `Accept all` was pressed ([on]): the turn's later edits apply without a diff until its `result` ([ChatState.acceptAll]). */
-    data class AcceptAll(val on: Boolean) : SessionEvent
+    data class AcceptAll(val on: Boolean) : EditEvent
 }
 
 private val LOG: Logger

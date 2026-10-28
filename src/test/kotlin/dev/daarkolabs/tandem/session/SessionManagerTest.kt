@@ -2096,7 +2096,7 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `editEvent shows an edit's review and Accept all in the chat, and nothing else`() = test {
+    fun `editEvent shows an edit's review and Accept all in the chat`() = test {
         val tools = object : HostTools {
             override suspend fun call(call: ToolCall) = error("not called")
             override fun cancel(session: SessionId, requestId: JsonElement) {}
@@ -2107,14 +2107,12 @@ class SessionManagerTest {
         assertSame(tools, handle.hostTools)
         val review = EditReview("a.kt", EditPhase.OPEN)
 
-        manager.editEvent(handle.id, SessionEvent.HostNotice(NoticeLevel.ERROR, "not an edit's"))
         manager.editEvent(handle.id, SessionEvent.EditPhase("t1", review))
         manager.editEvent(handle.id, SessionEvent.AcceptAll(true))
         manager.editEvent("no-such-session", SessionEvent.AcceptAll(true))
 
         val state = handle.state.first { it.acceptAll }
         assertEquals(mapOf("t1" to review), state.edits)
-        assertTrue(state.entries.none { it is ChatEntry.Notice && it.text == "not an edit's" })
     }
 
     @Test

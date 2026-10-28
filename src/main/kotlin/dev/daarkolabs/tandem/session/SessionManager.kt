@@ -734,10 +734,9 @@ class SessionManager internal constructor(
 
     /**
      * Shows a Tandem edit's progress in session [id]'s chat: [SessionEvent.EditPhase] or [SessionEvent.AcceptAll], from the IDE's
-     * `TandemEdits`; through the running process's state, or straight in the chat without one. Any other event is ignored.
+     * `TandemEdits`; through the running process's state, or straight in the chat without one. An unknown [id] is ignored.
      */
-    fun editEvent(id: SessionId, event: SessionEvent) {
-        if (event !is SessionEvent.EditPhase && event !is SessionEvent.AcceptAll) return
+    fun editEvent(id: SessionId, event: SessionEvent.EditEvent) {
         handle(id)?.pick(live = { it.event(event) }, stopped = event)
     }
 
