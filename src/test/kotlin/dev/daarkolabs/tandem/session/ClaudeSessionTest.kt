@@ -16,6 +16,8 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
@@ -23,12 +25,14 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -48,6 +52,7 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -1804,6 +1809,7 @@ class ClaudeSessionTest {
         val callCancelled = CompletableDeferred<Unit>()
         val cancelled: MutableList<Pair<SessionId, JsonElement>> = Collections.synchronizedList(ArrayList())
         val cancelledAll: MutableList<SessionId> = Collections.synchronizedList(ArrayList())
+        val allCancelled = CompletableDeferred<Unit>()
 
         override suspend fun call(call: ToolCall): ToolReply {
             calls.complete(call)
@@ -1821,6 +1827,7 @@ class ClaudeSessionTest {
 
         override fun cancelAll(session: SessionId) {
             cancelledAll.add(session)
+            allCancelled.complete(Unit)
         }
     }
 
@@ -1828,6 +1835,15 @@ class ClaudeSessionTest {
     private suspend fun ScriptedSession.mcpResponse(requestId: String): JsonObject {
         val line = written("\"request_id\":\"$requestId\"").single { "mcp_response" in it }
         return Json.parseToJsonElement(line).jsonObject["response"]!!.jsonObject["response"]!!.jsonObject["mcp_response"]!!.jsonObject
+    }
+
+    /**
+     * Waits until every frame the host sent before now is written: the outbox writes in order, so once the answer to a `ping` sent
+     * now is in [ScriptedSession.stdin], so is everything before it.
+     */
+    private suspend fun ScriptedSession.drained() {
+        write("""{"type":"control_request","request_id":"barrier","request":{"subtype":"mcp_message","server_name":"tandem","message":{"jsonrpc":"2.0","id":99,"method":"ping"}}}""")
+        mcpResponse("barrier")
     }
 
     /** The `request_id` of line [n] of fixture [name]. */
@@ -1909,6 +1925,81 @@ class ClaudeSessionTest {
         run.close()
     }
 
+    // spec: notifications/cancelled cancels the pending call's job and the late reply is not sent
+    @Test
+    fun `a call withdrawn by notifications cancelled whose host still answers late sends no reply`() = runBlocking {
+        val late = CompletableDeferred<Unit>()
+        val callJob = CompletableDeferred<Job>()
+        val tools = FakeHostTools {
+            callJob.complete(currentCoroutineContext().job)
+            withContext(NonCancellable) { late.await() } // a host that ignores the cancellation and answers anyway
+            ToolReply("late", isError = false)
+        }
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit-stop")[39 - 1])
+        withTimeout(10_000) { tools.calls.await() }
+        run.write(Fixtures.lines("ide-edit-stop")[42 - 1])
+        run.mcpResponse(requestIdAt("ide-edit-stop", 42)) // acknowledged after the call was withdrawn
+        assertEquals(listOf<Pair<SessionId, JsonElement>>(newSessionId to JsonPrimitive(2)), tools.cancelled.toList())
+        val job = withTimeout(10_000) { callJob.await() }
+        assertTrue(job.isCancelled)
+
+        late.complete(Unit)
+        withTimeout(10_000) { job.join() } // the host answered, and the job has done whatever it does with the answer
+        run.drained()
+        val callId = requestIdAt("ide-edit-stop", 39)
+        assertFalse(run.stdin.readLines().any { "\"request_id\":\"$callId\"" in it }, "the late answer is dropped")
+        run.close()
+    }
+
+    // spec: a tools call whose JSON-RPC id is still open withdraws the older call
+    @Test
+    fun `a tools call whose id is still open withdraws the older call and only the newer one answers`() = runBlocking {
+        val seen = AtomicInteger()
+        val olderEnded = CompletableDeferred<Unit>()
+        val tools = FakeHostTools {
+            if (seen.incrementAndGet() == 1) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    olderEnded.complete(Unit)
+                }
+            }
+            ToolReply("newer", isError = false)
+        }
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        val line = Fixtures.lines("ide-edit")[38 - 1]
+        val olderId = requestIdAt("ide-edit", 38)
+        run.write(line)
+        withTimeout(10_000) { tools.calls.await() }
+        run.write(line.replace("\"request_id\":\"$olderId\"", "\"request_id\":\"again\""))
+
+        val reply = run.mcpResponse("again")
+        assertEquals("newer", reply["result"]!!.jsonObject["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content)
+        withTimeout(10_000) { olderEnded.await() }
+        assertEquals(listOf<Pair<SessionId, JsonElement>>(newSessionId to JsonPrimitive(2)), tools.cancelled.toList())
+        run.drained()
+        assertFalse(run.stdin.readLines().any { "\"request_id\":\"$olderId\"" in it }, "the older call gets no reply")
+        run.close()
+    }
+
+    // spec: a host that fails answers an error, so the CLI never waits
+    @Test
+    fun `a host that throws an Error still answers the call with an error`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, hostTools = FakeHostTools { throw NotImplementedError("lane A") })
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit")[38 - 1])
+        val failed = run.mcpResponse(requestIdAt("ide-edit", 38))["result"]!!.jsonObject
+        assertEquals(true, failed["isError"]!!.jsonPrimitive.boolean)
+        assertEquals(
+            "Tandem could not run edit_file: NotImplementedError.",
+            failed["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content,
+        )
+        run.close()
+    }
+
     // spec: an unknown server_name gets -32601
     @Test
     fun `an unknown server_name gets -32601`() = runBlocking {
@@ -1980,8 +2071,27 @@ class ClaudeSessionTest {
 
         run.close()
         withTimeout(10_000) { tools.callCancelled.await() }
+        withTimeout(10_000) { tools.allCancelled.await() }
         assertEquals(listOf<SessionId>(newSessionId), tools.cancelledAll.toList())
         assertFalse(run.stdin.readLines().any { "mcp_response" in it }, "nobody reads a reply any more")
+    }
+
+    // spec: the process ending by itself cancels the open calls (stop, close and the process's end)
+    @Test
+    fun `a process that ends by itself with a call open cancels it with no reply`() = runBlocking {
+        val tools = FakeHostTools()
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit")[38 - 1])
+        withTimeout(10_000) { tools.calls.await() }
+
+        run.die()
+        withTimeout(10_000) { tools.callCancelled.await() }
+        withTimeout(10_000) { tools.allCancelled.await() }
+        assertEquals(listOf<SessionId>(newSessionId), tools.cancelledAll.toList())
+        assertFalse(run.stdin.readLines().any { "mcp_response" in it }, "no reply for the withdrawn call")
+        run.close()
+        assertEquals(listOf<SessionId>(newSessionId), tools.cancelledAll.toList(), "once per process")
     }
 
     @Test

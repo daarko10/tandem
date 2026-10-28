@@ -864,7 +864,14 @@ class ClaudeSession(
             // Withdrawn meanwhile (notifications/cancelled, the process's end): the cancel took the entry, and no reply goes out.
             if (calls.remove(id, currentCoroutineContext().job)) send(HostMessages.mcpResponse(requestId, answer))
         }
-        if (calls.put(id, job) != null) LOG.info("tools/call id=$id again while one runs: only the newer one answers")
+        calls.put(id, job)?.let { old ->
+            // The CLI reused an open id, so it gave up on the older call: it is withdrawn as by notifications/cancelled, with no
+            // reply (one would carry the same JSON-RPC id and could settle the newer call). The newer job has not started, so the
+            // host's cancel reaches only the older one.
+            LOG.info("tools/call id=$id again while one runs: the older one is withdrawn")
+            hostTools?.cancel(sessionKey(), id)
+            old.cancel()
+        }
         if (callsEnded.get()) {
             // The process ended meanwhile: a lazy job cancelled before its start never runs, so the host never sees the call.
             calls.remove(id, job)
@@ -883,8 +890,9 @@ class ClaudeSession(
             tools.call(ToolCall(name, arguments, toolUseId, requestId, sessionKey()))
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            LOG.warn("tools/call $name id=$requestId tool_use=$toolUseId failed in the IDE", e)
+        } catch (e: Throwable) {
+            // The class only: an IDE file API puts the file's path in its message (NoSuchFileException, AccessDeniedException).
+            LOG.warn("tools/call $name id=$requestId tool_use=$toolUseId failed in the IDE: ${e.javaClass.name}")
             ToolReply("Tandem could not run $name: ${e.javaClass.simpleName}.", isError = true)
         }
     }
