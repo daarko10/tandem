@@ -35,6 +35,9 @@ Reads --session-id <id>, --resume <id>, --fork-session and --add-dir <dir> from 
                           test can hold a stop (the host waits for the exit) while something else happens
   TANDEM_FAKE_EDIT_CANCEL_MS  rule (p): a replayed `tools/call` left unanswered this long is withdrawn as on an `interrupt`, without
                           the interrupt's receipt (the CLI's own MCP_TOOL_TIMEOUT; unset or 0: never)
+  TANDEM_FAKE_RESULT_GATE_FILE  before emitting each replayed `result` line (a turn's end), wait until this file exists, checking
+                          every 100 ms for up to 60 s, then emit it anyway: a test holds the turn running until it has seen
+                          what shows only while a turn runs, in place of a slow stream
 
 Every `<session_id-N>` placeholder in the fixture becomes the session id: the value after --session-id or --resume;
 with --fork-session the value after --session-id (the fork's own id) or else a fresh UUID; a fresh UUID when neither
@@ -112,10 +115,15 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
       reply `isError`, as the CLI writes an error), `is_error` from `isError`, and the line's `tool_use_result` the content blocks,
       or `Error: <text>` for an error; a JSON-RPC error reply becomes an error with its message. So a test sees the text Tandem
       produced, never the recorded one. A `can_use_tool` for a Tandem tool is sent as recorded and its answer is not checked.
+      With TANDEM_FAKE_LOG set, right after logging the host's `control_response` to a `tools/call` the fake appends
+      {"type":"__disk__","tool_use_id":<the call's tool use id>,"text":<the call's `file_path` as read from disk now, null when
+      it cannot be read>}, so a test sees what the disk held when the reply arrived (spec 9.7: saved before the reply).
   (o) In a fixture with `mcp_message` frames, `<path>` (the redactor's name for the recording's working directory) becomes this
       process's working directory (`os.getcwd()`, the project the host spawned it in) in every replayed frame: the `tools/call`
       arguments, the `can_use_tool` input, `init.cwd` and the result lines. Other fixtures keep `<path>` as recorded (rows such
-      as `Read <path>` in `tools-read` are drawn from it).
+      as `Read <path>` in `tools-read` are drawn from it). The directory is escaped once, as inside a JSON string: inside a
+      `stream_event`'s `partial_json` (JSON within a JSON string) a `\\` or `"` in it would come out malformed. Neither occurs in
+      a Linux or macOS temporary directory.
   (p) A host `interrupt` read while a replayed `tools/call` waits for its reply withdraws the call when the fixture recorded the
       withdrawal (a `notifications/cancelled` for that call's JSON-RPC id before the next `tools/call`, `ide-edit-stop:42`): the
       fake, without waiting for an `mcp_response`, sends the recorded lines from the call to the turn's `result` in order (the
@@ -142,6 +150,7 @@ log_path = os.environ.get("TANDEM_FAKE_LOG")
 delay_ms = int(os.environ.get("TANDEM_FAKE_DELAY_MS") or 0)
 line_delay_ms = int(os.environ.get("TANDEM_FAKE_LINE_DELAY_MS") or 0)
 gate_file = os.environ.get("TANDEM_FAKE_GATE_FILE")
+result_gate_file = os.environ.get("TANDEM_FAKE_RESULT_GATE_FILE")
 auth_done_ms = os.environ.get("TANDEM_FAKE_AUTH_DONE_MS")
 auth_done_ms = int(auth_done_ms) if auth_done_ms else None
 extra_needs_auth = os.environ.get("TANDEM_FAKE_EXTRA_NEEDS_AUTH") or None
@@ -276,10 +285,10 @@ def wait_for(predicate):
             return frame
 
 
-def wait_for_gate():
-    """Waits until TANDEM_FAKE_GATE_FILE exists, for up to 60 s."""
+def wait_for_gate(path):
+    """Waits until [path] (TANDEM_FAKE_GATE_FILE or TANDEM_FAKE_RESULT_GATE_FILE) exists, for up to 60 s."""
     deadline = time.monotonic() + 60
-    while not os.path.exists(gate_file):
+    while not os.path.exists(path):
         if time.monotonic() > deadline:
             sys.stderr.write("gate file never appeared; going on\n")
             return
@@ -627,7 +636,25 @@ def await_tool_reply(index, message):
             reply = (response.get("response") or {}).get("mcp_response")
             if isinstance(reply, dict) and tool_use_id is not None:
                 host_replies[tool_use_id] = reply
+            log_disk(message, tool_use_id)
             return index + 1
+
+
+def log_disk(message, tool_use_id):
+    """Rule (n): appends what the `tools/call` [message]'s `file_path` holds on disk now to TANDEM_FAKE_LOG, as a `__disk__` line."""
+    if not log_path:
+        return
+    arguments = (rpc_of(message).get("params") or {}).get("arguments") or {}
+    file_path = arguments.get("file_path")
+    text = None
+    if isinstance(file_path, str):
+        try:
+            with open(file_path.replace(PATH_PLACEHOLDER, os.getcwd()), encoding="utf-8") as file:
+                text = file.read()
+        except (OSError, UnicodeDecodeError):
+            text = None
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(json.dumps({"type": "__disk__", "tool_use_id": tool_use_id, "text": text}, separators=(",", ":")) + "\n")
 
 
 def withdraw(index, end, interrupt_id):
@@ -671,7 +698,9 @@ while position < len(replay):
     if kind == "control_request" and delay_ms:
         time.sleep(delay_ms / 1000)
     if kind == "control_request" and gate_file:
-        wait_for_gate()
+        wait_for_gate(gate_file)
+    if kind == "result" and result_gate_file:
+        wait_for_gate(result_gate_file)
     if kind == "stream_event" and line_delay_ms:
         time.sleep(line_delay_ms / 1000)
     if kind == "user" and host_replies:

@@ -36,6 +36,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -1616,23 +1617,15 @@ class ToolWindowIdeTest {
     @Test
     fun `an edit opens the diff and Accept applies it`() {
         val project = newProject()
-        val hello = writeHello(project)
+        writeHello(project)
         val log = Files.createTempFile("tandem-sent", ".ndjson")
-        var diskAtReply: String? = null
         val sent = runChat("edit-accept", fixtures = listOf("ide-edit"), project = project, sentLog = log) {
             openFile("hello.txt", waitForCodeAnalysis = false)
             newSession()
             typePrompt("Change alpha to beta in hello.txt")
             editWait("the diff tab", 1.minutes) { diffTabShown() && diffButton(ACCEPT_BUTTON).present() }
             diffButton(ACCEPT_BUTTON).click()
-            // Spec 9.7: the disk holds the applied text before the reply goes out. The log is read before the disk on each poll, so a
-            // reply that went out before the save would be caught with the old text on the disk.
-            editWait("the edit's reply in the fake's log", 30.seconds) {
-                val replied = toolReplies(readLog(log)).isNotEmpty()
-                val disk = hello.readText()
-                if (replied) diskAtReply = disk
-                replied
-            }
+            editWait("the edit's reply in the fake's log", 30.seconds) { toolReplies(readLog(log)).isNotEmpty() }
             editWait("the diff closed", 30.seconds) { !diffButton(ACCEPT_BUTTON).present() }
             editWait("the editor shows beta", 30.seconds) { documentText("hello.txt") == BETA }
             editWait("the row", 1.minutes) { described("Edited hello.txt").present() }
@@ -1648,7 +1641,9 @@ class ToolWindowIdeTest {
             ui.keyboard { hotKey(if (isMac) KeyEvent.VK_META else KeyEvent.VK_CONTROL, KeyEvent.VK_Z) }
             editWait("one undo restored alpha", 30.seconds) { documentText("hello.txt") == HELLO }
         }
-        assertEquals(BETA, diskAtReply, "the file on disk read beta when the reply was in the log")
+        // Spec 9.7: the disk holds the applied text before the reply goes out. The fake reads the call's file the moment the reply
+        // arrives and logs it as `__disk__` (fake-claude.py rule (n)), so a reply sent before the save reads alpha here.
+        assertEquals(BETA, sent.single { it.type == "__disk__" }["text"]?.jsonPrimitive?.contentOrNull, "the file on disk when the reply arrived")
         val reply = toolReplies(sent).single()
         assertTrue("Applied the edit to" in reply.replyText() && "saved" in reply.replyText(), reply.toString())
         assertFalse(reply.isErrorReply())
@@ -1688,6 +1683,7 @@ class ToolWindowIdeTest {
             newSession()
             typePrompt("Change alpha to beta in hello.txt")
             editWait("the diff", 1.minutes) { diffButton(REASON_FIELD).present() }
+            assertTrue(ui.x("//div[@name='$REASON_FIELD' and @accessiblename='$REASON_ACCESSIBLE_NAME']").present(), "the reason field's accessible name")
             diffButton(REASON_FIELD).click()
             diffButton(REASON_FIELD).keyboard { typeText("not now", 20) }
             diffButton(REJECT_BUTTON).click()
@@ -1706,8 +1702,15 @@ class ToolWindowIdeTest {
     fun `Accept all skips the next diffs`() {
         val project = newProject()
         val hello = writeHello(project)
-        // ide-edit-two: two edit_file calls in one turn. Its stream lines are slowed so that the turn runs for a while after Accept all.
-        val sent = runChat("edit-accept-all", fixtures = listOf("ide-edit-two"), project = project, lineDelayMs = 300) {
+        // ide-edit-two: two edit_file calls in one turn. The fake holds the turn's result until the gate file exists, so the turn runs
+        // until the test has seen the hint.
+        val resultGate = Files.createTempDirectory("tandem-result-gate").resolve("go")
+        val sent = runChat(
+            "edit-accept-all",
+            fixtures = listOf("ide-edit-two"),
+            project = project,
+            extraEnv = mapOf("TANDEM_FAKE_RESULT_GATE_FILE" to resultGate.toString()),
+        ) {
             newSession()
             typePrompt("Make both edits to hello.txt")
             editWait("the first diff", 2.minutes) { diffButton(ACCEPT_ALL_BUTTON).present() }
@@ -1715,6 +1718,8 @@ class ToolWindowIdeTest {
             editWait("the Accept all hint while the turn runs", 30.seconds) { containing(ACCEPT_ALL_HINT).present() }
             // The second call waits for nobody: a diff would hold it, so the file can only read `line 2` without one.
             editWait("both edits on disk", 1.minutes) { hello.readText() == "beta\nline 2\n" }
+            assertTrue(containing(ACCEPT_ALL_HINT).present(), "the hint stays while the turn runs")
+            resultGate.writeText("")
             editWait("the turn's footer", 2.minutes) { ui.x(FOOTER).present() }
             assertFalse(diffButton(ACCEPT_BUTTON).present(), "no second diff")
             editWait("the hint gone with the turn", 30.seconds) { !containing(ACCEPT_ALL_HINT).present() }
@@ -1776,6 +1781,12 @@ class ToolWindowIdeTest {
         }
         assertTrue(sent.any { it.type == "control_request" && it["request"]!!.jsonObject["subtype"]!!.jsonPrimitive.content == "interrupt" })
         assertTrue(toolReplies(sent).isEmpty(), "no mcp_response for the withdrawn call")
+        // Nor any other answer to it, an error included: no control_response to its request (ide-edit-stop:39, the id the fake keeps
+        // as recorded), and no mcp_response for its JSON-RPC id 2.
+        val responses = sent.filter { it.type == "control_response" }.mapNotNull { it["response"] as? JsonObject }
+        assertTrue(responses.none { it["request_id"]?.jsonPrimitive?.contentOrNull == "<request_id-47>" }, responses.toString())
+        val rpcIds = responses.mapNotNull { ((it["response"] as? JsonObject)?.get("mcp_response") as? JsonObject)?.get("id") }
+        assertFalse(JsonPrimitive(2) in rpcIds, rpcIds.toString())
         assertEquals(HELLO, hello.readText(), "the file unchanged on disk")
     }
 
@@ -1809,9 +1820,8 @@ class ToolWindowIdeTest {
 
     private fun JsonObject.isErrorReply(): Boolean = this["isError"]?.jsonPrimitive?.booleanOrNull == true
 
-    /** A Swing control of the diff's bar, by its name (IDE-edits spec 3.8) or, failing that, its accessible name. */
-    private fun Driver.diffButton(control: Pair<String, String>): UiComponent =
-        ui.x("//div[@name='${control.first}' or @accessiblename='${control.second}']")
+    /** A Swing control of the diff's bar, by its Swing name (IDE-edits spec 3.8). */
+    private fun Driver.diffButton(swingName: String): UiComponent = ui.x("//div[@name='$swingName']")
 
     /** Whether the diff's editor tab (or window), titled `Tandem: hello.txt`, is shown: the tabs and the tab's label both name it. */
     private fun Driver.diffTabShown(): Boolean =
@@ -2372,10 +2382,11 @@ class ToolWindowIdeTest {
         const val BETA = "beta\nline two\n"
 
         /** The diff bar's controls: their Swing names and accessible names (IDE-edits spec 3.8). */
-        val ACCEPT_BUTTON: Pair<String, String> = "tandem.edit.accept" to "Accept"
-        val ACCEPT_ALL_BUTTON: Pair<String, String> = "tandem.edit.acceptAll" to "Accept all"
-        val REJECT_BUTTON: Pair<String, String> = "tandem.edit.reject" to "Reject"
-        val REASON_FIELD: Pair<String, String> = "tandem.edit.reason" to "Reason for rejecting"
+        const val ACCEPT_BUTTON = "tandem.edit.accept"
+        const val ACCEPT_ALL_BUTTON = "tandem.edit.acceptAll"
+        const val REJECT_BUTTON = "tandem.edit.reject"
+        const val REASON_FIELD = "tandem.edit.reason"
+        const val REASON_ACCESSIBLE_NAME = "Reason for rejecting"
 
         /** The footer's hint while `Accept all` holds for the turn. */
         const val ACCEPT_ALL_HINT = "Accepting all edits this turn"

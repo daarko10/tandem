@@ -133,6 +133,39 @@ class FakeClaudeTest {
         assertEquals("notifications/cancelled", withdrawal[0].rpcMethod())
     }
 
+    // spec 9.7: the fake logs what the disk held when the host's reply to a call arrived (not a spec-named test)
+    @Test
+    fun `the reply to a call is followed in the log by the file's text on disk`() {
+        val log = dir.resolve("sent.ndjson")
+        dir.resolve("hello.txt").toFile().writeText("on disk at the reply\n")
+        val fake = start("ide-edit", mapOf("TANDEM_FAKE_LOG" to log.toString()))
+        handshake(fake)
+        fake.prompt()
+        val call = fake.readUntil({ answerAsHost(it) }) { it.rpcMethod() == "tools/call" }.last()
+        answerAsHost(call)
+        fake.readUntil({ answerAsHost(it) }) { it.type == "result" }
+
+        val logged = log.toFile().readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
+        val reply = logged.indexOfFirst { it.type == "control_response" && it["response"]!!.jsonObject.string("request_id") == call.string("request_id") }
+        assertTrue(reply >= 0, logged.joinToString("\n"))
+        val disk = logged[reply + 1]
+        assertEquals("__disk__", disk.type)
+        assertEquals(call.toolUseId(), disk.string("tool_use_id"))
+        assertEquals("on disk at the reply\n", disk.string("text"))
+    }
+
+    // spec 9.6: TANDEM_FAKE_RESULT_GATE_FILE holds a turn's result until the file exists (not a spec-named test)
+    @Test
+    fun `the result waits for TANDEM_FAKE_RESULT_GATE_FILE`() {
+        val gate = dir.resolve("result.gate")
+        val fake = start("plain-reply", mapOf("TANDEM_FAKE_RESULT_GATE_FILE" to gate.toString()))
+        fake.prompt()
+        fake.readUntil({}) { it.type == "system" && it.string("subtype") == "post_turn_summary" }
+        assertEquals(null, fake.poll(1), "no result while the gate file is missing")
+        gate.toFile().writeText("")
+        fake.readUntil({}) { it.type == "result" }
+    }
+
     private fun start(fixture: String, env: Map<String, String> = emptyMap()): Fake = Fake(fakeClaude, dir, fixture, env).also { fakes += it }
 
     /** What a host answers at once: every `mcp_message` with [toolReply] for a `tools/call`, every `can_use_tool` with allow. */
@@ -213,6 +246,9 @@ class FakeClaudeTest {
             stdin.newLine()
             stdin.flush()
         }
+
+        /** The next line within [seconds], or null when none came. */
+        fun poll(seconds: Long): JsonObject? = out.poll(seconds, TimeUnit.SECONDS)?.let { Json.parseToJsonElement(it).jsonObject }
 
         fun next(): JsonObject {
             val line = assertNotNull(out.poll(10, TimeUnit.SECONDS), "the fake wrote nothing within 10 s")
