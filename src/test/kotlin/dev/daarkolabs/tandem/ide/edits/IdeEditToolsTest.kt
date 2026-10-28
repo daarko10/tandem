@@ -13,10 +13,10 @@ import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.TextEditor
 import com.intellij.openapi.fileEditor.impl.text.TextEditorProvider
 import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.util.io.FileUtilRt
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.openapi.vfs.limits.FileSizeLimit
 import com.intellij.testFramework.common.timeoutRunBlocking
 import com.intellij.testFramework.junit5.TestApplication
 import com.intellij.testFramework.junit5.fixture.projectFixture
@@ -202,8 +202,8 @@ class IdeEditToolsTest {
 
     @Test
     fun `a file over the IDE's limit is refused`() {
-        // The IDE's own limit for a `.txt` file (idea.max.content.load.filesize, read once at startup), one byte over it.
-        val size = FileSizeLimit.getContentLoadLimit("txt").toLong() + 1
+        // The IDE's own limit (idea.max.content.load.filesize), one byte over it.
+        val size = FileUtilRt.getUserContentLoadLimit().toLong() + 1
         val path = dir.resolve("large.txt")
         Files.newOutputStream(path).use { out ->
             val chunk = ByteArray(1024 * 1024) { 'x'.code.toByte() }
@@ -219,6 +219,36 @@ class IdeEditToolsTest {
         } finally {
             Files.deleteIfExists(path)
         }
+    }
+
+    @Test
+    fun `write_file creates a new file of an unknown type`() {
+        val path = dir.resolve("notes.xyz")
+        assertReply(EditResults.created(path.toString(), "one\n", changed = false), run(writeCall(path, "one\n")))
+        assertEquals("one\n", Files.readString(path))
+    }
+
+    @Test
+    fun `a new file of unknown type with a NUL is refused`() {
+        val path = dir.resolve("blob.zzz")
+        assertReply(EditResults.binary(path.toString()), run(writeCall(path, "ab\u0000cd")))
+        assertFalse(Files.exists(path))
+    }
+
+    @Test
+    fun `a file of unknown type with a NUL is refused`() {
+        val path = write("data.zzz", "ab\u0000cd")
+        assertReply(EditResults.binary(path.toString()), run(editCall(path, "ab", "xy")))
+        assertEquals("ab\u0000cd", Files.readString(path))
+    }
+
+    @Test
+    fun `write_file content over 10 MB is refused`() {
+        val path = dir.resolve("huge.txt")
+        val size = 10L * 1024 * 1024 + 1
+        val reply = run(writeCall(path, "x".repeat(size.toInt())))
+        assertReply(EditResults.tooLarge(path.toString(), StringUtil.formatFileSize(size)), reply)
+        assertFalse(Files.exists(path))
     }
 
     @Test
@@ -287,6 +317,18 @@ class IdeEditToolsTest {
         assertReply(EditResults.fileChanged(path.toString(), "zero\nalpha\nline two\n"), reply)
         timeoutRunBlocking(30.seconds) { assertEquals("zero\nalpha\nline two\n", textOf(documentOf(path))) }
         assertEquals(listOf(SESSION to "Could not apply the edit to hello.txt: the file changed while the diff was open"), notices.toList())
+    }
+
+    @Test
+    fun `a new file that appears while the diff is open is a change`() {
+        val path = dir.resolve("late/new.txt")
+        review = { proposal ->
+            withContext(Dispatchers.IO) { write("late/new.txt", "theirs\n") }
+            Decision.Accepted(proposal.proposed, all = false)
+        }
+        assertReply(EditResults.fileChanged(path.toString(), "theirs\n"), run(writeCall(path, "mine\n")))
+        assertEquals("theirs\n", Files.readString(path))
+        assertEquals(listOf(SESSION to "Could not apply the edit to new.txt: the file changed while the diff was open"), notices.toList())
     }
 
     @Test

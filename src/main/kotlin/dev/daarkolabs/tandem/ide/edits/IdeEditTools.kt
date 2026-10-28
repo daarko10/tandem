@@ -10,12 +10,12 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileTypes.FileTypeRegistry
 import com.intellij.openapi.fileTypes.UnknownFileType
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.io.FileUtilRt
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.ReadonlyStatusHandler
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.openapi.vfs.limits.FileSizeLimit
 import com.intellij.psi.PsiDocumentManager
 import dev.daarkolabs.tandem.protocol.TandemTools
 import dev.daarkolabs.tandem.protocol.ToolReply
@@ -215,11 +215,18 @@ class IdeEditTools(
         return InCommand.Done(document, emptyList())
     }
 
-    /** `write_file` of a new file: its directories, the file, its text. A file that appeared meanwhile is a change while the diff was open. */
+    /**
+     * `write_file` of a new file: its directories, the file, its text. A file that appeared meanwhile is a change while the diff was
+     * open, found before any folder is created.
+     */
     private fun create(proposal: EditProposal, finalText: String): InCommand {
         val parentPath = proposal.path.parent ?: throw IOException("the path has no parent folder")
-        val parent = VfsUtil.createDirectories(parentPath.toString())
         val name = proposal.path.fileName.toString()
+        if (Files.exists(proposal.path)) {
+            val existing = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(proposal.path)
+            return InCommand.Stale(existing?.let { FileDocumentManager.getInstance().getDocument(it)?.text }.orEmpty())
+        }
+        val parent = VfsUtil.createDirectories(parentPath.toString())
         parent.findChild(name)?.let { existing ->
             val text = FileDocumentManager.getInstance().getDocument(existing)?.text.orEmpty()
             return InCommand.Stale(text)
@@ -248,7 +255,8 @@ class IdeEditTools(
         val file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path)
             ?: return@withContext Checked.Refusal(EditResults.missing(given))
         if (file.isDirectory) return@withContext Checked.Refusal(EditResults.directory(given))
-        if (FileSizeLimit.isTooLargeForContentLoading(file.length, file.extension)) {
+        // FileUtilRt.isTooLarge (spec 4.3) is deprecated and FileSizeLimit internal in 2026.1: the same user limit, public.
+        if (file.length > FileUtilRt.getUserContentLoadLimit()) {
             return@withContext Checked.Refusal(EditResults.tooLarge(given, StringUtil.formatFileSize(file.length)))
         }
         if (isBinary(file, path)) return@withContext Checked.Refusal(EditResults.binary(given))
@@ -256,9 +264,9 @@ class IdeEditTools(
     }
 
     private fun newFile(call: ToolCall, path: Path, args: Args.Write): Checked {
-        if (FileTypeRegistry.getInstance().getFileTypeByFileName(path.fileName.toString()).isBinary) {
-            return Checked.Refusal(EditResults.binary(args.filePath))
-        }
+        val type = FileTypeRegistry.getInstance().getFileTypeByFileName(path.fileName.toString())
+        val binary = if (type == UnknownFileType.INSTANCE) '\u0000' in args.content.take(BINARY_PROBE_BYTES) else type.isBinary
+        if (binary) return Checked.Refusal(EditResults.binary(args.filePath))
         val proposed = EditMatcher.normalizeNewlines(args.content)
         return Checked.Ready(EditProposal(call, null, path, null, "", proposed, emptyList(), isNew = true, tool = TandemTools.WRITE_FILE))
     }

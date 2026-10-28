@@ -43,5 +43,9 @@ sealed interface Decision {
     data object Stopped : Decision
 }
 
-/** The document no longer holds what the proposal was built on (spec 3.2's check); [currentText] is what it holds now. */
+/**
+ * The document no longer holds what the proposal was built on (spec 3.2's check); [currentText] is what it holds now. Not thrown:
+ * [IdeEditTools.apply] finds the stale case inside its write command, writes nothing and reports it as `EditResults.fileChanged`
+ * (with the notice `the file changed while the diff was open`), so a caller never catches this.
+ */
 class EditStale(val currentText: String) : RuntimeException("the file changed while the diff was open")
