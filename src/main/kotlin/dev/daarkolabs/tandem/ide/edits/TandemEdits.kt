@@ -24,6 +24,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
@@ -171,8 +172,8 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
     }
 
     /**
-     * [present], and when it fails for any reason, [proposal] fails with [DiffNotOpened] instead of ending the collector: a call
-     * that waits forever, and every later one behind it, would be a silent failure (hard rule 5).
+     * [present], and when it fails for any reason, [proposal] fails with [DiffNotOpened] and the session hears it, instead of ending
+     * the collector: a call that waits forever, and every later one behind it, would be a silent failure (hard rule 5).
      */
     private suspend fun presentOrFail(proposal: EditProposal) {
         try {
@@ -180,8 +181,16 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            LOG.warn("tools/call request ${proposal.call.requestId}: showing the diff failed: ${e.javaClass.simpleName}", e)
-            queue.fail(proposal, DiffNotOpened(reasonOf(e)))
+            // The class only: the message can name the file (the plan: never log a file path).
+            LOG.warn("tools/call request ${proposal.call.requestId}: showing the diff failed: ${e.javaClass.name}")
+            val reason = reasonOf(e)
+            queue.fail(proposal, DiffNotOpened(reason))
+            try {
+                sessions.notice(proposal.call.session, "The diff could not be opened: $reason")
+            } catch (e: Throwable) {
+                if (e is CancellationException) throw e
+                LOG.warn("tools/call request ${proposal.call.requestId}: the notice failed too: ${e.javaClass.name}")
+            }
         }
     }
 
@@ -193,11 +202,13 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
             val showing = launch {
                 val decided = try {
                     presenter.show(proposal)
-                } catch (e: CancellationException) {
-                    throw e
                 } catch (e: Throwable) {
+                    // Our own cancellation (the decision completed, or a Stop) goes on; any other throwable, a cancellation the
+                    // platform raised inside the presenter included, is a diff that could not be opened: the call is refused, the
+                    // session hears it, and the next proposal opens (hard rule 5).
+                    if (e is CancellationException) ensureActive()
                     val reason = reasonOf(e)
-                    LOG.warn("tools/call request ${proposal.call.requestId}: the diff could not be opened: ${e.javaClass.simpleName}")
+                    LOG.warn("tools/call request ${proposal.call.requestId}: the diff could not be opened: ${e.javaClass.name}")
                     queue.fail(proposal, DiffNotOpened(reason))
                     sessions.notice(proposal.call.session, "The diff could not be opened: $reason")
                     return@launch
@@ -261,7 +272,11 @@ class DiffNotOpened(val reason: String) : RuntimeException(reason)
 
 private fun reasonOf(e: Throwable): String = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
 
-/** The file name a call's `file_path` names, as the rows show it; the whole value when it has no separator. */
+/**
+ * The bare file name a call's `file_path` names ([EditReview.file]), the whole value when it has no separator. The rows build their
+ * own labels from the call's input through `ToolLabels.fileName(input, cwd)`, relative to the session's cwd as every file row is;
+ * this name is for the review's identity, logs and tests, never for a label (A4 reads the input, not [EditReview.file]).
+ */
 private fun fileNameOf(call: ToolCall): String {
     val given = (call.arguments["file_path"] as? JsonPrimitive)?.content.orEmpty()
     return try {

@@ -289,6 +289,14 @@ class TandemEditsTest {
         assertTrue(b.isError, b.text)
         assertEquals(EditReview("two.txt", EditPhase.DONE, null), phases("t2").last())
 
+        // Nor a cancellation the presenter raised itself (a ProcessCanceledException inside the platform): it is not ours.
+        failing["t4"] = CancellationException("the platform cancelled the open")
+        val d = start(editCall(hello("four.txt"), "t4")).await()
+        assertTrue(d.isError, d.text)
+        assertEquals(EditReview("four.txt", EditPhase.DONE, null), phases("t4").last())
+        assertEquals("s1" to "The diff could not be opened: the platform cancelled the open", notices.last())
+        assertEquals(3, notices.size)
+
         val c = start(editCall(hello("three.txt"), "t3"))
         nextShow().answer.complete(Decision.Accepted("beta\nline two\n", all = false))
         assertFalse(c.await().isError)
