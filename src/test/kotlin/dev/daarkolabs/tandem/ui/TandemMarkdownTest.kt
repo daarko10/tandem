@@ -60,11 +60,39 @@ class TandemMarkdownTest {
     }
 
     @Test
-    fun `inline code is the code tint on the box fill in the editor font at body − 1`() {
+    fun `inline code is the code tint on the code fill in the editor font at body − 1`() {
+        val fill = Color(0.3f, 0.3f, 0.3f, 0.5f)
         assertEquals(
-            SpanStyle(color = Color.Red, background = Color.Gray, fontFamily = FontFamily.Monospace, fontSize = 12.sp),
-            inlineCodeStyle(palette(codeTint = Color.Red, boxFill = Color.Gray), FontFamily.Monospace, 13.sp),
+            SpanStyle(color = Color.Red, background = fill, fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+            inlineCodeStyle(palette(codeTint = Color.Red, boxFill = Color.Gray).copy(codeFill = fill), FontFamily.Monospace, 13.sp),
         )
+    }
+
+    @Test
+    fun `the code fill is see-through and over the panel looks like the box fill`() {
+        val panel = Color(0xFF191A1C)
+        val box = Color(0xFF33353A)
+        val fill = translucentOver(box, panel, CODE_FILL_ALPHA)
+        // Colours keep 8 bits a channel: 0.5 is 128 / 255.
+        assertEquals(CODE_FILL_ALPHA, fill.alpha, 1f / 255)
+        // Drawn over the panel, it is the box fill to within a rounding step.
+        listOf(Color::red, Color::green, Color::blue).forEach { channel ->
+            val shown = channel(fill) * fill.alpha + channel(panel) * (1 - fill.alpha)
+            assertEquals(channel(box), shown, 2f / 255)
+        }
+        // A light theme: the box a step darker than the panel.
+        assertEquals(CODE_FILL_ALPHA, translucentOver(Color(0xFFEBECF0), Color(0xFFF7F8FA), CODE_FILL_ALPHA).alpha, 1f / 255)
+        // No colour at that alpha reaches the target (black over white needs a channel below 0): the opaque target.
+        assertEquals(Color.Black, translucentOver(Color.Black, Color.White, CODE_FILL_ALPHA))
+        // A see-through panel gives no fixed result to aim for.
+        assertEquals(box, translucentOver(box, panel.copy(alpha = 0.5f), CODE_FILL_ALPHA))
+    }
+
+    @Test
+    fun `a block quote's text is the secondary text and its bar the given line`() {
+        val quote = quoteStyling(palette(codeTint = Color.Red, boxFill = Color.Gray).copy(secondary = Color.Cyan), Color.Magenta)
+        assertEquals(Color.Cyan, quote.textColor)
+        assertEquals(Color.Magenta, quote.lineColor)
     }
 
     @Test

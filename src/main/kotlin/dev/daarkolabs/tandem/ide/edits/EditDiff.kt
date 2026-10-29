@@ -50,7 +50,7 @@ import javax.swing.JPanel
 private val LOG = logger<EditDiff>()
 
 /**
- * The editable diff of one proposal (spec 3.1, 3.2): the file's own `Document` read-only on the left (empty for a new file), the
+ * The editable diff of one proposal (spec 3.1, 3.2): the file's own `Document` read-only on the left (an empty read-only document titled `New file` for a new file), the
  * proposal editable on the right, and the bar under it with `Accept`, `Accept all`, `Reject` and the reason field. [show] opens it
  * through the IDE's diff tab files manager (the IDE's preference picks a tab or a window) and returns the user's [Decision]:
  * `Accepted` with the right side's text as it is when pressed, or `Rejected` with the typed reason; closing the diff without a
@@ -112,12 +112,14 @@ class EditDiff(private val project: Project) : DiffPresenter {
         val name = proposal.fileName
         val factory = DiffContentFactory.getInstance()
         val document = proposal.document
+        val fileType = proposal.file?.fileType ?: FileTypeManager.getInstance().getFileTypeByFileName(name)
+        // A new file's left side is an empty document, not EmptyContent: with an EmptyContent side the platform picks its one-side
+        // viewer, which applies FORCE_READ_ONLY_CONTENTS[0] (the left's `true`) to the side it shows, so the proposal was read-only.
         val left = when {
-            proposal.isNew || document == null -> factory.createEmpty()
+            proposal.isNew || document == null -> factory.create(project, "", fileType)
             proposal.file != null -> factory.create(project, document, proposal.file)
             else -> factory.create(project, document)
         }
-        val fileType = proposal.file?.fileType ?: FileTypeManager.getInstance().getFileTypeByFileName(name)
         val right = factory.createEditable(project, proposal.proposed, fileType)
         val leftTitle = when {
             proposal.isNew || document == null -> NEW_FILE
