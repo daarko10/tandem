@@ -11,19 +11,24 @@ a step only the owner takes: secrets, the upload, the review and publishing a re
 - `build.gradle.kts`: `signPlugin` and `publishPlugin` read `CERTIFICATE_CHAIN`, `PRIVATE_KEY`, `PRIVATE_KEY_PASSWORD`
   and `PUBLISH_TOKEN` from the environment only. Nothing else needs them, and they are never in the repository.
 - `.github/workflows/release.yml` (Actions > Release > Run workflow, on `main` only): refuses a version that is already
-  tagged or has no `CHANGELOG.md` section, runs `./gradlew check`, signs the ZIP and verifies the signature, uploads the
-  signed ZIP as an artifact, drafts a GitHub release `v<version>` with it, and uploads to the Marketplace only when
-  "Upload the signed ZIP to the JetBrains Marketplace" is ticked.
+  tagged or has no `CHANGELOG.md` section, runs `./gradlew check` and builds the ZIP, signs it when the three signing
+  secrets are set, uploads the ZIP as the `plugin` artifact, drafts a GitHub release `v<version>` with it, and uploads to
+  the Marketplace only when "Upload the signed ZIP to the JetBrains Marketplace" is ticked.
 
 ## One-time setup (Owner)
-1. **Signing certificate.** On your own machine, outside the repository:
+1. **Signing is optional.** The Marketplace signs every plugin it serves with its own key, and that is the signature the IDE
+   checks; a vendor's own signature is an extra layer on top. With no signing secrets set, the release workflow sends the
+   plain ZIP and says so in a notice. To sign as well, make a key pair on a device of your own and never in a hosted agent
+   session (the private key would be in its transcript):
    ```bash
    openssl genpkey -aes-256-cbc -algorithm RSA -out private.pem -pkeyopt rsa_keygen_bits:4096
    openssl req -key private.pem -new -x509 -days 3650 -out chain.crt
    ```
-   Put the contents of `chain.crt` in the repository secret `CERTIFICATE_CHAIN`, of `private.pem` in `PRIVATE_KEY`, and the
-   passphrase you chose in `PRIVATE_KEY_PASSWORD` (Settings > Secrets and variables > Actions). Keep both files somewhere
-   safe: every later version must be signed with the same key.
+   On an iPhone, a-Shell (free, App Store) runs these two commands; `cat chain.crt` and `cat private.pem`, copy each, and
+   paste it into the repository secrets `CERTIFICATE_CHAIN` and `PRIVATE_KEY`, with the passphrase in
+   `PRIVATE_KEY_PASSWORD`, on github.com in Safari (Settings > Secrets and variables > Actions; the GitHub app has no secrets
+   page). Set all three or none: the workflow refuses a partial set. Keep both files: every later version must be signed with
+   the same key.
 2. **Vendor.** Sign in to plugins.jetbrains.com with your JetBrains Account and set up the vendor profile the plugin is
    published under. `plugin.xml` names the vendor "DaArKo Labs" with the URL `https://daarkolabs.com`; that URL answered
    HTTP 520 on 2026-10-29, so make it load, or change the URL in `plugin.xml`, before the upload.
@@ -32,11 +37,13 @@ a step only the owner takes: secrets, the upload, the review and publishing a re
 The Marketplace takes a new plugin's first version through its web form only; `publishPlugin` can update a listed plugin
 but cannot create one.
 1. Merge the release's pull requests into `main`.
-2. Actions > Release > Run workflow on `main`, with the upload box **unticked**. Download `signed-plugin` from the run.
-3. On plugins.jetbrains.com, choose Upload plugin and give it the signed ZIP. Fill in the listing (below) and submit it.
+2. Actions > Release > Run workflow on `main`, with the upload box **unticked**. Download the `plugin` artifact from the run
+   (on an iPhone, Safari saves it to Files).
+3. On plugins.jetbrains.com, choose Upload plugin and give it the ZIP. Fill in the listing (below) and submit it.
    JetBrains reviews every new plugin by hand; the listing appears when they approve it.
 4. Publish the draft GitHub release the run created. Publishing it creates the tag `v<version>`.
-5. Marketplace > your profile > My Tokens: create a token and put it in the repository secret `PUBLISH_TOKEN`.
+5. Marketplace > your profile > My Tokens: create a token and put it in the repository secret `PUBLISH_TOKEN` (on github.com
+   in Safari, as above).
 
 ## Every later version
 1. Raise `version` in `gradle.properties`, add its section to `CHANGELOG.md` (move what is under `[Unreleased]`), merge.

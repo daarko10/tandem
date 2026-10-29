@@ -1,8 +1,10 @@
 name: Release
 
-# Run by the owner only, from Actions > Release > Run workflow on main (docs/marketplace.md). It builds and signs the plugin
-# ZIP, drafts a GitHub release for it, and uploads it to the JetBrains Marketplace only when "publish" is ticked: the very
-# first version goes to the Marketplace by hand on plugins.jetbrains.com, and publishPlugin can only update a listed plugin.
+# Run by the owner only, from Actions > Release > Run workflow on main (docs/marketplace.md). It builds the plugin ZIP, signs
+# it when the three signing secrets are set (the Marketplace signs every plugin it serves with its own key anyway, so a
+# vendor signature is optional), drafts a GitHub release for it, and uploads it to the JetBrains Marketplace only when
+# "publish" is ticked: the very first version goes to the Marketplace by hand on plugins.jetbrains.com, and publishPlugin can
+# only update a listed plugin.
 on:
   workflow_dispatch:
     inputs:
@@ -52,9 +54,28 @@ jobs:
           grep -q "^## \[$version\]" CHANGELOG.md || { echo "::error title=Release::CHANGELOG.md has no section for $version"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
           ./gradlew -q getChangelog --no-header --no-empty-sections --project-version="$version" > release-notes.md
-      - name: Check
-        run: ./gradlew check
+      - name: Check and build
+        run: ./gradlew check buildPlugin
+      # The secrets context cannot be read in a step's `if`, so a step reads them into an output first.
+      - name: Decide on signing
+        id: signing
+        shell: bash
+        env:
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CERTIFICATE_CHAIN" ] && [ -n "$PRIVATE_KEY" ] && [ -n "$PRIVATE_KEY_PASSWORD" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$CERTIFICATE_CHAIN" ] && [ -z "$PRIVATE_KEY" ] && [ -z "$PRIVATE_KEY_PASSWORD" ]; then
+            echo "::notice title=Release::no signing secrets: the plain ZIP goes out, and the Marketplace signs it with its own key"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Release::set all three of CERTIFICATE_CHAIN, PRIVATE_KEY and PRIVATE_KEY_PASSWORD, or none of them"; exit 1
+          fi
       - name: Sign
+        if: steps.signing.outputs.signed == 'true'
         env:
           CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
@@ -63,17 +84,28 @@ jobs:
         run: |
           ./gradlew signPlugin
           ./gradlew verifyPluginSignature
+      - name: Name the ZIP
+        id: zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip="$(ls build/distributions/*-signed.zip 2>/dev/null || ls build/distributions/*.zip)"
+          [ "$(wc -l <<<"$zip")" -eq 1 ] || { echo "::error title=Release::one ZIP expected in build/distributions, found: $zip"; exit 1; }
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: signed-plugin
-          path: ./build/distributions/*-signed.zip
+          name: plugin
+          path: ${{ steps.zip.outputs.zip }}
       - name: Draft the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          ZIP: ${{ steps.zip.outputs.zip }}
         run: |
-          gh release create "v$VERSION" build/distributions/*-signed.zip \
+          gh release create "v$VERSION" "$ZIP" \
             --draft --target "$GITHUB_SHA" --title "Tandem $VERSION" --notes-file release-notes.md
+      # With the signing secrets set, publishPlugin signs first (the Gradle plugin's own dependency) and uploads the signed ZIP;
+      # without them it uploads buildPlugin's.
       - name: Publish to the JetBrains Marketplace
         if: inputs.publish
         env:

@@ -1044,11 +1044,19 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertEqual("inputs.publish", step(wf, "release", "Publish to the JetBrains Marketplace")["if"])
         self.assertIn("--draft", step(wf, "release", "Draft the GitHub release")["run"])
 
-    def test_the_secrets_reach_only_the_sign_and_publish_steps(self):
+    def test_the_secrets_reach_only_the_signing_and_publish_steps(self):
         wf = load(RELEASE)
         with_secrets = [s.get("name") for s in steps(wf, "release") if "secrets." in json.dumps(s)]
-        self.assertEqual(["Sign", "Publish to the JetBrains Marketplace"], with_secrets)
+        self.assertEqual(["Decide on signing", "Sign", "Publish to the JetBrains Marketplace"], with_secrets)
         self.assertNotIn("PUBLISH_TOKEN", json.dumps(step(wf, "release", "Sign")))
+        self.assertNotIn("PUBLISH_TOKEN", json.dumps(step(wf, "release", "Decide on signing")))
+
+    def test_signing_is_optional_and_the_zip_is_built_either_way(self):
+        wf = load(RELEASE)
+        self.assertEqual("steps.signing.outputs.signed == 'true'", step(wf, "release", "Sign")["if"])
+        self.assertIn("buildPlugin", step(wf, "release", "Check and build")["run"])
+        self.assertIn("*.zip", step(wf, "release", "Name the ZIP")["run"])                    # the plain ZIP when there is no signed one
+        self.assertEqual("${{ steps.zip.outputs.zip }}", step(wf, "release", "Draft the GitHub release")["env"]["ZIP"])
 
 
 if __name__ == "__main__":
