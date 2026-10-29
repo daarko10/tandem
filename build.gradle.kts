@@ -123,10 +123,11 @@ intellijPlatform {
 
     pluginVerification {
         ides {
-            // Every stable IntelliJ IDEA release from sinceBuild up to the newest one.
+            // Every stable IntelliJ IDEA release from sinceBuild up to the newest one, and the newest EAP: the Marketplace verifies
+            // against the EAP too, and a Jewel API that moved there is found here first.
             select {
                 types = listOf(IntelliJPlatformType.IntellijIdea)
-                channels = listOf(ProductRelease.Channel.RELEASE)
+                channels = listOf(ProductRelease.Channel.RELEASE, ProductRelease.Channel.EAP)
                 sinceBuild = providers.gradleProperty("pluginSinceBuild")
             }
         }

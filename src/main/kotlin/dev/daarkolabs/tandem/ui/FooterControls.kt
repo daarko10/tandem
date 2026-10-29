@@ -82,7 +82,6 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.MenuScope
 import org.jetbrains.jewel.ui.component.PopupMenu
 import org.jetbrains.jewel.ui.component.Text
-import org.jetbrains.jewel.ui.component.copyWithSize
 import org.jetbrains.jewel.ui.component.separator
 import java.awt.Component
 import java.awt.KeyboardFocusManager
@@ -618,7 +617,7 @@ private fun modelText(label: ModelLabel, style: TextStyle, palette: ChatPalette)
 private fun DefaultChip(palette: ChatPalette) {
     val small = smallTextStyle()
     Box(Modifier.background(palette.bubbleFill, RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp)) {
-        Text("Default", style = small.copyWithSize((small.fontSize.value - 1).sp), color = palette.secondary, maxLines = 1)
+        Text("Default", style = small.copy(fontSize = (small.fontSize.value - 1).sp), color = palette.secondary, maxLines = 1)
     }
 }
 
