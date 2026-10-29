@@ -1,6 +1,6 @@
 package dev.daarkolabs.tandem.ide.edits
 
-import com.intellij.diff.contents.EmptyContent
+import com.intellij.diff.contents.DocumentContent
 import com.intellij.diff.editor.ChainDiffVirtualFile
 import com.intellij.diff.util.DiffUserDataKeys
 import com.intellij.diff.util.DiffUserDataKeysEx
@@ -11,6 +11,9 @@ import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.editor.Document
+import com.intellij.openapi.editor.EditorModificationUtil
+import com.intellij.openapi.editor.ex.EditorEx
+import com.intellij.openapi.editor.impl.EditorComponentImpl
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
@@ -27,6 +30,7 @@ import com.intellij.testFramework.junit5.fixture.tempPathFixture
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.UIUtil
 import dev.daarkolabs.tandem.session.ToolCall
+import dev.daarkolabs.tandem.session.edits.EditResults
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -144,10 +148,72 @@ class EditDiffTest {
     @Test
     fun `a new file reads New file`() = withDiff({ newFileProposal() }) { shown, decision ->
         assertEquals(listOf("New file", "Proposed by Claude"), shown.request.contentTitles)
-        assertIs<EmptyContent>(shown.request.contents[0])
+        val left = assertIs<DocumentContent>(shown.request.contents[0])
+        assertEquals("", readAction { left.document.text })
         assertEquals("Tandem: new.txt", shown.request.title)
         click(button(shown, "tandem.edit.reject"))
         decision.await()
+    }
+
+    /** The diff's editor that shows [document], once the diff's viewer has built it. On the EDT. */
+    private suspend fun editorOf(shown: EditDiff.Shown, document: Document): EditorEx {
+        while (true) {
+            val editor = withContext(Dispatchers.EDT) {
+                PlatformTestUtil.dispatchAllEventsInIdeEventQueue()
+                UIUtil.uiTraverser(shown.editors[0].component).filter(EditorComponentImpl::class.java)
+                    .map { it.editor }.firstOrNull { it.document === document }
+            }
+            if (editor != null) return editor
+            delay(10)
+        }
+    }
+
+    @Test
+    fun `a new file's proposal is editable and the edited text is what Accept creates and the reply carries`() = timeoutRunBlocking(30.seconds) {
+        val path = dir.resolve("made/new.txt")
+        val tools = IdeEditTools(project, { emptyList() }, { diff.show(it) }, { _, _ -> })
+        val call = ToolCall(
+            "write_file",
+            buildJsonObject {
+                put("file_path", path.toString())
+                put("content", "fresh\n")
+            },
+            "toolu_1",
+            JsonPrimitive(1),
+            "s1",
+        )
+        val reply = async { tools.call(call, autoAccept = null) }
+        var shown = diff.shown
+        while (shown == null) {
+            delay(10)
+            shown = diff.shown
+        }
+        val proposal = editorOf(shown, shown.right.document)
+        // The left side: an empty, read-only document titled New file, so the platform shows its two-side viewer and not the
+        // one-side one, which takes FORCE_READ_ONLY_CONTENTS[0] for the side it shows and so made the proposal read-only.
+        val left = assertIs<DocumentContent>(shown.request.contents[0])
+        assertEquals("", readAction { left.document.text })
+        assertEquals(listOf("New file", "Proposed by Claude"), shown.request.contentTitles)
+        withContext(Dispatchers.EDT) {
+            assertFalse(proposal.isViewer, "the proposal is not a read-only viewer")
+            assertTrue(proposal.document.isWritable, "the proposal's document is writable")
+            assertTrue(EditorModificationUtil.checkModificationAllowed(proposal), "the proposal's editor accepts typing")
+            WriteCommandAction.runWriteCommandAction(project) {
+                proposal.caretModel.moveToOffset(proposal.document.textLength)
+                EditorModificationUtil.insertStringAtCaret(proposal, "by hand\n")
+            }
+            val leftEditor = UIUtil.uiTraverser(shown.editors[0].component).filter(EditorComponentImpl::class.java)
+                .map { it.editor }.firstOrNull { it.document === left.document }
+            assertTrue(leftEditor == null || leftEditor.isViewer, "the empty left side is read-only")
+        }
+        click(button(shown, "tandem.edit.accept"))
+        val edited = "fresh\nby hand\n"
+        val result = reply.await()
+        val expected = EditResults.created(path.toString(), edited, changed = true)
+        assertEquals(expected.isError, result.isError, result.text)
+        assertEquals(expected.text, result.text)
+        assertEquals(edited, Files.readString(path))
+        assertEquals(null, diff.shown)
     }
 
     @Test
