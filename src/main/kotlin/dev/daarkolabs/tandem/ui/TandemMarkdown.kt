@@ -14,6 +14,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.TextUnit
@@ -107,17 +108,19 @@ class TandemBlockRenderer(
  * Inline code is the pill of polish spec 2.5 ([inlineCodeStyle]) in every block (open item 5): the bridge's `MarkdownStyling.create`
  * hands its one `inlinesStyling` to the paragraph styling, which the paragraphs inside list items and block quotes use too, and the
  * table renderer reads it for its cells; headings build their own from their sizes, so each level is rebuilt with the pill
- * ([headingWithInlineCode]).
+ * ([headingWithInlineCode]). Block quotes take their colours from the theme ([quoteStyling]).
  */
 @Composable
 internal fun TandemMarkdownStyling(project: Project, content: @Composable () -> Unit) {
     val palette = chatPalette()
     val editorFont = JewelTheme.editorTextStyle.fontFamily ?: FontFamily.Monospace
     val bodySize = JewelTheme.defaultTextStyle.fontSize
+    val quoteLine = JewelTheme.globalColors.borders.normal
     val (styling, renderer) = remember(JewelTheme.instanceUuid) {
         val s = MarkdownStyling.create(
             inlinesStyling = InlinesStyling.create(inlineCode = inlineCodeStyle(palette, editorFont, bodySize)),
             heading = headingWithInlineCode(MarkdownStyling.Heading.create(), palette, editorFont),
+            blockQuote = quoteStyling(palette, quoteLine),
         )
         val extensions = listOf(GitHubTableRendererExtension(GfmTableStyling.create(), s), GitHubStrikethroughRendererExtension)
         s to TandemBlockRenderer(s, extensions)
@@ -129,15 +132,23 @@ internal fun TandemMarkdownStyling(project: Project, content: @Composable () -> 
 }
 
 /**
- * The inline code pill (polish spec 2.5): [ChatPalette.codeTint] on [ChatPalette.boxFill] in the [editorFont], one point under
- * [bodySize]. A `SpanStyle` has no border or radius, so the pill has square corners (polish spec open item 17).
+ * The inline code pill (polish spec 2.5): [ChatPalette.codeTint] on [ChatPalette.codeFill] in the [editorFont], one point under
+ * [bodySize]. A `SpanStyle` has no border or radius, so the pill has square corners (polish spec open item 17). The fill is
+ * half transparent: Compose paints a span's background over the selection, and an opaque pill hid the selection of its text.
  */
 internal fun inlineCodeStyle(palette: ChatPalette, editorFont: FontFamily, bodySize: TextUnit): SpanStyle = SpanStyle(
     color = palette.codeTint,
-    background = palette.boxFill,
+    background = palette.codeFill,
     fontFamily = editorFont,
     fontSize = if (bodySize.isSp) (bodySize.value - 1).sp else bodySize,
 )
+
+/**
+ * A block quote's styling: the bridge's, with its text in [ChatPalette.secondary] and its bar in [line]. The bridge's own colours
+ * are fixed light-theme greys, and its quote text came out black on a dark theme.
+ */
+internal fun quoteStyling(palette: ChatPalette, line: Color): MarkdownStyling.BlockQuote =
+    MarkdownStyling.BlockQuote.create(lineColor = line, textColor = palette.secondary)
 
 /**
  * [heading] with the inline code pill ([inlineCodeStyle]) in each of its six levels, everything else kept. The bridge's
