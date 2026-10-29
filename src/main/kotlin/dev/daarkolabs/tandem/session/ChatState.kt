@@ -136,12 +136,32 @@ data class ChatState(
      * process ended or the chat was [settled]; empty for an init that lists none.
      */
     val cliCapabilities: Set<String>? = null,
+    /** Each Tandem edit's review, by tool use id ([SessionEvent.EditPhase], from the IDE's `TandemEdits`; spec 3.4, 4.2). */
+    val edits: Map<String, EditReview> = emptyMap(),
+    /** `Accept all` was pressed in this turn: its later edits apply without a diff. Reset by the turn's `result` (spec 3.3). */
+    val acceptAll: Boolean = false,
 )
+
+/** Where a Tandem edit's review stands: waiting behind another diff, its diff open, or decided. */
+enum class EditPhase { QUEUED, OPEN, DONE }
+
+/** How a decided Tandem edit came out (spec 3.4): accepted as proposed or with the user's changes, auto-accepted, rejected, stopped. */
+enum class EditOutcome { ACCEPTED, ACCEPTED_CHANGED, AUTO, REJECTED, STOPPED }
+
+/** The review of one Tandem edit of [file] (its name as the row shows it): its [phase], and once [EditPhase.DONE] its [outcome]. */
+data class EditReview(val file: String, val phase: EditPhase, val outcome: EditOutcome? = null)
+
+/** What a [ContextChip] stands for: the editor's selection, or a file with unsaved changes sent as a text block (spec 3.5). */
+enum class ContextChipKind { SELECTION, UNSAVED_FILE }
+
+/** A context block a prompt carried, as its bubble shows it: its [kind], its [label] and the file's [path]. */
+data class ContextChip(val kind: ContextChipKind, val label: String, val path: String)
 
 /**
  * A message sent while Claude worked, not started yet: its [text] and [images] are Tandem's own copy (the CLI never echoes it),
  * [later] whether it was sent with `"priority":"later"`. [restoreOnWithdraw]: while [PendingStage.WITHDRAWING], whether it goes
- * back to the composer (Edit) or is dropped (Cancel).
+ * back to the composer (Edit) or is dropped (Cancel). [typed] is the draft as the user typed it (`@src/A.kt`, where [text] holds the
+ * bare path of a dirty mention, spec 3.5): what goes back to the composer, so that the next send swaps against the buffer as it is then.
  */
 data class PendingSend(
     val uuid: String,
@@ -151,6 +171,9 @@ data class PendingSend(
     val later: Boolean,
     val stage: PendingStage,
     val restoreOnWithdraw: Boolean = false,
+    /** The context blocks sent before its text, as chips (spec 3.5); its entry takes them once it starts. */
+    val context: List<ContextChip> = emptyList(),
+    val typed: String = text,
 )
 
 /** Where a [PendingSend] stands. */
@@ -165,7 +188,7 @@ enum class PendingStage {
     WITHDRAWING,
 }
 
-/** A message that came back without running, for the composer to put back ahead of the draft. */
+/** A message that came back without running, for the composer to put back ahead of the draft: its [text] as typed. */
 data class ReturnedSend(val uuid: String, val text: String, val images: List<UserImage>)
 
 /** How many characters of a message's first line a notice quotes (spec 12.5). */
@@ -301,6 +324,8 @@ sealed interface ChatEntry {
         val sentAtMillis: Long? = null,
         val images: List<UserImage> = emptyList(),
         val folded: Boolean = false,
+        /** The context blocks sent before its text (the selection, an unsaved file), as chips (spec 3.5). */
+        val context: List<ContextChip> = emptyList(),
     ) : ChatEntry
 
     /**
@@ -346,6 +371,11 @@ sealed interface ChatEntry {
         val parentToolUseId: String? = null,
         val agentId: String? = null,
         val atMillis: Long? = null,
+        /**
+         * Why the call did not run, from its `tool_result_meta` entry, with or without a [decision]: `user-rejected` on the CLI's own
+         * result for a call Stop withdrew (`ide-edit-stop:44`), which carries no decision.
+         */
+        val nonExecutionKind: String? = null,
     ) : ChatEntry
 
     /**
@@ -490,6 +520,7 @@ private fun ChatState.withNothingInProgress(): ChatState = copy(
     turn = null,
     quietSends = emptySet(),
     cliCapabilities = null,
+    acceptAll = false,
 )
 
 /**
@@ -501,8 +532,8 @@ internal fun ChatState.forkHistory(): ChatState = copy(pendingSends = emptyList(
 /**
  * The history a fork at [uuid] starts from (spec 13.1): [forkHistory] up to the first main-thread [ChatEntry.Assistant] whose
  * [ChatEntry.Assistant.uuids] hold [uuid], and on to the next [ChatEntry.User] or [ChatEntry.Shell] entry after it, so that its
- * whole turn and the turn's footer stay. The ring waits for the fork's first turn ([ChatState.context] null), and only the tasks of
- * calls still shown stay. Null when no main-thread assistant entry holds [uuid] (a subagent's line, or none of this history's).
+ * whole turn and the turn's footer stay. The ring waits for the fork's first turn ([ChatState.context] null), and only the tasks and
+ * edit reviews of calls still shown stay. Null when no main-thread assistant entry holds [uuid] (a subagent's line, or none of this history's).
  */
 internal fun ChatState.forkedAt(uuid: String): ChatState? {
     val history = forkHistory()
@@ -518,6 +549,8 @@ internal fun ChatState.forkedAt(uuid: String): ChatState? {
         entryIndex = emptyMap(),
         context = null,
         tasks = history.tasks.filterValues { it.toolUseId in calls },
+        // Edit reviews go with their calls' entries.
+        edits = history.edits.filterKeys { it in calls },
     )
 }
 

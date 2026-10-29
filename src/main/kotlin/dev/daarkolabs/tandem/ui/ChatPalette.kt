@@ -17,7 +17,9 @@ import org.jetbrains.jewel.ui.theme.colorPalette
  * colour), the diff stats' colours and the diff lines' fills, and the polish spec's two muted tiers and accent (its section 1):
  * [secondary], the body text at 0.8 alpha (the footer's mode label and model name), [dim], the theme's info text (menu headers,
  * descriptions, digits, the effort), and [accent], the theme's blue (a menu's check). [shell] colours a Bash body's command from the
- * editor scheme (polish spec 2.4) and [codeTint] is the inline code pill's text (polish spec 2.5).
+ * editor scheme (polish spec 2.4) and [codeTint] is the inline code pill's text (polish spec 2.5). [codeFill] is the pill's fill:
+ * [boxFill] made half transparent ([translucentOver]), so a text selection, which Compose draws under a span's background, shows
+ * through it.
  */
 internal data class ChatPalette(
     val bubbleFill: Color,
@@ -31,6 +33,7 @@ internal data class ChatPalette(
     val accent: Color,
     val shell: ShellColors,
     val codeTint: Color,
+    val codeFill: Color = boxFill,
 )
 
 /** A Bash body's colours by token kind (polish spec 2.4), and the `$ ` prompt's. */
@@ -87,6 +90,23 @@ internal fun chatPalette(): ChatPalette {
             accent = palette.blueOrNull(if (dark) 6 else 5) ?: colors.outlines.focused,
             shell = shell,
             codeTint = palette.redOrNull(if (dark) 9 else 2) ?: colors.text.error,
+            codeFill = translucentOver(step, colors.panelBackground, CODE_FILL_ALPHA),
         )
     }
+}
+
+/** The inline code pill's opacity: a selection under it still shows at half strength. */
+internal const val CODE_FILL_ALPHA: Float = 0.5f
+
+/**
+ * A colour at [alpha] that, drawn over [behind], looks like [target], so whatever is drawn under it (a text selection) shows through.
+ * [target] itself when no colour at that [alpha] does (a channel would leave 0 to 1) or [behind] is not opaque.
+ */
+internal fun translucentOver(target: Color, behind: Color, alpha: Float): Color {
+    if (behind.alpha < 1f || alpha <= 0f) return target
+    fun channel(t: Float, b: Float): Float = (t - b * (1 - alpha)) / alpha
+    val r = channel(target.red, behind.red)
+    val g = channel(target.green, behind.green)
+    val b = channel(target.blue, behind.blue)
+    return if (listOf(r, g, b).all { it in 0f..1f }) Color(r, g, b, alpha) else target
 }

@@ -72,6 +72,10 @@ internal class SessionSpawner(
     private val addTakenOver: (from: SessionHandle, handle: SessionHandle) -> Boolean,
     /** Runs between the new row taking the process over and [addTakenOver]: tests let a turn end there. */
     private val beforeAddTakenOver: suspend (handle: SessionHandle) -> Unit = {},
+    /** What serves Tandem's own tools to each process ([ClaudeSession]'s `hostTools`). */
+    private val hostTools: HostTools? = null,
+    /** The plugin's version, for Tandem's server ([ClaudeSession]'s `version`). */
+    private val hostVersion: String = "dev",
 ) {
     /** One start at a time makes room under the cap and attaches its process, so that two starts never count the same room. */
     private val admission = Mutex()
@@ -189,7 +193,7 @@ internal class SessionSpawner(
     private suspend fun takeOver(from: SessionHandle, session: ClaudeSession, id: SessionId) {
         val process = from.handOver(session) ?: return // stopped or ended meanwhile
         session.notice(NoticeLevel.WARNING, "Resumed as a new session $id")
-        val handle = SessionHandle(id, scope, session.state.value, listing, clock())
+        val handle = SessionHandle(id, scope, session.state.value, listing, clock(), hostTools = hostTools)
         handle.inheritFolders(from) // the process runs with from's --add-dir folders: the new row lists them and checks its inits
         // Nobody else knows the new handle yet, so it has no process of its own and takes this one.
         if (!handle.adopt(process) { adopted, reported -> firstInit(handle, adopted, reported) }) {
@@ -279,7 +283,7 @@ internal class SessionSpawner(
             initial = reduce(initial, SessionEvent.HostNotice(NoticeLevel.INFO, notice))
         }
         if (overCap) initial = reduce(initial, SessionEvent.HostNotice(NoticeLevel.INFO, CAP_EXCEEDED_TEXT))
-        val session = ClaudeSession(scope, config, launcher, initial)
+        val session = ClaudeSession(scope, config, launcher, initial, hostTools = hostTools, version = hostVersion)
         processes.add(session)
         session.job.invokeOnCompletion { processes.remove(session) }
         return session

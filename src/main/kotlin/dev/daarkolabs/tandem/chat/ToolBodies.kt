@@ -28,12 +28,14 @@ object ToolBodies {
 
     /**
      * The body of a call of [kind] with [input], its result's raw [content] (a string or blocks), its `tool_use_result` [result]
-     * (or its text when it has none) and whether the result [isError].
+     * (or its text when it has none) and whether the result [isError]. A [tandem] call (Tandem's own `edit_file` or `write_file`,
+     * spec 3.4) shows its result's text, which says what landed and how the file now reads.
      */
-    fun body(kind: ToolKind, input: JsonObject?, content: JsonElement?, result: JsonElement?, isError: Boolean): ToolBody {
+    fun body(kind: ToolKind, input: JsonObject?, content: JsonElement?, result: JsonElement?, isError: Boolean, tandem: Boolean = false): ToolBody {
         val text = contentText(content) ?: (result as? JsonPrimitive)?.takeIf { it.isString }?.content.orEmpty()
         if (isError) return errorBody(kind, input, text, result)
         val fields = result as? JsonObject
+        if (tandem) return mono(text)
         return when (kind) {
             ToolKind.READ -> image(content, fields) ?: fields?.obj("file")?.let(::numbered) ?: mono(ToolLabels.stripSystemReminders(text))
             ToolKind.EDIT -> diff(input, fields) ?: mono(text)
@@ -71,15 +73,25 @@ object ToolBodies {
         }
     }
 
-    /** `+A -B` of an edit (from `structuredPatch`) or of a write: an update's patch, else the lines it created. Null for other tools. */
+    /**
+     * `+A -B` of an edit (from `structuredPatch`, else counted from its input's `old_string` and `new_string`, spec 3.4) or of a write:
+     * an update's patch, else the lines it created. Null for other tools, and for an edit with neither.
+     */
     fun stats(kind: ToolKind, input: JsonObject?, result: JsonElement?): DiffStats? = when (kind) {
-        ToolKind.EDIT -> patchStats(result as? JsonObject)
+        ToolKind.EDIT -> patchStats(result as? JsonObject) ?: inputStats(input)
         ToolKind.CREATE -> if (isWriteUpdate(result)) {
             patchStats(result as JsonObject)
         } else {
             DiffStats(contentLines(input?.string("content").orEmpty()).size, 0)
         }
         else -> null
+    }
+
+    /** An edit's stats from its input: the lines of `new_string` added, those of `old_string` removed; null without both. */
+    private fun inputStats(input: JsonObject?): DiffStats? {
+        val old = input?.string("old_string") ?: return null
+        val new = input.string("new_string") ?: return null
+        return DiffStats(contentLines(new).size, contentLines(old).size)
     }
 
     /** Whether a `Write` result updated an existing file: `type: "update"` with a non-empty `structuredPatch`. */

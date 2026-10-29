@@ -21,14 +21,27 @@ object HostMessages {
      * A prompt: a text block for [text] unless it is blank, then one base64 image block per entry of [images], in order
      * (docs/protocol.md 3). [uuid] comes back as `user_message_uuids` so turns can be correlated. With [later], `"priority":"later"`
      * follows `uuid`: a message sent while a turn runs waits for its own turn instead of folding into the running one (spec 12.6);
-     * without it the frame is byte-identical to before.
+     * without it the frame is byte-identical to before. Each of [context] (the selection, an unsaved buffer; spec 3.5) goes first,
+     * as its own text block `<firstLine>\n```\n<body>\n````; with none the frame is as before.
      */
-    fun userMessage(text: String, images: List<ImageBlock>, uuid: String, later: Boolean = false): JsonObject = buildJsonObject {
+    fun userMessage(
+        text: String,
+        images: List<ImageBlock>,
+        uuid: String,
+        later: Boolean = false,
+        context: List<ContextBlock> = emptyList(),
+    ): JsonObject = buildJsonObject {
         put("type", "user")
         put("session_id", "")
         putJsonObject("message") {
             put("role", "user")
             putJsonArray("content") {
+                for (block in context) {
+                    addJsonObject {
+                        put("type", "text")
+                        put("text", "${block.firstLine}\n```\n${block.body}\n```")
+                    }
+                }
                 if (text.isNotBlank()) {
                     addJsonObject {
                         put("type", "text")
@@ -73,11 +86,18 @@ object HostMessages {
     fun bashContext(command: String, stdout: String, stderr: String, uuid: String): JsonObject =
         bashFrame(BashEscape.context(command, stdout, stderr), uuid, query = false)
 
-    /** `forwardSubagentText` makes the CLI forward a subagent's text replies as assistant lines with an `agent_id`. */
+    /**
+     * `forwardSubagentText` makes the CLI forward a subagent's text replies as assistant lines with an `agent_id`; `sdkMcpServers`
+     * registers Tandem's own MCP server, which the CLI then reaches with `mcp_message` requests (spec 4.1).
+     */
     fun initialize(requestId: String): JsonObject = request(requestId, "initialize") {
         put("hooks", JsonNull)
         put("forwardSubagentText", true)
+        putJsonArray("sdkMcpServers") { add(TandemTools.SERVER_NAME) }
     }
+
+    /** Answers an `mcp_message` with the JSON-RPC [reply] (`jsonRpcResult`, `jsonRpcError` or [TandemTools.answer]'s), under `mcp_response`. */
+    fun mcpResponse(requestId: String, reply: JsonObject): JsonObject = success(requestId) { put("mcp_response", reply) }
 
     /** Stops the running turn; with [cancelQueued] the CLI also drops the messages queued behind it (`interrupt_cancel_queued_v1`). */
     fun interrupt(requestId: String, cancelQueued: Boolean = false): JsonObject = request(requestId, "interrupt") {

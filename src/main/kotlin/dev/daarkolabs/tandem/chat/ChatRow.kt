@@ -1,5 +1,7 @@
 package dev.daarkolabs.tandem.chat
 
+import dev.daarkolabs.tandem.session.ContextChip
+import dev.daarkolabs.tandem.session.EditReview
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
 import dev.daarkolabs.tandem.session.TurnEnd
@@ -31,7 +33,7 @@ enum class RowGap(val dp: Int) {
  * What the user sent, `u:<entry id>`. [mono]: a slash command or a `!` shell line, drawn in the editor font. [images]: the images
  * sent with it, in order, by id only (polish spec 2.7); an images-only prompt has a blank [text]. [caption]: the line under the
  * bubble, [FOLDED_CAPTION] for a prompt the CLI took into the running turn (desktop-parity spec 12.1); null for a prompt that
- * started its own turn.
+ * started its own turn. [chips]: the context blocks sent before its text (an unsaved file, the selection; spec 3.5).
  */
 data class UserRow(
     override val key: String,
@@ -40,6 +42,7 @@ data class UserRow(
     override val gap: RowGap = RowGap.TURN,
     val images: ImmutableList<ImageRef> = persistentListOf(),
     val caption: String? = null,
+    val chips: ImmutableList<ContextChip> = persistentListOf(),
 ) : ChatRow
 
 /**
@@ -182,7 +185,8 @@ data class RowLabel(val text: String, val spans: ImmutableList<IntRange>)
  * built; else, while it runs or waits, its body so far ([ToolBodies.pending], polish spec 2.1); else [ToolBody.None], which a call
  * whose input still streams always has. [children] and [progress] belong to an Agent call: the subagent's rows and its sub-line.
  * [subject] is what a group sentence names: the path relative to the session's directory (reads, edits, writes) or the one-line
- * command (shell).
+ * command (shell). A Tandem edit (spec 3.4) carries its [review] while the user reviews it in the IDE, the [tag] after its label
+ * (`with your changes`, `auto-accepted`) and its row [action] (`Show diff` while its diff is open).
  */
 data class ToolCall(
     val id: String,
@@ -195,7 +199,22 @@ data class ToolCall(
     val children: ImmutableList<ChatRow>,
     val progress: String?,
     val subject: String? = null,
+    val review: EditReview? = null,
+    val tag: String? = null,
+    val action: RowAction? = null,
 )
+
+/** What a tool row offers beside its label (spec 3.4). */
+sealed interface RowAction {
+    /** `Show diff`: focuses the open diff of Tandem's edit [toolUseId]. */
+    data class ShowDiff(val toolUseId: String) : RowAction
+}
+
+/** The tag after an edit's label once the user accepted it with changes of their own (spec 3.4). */
+const val TAG_WITH_YOUR_CHANGES: String = "with your changes"
+
+/** The tag after an edit's label when it applied without a diff (spec 3.3). */
+const val TAG_AUTO_ACCEPTED: String = "auto-accepted"
 
 /** What a tool does, which picks its labels, its body and its family in a group (spec 4.6.2). */
 enum class ToolKind { READ, FIND, SEARCH, SHELL, EDIT, CREATE, WEB_FETCH, WEB_SEARCH, AGENT, QUESTION, PLAN, PLAN_ENTER, TASKS, TOOL_SEARCH, MCP, OTHER }

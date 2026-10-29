@@ -5,7 +5,10 @@ import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.text.TextRange
+import dev.daarkolabs.tandem.chat.MentionPalette
 import dev.daarkolabs.tandem.chat.ScrollEvent
+import dev.daarkolabs.tandem.chat.insertMention
 import dev.daarkolabs.tandem.session.ReturnedSend
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -142,6 +145,21 @@ private fun paletteKey(key: Key, modified: Boolean): ComposerAction? = when (key
 }
 
 /**
+ * Enter or Tab on the open `@` palette (spec 3.5): [palette]'s selected path replaces the typed `@…` in [draft] as `@<path> `, the
+ * caret after its space, so the palette stays closed until another `@` is typed. Both keys insert: the mention is plain text that
+ * the CLI expands when the prompt is sent. False when the palette lists nothing.
+ */
+internal fun pickMention(draft: TextFieldState, palette: MentionPalette): Boolean {
+    val path = palette.pick ?: return false
+    val (text, caret) = insertMention(draft.text.toString(), palette.query, path)
+    draft.edit {
+        replace(0, length, text)
+        selection = TextRange(caret)
+    }
+    return true
+}
+
+/**
  * Whether Enter or the Send button sends: some text, or an attached image with blank text, and no prompt still being encoded
  * ([sending]: the composer counts as busy until the last one captured has gone out, polish spec 2.7 "Send order" and edge 10).
  */
@@ -155,14 +173,18 @@ internal fun canSend(text: String, attachmentCount: Int, sending: Boolean): Bool
  * is captured and cleared at once, and the sender encodes its images off it. Returns whether it sent, so that the caller scrolls the
  * list to its bottom.
  */
-internal fun sendDraft(ui: ChatUiState, sender: ComposerSender, later: Boolean = false): Boolean {
+internal fun sendDraft(ui: ChatUiState, sender: ComposerSender, later: Boolean = false, command: Boolean = false): Boolean {
     val text = ui.draft.text.toString().trim()
     if (!canSend(text, ui.attachments.size, sender.sending.value)) return false
     val images = ui.attachments.map { CapturedImage(it.mediaType, it.bytes) }
+    // The selection goes only while its chip shows (spec 3.5), captured with the prompt it belongs to before anything is cleared. A
+    // slash command ([command]) goes without it: the CLI's commands are recorded as plain text only (docs/protocol.md 4), and a
+    // leading block could make the command a prompt.
+    val selection = if (command) null else ui.chipSelection
     ui.draft.clearText()
     ui.attachments.clear()
     ui.composerNotice.value = null
-    sender.submit(CapturedPrompt(text, images, later))
+    sender.submit(CapturedPrompt(text, images, later, selection))
     ui.follow.value = ui.follow.value.on(ScrollEvent.Sent)
     return true
 }

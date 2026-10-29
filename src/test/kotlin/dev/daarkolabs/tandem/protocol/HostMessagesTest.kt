@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Test
 import kotlin.io.path.readLines
@@ -50,11 +51,51 @@ class HostMessagesTest {
         )
     }
 
+    // spec: initialize registers the sdk server
     @Test
-    fun `initialize forwards subagent text`() {
+    fun `initialize registers the sdk server`() {
         assertEquals(
-            """{"type":"control_request","request_id":"a0","request":{"subtype":"initialize","hooks":null,"forwardSubagentText":true}}""",
-            wire(HostMessages.initialize("a0")),
+            """{"type":"control_request","request_id":"r1","request":{"subtype":"initialize","hooks":null,"forwardSubagentText":true,""" +
+                """"sdkMcpServers":["tandem"]}}""",
+            wire(HostMessages.initialize("r1")),
+        )
+    }
+
+    // spec: mcpResponse wraps the reply
+    @Test
+    fun `mcpResponse wraps the reply`() {
+        assertEquals(
+            """{"type":"control_response","response":{"subtype":"success","request_id":"r2","response":""" +
+                """{"mcp_response":{"jsonrpc":"2.0","id":3,"result":{}}}}}""",
+            wire(HostMessages.mcpResponse("r2", jsonRpcResult(JsonPrimitive(3), buildJsonObject {}))),
+        )
+    }
+
+    // spec: userMessage puts context blocks before the prompt
+    @Test
+    fun `userMessage puts context blocks before the prompt`() {
+        val message = HostMessages.userMessage(
+            "Why?",
+            listOf(ImageBlock("image/png", "iVBORw0")),
+            "u-4",
+            context = listOf(
+                ContextBlock("The user's selection in a.kt, lines 2-3:", "val b = 2\nval c = 3"),
+                ContextBlock("/p/b.kt as open in the IDE, with unsaved changes:", "fun b() = 1"),
+            ),
+        )
+        val content = message.getValue("message").jsonObject.getValue("content").jsonArray
+        assertEquals(4, content.size)
+        val first = content[0].jsonObject
+        assertEquals("text", first.getValue("type").jsonPrimitive.content)
+        assertEquals("The user's selection in a.kt, lines 2-3:\n```\nval b = 2\nval c = 3\n```", first.getValue("text").jsonPrimitive.content)
+        assertTrue(first.getValue("text").jsonPrimitive.content.startsWith("The user's selection in a.kt, lines 2-3:\n```\n"))
+        assertEquals("/p/b.kt as open in the IDE, with unsaved changes:\n```\nfun b() = 1\n```", content[1].jsonObject.getValue("text").jsonPrimitive.content)
+        assertEquals("""{"type":"text","text":"Why?"}""", content[2].toString())
+        assertEquals("image", content[3].jsonObject.getValue("type").jsonPrimitive.content)
+        // An empty list sends the frame of `user text message`, byte for byte.
+        assertEquals(
+            wire(HostMessages.userMessage("ping", emptyList(), uuid = "u-1")),
+            wire(HostMessages.userMessage("ping", emptyList(), uuid = "u-1", context = emptyList())),
         )
     }
 

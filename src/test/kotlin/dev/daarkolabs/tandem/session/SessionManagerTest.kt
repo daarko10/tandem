@@ -25,6 +25,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.serialization.json.JsonElement
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -135,6 +136,7 @@ class SessionManagerTest {
         mcpAuthTimeout: suspend () -> Unit = { delay(3.minutes) },
         respondToShell: () -> Boolean = { true },
         shell: ShellRunner = ShellRunner(environment = { mapOf("SHELL" to "/bin/sh") }),
+        hostTools: HostTools? = null,
     ): SessionManager {
         val fake = buildMap {
             put("TANDEM_FAKE_LOG", log.toString())
@@ -159,6 +161,8 @@ class SessionManagerTest {
             mcpAuthTimeout = mcpAuthTimeout,
             respondToShell = respondToShell,
             shell = shell,
+            hostTools = hostTools,
+            hostVersion = "0.4.0",
         )
     }
 
@@ -2075,6 +2079,40 @@ class SessionManagerTest {
         assertEquals(false, toggle["enabled"]!!.jsonPrimitive.boolean)
         assertEquals(McpStatus.DISABLED, manager.refreshMcp(handle.id).ok().single { it.name == "echo" }.status)
         handle.mcpServers.first { mcp -> mcp.servers.any { it.name == "echo" && it.status == McpStatus.DISABLED } }
+    }
+
+    // spec: toggleMcp and reconnectMcp refuse Tandem's own server without a request
+    @Test
+    fun `toggleMcp and reconnectMcp refuse Tandem's own server without a request`() = test {
+        val (manager, handle) = mcpSession()
+        val refused = McpResult.Failed(McpError.Rejected("Tandem's own server cannot be changed"))
+
+        assertEquals(refused, manager.toggleMcp(handle.id, "tandem", enabled = false))
+        assertEquals(refused, manager.reconnectMcp(handle.id, "tandem"))
+        // Ordered behind both: had either sent a request, the fake's log would hold it before this one's answer.
+        manager.refreshMcp(handle.id).ok()
+        assertEquals(emptyList(), requests("mcp_toggle"))
+        assertEquals(emptyList(), requests("mcp_reconnect"))
+    }
+
+    @Test
+    fun `editEvent shows an edit's review and Accept all in the chat`() = test {
+        val tools = object : HostTools {
+            override suspend fun call(call: ToolCall) = error("not called")
+            override fun cancel(session: SessionId, requestId: JsonElement) {}
+            override fun cancelAll(session: SessionId) {}
+        }
+        val manager = manager(hostTools = tools)
+        val handle = manager.started()
+        assertSame(tools, handle.hostTools)
+        val review = EditReview("a.kt", EditPhase.OPEN)
+
+        manager.editEvent(handle.id, SessionEvent.EditPhase("t1", review))
+        manager.editEvent(handle.id, SessionEvent.AcceptAll(true))
+        manager.editEvent("no-such-session", SessionEvent.AcceptAll(true))
+
+        val state = handle.state.first { it.acceptAll }
+        assertEquals(mapOf("t1" to review), state.edits)
     }
 
     @Test

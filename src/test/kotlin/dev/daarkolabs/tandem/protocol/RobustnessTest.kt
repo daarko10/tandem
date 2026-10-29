@@ -1,13 +1,20 @@
 package dev.daarkolabs.tandem.protocol
 
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 import kotlin.io.path.readLines
 import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -29,6 +36,95 @@ class RobustnessTest {
         assertIs<CliMessage.Unknown>(Ndjson.decode("""{"type":"system","subtype":"brand_new"}"""))
         val request = Ndjson.decode("""{"type":"control_request","request_id":"r1","request":{"subtype":"brand_new"}}""")
         assertIs<InboundRequest.Other>(assertIs<CliMessage.ControlRequest>(request).request)
+    }
+
+    // spec: mcp_message without server_name or with a non-object message is Other
+    @Test
+    fun `mcp_message without server_name or with a non-object message is Other`() {
+        for (request in listOf(
+            """{"subtype":"mcp_message","message":{"jsonrpc":"2.0","id":0,"method":"ping"}}""",
+            """{"subtype":"mcp_message","server_name":7,"message":{"jsonrpc":"2.0","id":0,"method":"ping"}}""",
+            """{"subtype":"mcp_message","server_name":"tandem","message":"ping"}""",
+            """{"subtype":"mcp_message","server_name":"tandem","message":[1]}""",
+            """{"subtype":"mcp_message","server_name":"tandem"}""",
+        )) {
+            val decoded = assertIs<CliMessage.ControlRequest>(Ndjson.decode("""{"type":"control_request","request_id":"r1","request":$request}"""))
+            assertEquals("mcp_message", assertIs<InboundRequest.Other>(decoded.request, request).subtype)
+        }
+        val ok = Ndjson.decode(
+            """{"type":"control_request","request_id":"r2","request":{"subtype":"mcp_message","server_name":"tandem","message":{"method":"ping"}}}""",
+        )
+        assertEquals(InboundRequest.McpMessage("tandem", json("""{"method":"ping"}""")), assertIs<CliMessage.ControlRequest>(ok).request)
+    }
+
+    // spec: a tools/call with a string id is answered with that id
+    @Test
+    fun `a tools call with a string id is answered with that id`() {
+        val cancelled = mutableListOf<JsonElement>()
+        val reply = runBlocking {
+            withTimeout(10_000) {
+                TandemTools.answer(
+                    json("""{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"write_file","arguments":{"file_path":"/p/n","content":""}}}"""),
+                    "0.4.0",
+                    { _, _, _, id -> ToolReply("id ${id}", isError = false) },
+                    { cancelled += it },
+                )()
+            }
+        }
+        assertEquals(JsonPrimitive("req-7"), assertNotNull(reply)["id"])
+        assertEquals("""{"jsonrpc":"2.0","id":"req-7","result":{"content":[{"type":"text","text":"id \"req-7\""}]}}""", reply.toString())
+        runBlocking {
+            TandemTools.answer(json("""{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"req-7"}}"""), "0.4.0", { _, _, _, _ -> null }, { cancelled += it })()
+        }
+        assertEquals(listOf<JsonElement>(JsonPrimitive("req-7")), cancelled)
+        // The session compares ids by JSON equality: 7 is never "req-7", and 2 is never "2".
+        assertNotEquals<JsonElement>(JsonPrimitive(7), JsonPrimitive("req-7"))
+        assertNotEquals<JsonElement>(JsonPrimitive(2), JsonPrimitive("2"))
+        assertEquals(JsonRpcRequest("tools/call", JsonPrimitive("req-7"), null), jsonRpcRequest(json("""{"id":"req-7","method":"tools/call"}""")))
+    }
+
+    // spec: an object id yields -32600 and a missing method too
+    @Test
+    fun `an object id yields -32600 and a missing method too`() {
+        for ((message, id) in listOf(
+            """{"jsonrpc":"2.0","id":{"a":1},"method":"tools/call"}""" to """{"a":1}""",
+            """{"jsonrpc":"2.0","id":true,"method":"ping"}""" to "true",
+            """{"jsonrpc":"2.0","id":null,"method":"ping"}""" to "null",
+            """{"jsonrpc":"2.0","id":4}""" to "4",
+            """{"jsonrpc":"2.0","id":5,"method":7}""" to "5",
+            """{"jsonrpc":"2.0","method":["ping"]}""" to "0",
+        )) {
+            assertNull(jsonRpcRequest(json(message)), message)
+            val reply = runBlocking { TandemTools.answer(json(message), "0.4.0", { _, _, _, _ -> error("no call") }, { error("no cancel") })() }
+            assertEquals("""{"jsonrpc":"2.0","id":$id,"error":{"code":-32600,"message":"Invalid request"}}""", reply.toString(), message)
+        }
+    }
+
+    // spec: a tools/call without arguments yields the malformed-arguments error
+    @Test
+    fun `a tools call without arguments yields the malformed text`() {
+        for (params in listOf(
+            """{"name":"edit_file"}""",
+            """{"name":"edit_file","arguments":"file_path=/p"}""",
+        )) {
+            val reply = runBlocking {
+                TandemTools.answer(json("""{"jsonrpc":"2.0","id":2,"method":"tools/call","params":$params}"""), "0.4.0", { _, _, _, _ -> error("no call") }, {})()
+            }
+            val result = assertNotNull(reply)["result"]!!.jsonObject
+            assertEquals(JsonPrimitive(true), result["isError"])
+            assertEquals(
+                "edit_file needs file_path, old_string and new_string as strings.",
+                result["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content,
+            )
+        }
+        // A tools/call without params, or without a string name, names no tool.
+        for (message in listOf(
+            """{"jsonrpc":"2.0","id":2,"method":"tools/call"}""",
+            """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":5,"arguments":{}}}""",
+        )) {
+            val reply = runBlocking { TandemTools.answer(json(message), "0.4.0", { _, _, _, _ -> error("no call") }, {})() }
+            assertEquals("""{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"Unknown tool: "}}""", reply.toString(), message)
+        }
     }
 
     @Test

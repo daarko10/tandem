@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -15,9 +16,11 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.PermissionCard
 import dev.daarkolabs.tandem.ide.TandemWorkspaceState
+import dev.daarkolabs.tandem.ide.edits.TandemEdits
 import dev.daarkolabs.tandem.session.SessionHandle
 import dev.daarkolabs.tandem.session.SessionManager
 import dev.daarkolabs.tandem.session.UsagePart
@@ -25,6 +28,7 @@ import dev.daarkolabs.tandem.ui.cards.PendingCardHost
 import dev.daarkolabs.tandem.ui.cards.answerFor
 import dev.daarkolabs.tandem.ui.cards.escapeAnswer
 import dev.daarkolabs.tandem.ui.cards.pendingCard
+import dev.daarkolabs.tandem.ui.rows.LocalShowDiff
 import dev.daarkolabs.tandem.ui.rows.ReplyHost
 import dev.daarkolabs.tandem.ui.rows.copyToClipboard
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -71,6 +75,7 @@ internal fun ChatPane(
     val panel = JewelTheme.globalColors.panelBackground
     // The replies' hover rows (polish spec 2.6): Fork from here forks at the reply's own point (desktop-parity spec 13.1).
     val reply = remember(handle.id, actions) { ReplyHost(::copyToClipboard) { at -> actions.fork(handle.id, at) } }
+    val showDiff: (String) -> Unit = remember(project) { { toolUseId -> project.service<TandemEdits>().showDiff(toolUseId) } }
     // The chat pane's height, which caps the context popover's (desktop-parity spec 3.1: 60 % of the tool window).
     val density = LocalDensity.current
     // Read only by the open popover (through the provider), so a resize recomposes neither the pane nor the prompt bar.
@@ -96,19 +101,22 @@ internal fun ChatPane(
                 } else {
                     "Ask Claude anything about this project."
                 }
-                ChatPanel(
-                    project,
-                    presenter,
-                    ui,
-                    emptyText,
-                    handle.lastFrameAtMillis,
-                    onFocusComposer,
-                    reply,
-                    onOpenMcp,
-                    onStop,
-                    onUsageRetry,
-                    onWithdraw = { uuid, restore -> manager.withdraw(handle.id, uuid, restore) },
-                )
+                // A Tandem edit row's `Show diff` focuses that call's open diff (IDE-edits spec 3.4, deviation 5).
+                CompositionLocalProvider(LocalShowDiff provides showDiff) {
+                    ChatPanel(
+                        project,
+                        presenter,
+                        ui,
+                        emptyText,
+                        handle.lastFrameAtMillis,
+                        onFocusComposer,
+                        reply,
+                        onOpenMcp,
+                        onStop,
+                        onUsageRetry,
+                        onWithdraw = { uuid, restore -> manager.withdraw(handle.id, uuid, restore) },
+                    )
+                }
             }
         },
         card = { pending.card?.let { PendingCardHost(project, handle, manager, pending, feedback, cardTakesFocus) } },

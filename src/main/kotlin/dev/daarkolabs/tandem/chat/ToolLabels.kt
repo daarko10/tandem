@@ -103,8 +103,17 @@ object ToolLabels {
             val file = fileName(input, cwd)
             Forms(phrase("Reading", file), phrase("Read", file, tail = readRange(input, result)), phrase("Failed to read", file), phrase("Read", file))
         }
-        ToolKind.EDIT -> fileForms("Editing", "Edited", "Failed to edit", "Edit", fileName(input, cwd))
-        ToolKind.CREATE -> fileName(input, cwd).let { file ->
+        ToolKind.EDIT -> if (ToolKinds.isTandem(name)) {
+            fileName(input, cwd).let { file -> fileForms("Editing", "Edited", "Failed to edit", "Edit", file, denied = phrase("Rejected edit of", file)) }
+        } else {
+            fileForms("Editing", "Edited", "Failed to edit", "Edit", fileName(input, cwd))
+        }
+        // Tandem's write_file: its own failed and rejected wording (spec 3.4); its result never says whether the file existed.
+        ToolKind.CREATE -> if (ToolKinds.isTandem(name)) {
+            fileName(input, cwd).let { file ->
+                fileForms("Creating", "Created", "Failed to create", "Create", file, denied = phrase("Rejected creating", file))
+            }
+        } else fileName(input, cwd).let { file ->
             Forms(
                 phrase("Creating", file),
                 phrase(if (ToolBodies.isWriteUpdate(result)) "Edited" else "Created", file),
@@ -149,8 +158,8 @@ object ToolLabels {
         }
     }
 
-    private fun fileForms(running: String, done: String, failed: String, base: String, obj: String?): Forms =
-        Forms(phrase(running, obj), phrase(done, obj), phrase(failed, obj), phrase(base, obj))
+    private fun fileForms(running: String, done: String, failed: String, base: String, obj: String?, denied: RowLabel? = null): Forms =
+        Forms(phrase(running, obj), phrase(done, obj), phrase(failed, obj), phrase(base, obj), denied)
 
     /** Bash and PowerShell: the description when the call has one (spec 4.6.2), else the command. */
     private fun shellForms(input: JsonObject?): Forms {
@@ -190,8 +199,28 @@ object ToolLabels {
         ToolKind.MCP, ToolKind.OTHER, ToolKind.TOOL_SEARCH -> "Using"
     }
 
+    /**
+     * The label of a Tandem edit of [file] while the user reviews it (spec 3.4), or null when its [review] adds nothing to the call's
+     * own label: `Edit of <file> waits for the open diff` while queued, `Reviewing <file> in the diff` while open, and once decided,
+     * before the result lands, `Edited <file>` (or `Created <file>`), `Rejected edit of <file>` (`Rejected creating <file>`), or
+     * `Claude stopped waiting for this edit.`. [file] is drawn in the editor font.
+     */
+    internal fun reviewLabel(kind: ToolKind, phase: ReviewLabel, file: String?): RowLabel = when (phase) {
+        ReviewLabel.QUEUED -> phrase("Edit of", file, tail = " waits for the open diff")
+        ReviewLabel.OPEN -> phrase("Reviewing", file, tail = " in the diff")
+        ReviewLabel.APPLIED -> phrase(if (kind == ToolKind.CREATE) "Created" else "Edited", file)
+        ReviewLabel.REJECTED -> phrase(if (kind == ToolKind.CREATE) "Rejected creating" else "Rejected edit of", file)
+        ReviewLabel.STOPPED -> plain(STOPPED_WAITING)
+    }
+
+    /** What a Tandem edit's row says while its review decides it (spec 3.4), [reviewLabel]'s cases. */
+    internal enum class ReviewLabel { QUEUED, OPEN, APPLIED, REJECTED, STOPPED }
+
+    /** The row of a Tandem edit the CLI withdrew while the turn goes on (spec 3.2, deviation 10). */
+    internal const val STOPPED_WAITING: String = "Claude stopped waiting for this edit."
+
     /** The file a call names, relative to [cwd] and middle-truncated. */
-    private fun fileName(input: JsonObject?, cwd: String?): String? = filePath(input)?.let { middleTruncate(relativePath(it, cwd), NAME_MAX) }
+    internal fun fileName(input: JsonObject?, cwd: String?): String? = filePath(input)?.let { middleTruncate(relativePath(it, cwd), NAME_MAX) }
 
     /** The untruncated path a file tool names: `file_path`, a notebook's `notebook_path`, or `path`. */
     internal fun filePath(input: JsonObject?): String? =

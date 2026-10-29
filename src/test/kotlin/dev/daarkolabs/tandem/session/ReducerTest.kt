@@ -2203,6 +2203,101 @@ class ReducerTest {
         assertTrue(agents.assistants().any { "<uuid-50>" in it.uuids && it.parentToolUseId != null }, "agent-sync:42 is a subagent's line")
         assertNull(agents.forkedAt("<uuid-50>"))
     }
+
+    // spec: EditPhase events set edits and clear clears them
+    // The "clear" half is a fork cut, not a /clear: Tandem decodes no conversation_reset and keeps the entries over a /clear, and
+    // spec 4.2 says the reviews are cleared with the entries, so they go only where the entries go (plan deviation 11).
+    @Test
+    fun `EditPhase events set edits and clear clears them`() {
+        val queued = EditReview("hello.txt", EditPhase.QUEUED)
+        var state = reduce(ChatState(), SessionEvent.EditPhase("t1", queued))
+        assertEquals(mapOf("t1" to queued), state.edits)
+        val done = EditReview("hello.txt", EditPhase.DONE, EditOutcome.ACCEPTED_CHANGED)
+        state = reduce(reduce(state, SessionEvent.EditPhase("t1", EditReview("hello.txt", EditPhase.OPEN))), SessionEvent.EditPhase("t1", done))
+        assertEquals(mapOf("t1" to done), state.edits, "each phase replaces the call's review")
+        assertEquals(state.edits, state.settled().edits, "a stopped process keeps the reviews with the entries")
+
+        // A fork cut drops the reviews of the calls it leaves out.
+        val origin = forkAtOrigin().copy(edits = mapOf("<id-28>" to done))
+        assertEquals(emptyMap(), assertNotNull(origin.forkedAt("<uuid-14>")).edits)
+    }
+
+    // spec: AcceptAll sets and the result resets acceptAll
+    @Test
+    fun `AcceptAll sets and the result resets acceptAll`() {
+        val on = reduce(ChatState(busy = true), SessionEvent.AcceptAll(true))
+        assertTrue(on.acceptAll)
+        assertFalse(reduce(on, SessionEvent.AcceptAll(false)).acceptAll)
+        val result = Fixtures.lines("ide-edit")[71 - 1]
+        assertFalse(reduce(on, cli(result)).acceptAll, "the turn's result ends it (ide-edit:71)")
+        assertFalse(reduce(on, SessionEvent.Ended("The claude CLI exited.", isError = false)).acceptAll, "so does the process's end")
+        assertFalse(on.settled().acceptAll)
+    }
+
+    // spec: the Tandem can_use_tool is dropped
+    @Test
+    fun `the Tandem can_use_tool is dropped`() {
+        val request = Fixtures.lines("ide-edit")[37 - 1]
+        val state = reduce(ChatState(busy = true), cli(request))
+        assertEquals(emptyList(), state.pendingPermissions)
+        // Another MCP tool's request still raises its card.
+        val foreign = request.replace("mcp__tandem__edit_file", "mcp__echo__echo")
+        assertEquals(listOf("mcp__echo__echo"), reduce(ChatState(busy = true), cli(foreign)).pendingPermissions.map { it.toolName })
+    }
+
+    // spec: a user-rejected result without a decision keeps its kind
+    @Test
+    fun `a user-rejected result without a decision keeps its kind`() {
+        val result = reduce(ChatState(), cli(Fixtures.lines("ide-edit-stop")[44 - 1])).entries.filterIsInstance<ChatEntry.ToolResult>().single()
+        assertEquals("user-rejected", result.nonExecutionKind)
+        assertNull(result.decision)
+        assertTrue(result.isError)
+        // An accepted call keeps its decision and has no kind (ide-edit:41).
+        val accepted = reduce(ChatState(), cli(Fixtures.lines("ide-edit")[41 - 1])).entries.filterIsInstance<ChatEntry.ToolResult>().single()
+        assertEquals("accept", accepted.decision?.decision)
+        assertNull(accepted.nonExecutionKind)
+    }
+
+    // spec: a sent message keeps its chips
+    @Test
+    fun `a sent message keeps its chips`() {
+        val chip = ContextChip(ContextChipKind.UNSAVED_FILE, "A.kt (unsaved)", "src/A.kt")
+        val sent = reduce(ChatState(), SessionEvent.UserSent("u1", "fix src/A.kt", live = true, context = listOf(chip)))
+        assertEquals(listOf(chip), sent.entries.filterIsInstance<ChatEntry.User>().single().context)
+        // One sent while a turn runs waits with its chips, and its entry takes them when it starts, or folds.
+        val waiting = reduce(sent, SessionEvent.UserSent("u2", "again", live = true, context = listOf(chip)))
+        assertEquals(listOf(chip), waiting.pendingSends.single().context)
+        val started = reduce(waiting, cli("""{"type":"command_lifecycle","command_uuid":"u2","state":"started"}"""))
+        assertEquals(listOf(chip), started.entries.filterIsInstance<ChatEntry.User>().last().context)
+        val folded = reduce(ChatState(), SessionEvent.UserSent("u3", "loaded", folded = true, context = listOf(chip)))
+        assertEquals(listOf(chip), folded.entries.filterIsInstance<ChatEntry.User>().single().context)
+        // Without chips, none.
+        assertEquals(emptyList(), reduce(ChatState(), SessionEvent.UserSent("u4", "plain")).entries.filterIsInstance<ChatEntry.User>().single().context)
+    }
+
+    // spec 3.5: a withdrawn send comes back as typed, so the next send swaps against the buffer as it is then
+    @Test
+    fun `a cancelled send with context comes back to the composer as typed`() {
+        val chip = ContextChip(ContextChipKind.UNSAVED_FILE, "A.kt (unsaved)", "src/A.kt")
+        val busy = reduce(ChatState(), SessionEvent.UserSent("u1", "first", live = true))
+        val waiting = reduce(busy, SessionEvent.UserSent("u2", "fix src/A.kt", live = true, context = listOf(chip), typed = "fix @src/A.kt"))
+        assertEquals("fix @src/A.kt", waiting.pendingSends.single().typed)
+        // Edit withdraws it through command_lifecycle: the composer gets the `@` back, not the bare path the CLI was sent.
+        val asked = reduce(waiting, SessionEvent.WithdrawRequested("u2", restore = true))
+        val cancelled = reduce(asked, cli("""{"type":"command_lifecycle","command_uuid":"u2","state":"cancelled"}"""))
+        assertTrue(cancelled.pendingSends.isEmpty())
+        assertEquals(listOf(ReturnedSend("u2", "fix @src/A.kt", emptyList())), cancelled.returnedSends)
+        // Stop's cancelled line, with no withdraw asked, returns it as typed too; its notice quotes what was sent.
+        val stopped = reduce(waiting, cli("""{"type":"command_lifecycle","command_uuid":"u2","state":"cancelled"}"""))
+        assertEquals(listOf(ReturnedSend("u2", "fix @src/A.kt", emptyList())), stopped.returnedSends)
+        assertEquals(listOf(notSentText("fix src/A.kt")), stopped.noticeTexts(NoticeLevel.INFO))
+        // A send without a dirty mention has the same text both ways.
+        val plain = reduce(busy, SessionEvent.UserSent("u3", "again", live = true))
+        assertEquals("again", plain.pendingSends.single().typed)
+        // One that starts keeps the sent text in its entry.
+        val started = reduce(waiting, cli("""{"type":"command_lifecycle","command_uuid":"u2","state":"started"}"""))
+        assertEquals("fix src/A.kt", started.entries.filterIsInstance<ChatEntry.User>().last().text)
+    }
 }
 
 /** A complete main-thread `assistant` line with one text block. */

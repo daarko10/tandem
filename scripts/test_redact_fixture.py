@@ -230,6 +230,52 @@ class RedactTest(unittest.TestCase):
             self.assertEqual([{"name": "mcp", "description": "Manage MCP servers"}], answer["response"]["response"]["commands"])
             self.assertEqual([], answer["response"]["response"]["agents"])
 
+    def test_tool_use_id_meta_is_an_id(self):
+        tool_use = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_01X", "name": "t",
+                                                                  "input": {}}]}}
+        call = {"type": "control_request", "request_id": "r1", "request": {
+            "subtype": "mcp_message", "server_name": "tandem",
+            "message": {"method": "tools/call", "params": {"_meta": {"claudecode/toolUseId": "toolu_01X",
+                                                                      "progressToken": 2}}}}}
+        (use, out), err = self.redact(tool_use, call)
+        placeholder = use["message"]["content"][0]["id"]
+        self.assertEqual(placeholder, out["request"]["message"]["params"]["_meta"]["claudecode/toolUseId"])
+        self.assertNotIn("leaked", json.dumps(out))
+        self.assertEqual("", err)
+
+    def test_turn_attribution_key_is_an_id(self):
+        key = "0b0e5c1a-3f2d-4c6b-9a8e-7d6c5b4a3f2e"
+        (out,), err = self.redact({"type": "user", "turnAttributionKey": key})
+        self.assertEqual("<turnAttributionKey-1>", out["turnAttributionKey"])
+        self.assertEqual("", err)
+
+    def test_every_committed_fixture_outside_init_keep_has_no_init_tools(self):
+        fixtures = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "test", "resources", "fixtures")
+        offenders = []
+        for name in sorted(os.listdir(fixtures)):
+            stem, ext = os.path.splitext(name)
+            if ext != ".ndjson" or "tools" in redact_fixture.INIT_KEEP.get(stem, ()):
+                continue
+            with open(os.path.join(fixtures, name), encoding="utf-8") as f:
+                for number, line in enumerate(f, 1):
+                    msg = json.loads(line) if line.strip() else None
+                    if isinstance(msg, dict) and msg.get("type") == "system" and msg.get("subtype") == "init" \
+                            and msg.get("tools"):
+                        offenders.append(f"{stem}:{number}")
+        self.assertEqual([], offenders, "the redactor empties init.tools outside INIT_KEEP (ide-edits plan, deviation 1)")
+
+    def test_init_tools_survive_for_ide_edit_and_not_for_history_reply(self):
+        tools = ["Bash", "mcp__tandem__edit_file", "mcp__tandem__write_file"]
+        for name in ("ide-edit", "ide-edit-two", "ide-edit-stop", "transcripts/ide-edit"):
+            importlib.reload(redact_fixture)
+            (out,), _ = self.redact({**init(), "tools": tools, "mcp_servers": [{"name": "tandem"}, {"name": "echo"}]},
+                                    name=name)
+            self.assertEqual(tools, out["tools"], name)
+            self.assertEqual(["tandem", "echo"], [s["name"] for s in out["mcp_servers"]], name)
+        importlib.reload(redact_fixture)
+        (out,), _ = self.redact({**init(), "tools": tools}, name="history-reply")
+        self.assertEqual([], out["tools"])
+
     def test_submit_uuid_gets_an_id_placeholder(self):
         (out,), err = self.redact({"type": "system", "subtype": "local_command", "content": "/help",
                                    "uuid": "11111111-2222-4333-8444-555555555555",
@@ -278,6 +324,39 @@ class RedactTest(unittest.TestCase):
         self.assertEqual("rule to `<path>`: when", out["note"])
         (out,), _ = self.redact({"type": "system", "subtype": "x", "note": "see /home/u/x.md: now"})
         self.assertEqual("see <path>: now", out["note"])
+
+    def test_a_path_under_the_work_dir_keeps_its_file_name(self):
+        work = os.path.join(self.dir.name, "work")
+        os.makedirs(work)
+        call = {"type": "control_request", "request": {"subtype": "mcp_message", "message": {
+            "method": "tools/call", "params": {"arguments": {"file_path": os.path.join(work, "hello.txt")}}}}}
+        stream = [call,  # before the init that names the directory: the whole file is read first
+                  {"type": "system", "subtype": "init", "session_id": "s", "cwd": work},
+                  {"type": "user", "text": f"old_string was not found in {work}/hello.txt. The file reads"},
+                  {"type": "user", "text": f"Created /private{work}/new.txt and {work}. Also /home/u/other.txt."}]
+        (first, init_line, found, created), err = self.redact(*stream)
+        self.assertEqual("<path>/hello.txt", first["request"]["message"]["params"]["arguments"]["file_path"])
+        self.assertEqual("<path>", init_line["cwd"])
+        self.assertEqual("old_string was not found in <path>/hello.txt. The file reads", found["text"])
+        self.assertEqual("Created <path>/new.txt and <path>. Also <path>.", created["text"])
+        self.assertEqual("", err)
+        # The transcript of the same run, redacted after the stream, keeps the tail too; a second run changes nothing.
+        (line,), _ = self.redact({"type": "user", "cwd": work, "text": f"{work}/hello.txt"}, name="transcripts/out")
+        self.assertEqual(("<path>", "<path>/hello.txt"), (line["cwd"], line["text"]))
+        importlib.reload(redact_fixture)
+        again, _ = self.redact(first, init_line, found, created)
+        self.assertEqual([first, init_line, found, created], again)
+
+    def test_a_work_dir_outside_the_temporary_directories_keeps_no_tail(self):
+        (_, out), _ = self.redact({"type": "system", "subtype": "init", "session_id": "s", "cwd": "/home/u/project"},
+                                  {"type": "user", "text": "/home/u/project/secret-name.kt"})
+        self.assertEqual("<path>", out["text"])
+
+    def test_a_directory_that_only_starts_like_the_work_dir_is_not_kept(self):
+        work = os.path.join(self.dir.name, "work")
+        (_, out), _ = self.redact({"type": "system", "subtype": "init", "session_id": "s", "cwd": work},
+                                  {"type": "user", "text": f"{work}2/secret.txt and {work}.bak"})
+        self.assertEqual("<path> and <path>.bak", out["text"])
 
     def test_merged_send_uuids_get_the_placeholders_of_their_sends(self):
         (stream, line), err = self.redact(

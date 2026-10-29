@@ -1,5 +1,7 @@
 package dev.daarkolabs.tandem.chat
 
+import dev.daarkolabs.tandem.session.EditOutcome
+import dev.daarkolabs.tandem.session.EditPhase
 import kotlinx.collections.immutable.toImmutableList
 
 /**
@@ -42,13 +44,14 @@ object Grouping {
 
     /**
      * [calls] split into rows (rules 2–4): a call of a tool that is always alone, or one that failed, was denied or was interrupted,
-     * is a row of its own, and the calls between such rows form one group each. A single call is a list of one.
+     * or a Tandem edit in review (spec 3.4), is a row of its own, and the calls between such rows form one group each. A single
+     * call is a list of one.
      */
     fun fold(calls: List<ToolCall>): List<List<ToolCall>> {
         val rows = ArrayList<List<ToolCall>>()
         var group = ArrayList<ToolCall>()
         for (call in calls) {
-            if (call.kind in loneKinds || call.state in loneStates) {
+            if (call.kind in loneKinds || call.state in loneStates || call.inReview()) {
                 if (group.isNotEmpty()) rows += group
                 group = ArrayList()
                 rows += listOf(call)
@@ -147,4 +150,15 @@ object Grouping {
         } else {
             members.distinctBy { if (it.kind != ToolKind.SHELL && it.subject != null) "name:${it.subject}" else "call:${it.id}" }.size
         }
+
+    /**
+     * A Tandem edit whose row speaks for its review (spec 3.4), so it keeps a row of its own: one that waits for its diff or is in review
+     * (with `Show diff`), one the user decided that still waits for its result (`Edited …` / `Rejected …`), and one Claude stopped waiting
+     * for (`Claude stopped waiting for this edit.`).
+     */
+    private fun ToolCall.inReview(): Boolean {
+        val review = review ?: return false
+        return review.phase == EditPhase.QUEUED || review.phase == EditPhase.OPEN || state in liveStates ||
+            review.outcome == EditOutcome.STOPPED
+    }
 }

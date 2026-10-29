@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -51,6 +52,7 @@ import dev.daarkolabs.tandem.ui.smallTextStyle
 import org.jetbrains.jewel.foundation.modifier.thenIf
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Icon
+import org.jetbrains.jewel.ui.component.Link
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
 
@@ -118,11 +120,34 @@ internal fun ToolRowItem(rendered: RenderedRow, ui: ChatUiState) {
     val opens = canExpand(row)
     val lone = row.calls.singleOrNull()
     val needsParse = lone != null && parsedOnOpen(lone.body) && rendered.bodies[row.key] == null
-    Column(Modifier.chatColumn().padding(top = row.gap.dp.dp)) {
-        ToolLine(row.label, row.state, row.stats, opens, expanded && opens, minHeight = 24.dp, marker = headerMarker(row)) {
+    // A Tandem edit's row (IDE-edits spec 3.4, 3.8): its tag after the label, `Show diff` while its diff is open.
+    val edit = lone?.takeIf { it.review != null }
+    Column(Modifier.chatColumn().padding(top = row.gap.dp.dp).thenIf(edit != null) { testTag(editRowTag(edit!!.id)) }) {
+        ToolLine(
+            row.label,
+            row.state,
+            row.stats,
+            opens,
+            expanded && opens,
+            minHeight = 24.dp,
+            marker = headerMarker(row),
+            tag = lone?.tag,
+        ) {
             // A lone row opens its call's sub-row too, so it stays open if the row becomes a group (polish spec 2.1); closing either
             // clamps every body beneath it again (2.2).
             ui.toggle(row.key, clampOwners(row), opensWith = lone?.let { "c:${it.id}" })
+        }
+        edit?.let { call ->
+            val showDiff = LocalShowDiff.current
+            showDiffClick(call, showDiff)?.let { click ->
+                Link(
+                    SHOW_DIFF_LABEL,
+                    onClick = click,
+                    modifier = Modifier.padding(start = 14.dp)
+                        .testTag(showDiffTag(call.id))
+                        .semantics { contentDescription = SHOW_DIFF_LABEL },
+                )
+            }
         }
         // An agent's sub-line: `Done (2 tool uses · 21.8k tokens · 5.8s)` (spec 4.8).
         lone?.progress?.takeIf { lone.kind == ToolKind.AGENT }?.let { Text(it, style = smallTextStyle(), color = JewelTheme.globalColors.text.info) }
@@ -150,6 +175,7 @@ internal fun ToolRowItem(rendered: RenderedRow, ui: ChatUiState) {
  * drawn exactly when the line [opens], live or finished (polish spec 2.1), and the whole line is then the click target. Assistive
  * technology knows it as a button named by [description], its label unless the caller says otherwise (a streaming thinking row).
  * With [shimmer] a light band sweeps across the label ([Modifier.shimmer]): a streaming thinking row's, never a tool's (spec 15.1).
+ * A [tag] (a Tandem edit's `with your changes` or `auto-accepted`, IDE-edits spec 3.4) follows the label, dimmed.
  */
 @Composable
 internal fun ToolLine(
@@ -163,6 +189,7 @@ internal fun ToolLine(
     description: String = label.text,
     marker: Marker = Marker.NONE,
     shimmer: Boolean = false,
+    tag: String? = null,
     onClick: () -> Unit,
 ) {
     val colors = JewelTheme.globalColors.text
@@ -208,6 +235,7 @@ internal fun ToolLine(
             modifier = Modifier.weight(1f, fill = false)
                 .shimmer(shimmer, { band.value }, { Float.POSITIVE_INFINITY }, colors.normal),
         )
+        tag?.let { Text(it, style = smallTextStyle(), color = colors.disabled, maxLines = 1, modifier = Modifier.padding(start = 8.dp)) }
         stats?.let { DiffStatsText(it) }
         if (opens) {
             Icon(AllIconsKeys.General.ChevronRight, null, Modifier.padding(start = 8.dp).size(16.dp).rotate(angle), tint = tone)

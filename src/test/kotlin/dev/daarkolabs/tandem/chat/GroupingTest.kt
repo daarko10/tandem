@@ -4,6 +4,9 @@ import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.EditOutcome
+import dev.daarkolabs.tandem.session.EditPhase
+import dev.daarkolabs.tandem.session.EditReview
 import dev.daarkolabs.tandem.session.SessionEvent
 import dev.daarkolabs.tandem.session.reduce
 import kotlinx.collections.immutable.persistentListOf
@@ -120,6 +123,46 @@ class GroupingTest {
         assertEquals(listOf(calls), Grouping.fold(calls))
         assertEquals("Edited 2 files, created d.kt", Grouping.sentence(calls).text)
         assertEquals(DiffStats(12, 4), Grouping.stats(calls))
+    }
+
+    /** A Tandem `edit_file` call of [file] under [review], in [state]. */
+    private fun tandemEdit(file: String, review: EditReview, state: ToolState): ToolCall =
+        call("tandem-$file", "mcp__tandem__edit_file", path(file), state).copy(review = review)
+
+    // ide-edits spec 3.4: a row that speaks for its review is never folded into a group's sentence
+    @Test
+    fun `a queued or open Tandem edit between two reads stays its own row`() {
+        for (phase in listOf(EditPhase.QUEUED, EditPhase.OPEN)) {
+            val edit = tandemEdit("e.kt", EditReview("e.kt", phase), ToolState.RUNNING)
+            val a = read("a")
+            val b = read("b")
+            assertEquals(listOf(listOf(a), listOf(edit), listOf(b)), Grouping.fold(listOf(a, edit, b)), phase.name)
+        }
+    }
+
+    @Test
+    fun `a decided Tandem edit that waits for its result stays its own row`() {
+        for (outcome in listOf(EditOutcome.ACCEPTED, EditOutcome.REJECTED)) {
+            val edit = tandemEdit("e.kt", EditReview("e.kt", EditPhase.DONE, outcome), ToolState.RUNNING)
+            val a = read("a")
+            val b = read("b")
+            assertEquals(listOf(listOf(a), listOf(edit), listOf(b)), Grouping.fold(listOf(a, edit, b)), outcome.name)
+        }
+    }
+
+    @Test
+    fun `a stopped Tandem edit stays its own row`() {
+        val edit = tandemEdit("e.kt", EditReview("e.kt", EditPhase.DONE, EditOutcome.STOPPED), ToolState.DONE)
+        val a = read("a")
+        val b = read("b")
+        assertEquals(listOf(listOf(a), listOf(edit), listOf(b)), Grouping.fold(listOf(a, edit, b)))
+    }
+
+    @Test
+    fun `an accepted Tandem edit with its result folds like any edit`() {
+        val edit = tandemEdit("e.kt", EditReview("e.kt", EditPhase.DONE, EditOutcome.ACCEPTED), ToolState.DONE)
+        val calls = listOf(read("a"), edit, read("b"))
+        assertEquals(listOf(calls), Grouping.fold(calls))
     }
 
     @Test

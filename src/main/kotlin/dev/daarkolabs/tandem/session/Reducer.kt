@@ -42,6 +42,7 @@ sealed interface SessionEvent {
      * A prompt the user sent: its [text] and the [images] attached to it. [live]: sent to a running process, which waits it in its
      * queue while a turn is open or a message waits ([held]: Tandem holds it behind a shell escape's frames); [later]: sent with
      * `"priority":"later"`. [folded]: a loaded transcript's message that the CLI took into a running turn (a `queued_command`).
+     * [typed]: the draft as typed, where [text] holds a dirty mention's bare path (spec 3.5); it is what a withdrawn send restores.
      */
     data class UserSent(
         val uuid: String,
@@ -52,6 +53,9 @@ sealed interface SessionEvent {
         val live: Boolean = false,
         val held: Boolean = false,
         val folded: Boolean = false,
+        /** The context blocks sent before its text, as chips (spec 3.5). */
+        val context: List<ContextChip> = emptyList(),
+        val typed: String = text,
     ) : SessionEvent
 
     /** The held message [uuid] was written: [PendingStage.HELD] becomes [PendingStage.QUEUED]. */
@@ -143,6 +147,15 @@ sealed interface SessionEvent {
 
     /** The user asked again for [part] of [uuid]'s usage card: [UsagePart.SESSION] loads both parts again, [UsagePart.HISTORY] its own. */
     data class UsageRetry(val uuid: String, val part: UsagePart) : SessionEvent
+
+    /** An event of a Tandem edit from the IDE's `TandemEdits`, the only ones `SessionManager.editEvent` takes. */
+    sealed interface EditEvent : SessionEvent
+
+    /** The review of Tandem edit [toolUseId] moved on to [review] (from the IDE's `TandemEdits`): it replaces [ChatState.edits]' entry. */
+    data class EditPhase(val toolUseId: String, val review: EditReview) : EditEvent
+
+    /** `Accept all` was pressed ([on]): the turn's later edits apply without a diff until its `result` ([ChatState.acceptAll]). */
+    data class AcceptAll(val on: Boolean) : EditEvent
 }
 
 private val LOG: Logger
@@ -240,6 +253,8 @@ fun reduce(state: ChatState, event: SessionEvent): ChatState = when (event) {
             UsagePart.HISTORY -> card.copy(history = UsagePartState.Loading)
         }
     }
+    is SessionEvent.EditPhase -> state.copy(edits = state.edits + (event.toolUseId to event.review))
+    is SessionEvent.AcceptAll -> state.copy(acceptAll = event.on)
 }
 
 /** The session part of a usage card for [result]: a success without a `session` object fails it (spec 3.2). */
@@ -299,7 +314,7 @@ private inline fun ChatState.updateShell(id: String, change: (ChatEntry.Shell) -
  * result between its turns.
  */
 private fun reduceUserSent(state: ChatState, event: SessionEvent.UserSent): ChatState = when {
-    event.folded -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images, folded = true))
+    event.folded -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images, folded = true, context = event.context))
     event.live && (event.held || state.turn != null || state.pendingSends.isNotEmpty()) -> state.copy(
         pendingSends = state.pendingSends + PendingSend(
             uuid = event.uuid,
@@ -308,9 +323,12 @@ private fun reduceUserSent(state: ChatState, event: SessionEvent.UserSent): Chat
             sentAtMillis = event.atMillis,
             later = event.later,
             stage = if (event.held) PendingStage.HELD else PendingStage.QUEUED,
+            context = event.context,
+            typed = event.typed,
         ),
     )
-    else -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images)).openTurn(event.uuid, event.atMillis)
+    else -> state.append(ChatEntry.User(event.uuid, event.text, event.atMillis, event.images, context = event.context))
+        .openTurn(event.uuid, event.atMillis)
 }
 
 /** This state with a turn opened for prompt [uuid] at [at]: busy, not interrupted. */
@@ -328,9 +346,9 @@ private inline fun ChatState.updatePending(uuid: String, change: (PendingSend) -
     return if (changed == pendingSends[position]) this else copy(pendingSends = pendingSends.toMutableList().also { it[position] = changed })
 }
 
-/** This state with [send] no longer waiting, back for the composer ([ChatState.returnedSends]). */
+/** This state with [send] no longer waiting, back for the composer ([ChatState.returnedSends]) as typed. */
 private fun ChatState.returnSend(send: PendingSend): ChatState =
-    copy(pendingSends = pendingSends - send, returnedSends = returnedSends + ReturnedSend(send.uuid, send.text, send.images))
+    copy(pendingSends = pendingSends - send, returnedSends = returnedSends + ReturnedSend(send.uuid, send.typed, send.images))
 
 /**
  * Every waiting message back for the composer, each with a notice of [level] saying so ([text] of its text): the process that
@@ -350,7 +368,7 @@ private fun reduceLifecycle(state: ChatState, message: CliMessage.CommandLifecyc
         "started" -> {
             val open = state.turn != null
             val next = state.copy(pendingSends = state.pendingSends - send)
-                .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = open))
+                .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = open, context = send.context))
             if (open) next else next.openTurn(send.uuid, at)
         }
         "cancelled" -> when {
@@ -371,7 +389,7 @@ private fun ChatState.foldNamed(result: CliMessage.Result): ChatState {
     val named = pendingSends.filter { it.uuid in result.userMessageUuids }
     return named.fold(this) { state, send ->
         state.copy(pendingSends = state.pendingSends - send)
-            .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = true))
+            .append(ChatEntry.User(send.uuid, send.text, send.sentAtMillis, send.images, folded = true, context = send.context))
     }
 }
 
@@ -422,6 +440,7 @@ private fun reduceEnded(state: ChatState, event: SessionEvent.Ended): ChatState 
         turnsEnded = if (end != null) state.turnsEnded + 1 else state.turnsEnded,
         turnInterrupted = false,
         turn = null,
+        acceptAll = false,
         // No process owes those results any more: none of them may keep the session from being idle.
         quietSends = emptySet(),
         cliCapabilities = null,
@@ -466,8 +485,11 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
     is CliMessage.Assistant -> reduceAssistant(state, message, at)
     is CliMessage.User -> reduceUser(state, message, at)
     is CliMessage.StreamEvent -> reduceStream(state, message, at)
-    is CliMessage.Result -> reduceQuietOr(state.foldNamed(message), message)
+    // Accept all lasts for the turn it was pressed in (spec 3.3).
+    is CliMessage.Result -> reduceQuietOr(state.foldNamed(message), message).let { if (it.acceptAll) it.copy(acceptAll = false) else it }
     is CliMessage.ControlRequest -> when (val request = message.request) {
+        // Tandem's own tools ask no question: the diff is the question, and ClaudeSession allows the call at once (spec 4.2).
+        is InboundRequest.CanUseTool if request.toolName.startsWith(TANDEM_TOOL_PREFIX) -> state
         is InboundRequest.CanUseTool -> state.copy(
             pendingPermissions = state.pendingPermissions + PendingPermission(
                 requestId = message.requestId,
@@ -483,7 +505,7 @@ private fun reduceCli(state: ChatState, message: CliMessage, at: Long): ChatStat
                 blockedPath = request.blockedPath,
             ),
         )
-        is InboundRequest.Other -> state
+        is InboundRequest.McpMessage, is InboundRequest.Other -> state
     }
     is CliMessage.ControlCancelRequest -> state.copy(pendingPermissions = state.pendingPermissions.filter { it.requestId != message.requestId })
     is CliMessage.ControlResponse -> {
@@ -795,22 +817,25 @@ private fun reduceUser(state: ChatState, message: CliMessage.User, at: Long): Ch
     var next = state
     for (block in message.content) {
         next = when (block) {
-            is ContentBlock.ToolResult -> next.append(
-                ChatEntry.ToolResult(
-                    id = "result-${block.toolUseId}",
-                    toolUseId = block.toolUseId,
-                    text = toolResultText(block),
-                    isError = block.isError,
-                    content = block.content,
-                    result = result,
-                    decision = message.toolResultMeta.firstOrNull { it.id == block.toolUseId }?.let { meta ->
-                        meta.decision?.let { PermissionDecision(it, meta.source, meta.reasonType, meta.nonExecutionKind) }
-                    },
-                    parentToolUseId = message.parentToolUseId,
-                    agentId = message.agentId,
-                    atMillis = at,
-                ),
-            )
+            is ContentBlock.ToolResult -> {
+                // The meta's kind is kept with or without a decision: Stop's synthetic result carries none (ide-edit-stop:44).
+                val meta = message.toolResultMeta.firstOrNull { it.id == block.toolUseId }
+                next.append(
+                    ChatEntry.ToolResult(
+                        id = "result-${block.toolUseId}",
+                        toolUseId = block.toolUseId,
+                        text = toolResultText(block),
+                        isError = block.isError,
+                        content = block.content,
+                        result = result,
+                        decision = meta?.decision?.let { PermissionDecision(it, meta.source, meta.reasonType, meta.nonExecutionKind) },
+                        parentToolUseId = message.parentToolUseId,
+                        agentId = message.agentId,
+                        atMillis = at,
+                        nonExecutionKind = meta?.nonExecutionKind,
+                    ),
+                )
+            }
             is ContentBlock.Text -> if (isInterruptMarker(block.text)) {
                 next.notice(NoticeLevel.INFO, "Stopped.", NoticeKind.INTERRUPTED).copy(turnInterrupted = true)
             } else {

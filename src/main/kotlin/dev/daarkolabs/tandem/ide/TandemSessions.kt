@@ -7,6 +7,7 @@ import com.intellij.openapi.components.serviceIfCreated
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.chat.RowOptions
+import dev.daarkolabs.tandem.ide.edits.TandemEdits
 import dev.daarkolabs.tandem.session.DefaultProcessLauncher
 import dev.daarkolabs.tandem.session.NewSessionOptions
 import dev.daarkolabs.tandem.session.ProcessLauncher
@@ -120,6 +121,9 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
         respondToShell = { TandemSettings.getInstance().state.respondToShellOutput },
         // A shell escape runs with the login shell's environment, as the CLI does; read on IO, where waiting for the platform is fine.
         shell = ShellRunner(environment = ShellEnvironment::get),
+        // Tandem's edit tools for every session's process, and the version its server names itself with (spec 4.2).
+        hostTools = project.service<TandemEdits>(),
+        hostVersion = TandemBuild.VERSION,
     )
 
     /** Opens an MCP server's sign-in page in the system browser (spec 3.3, 4.4); tests swap in a log line (`tandem.browserOpener`). */

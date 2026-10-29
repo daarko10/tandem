@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -64,9 +65,11 @@ import dev.daarkolabs.tandem.chat.ToolState
 import dev.daarkolabs.tandem.chat.TurnEndRow
 import dev.daarkolabs.tandem.chat.UserRow
 import dev.daarkolabs.tandem.chat.WorkingRow
+import dev.daarkolabs.tandem.ide.context.ProjectFiles
 import dev.daarkolabs.tandem.session.UsagePart
 import dev.daarkolabs.tandem.ui.dev.RecompositionCounter
 import dev.daarkolabs.tandem.ui.dev.RenderingSpike
+import dev.daarkolabs.tandem.ui.rows.LocalKnownPaths
 import dev.daarkolabs.tandem.ui.rows.NoticeItem
 import dev.daarkolabs.tandem.ui.rows.QueuedRowItem
 import dev.daarkolabs.tandem.ui.rows.ReplyHost
@@ -201,47 +204,51 @@ internal fun ChatPanel(
     val density = LocalDensity.current
     val currentOnFocusComposer by rememberUpdatedState(onFocusComposer)
     val listFocus = remember { FocusRequester() }
-    TandemMarkdownStyling(project) {
-        VerticallyScrollableContainer(listState, Modifier.fillMaxSize(), scrollbarInteractionSource = thumb) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize()
-                    .nestedScroll(connection)
-                    .onSizeChanged { viewportHeight = it.height }
-                    .semantics { contentDescription = "Transcript" }
-                    .focusRequester(listFocus)
-                    .focusable()
-                    .onPreviewKeyEvent { event ->
-                        val action = scrollKey(event.key, event.type)
-                            ?: return@onPreviewKeyEvent false
-                        if (action == ScrollAction.FOCUS_COMPOSER) {
-                            currentOnFocusComposer()
-                        } else {
-                            val page = listState.layoutInfo.viewportSize.height - with(density) { PAGE_OVERLAP.toPx() }
-                            applyScrollAction(action, listState, page.coerceAtLeast(0f), ui, scope)
+    // The paths the bubbles draw an `@path` chip for: the project's files, as last read off the EDT (spec 3.5).
+    val knownPaths by remember(project) { ProjectFiles.getInstance(project).known }.collectAsState()
+    CompositionLocalProvider(LocalKnownPaths provides knownPaths) {
+        TandemMarkdownStyling(project) {
+            VerticallyScrollableContainer(listState, Modifier.fillMaxSize(), scrollbarInteractionSource = thumb) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize()
+                        .nestedScroll(connection)
+                        .onSizeChanged { viewportHeight = it.height }
+                        .semantics { contentDescription = "Transcript" }
+                        .focusRequester(listFocus)
+                        .focusable()
+                        .onPreviewKeyEvent { event ->
+                            val action = scrollKey(event.key, event.type)
+                                ?: return@onPreviewKeyEvent false
+                            if (action == ScrollAction.FOCUS_COMPOSER) {
+                                currentOnFocusComposer()
+                            } else {
+                                val page = listState.layoutInfo.viewportSize.height - with(density) { PAGE_OVERLAP.toPx() }
+                                applyScrollAction(action, listState, page.coerceAtLeast(0f), ui, scope)
+                            }
+                            true
                         }
-                        true
-                    }
-                    // A click anywhere in the transcript focuses it (focusable alone is reached by Tab only); the Initial pass
-                    // leaves the rows' own clicks working.
-                    .pointerInput(listFocus) {
-                        awaitEachGesture {
-                            awaitFirstDown(pass = PointerEventPass.Initial)
-                            listFocus.requestFocus()
+                        // A click anywhere in the transcript focuses it (focusable alone is reached by Tab only); the Initial pass
+                        // leaves the rows' own clicks working.
+                        .pointerInput(listFocus) {
+                            awaitEachGesture {
+                                awaitFirstDown(pass = PointerEventPass.Initial)
+                                listFocus.requestFocus()
+                            }
+                        },
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                ) {
+                    items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt, agentExpanded, reply, onOpenMcp, onStop, onUsageRetry, onWithdraw) }
+                }
+                val buttonText = ui.follow.value.buttonText
+                if (buttonText != null && listState.canScrollForward) {
+                    JumpToBottom(buttonText, Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)) {
+                        scope.launch {
+                            val last = listState.layoutInfo.totalItemsCount - 1
+                            if (last >= 0) listState.animateScrollToItem(last)
+                            ui.follow.value = ui.follow.value.on(ScrollEvent.Jump)
+                            if (last >= 0) listState.requestScrollToItem(last, Int.MAX_VALUE)
                         }
-                    },
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-            ) {
-                items(rows, key = { it.row.key }, contentType = { it.row::class }) { RowItem(it, ui, lastFrameAt, agentExpanded, reply, onOpenMcp, onStop, onUsageRetry, onWithdraw) }
-            }
-            val buttonText = ui.follow.value.buttonText
-            if (buttonText != null && listState.canScrollForward) {
-                JumpToBottom(buttonText, Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)) {
-                    scope.launch {
-                        val last = listState.layoutInfo.totalItemsCount - 1
-                        if (last >= 0) listState.animateScrollToItem(last)
-                        ui.follow.value = ui.follow.value.on(ScrollEvent.Jump)
-                        if (last >= 0) listState.requestScrollToItem(last, Int.MAX_VALUE)
                     }
                 }
             }

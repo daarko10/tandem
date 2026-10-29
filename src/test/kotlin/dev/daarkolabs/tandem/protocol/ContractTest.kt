@@ -5,6 +5,7 @@ import dev.daarkolabs.tandem.session.isUsageLine
 import dev.daarkolabs.tandem.session.transcript.TranscriptReader
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -24,12 +25,13 @@ import kotlin.test.assertTrue
  * (`.claude/skills/fix-contract-drift`, step 2): [STREAM] and the [TRANSCRIPTS]. `scripts/classify_drift.py` hands their
  * failures to the fixer by test name, so drift only a scenario recording shows must not fail them. The scenario recordings the
  * workflow makes (`mcp-slash`, `mcp-status`, `mcp-tool-call`, `bash-mode`, `bash-mode-respond`, `bash-mode-context`, `queue-fold`,
- * `queue-later`, `queue-cancel`, `queue-cancel-steer`, `queue-during-card`, `fork-at`, `parity-requests`) get the
+ * `queue-later`, `queue-cancel`, `queue-cancel-steer`, `queue-during-card`, `fork-at`, `parity-requests`, `ide-edit`) get the
  * same decode and reader checks in the `scenario` tests, whose red the loop reports on its standing issue instead, and are
  * checked for what Tandem reads in them: the slash catalogue, `init`'s `terminal_slash_commands` and a local command; the
  * `mcp_status`, `mcp_toggle` and `mcp_authenticate` answers and `init`'s `mcp_servers`; an MCP tool's permission request naming
  * its server; each quiet shell-escape frame's zero-turn result; the command lifecycle of messages written while a turn runs
- * (folded, `later`, withdrawn, during a card), a fork cut at a reply, and the context and usage answers. A check is skipped when
+ * (folded, `later`, withdrawn, during a card), a fork cut at a reply, the context and usage answers, and Tandem's
+ * own MCP server's `mcp_message` frames and tools in `init`. A check is skipped when
  * its file is not there.
  */
 class ContractTest {
@@ -118,6 +120,25 @@ class ContractTest {
             messages.filterIsInstance<CliMessage.SystemInit>().any { init -> init.mcpServers.any { it.name == "echo" && it.status == McpStatus.CONNECTED } },
             "no init lists echo connected in mcp_servers",
         )
+    }
+
+    // spec: ide-edit: mcp_message frames decode and init names both tools
+    @Test
+    fun `ide-edit - mcp_message frames decode and init names both tools`() {
+        val messages = recording("ide-edit")
+        val rpc = messages.filterIsInstance<CliMessage.ControlRequest>().map { it.request }.filterIsInstance<InboundRequest.McpMessage>()
+            .filter { it.serverName == "tandem" }.mapNotNull { jsonRpcRequest(it.message) }
+        val methods = rpc.map { it.method }
+        for (method in listOf("initialize", "notifications/initialized", "tools/list", "tools/call")) {
+            assertTrue(method in methods, "no mcp_message $method for tandem: $methods")
+        }
+        assertTrue(
+            rpc.filter { it.method == "tools/call" }.all { (it.params?.get("_meta") as? JsonObject)?.containsKey("claudecode/toolUseId") == true },
+            "a tools/call without _meta claudecode/toolUseId",
+        )
+        val init = messages.filterIsInstance<CliMessage.SystemInit>().firstOrNull()
+        val tools = assertNotNull(init, "no init").tools
+        assertTrue("mcp__tandem__edit_file" in tools && "mcp__tandem__write_file" in tools, "init does not name Tandem's tools: $tools")
     }
 
     @Test

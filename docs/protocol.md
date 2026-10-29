@@ -1,6 +1,6 @@
 # CLI stream-json protocol reference
 
-How Tandem talks to the user's `claude` binary (Claude Code; recorded with CLI 2.1.300 to 2.1.310) over stdin/stdout
+How Tandem talks to the user's `claude` binary (Claude Code; recorded with CLI 2.1.300 to 2.1.312) over stdin/stdout
 NDJSON. Every claim names the fixture line that shows it and the CLI version it was recorded on, or the source it rests
 on (below); the traps that cost the most time are collected in the Gotchas section right after this introduction: read
 it first. It is unnumbered, so sections 1 to 11 keep the numbers the code cites them by (section 9 points back to it).
@@ -36,6 +36,9 @@ Sources, in order of authority:
      runs a turn, with `fork-at-live-origin` and `fork-at-busy-origin`: section 8), and `parity-add-dir-spawn` (`--add-dir` on
      a spawn, a resume, a fork and a fork at a reply, section 1.1; its stream holds five processes' stdout, the
      transcripts `parity-add-dir-spawn-origin` and `parity-add-dir-spawn` are the origin's and the plain fork's).
+   - 2.1.312, each with its transcript, recorded with `--model sonnet`: `ide-edit`, `ide-edit-two` and `ide-edit-stop`
+     (Tandem's own edit tools served as an SDK MCP server over the control channel, beside a configured stdio server:
+     sections 1.1, 4.2, 4.5 and 6.2; section 10 lists the frames of each) and `ide-mention` (`@path` in a prompt, section 3).
    `synthetic-long-reply` is generated from `plain-reply` by `scripts/make_long_reply.py`, the only fixture that was not
    recorded; nothing here cites it. Re-record with `scripts/record-fixture.sh` (one-shot prompt) or
    `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too and redact the recording in the
@@ -52,6 +55,9 @@ Sources, in order of authority:
 3. `@anthropic-ai/claude-agent-sdk` 0.3.300: `sdk.d.ts` (types) and `sdk.mjs` (what the SDK actually writes and reads);
    0.3.306's `sdk.d.ts` for the MCP types of 4.4 and 4.5.
 4. `claude --help` output.
+5. The strings of the installed `claude` 2.1.312 binary (a Bun-compiled native binary with its JavaScript inside), read, not
+   run, where a claim says **binary**. They show what the code accepts and documents, not what a run did; a claim that rests
+   on them alone says so.
 
 Anything marked **(inferred)** is not directly shown by those sources. The CLI changes weekly: validate every field, and
 parse unknown `type`/`subtype` values to `Unknown(raw)` instead of throwing.
@@ -73,6 +79,7 @@ A row that cites a fixture was recorded (versions in Sources); the others come f
 | Batched and merged sends | The CLI batches the user frames queued before it starts processing (`bash-mode.ndjson:3-6`: both queued, then both started) and merges quiet ones (`shouldQuery:false`) into one transcript line with `mergedSendUuids` (`transcripts/bash-mode.jsonl:5`), answered by one zero-turn `result` naming both (`bash-mode.ndjson:8`, 2.1.306). A `result` can end several sends: read `user_message_uuids` (section 3, 7). |
 | `mcp_status` before the first prompt | The stdio servers are still `pending` (`mcp-status.ndjson:2`, 2.1.306); the first `init` already has settled states (`:6`). Ask again later (4.4). |
 | `mcp_set_servers` | Replaces only the servers it added itself, though every server of `--mcp-config` reports `source:"dynamic"` too: `{}` removes `echo2` alone (`mcp-status.ndjson:44`) and `echo`, `broken`, `authy` stay (`:45`, 2.1.306). The source does not tell the two apart (4.4). |
+| SDK MCP server | A host's own tools reach the CLI as `initialize.sdkMcpServers` plus `mcp_message` control requests, not as a `--mcp-config` entry (4.5). The CLI connects the server lazily: an `mcp_status` before the first prompt lists no row for it (`ide-edit:3`), and the server's `initialize` request arrives before the CLI answers the host's own `initialize` (`ide-edit:1`, then `:2`). A call the user has not answered when `interrupt` arrives is withdrawn with `notifications/cancelled`; the host sends no answer (`ide-edit-stop:42`). Every `mcp_message` request needs exactly one answer or the CLI waits (a held `tools/call` waited 3 s in `ide-edit-stop`; that the CLI waits without limit is **inferred**), except a `tools/call` the CLI withdrew with `notifications/cancelled`, which gets none. |
 | Keep-alive | `{"type":"keep_alive"}` can arrive anytime (e.g. during long control requests); ignore. Must not reset any "turn finished" state. |
 | Ordering | complete `assistant` precedes `content_block_stop` (`plain-reply.ndjson:10,11`; section 6.4). |
 | stdin close | Closing stdin = end of input. The SDK only calls `endInput()` after the last result when no bidirectional needs (permissions, hooks, MCP) remain. **Keep stdin open for the whole session**; close it to shut down gracefully, then wait for exit. |
@@ -113,9 +120,9 @@ then appends optional flags in this order (SDK 0.3.300; only those Tandem cares 
 | `--continue` / `--resume <session-id>` | resume options | `--resume` for an existing session (section 8); no `--continue` |
 | `--allowedTools a,b` / `--disallowedTools a,b` | options | `--disallowedTools Edit,Write,MultiEdit,NotebookEdit` (Tandem applies edits itself, through the IDE). `MultiEdit` no longer exists in 2.1.302 (in no `system/init.tools`, `tools-edit.ndjson:6`); naming it is harmless |
 | `--tools a,b` / `--tools=default` | `tools` option | optional |
-| `--mcp-config <json>` | non-SDK MCP servers given | yes: our IDE MCP server (see 1.4) |
+| `--mcp-config <json>` | non-SDK MCP servers given | **no.** Tandem's own tools are an SDK server named in `initialize` (4.2, 4.5), which needs no port and no config file. The CLI refuses an SDK server given here: a `--mcp-config` entry of `type:"sdk"` is rejected with "declares type \"sdk\", which only an SDK host application can register" (**binary**, 2.1.312) |
 | `--setting-sources user,project,local` | option | optional |
-| `--strict-mcp-config` | option | no |
+| `--strict-mcp-config` | option | no: configured servers run beside Tandem's own (recorded for one `--mcp-config` stdio server, `echo`, with the SDK server `tandem`, both `connected`: `ide-edit:8`, `:73`, 2.1.312; servers from the user's settings were left out by `--setting-sources project,local` and are unrecorded beside it) |
 | `--permission-mode <mode>` | option | yes |
 | `--allow-dangerously-skip-permissions` | option | only if user enables bypass |
 | `--fallback-model <id>` | option; SDK throws if equal to `--model` | no by default |
@@ -139,13 +146,14 @@ Recommended Tandem argv (`SessionConfig.argv()` builds it):
 claude --output-format stream-json --verbose --input-format stream-json \
   --include-partial-messages --thinking-display summarized --permission-prompt-tool=stdio \
   --model <picked> --effort <level> --permission-mode <mode> \
-  --mcp-config '{"mcpServers":{"tandem":{...}}}' \
   --disallowedTools Edit,Write,MultiEdit,NotebookEdit \
   <session flags>
 ```
 
-`--model`, `--effort` and `--permission-mode` are left out when there is no pick, so the CLI's default applies;
-`--mcp-config` comes with Milestone 2 and is not passed yet. `<session flags>` is exactly one of these, never none:
+`--model`, `--effort` and `--permission-mode` are left out when there is no pick, so the CLI's default applies. Tandem's
+edit tools come with `initialize`, not with a flag (4.2): the built-in `Edit`, `Write`, `MultiEdit` and `NotebookEdit` stay
+disallowed, and `mcp__tandem__edit_file` and `mcp__tandem__write_file` take their place. `<session flags>` is exactly one of
+these, never none:
 
 | Session | Flags |
 |---|---|
@@ -261,6 +269,8 @@ spawn ──► write control_request{initialize} ──► read control_respons
 ```
 
 The SDK (0.3.300) queues user messages until the `initialize` request is written (`writeAfterInitialize`); it does not wait for the response before writing. Default init timeout in the SDK is 60 s. Tandem writes `initialize` first too (4.2).
+With `sdkMcpServers` (4.2) the CLI's `mcp_message` `initialize` for the host's server arrives before the `initialize` answer
+(`ide-edit:1`, `:2`, 2.1.312): keep reading and answer it.
 
 ---
 
@@ -325,6 +335,14 @@ Exact line the SDK (0.3.300) writes for a string prompt:
 | `shouldQuery` | `false` appends without starting a turn |
 | `client_composed` | `true` disables `@path` expansion and slash-command dispatch |
 | `timestamp` | ISO string, optional |
+
+**`@path` in a prompt.** A plain `text` block that holds `@hello.txt` (a path relative to the working directory) is expanded by
+the CLI itself, from the disk: the model answered a question about the file's line with no tool call (`ide-mention:13`, 2.1.312,
+after `What is on @hello.txt#L2?`: the reply names line 2, but what `#L2` sent, one line or the whole file, is not recorded).
+Nothing of the expansion shows on stdout; the CLI's own transcript has an `attachment` line right after the user line, of
+`type:"file"` (`transcripts/ide-mention.jsonl:6`, `:29`; the redactor keeps only that `type`). The expansion reads the **disk**,
+so an editor buffer with unsaved changes is not what the model sees. Not recorded: a path with spaces, a directory, a path that
+does not exist, and a message sent while a turn runs.
 
 Images (base64 content block, Anthropic format):
 
@@ -451,8 +469,19 @@ Request fields (all optional): `hooks`, `sdkMcpServers`, `sdkMcpServerConfigs`, 
 Tandem sends (`HostMessages.initialize`):
 
 ```json
-{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize","hooks":null,"forwardSubagentText":true}}
+{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize","hooks":null,"forwardSubagentText":true,"sdkMcpServers":["tandem"]}}
 ```
+
+`sdkMcpServers` names the in-process MCP server that serves Tandem's edit tools (4.5). It is an array of strings; the CLI
+then drives that server with `mcp_message` requests. Recorded with CLI 2.1.312 (`ide-edit`): the server's own `initialize`
+request arrives **before** the CLI's answer to the host's (`ide-edit:1`, then `:2`); `notifications/initialized` and
+`tools/list` arrive only after the first user message, before `system/init` (`:4`, `:6`, `:8`); an `mcp_status` sent before
+the first prompt lists the configured server as `pending` and no `tandem` row (`:3`), and after a turn it lists the SDK
+server with `transport:"sdk"`, `scope:"dynamic"`, `source:"sdk"`, the `serverInfo` the host gave and its two tools (`:73`).
+`sdkMcpServerConfigs` (a per-tool `always_ask` or `always_deny` policy) and `sdkMcpServerManifests` (a one-shot cache of the
+server's `initialize` and `tools/list` answers, reported back under `sdk_mcp_manifests_parked`) are not sent, so what they
+change is unrecorded. The CLI rejects `mcp_message` in a cloud-hosted session (**binary**: "SDK MCP servers are not available
+in a cloud-hosted session"), which is not a case a plugin meets.
 
 `forwardSubagentText:true` makes the CLI forward a subagent's text replies as `assistant` lines with an `agent_id`
 (`agent-forwarded.ndjson:38`; section 5.2, `task_notification`), which Tandem nests under the `Agent` row.
@@ -666,7 +695,9 @@ host learns of a new status from `mcp_status`, that `init` or the model's own te
 {"type":"control_request","request_id":"m4","request":{"subtype":"mcp_authenticate","serverName":"authy"}}
 ```
 
-`serverName` is the name exactly as `mcp_status` reports it.
+`serverName` is the name exactly as `mcp_status` reports it. An SDK server (4.5) appears in the answer too, with
+`transport:"sdk"`, `scope:"dynamic"` and `source:"sdk"` (`ide-edit:73`); a host that lists servers must not offer to toggle or
+reconnect its own.
 
 | subtype | Answer |
 |---|---|
@@ -756,13 +787,81 @@ and `get_skills_dialog` (`parity-add-dir.ndjson:2`) are internal and undeclared 
 | subtype | When | Tandem |
 |---|---|---|
 | `hook_callback` | host-registered hooks in `initialize` | not used; reply `error` |
-| `mcp_message` | `sdkMcpServers` in-process servers | not used (our MCP server is a real socket server via `--mcp-config`) |
+| `mcp_message` | one JSON-RPC message for an SDK server named in `initialize.sdkMcpServers` (4.2) | answered for the server `tandem`: see "The SDK MCP server" below. Any other `server_name` gets the JSON-RPC error `-32601` |
 | `elicitation` | an MCP server asks the user for input (`sdk.d.ts` 0.3.306, lines 3976-3999; no recording has one) | answered with the error `Unsupported request: elicitation`, and the chat shows the warning `An MCP server asked for input Tandem cannot show yet.` |
 | `request_user_dialog` | only for kinds we declared | declare none |
 
-The subtypes come from `sdk.d.ts` 0.3.300; only `can_use_tool` (4.3) is recorded. The SDK leaves some subtypes unanswered
-on purpose (those "for the machine serving this session's tools"). Tandem answers every one it does not handle with the
-error `Unsupported request: <subtype>`.
+The subtypes come from `sdk.d.ts` 0.3.300; `can_use_tool` (4.3) and `mcp_message` (below) are recorded. The SDK leaves some
+subtypes unanswered on purpose (those "for the machine serving this session's tools"). Tandem answers every one it does not
+handle with the error `Unsupported request: <subtype>`.
+
+#### The SDK MCP server (`mcp_message`)
+
+Recorded with CLI 2.1.312 (`ide-edit`, `ide-edit-two`, `ide-edit-stop`). A `mcp_message` request carries one JSON-RPC message
+for a server the host registered in `initialize` (4.2), under `message`, and the server's name under `server_name`
+(`ide-edit:1`):
+
+```json
+{"type":"control_request","request_id":"<id>","request":{"subtype":"mcp_message","server_name":"tandem",
+  "message":{"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-code","version":"2.1.312"}},"jsonrpc":"2.0","id":0}}}
+```
+
+The host answers with a `success` whose `response` holds the JSON-RPC reply under `mcp_response` (this is what the Agent SDK
+itself does, **binary**; the host's frames are not in the fixtures, which hold the CLI's stdout only):
+
+```json
+{"type":"control_response","response":{"subtype":"success","request_id":"<id>","response":{"mcp_response":{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"tandem","version":"<plugin version>"}}}}}}
+```
+
+| `message.method` | Seen | Tandem's reply (`result`) |
+|---|---|---|
+| `initialize` | `ide-edit:1` (`id` 0) | the request's `protocolVersion`, `capabilities:{"tools":{}}`, `serverInfo{name:"tandem", version}` |
+| `notifications/initialized` (no `id`) | `ide-edit:4` | `{"jsonrpc":"2.0","result":{},"id":0}`, which is what the Agent SDK answers a notification with (**binary**); every `mcp_message` control request gets a `control_response`, a notification included |
+| `tools/list` | `ide-edit:6` (`id` 1) | `{"tools":[…]}`: `edit_file` (`file_path`, `old_string`, `new_string`, `replace_all`) and `write_file` (`file_path`, `content`), each with a JSON Schema |
+| `tools/call` | `ide-edit:38` (`id` 2) | `{"content":[{"type":"text","text":…}]}`, plus `"isError":true` for a tool error |
+| `notifications/cancelled` | `ide-edit-stop:42` | the empty result; it withdraws the call whose id is `params.requestId` (below) |
+| `ping` | not seen | `{}` (the MCP specification's answer) |
+| anything else | not seen | a request (with an `id`) for another method gets `-32601` (`Method not found: <method>`); any notification (no `id`) gets the notification reply; an unknown tool name `-32602`; a message with no string `method` `-32600` |
+
+A JSON-RPC `id` is a number in every recording (`0` to `3`) but the protocol allows a string: the reply echoes it as it came.
+A frame without a string `server_name` or an object `message` is not an `mcp_message` to Tandem and gets the usual
+`Unsupported request` error.
+
+**A call.** `tools/call` has `params{name, arguments, _meta}`, and `_meta["claudecode/toolUseId"]` is the `tool_use` block's id
+(`ide-edit:38`, whose `tool_use` is `:35`), the only link between the JSON-RPC call and the chat. The model sees the tool as
+`mcp__tandem__edit_file` in `init.tools`, in the `tool_use` block and in `can_use_tool` (`ide-edit:8`, `:35`, `:37`); the
+assistant line carries `tool_use_meta:[{display_name, server_display_name, tool_name}]` (`:35`). Like every MCP tool it is
+deferred: the model first calls `ToolSearch` with `select:mcp__tandem__edit_file` and gets a `tool_reference` (`ide-edit:19`,
+`:21`). The request order is `can_use_tool` first (`ide-edit:37`, `mcp_server:{name:"tandem", source:"sdk"}`,
+`server_policy_ask_only:true`), then, once it is allowed, the `tools/call` (`:38`). The `can_use_tool` still arrives under
+`acceptEdits` (`ide-edit-stop:68`, then the call `:69`); under `bypassPermissions` it is **unrecorded**, and the documented
+`always_ask` policy suggests it would arrive there too (**binary**). Tandem answers every `can_use_tool` for a Tandem tool
+with an allow at once and never shows a permission card, since the host's own review (a diff) is the question.
+
+**The result** is `tool_result.content` as the block array the host sent, with no `is_error`, and the same array in
+`tool_use_result` (`ide-edit:41`); see 6.2 for the error and the stopped shapes. The CLI hands the blocks to the model
+untouched.
+
+**A call that is not answered.** The CLI holds the `tools/call` until the host replies; nothing in the recordings times it out.
+The CLI has a per-call wall clock, `MCP_TOOL_TIMEOUT` ("Hard wall-clock limit per call; progress notifications do not extend it",
+**binary**), whose default, and whether it applies to an SDK server, are **unmeasured**: no held call waited longer than 5 s.
+On `interrupt` the CLI withdraws the call (`ide-edit-stop`):
+
+1. `mcp_message` `notifications/cancelled` with `params{requestId:<the call's id>, reason:"AbortError: remote-cancel"}` (`:42`);
+2. the interrupt's receipt `{"still_queued":[]}` (`:43`);
+3. a synthetic `user` tool result for the call (`:44`, 6.2) and the text `[Request interrupted by user for tool use]` (`:45`);
+4. a `result` with `subtype:"error_during_execution"`, `is_error:true` and `terminal_reason:"aborted_tools"` (`:46`).
+
+No `control_cancel_request` arrives for the `mcp_message` request. The withdrawal is `notifications/cancelled`, keyed by the
+JSON-RPC `requestId`, so a host closes whatever it showed for the call and sends no reply: `ide-edit-stop`'s driver sends
+none. What a late host answer does is **unrecorded in the fixtures**: it was tried only in an uncommitted probe on CLI
+2.1.312, where it produced nothing (no second result, no error) **(inferred)**.
+
+**A configured server with the same name.** Recorded only with a server passed through `--mcp-config` and named `tandem` (a
+probe, not committed): the SDK server wins dispatch, `init.tools` lists `mcp__tandem__edit_file` and `mcp__tandem__write_file`
+and none of the configured server's tools, and the host answers the call; but `init.mcp_servers` and `mcp_status` list **one**
+`tandem` row, which reads as the configured server (`source:"dynamic"`, `transport:"stdio"`, its `config` and `serverInfo`) with
+the SDK server's tools under it. A collision with a server from the user's, project's or local settings is unrecorded.
 
 ---
 
@@ -1009,6 +1108,19 @@ Shape (`plain-reply.ndjson:10`, 2.1.300; trimmed):
   permission_decision:{decision:"reject", source:"user_reject"}}]`; the turn's `result.permission_denials` lists the call
   (`:73`). On disk `toolUseResult` is the content string only and the rest moves to `mcpMeta:{_meta, structuredContent}`
   (`transcripts/mcp-tool-call.jsonl:32`).
+- An SDK MCP tool's result (2.1.312, Tandem's `edit_file` and `write_file`, 4.5): the host's content blocks, passed on as
+  they came. A success has `tool_result.content` as a block array of `{type:"text", text}`, no `is_error`, `tool_use_result`
+  the same array (no `structuredContent` or `_meta`, which a server that declares an output schema adds, above) and
+  `tool_result_meta:[{id, permission_decision:{decision:"accept", source:"user_temporary"}}]` (`ide-edit:41`, `ide-edit-two:40`).
+  A reply the host marked `isError` becomes `content` as a plain string, `is_error:true` and `tool_use_result:"Error: <text>"`
+  (`ide-edit:105`, and the stale `old_string` reply `ide-edit-stop:105`); its `permission_decision` is still the `accept` of
+  the earlier `can_use_tool`, so a host-side rejection is told apart by its text and not by the decision. The turn goes on and
+  the `result` is a `success` with empty `permission_denials`: a tool error, not a denial.
+  **A withdrawn call** (the user pressed Stop while the call waited) gets the CLI's own result instead
+  (`ide-edit-stop:44`): `is_error:true`, `tool_use_result:"User rejected tool use"`, a `content` that starts "The user doesn't
+  want to proceed with this tool use." and `tool_result_meta:[{id, non_execution_kind:"user-rejected"}]` with **no**
+  `permission_decision`. A reader that takes an error result without a reject decision for a failure will mislabel it:
+  `non_execution_kind` is the signal, and it can stand alone. The turn ends `aborted_tools` (`:46`).
 - `isSynthetic: true` for CLI-generated user messages; `isReplay: true` for echoes of our own sends (with `--replay-user-messages`).
 
 ### 6.3 `stream_event` (with `--include-partial-messages`)
@@ -1214,6 +1326,11 @@ Parse them leniently; any of them can change without notice.
 | assistant `local_command_run`, `local_command_outcome`, `local_command_source`; result `local_command` | a local command's reply (6.1, 7) | not in `sdk.d.ts` 0.3.300 (`mcp-slash.ndjson:5`, `:6`, `:17`, 2.1.306) |
 | assistant `tool_use_meta`, user `tool_use_result._meta` / `structuredContent`, `can_use_tool.server_policy_ask_only` | an MCP tool call's label, result and request (4.3, 6.1, 6.2) | not in `sdk.d.ts` 0.3.300 (`mcp-tool-call.ndjson:34`, `:35`, `:39`, 2.1.306) |
 | `mcp_authenticate` and its answer | 4.4, MCP requests | not in the typed request union of `sdk.d.ts` 0.3.306 (`mcp-status.ndjson:40`, 2.1.306) |
+| `mcp_message` request: `server_name`, `message` | one JSON-RPC message for an SDK server (4.5) | `ide-edit:1`, `:4`, `:6`, `:38`; the `message` is JSON-RPC 2.0 and its `id` can be a number or a string |
+| `tools/call` `params._meta["claudecode/toolUseId"]` | the `tool_use` block's id for an SDK tool's call | `ide-edit:38` (2.1.312) |
+| `mcp_status` entry `transport` | `"sdk"` for an SDK server (`"stdio"` for a configured one), beside `scope:"dynamic"` and `source:"sdk"` | `ide-edit:73` (2.1.312) |
+| `user.tool_result_meta[].non_execution_kind` without `permission_decision` | `"user-rejected"` on the CLI's own result for a call the user stopped (6.2) | `ide-edit-stop:44` (2.1.312) |
+| `mcp_message` `notifications/cancelled` | `params{requestId, reason}` withdraws a held `tools/call` (4.5) | `ide-edit-stop:42` (2.1.312) |
 
 The MCP fixtures (CLI 2.1.306, each with its transcript) were recorded by a one-off driver whose frames are now the
 `mcp-status`, `mcp-tool-call` and `mcp-slash` scenarios of `scripts/record-scenario.sh` (`scripts/drive_cli.py`; the nightly
@@ -1252,8 +1369,22 @@ whose recordings were promoted; each has its transcript, and all ran with `--mod
 | `fork-at`, `fork-at-live`, `fork-at-busy` | three turns, then a fork cut at the first reply: after the origin ended, while it is live and idle, while it runs a turn | section 8. Twins: `fork-at.jsonl`, `fork-at-origin.jsonl` and the `-live`, `-busy` pairs |
 
 The nightly contract job records `queue-fold`, `queue-later`, `queue-cancel`, `queue-cancel-steer`, `queue-during-card`,
-`fork-at` and `parity-requests` (a scripted run of the context and usage requests, 4.4, with no committed fixture) and
-`ContractTest` checks what Tandem switches on in them.
+`fork-at`, `ide-edit` and `parity-requests` (a scripted run of the context and usage requests, 4.4, with no committed fixture)
+and `ContractTest` checks what Tandem switches on in them.
+
+The IDE-edit fixtures were recorded with `scripts/record-scenario.sh` on CLI 2.1.312 with `--model sonnet`, in a temporary
+working directory the redactor writes `<path>` while keeping a file's name (`"file_path":"<path>/hello.txt"`). Each has its transcript. The three `ide-edit*` keep `init.tools` and `init.mcp_servers` (the redactor's INIT_KEEP);
+`ide-mention`'s are emptied, as in every other fixture. All
+ran with `--setting-sources project,local`; the three `ide-edit*` ran with one configured stdio server (`echo`) beside Tandem's
+SDK server. The host's frames are not in the files. The result texts the
+recording driver answered with follow Tandem's wording but not its bytes: a test asserts what Tandem builds, not these.
+
+| Fixture | Host frames (not in the file) | What it records |
+|---|---|---|
+| `ide-edit` | `initialize` with `sdkMcpServers`; `mcp_message` answers; a prompt asking for an `edit_file` (accepted with a hand change), a second prompt asking for a `write_file` (rejected with a reason); `mcp_status` before and after | the handshake (`:1`, `:4`, `:6`), `init` with both tools (`:8`), `ToolSearch` (`:19`, `:21`), the call (`:35`, `:37`, `:38`), the block-array result (`:41`), `mcp_status` with `transport:"sdk"` (`:73`), the second `init` (`:76`), `write_file` (`:101`, `:103`, `:104`) and its error result (`:105`). Transcript: `transcripts/ide-edit.jsonl` |
+| `ide-edit-two` | the same spawn; one prompt asking for two `edit_file` calls in a turn, both applied | both calls and their results (`:34`-`:40`, `:52`-`:56`), the second one's `tools/call` after the first's result |
+| `ide-edit-stop` | a call held, then `interrupt`; `set_permission_mode acceptEdits` and a call; `set_permission_mode default` and a call with a stale `old_string` | the withdrawal (`:42`-`:46`), a call under `acceptEdits` whose `can_use_tool` still arrives (`:68`-`:70`), the not-found result with the file as the IDE has it (`:105`) |
+| `ide-mention` | two prompts: `What is on @hello.txt#L2?` then `What does @hello.txt say?`, with every file tool disallowed | the replies with no tool call (`:13`, `:31`); the transcript's `attachment` lines (`transcripts/ide-mention.jsonl:6`, `:29`) |
 
 ---
 

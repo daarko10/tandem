@@ -390,4 +390,34 @@ class ToolLabelsTest {
         val input = buildJsonObject { put("file_path", "/a/b.kt"); put("offset", 3) }
         assertEquals("Read b.kt", ToolLabels.label(ToolKind.READ, "Read", input, ToolState.DONE, result, "/x").text)
     }
+
+    // spec: mcp__tandem__write_file is CREATE
+    @Test
+    fun `mcp__tandem__write_file is CREATE`() {
+        assertEquals(ToolKind.CREATE, ToolKinds.of("mcp__tandem__write_file"))
+        assertEquals(ToolKind.CREATE, ToolKinds.of(toolUseAt("ide-edit", 101).name))
+        assertEquals(ToolKind.EDIT, ToolKinds.of(toolUseAt("ide-edit", 35).name))
+    }
+
+    // spec: the eight edit and create labels
+    @Test
+    fun `the eight edit and create labels`() {
+        val edit = toolUseAt("ide-edit", 35)
+        val write = toolUseAt("ide-edit", 101)
+        val forms = listOf(ToolState.RUNNING, ToolState.DONE, ToolState.FAILED, ToolState.DENIED)
+        assertEquals(
+            listOf("Editing hello.txt", "Edited hello.txt", "Failed to edit hello.txt", "Rejected edit of hello.txt"),
+            forms.map { label(edit, it).text },
+        )
+        assertEquals(
+            listOf("Creating new.txt", "Created new.txt", "Failed to create new.txt", "Rejected creating new.txt"),
+            forms.map { label(write, it).text },
+        )
+        // The file is in the editor font.
+        assertEquals(persistentListOf(17..25), label(edit, ToolState.DENIED).spans)
+        // The recorded rejection reads as the denied form.
+        assertEquals("Rejected creating new.txt", label(write, ToolState.DENIED, toolResultAt("ide-edit", 105)).text)
+        // The built-in tools keep their own wording.
+        assertEquals("Failed to write <path>", ToolLabels.label(ToolKind.CREATE, "Write", buildJsonObject { put("file_path", "/x/<path>") }, ToolState.FAILED, null, "/x").text)
+    }
 }

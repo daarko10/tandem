@@ -8,28 +8,37 @@ import dev.daarkolabs.tandem.protocol.ImageBlock
 import dev.daarkolabs.tandem.protocol.McpAuthStart
 import dev.daarkolabs.tandem.protocol.Ndjson
 import dev.daarkolabs.tandem.protocol.PermissionMode
+import dev.daarkolabs.tandem.protocol.ToolReply
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -43,6 +52,7 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -709,6 +719,7 @@ class ClaudeSessionTest {
         mcpMillisPerSecond: Long = 1_000L,
         quietWaitMillis: Long = 5_000L,
         child: String? = null,
+        hostTools: HostTools? = null,
     ) {
         val stdin: File = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val process = ScriptedProcess(ProcessBuilder("sh", "-c", (child?.let { "$it & exec " } ?: "") + "cat > '${stdin.path}'").start())
@@ -719,6 +730,8 @@ class ClaudeSessionTest {
             ProcessLauncher { _, _ -> process },
             mcpMillisPerSecond = mcpMillisPerSecond,
             quietWaitMillis = quietWaitMillis,
+            hostTools = hostTools,
+            version = "0.4.0",
         )
 
         fun write(line: String) = process.script.println(line)
@@ -1789,4 +1802,336 @@ class ClaudeSessionTest {
         assertEquals("next", again.userFrames(2)[1].text())
         again.close()
     }
+
+    /** Serves Tandem's tools in a test: each call goes to [calls]; [answer] answers it (by default it waits until cancelled). */
+    private class FakeHostTools(private val answer: suspend (ToolCall) -> ToolReply = { awaitCancellation() }) : HostTools {
+        val calls = CompletableDeferred<ToolCall>()
+        val callCancelled = CompletableDeferred<Unit>()
+        val cancelled: MutableList<Pair<SessionId, JsonElement>> = Collections.synchronizedList(ArrayList())
+        val cancelledAll: MutableList<SessionId> = Collections.synchronizedList(ArrayList())
+        val allCancelled = CompletableDeferred<Unit>()
+
+        override suspend fun call(call: ToolCall): ToolReply {
+            calls.complete(call)
+            try {
+                return answer(call)
+            } catch (e: CancellationException) {
+                callCancelled.complete(Unit)
+                throw e
+            }
+        }
+
+        override fun cancel(session: SessionId, requestId: JsonElement) {
+            cancelled.add(session to requestId)
+        }
+
+        override fun cancelAll(session: SessionId) {
+            cancelledAll.add(session)
+            allCancelled.complete(Unit)
+        }
+    }
+
+    /** The `mcp_response` the host wrote for control request [requestId], once it is written. */
+    private suspend fun ScriptedSession.mcpResponse(requestId: String): JsonObject {
+        val line = written("\"request_id\":\"$requestId\"").single { "mcp_response" in it }
+        return Json.parseToJsonElement(line).jsonObject["response"]!!.jsonObject["response"]!!.jsonObject["mcp_response"]!!.jsonObject
+    }
+
+    /**
+     * Waits until every frame the host sent before now is written: the outbox writes in order, so once the answer to a `ping` sent
+     * now is in [ScriptedSession.stdin], so is everything before it.
+     */
+    private suspend fun ScriptedSession.drained() {
+        write("""{"type":"control_request","request_id":"barrier","request":{"subtype":"mcp_message","server_name":"tandem","message":{"jsonrpc":"2.0","id":99,"method":"ping"}}}""")
+        mcpResponse("barrier")
+    }
+
+    /** The `request_id` of line [n] of fixture [name]. */
+    private fun requestIdAt(name: String, n: Int): String =
+        Json.parseToJsonElement(Fixtures.lines(name)[n - 1]).jsonObject["request_id"]!!.jsonPrimitive.content
+
+    // spec: the handshake is answered in order while a text turn streams
+    @Test
+    fun `the handshake is answered in order while a text turn streams`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.session.sendUserMessage("Change alpha to beta in hello.txt")
+        run.written("\"type\":\"user\"")
+        // initialize (ide-edit:1), notifications/initialized (:4) and tools/list (:6), among the turn's own lines up to :18.
+        lines("ide-edit", 1, 18).forEach(run::write)
+
+        val responses = run.written("mcp_response", count = 3).map { Json.parseToJsonElement(it).jsonObject["response"]!!.jsonObject }
+        assertEquals(listOf(1, 4, 6).map { requestIdAt("ide-edit", it) }, responses.map { it["request_id"]!!.jsonPrimitive.content })
+        val replies = responses.map { it["response"]!!.jsonObject["mcp_response"]!!.jsonObject }
+        assertEquals(listOf(0, 0, 1), replies.map { it["id"]!!.jsonPrimitive.int }, "initialize 0, the notification's 0, tools/list 1")
+        val server = replies[0]["result"]!!.jsonObject
+        assertEquals("2025-11-25", server["protocolVersion"]!!.jsonPrimitive.content)
+        assertEquals("0.4.0", server["serverInfo"]!!.jsonObject["version"]!!.jsonPrimitive.content)
+        assertEquals(JsonObject(emptyMap()), replies[1]["result"])
+        assertEquals(listOf("edit_file", "write_file"), replies[2]["result"]!!.jsonObject["tools"]!!.jsonArray.map {
+            it.jsonObject["name"]!!.jsonPrimitive.content
+        })
+        assertTrue(run.session.state.value.busy, "answered while the turn streams, before its result")
+        assertEquals(emptyList(), run.settled().notices(NoticeLevel.ERROR), "no frame of the handshake went to the reducer as an error")
+        run.close()
+    }
+
+    // spec: a tools call is answered from the host tools off the reader
+    @Test
+    fun `a tools call is answered from the host tools off the reader`() = runBlocking {
+        val release = CompletableDeferred<ToolReply>()
+        val tools = FakeHostTools { release.await() }
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit")[38 - 1])
+        val call = withTimeout(10_000) { tools.calls.await() }
+        assertEquals(ToolCall(call.name, call.arguments, "<id-32>", JsonPrimitive(2), newSessionId), call)
+        assertEquals("edit_file", call.name)
+        assertEquals("<path>/hello.txt", call.arguments["file_path"]!!.jsonPrimitive.content)
+
+        // The reader goes on while the host works: a later line is reduced before the release.
+        run.write(Fixtures.lines("ide-edit")[11 - 1])
+        val streaming = run.settled()
+        assertTrue(streaming.entries.filterIsInstance<ChatEntry.Assistant>().any { it.streaming }, "ide-edit:11's message_start was reduced")
+        assertFalse(run.stdin.readLines().any { "mcp_response" in it }, "nothing answers the call before the host does")
+
+        release.complete(ToolReply("Applied.", isError = false))
+        val reply = run.mcpResponse(requestIdAt("ide-edit", 38))
+        assertEquals(JsonPrimitive(2), reply["id"])
+        val content = reply["result"]!!.jsonObject["content"]!!.jsonArray.single().jsonObject
+        assertEquals("Applied.", content["text"]!!.jsonPrimitive.content)
+        assertNull(reply["result"]!!.jsonObject["isError"])
+        run.close()
+    }
+
+    // spec: notifications/cancelled cancels the pending call's job and the late reply is not sent
+    @Test
+    fun `notifications cancelled cancels the pending call's job and the late reply is not sent`() = runBlocking {
+        val tools = FakeHostTools()
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit-stop")[39 - 1])
+        withTimeout(10_000) { tools.calls.await() }
+        run.write(Fixtures.lines("ide-edit-stop")[42 - 1])
+
+        withTimeout(10_000) { tools.callCancelled.await() }
+        assertEquals(listOf<Pair<SessionId, JsonElement>>(newSessionId to JsonPrimitive(2)), tools.cancelled.toList())
+        // The notification itself is acknowledged, the call never.
+        val ack = run.mcpResponse(requestIdAt("ide-edit-stop", 42))
+        assertEquals(Json.parseToJsonElement("""{"jsonrpc":"2.0","result":{},"id":0}"""), ack)
+        run.settled()
+        val callId = requestIdAt("ide-edit-stop", 39)
+        assertFalse(run.stdin.readLines().any { "\"request_id\":\"$callId\"" in it }, "no mcp_response for the withdrawn call")
+        run.close()
+    }
+
+    // spec: notifications/cancelled cancels the pending call's job and the late reply is not sent
+    @Test
+    fun `a call withdrawn by notifications cancelled whose host still answers late sends no reply`() = runBlocking {
+        val late = CompletableDeferred<Unit>()
+        val callJob = CompletableDeferred<Job>()
+        val tools = FakeHostTools {
+            callJob.complete(currentCoroutineContext().job)
+            withContext(NonCancellable) { late.await() } // a host that ignores the cancellation and answers anyway
+            ToolReply("late", isError = false)
+        }
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit-stop")[39 - 1])
+        withTimeout(10_000) { tools.calls.await() }
+        run.write(Fixtures.lines("ide-edit-stop")[42 - 1])
+        run.mcpResponse(requestIdAt("ide-edit-stop", 42)) // acknowledged after the call was withdrawn
+        assertEquals(listOf<Pair<SessionId, JsonElement>>(newSessionId to JsonPrimitive(2)), tools.cancelled.toList())
+        val job = withTimeout(10_000) { callJob.await() }
+        assertTrue(job.isCancelled)
+
+        late.complete(Unit)
+        withTimeout(10_000) { job.join() } // the host answered, and the job has done whatever it does with the answer
+        run.drained()
+        val callId = requestIdAt("ide-edit-stop", 39)
+        assertFalse(run.stdin.readLines().any { "\"request_id\":\"$callId\"" in it }, "the late answer is dropped")
+        run.close()
+    }
+
+    // round-1 review: the CLI reused an open JSON-RPC id
+    @Test
+    fun `a tools call whose id is still open withdraws the older call and only the newer one answers`() = runBlocking {
+        val seen = AtomicInteger()
+        val olderEnded = CompletableDeferred<Unit>()
+        val tools = FakeHostTools {
+            if (seen.incrementAndGet() == 1) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    olderEnded.complete(Unit)
+                }
+            }
+            ToolReply("newer", isError = false)
+        }
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        val line = Fixtures.lines("ide-edit")[38 - 1]
+        val olderId = requestIdAt("ide-edit", 38)
+        run.write(line)
+        withTimeout(10_000) { tools.calls.await() }
+        run.write(line.replace("\"request_id\":\"$olderId\"", "\"request_id\":\"again\""))
+
+        val reply = run.mcpResponse("again")
+        assertEquals("newer", reply["result"]!!.jsonObject["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content)
+        withTimeout(10_000) { olderEnded.await() }
+        assertEquals(listOf<Pair<SessionId, JsonElement>>(newSessionId to JsonPrimitive(2)), tools.cancelled.toList())
+        run.drained()
+        assertFalse(run.stdin.readLines().any { "\"request_id\":\"$olderId\"" in it }, "the older call gets no reply")
+        run.close()
+    }
+
+    // round-1 review: a host that fails answers an error, so the CLI never waits (callHostTools' contract, not a spec-named test)
+    @Test
+    fun `a host that throws an Error still answers the call with an error`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, hostTools = FakeHostTools { throw NotImplementedError("lane A") })
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit")[38 - 1])
+        val failed = run.mcpResponse(requestIdAt("ide-edit", 38))["result"]!!.jsonObject
+        assertEquals(true, failed["isError"]!!.jsonPrimitive.boolean)
+        assertEquals(
+            "Tandem could not run edit_file: NotImplementedError.",
+            failed["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content,
+        )
+        run.close()
+    }
+
+    // round-2 review: a CancellationException from the host while the call's own job is active is a failure, not a withdrawal
+    @Test
+    fun `a host that throws a CancellationException of its own still answers the call with an error`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId, hostTools = FakeHostTools { throw CancellationException("host") })
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit")[38 - 1])
+        val failed = run.mcpResponse(requestIdAt("ide-edit", 38))["result"]!!.jsonObject
+        assertEquals(true, failed["isError"]!!.jsonPrimitive.boolean)
+        assertEquals(
+            "Tandem could not run edit_file: CancellationException.",
+            failed["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content,
+        )
+        run.drained()
+        val callId = requestIdAt("ide-edit", 38)
+        assertEquals(1, run.stdin.readLines().count { "mcp_response" in it && "\"request_id\":\"$callId\"" in it }, "exactly one reply")
+        run.close()
+    }
+
+    // spec: an unknown server_name gets -32601
+    @Test
+    fun `an unknown server_name gets -32601`() = runBlocking {
+        val tools = FakeHostTools()
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        val call = Fixtures.lines("ide-edit")[38 - 1].replace("\"server_name\":\"tandem\"", "\"server_name\":\"elsewhere\"")
+        run.write(call)
+
+        val reply = run.mcpResponse(requestIdAt("ide-edit", 38))
+        assertEquals(
+            Json.parseToJsonElement("""{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found: tools/call"}}"""),
+            reply,
+        )
+        assertFalse(tools.calls.isCompleted, "another server's call never reaches Tandem's tools")
+        run.close()
+    }
+
+    // spec: a can_use_tool for mcp__tandem__edit_file is answered allow with the input and raises no pendingPermissions
+    @Test
+    fun `a can_use_tool for mcp__tandem__edit_file is answered allow with the input and raises no pendingPermissions`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        val request = Json.parseToJsonElement(Fixtures.lines("ide-edit")[37 - 1]).jsonObject
+        run.write(request.toString())
+
+        val requestId = request["request_id"]!!.jsonPrimitive.content
+        val frame = Json.parseToJsonElement(run.written("\"request_id\":\"$requestId\"").single()).jsonObject
+        val answer = frame["response"]!!.jsonObject["response"]!!.jsonObject
+        assertEquals("allow", answer["behavior"]!!.jsonPrimitive.content)
+        assertEquals(request["request"]!!.jsonObject["input"], answer["updatedInput"])
+        assertTrue(answer["updatedPermissions"] == null, "the suggestion to always allow is not applied")
+        assertEquals(emptyList(), run.settled().pendingPermissions)
+        run.close()
+    }
+
+    // spec: the version gate notice fires when init tools lack the tool and not when it has it
+    @Test
+    fun `the version gate notice fires when init tools lack the tool and not when it has it`() = runBlocking {
+        suspend fun warnings(vararg inits: String): List<String> {
+            val run = ScriptedSession(tmp, newSessionId)
+            run.session.start()
+            inits.forEach(run::write)
+            return run.settled().notices(NoticeLevel.WARNING).also { run.close() }
+        }
+        val init = Fixtures.lines("ide-edit")[8 - 1]
+        val without = Json.parseToJsonElement(init).jsonObject.toMutableMap().apply {
+            put("tools", Json.parseToJsonElement("""["Bash","Read"]"""))
+            put("claude_code_version", JsonPrimitive("2.1.312"))
+        }.let(::JsonObject).toString()
+        val notice = "Edits are off in this session: claude 2.1.312 did not take Tandem's edit tools. Update claude or use the terminal for edits."
+
+        assertEquals(listOf(notice), warnings(without, without), "once per process")
+        assertEquals(emptyList(), warnings(init), "ide-edit:8 lists mcp__tandem__edit_file")
+        assertEquals(emptyList(), warnings(Fixtures.lines("plain-reply").first { "\"subtype\":\"init\"" in it }), "tools emptied by the redactor")
+        val mcpStatusInit = Fixtures.lines("mcp-status").first { "\"subtype\":\"init\"" in it }
+        val version = Json.parseToJsonElement(mcpStatusInit).jsonObject["claude_code_version"]?.jsonPrimitive?.content ?: "unknown"
+        assertEquals(listOf(notice.replace("2.1.312", version)), warnings(mcpStatusInit), "recorded without the server (deviation 1)")
+    }
+
+    // spec: a session closed with a call open cancels it
+    @Test
+    fun `a session closed with a call open cancels it`() = runBlocking {
+        val tools = FakeHostTools()
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit")[38 - 1])
+        withTimeout(10_000) { tools.calls.await() }
+
+        run.close()
+        withTimeout(10_000) { tools.callCancelled.await() }
+        withTimeout(10_000) { tools.allCancelled.await() }
+        assertEquals(listOf<SessionId>(newSessionId), tools.cancelledAll.toList())
+        assertFalse(run.stdin.readLines().any { "mcp_response" in it }, "nobody reads a reply any more")
+    }
+
+    // the process ending by itself: the spec names stop, close and the process's end as the cancelAll cases
+    @Test
+    fun `a process that ends by itself with a call open cancels it with no reply`() = runBlocking {
+        val tools = FakeHostTools()
+        val run = ScriptedSession(tmp, newSessionId, hostTools = tools)
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit")[38 - 1])
+        withTimeout(10_000) { tools.calls.await() }
+
+        run.die()
+        withTimeout(10_000) { tools.callCancelled.await() }
+        withTimeout(10_000) { tools.allCancelled.await() }
+        assertEquals(listOf<SessionId>(newSessionId), tools.cancelledAll.toList())
+        assertFalse(run.stdin.readLines().any { "mcp_response" in it }, "no reply for the withdrawn call")
+        run.close()
+        assertEquals(listOf<SessionId>(newSessionId), tools.cancelledAll.toList(), "once per process")
+    }
+
+    @Test
+    fun `a tools call without host tools and one whose host fails are answered with an error`() = runBlocking {
+        val run = ScriptedSession(tmp, newSessionId)
+        run.session.start()
+        run.write(Fixtures.lines("ide-edit")[38 - 1])
+        val none = run.mcpResponse(requestIdAt("ide-edit", 38))["result"]!!.jsonObject
+        assertEquals(true, none["isError"]!!.jsonPrimitive.boolean)
+        assertEquals(NO_HOST_TOOLS_TEXT, none["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content)
+        run.close()
+
+        val failing = ScriptedSession(tmp, newSessionId, hostTools = FakeHostTools { throw IllegalStateException("boom") })
+        failing.session.start()
+        failing.write(Fixtures.lines("ide-edit")[38 - 1])
+        val failed = failing.mcpResponse(requestIdAt("ide-edit", 38))["result"]!!.jsonObject
+        assertEquals(true, failed["isError"]!!.jsonPrimitive.boolean)
+        assertEquals(
+            "Tandem could not run edit_file: IllegalStateException.",
+            failed["content"]!!.jsonArray.single().jsonObject["text"]!!.jsonPrimitive.content,
+        )
+        failing.close()
+    }
+
 }

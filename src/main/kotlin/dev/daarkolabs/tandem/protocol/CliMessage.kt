@@ -303,6 +303,15 @@ sealed interface InboundRequest {
         override val subtype: String get() = "can_use_tool"
     }
 
+    /**
+     * `mcp_message` (spec 4.1): a JSON-RPC [message] for the SDK MCP server [serverName] the host registered in `initialize`
+     * (`sdkMcpServers`). Answer with [HostMessages.mcpResponse]; [TandemTools.answer] builds the reply for `tandem`. A frame without
+     * a string `server_name` or an object `message` decodes to [Other].
+     */
+    data class McpMessage(val serverName: String, val message: JsonObject) : InboundRequest {
+        override val subtype: String get() = "mcp_message"
+    }
+
     /** Unsupported request: answer with [HostMessages.error] so the CLI never hangs. */
     data class Other(override val subtype: String, val request: JsonObject) : InboundRequest
 }

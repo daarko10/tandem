@@ -4,6 +4,9 @@ import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.EditOutcome
+import dev.daarkolabs.tandem.session.EditPhase
+import dev.daarkolabs.tandem.session.EditReview
 import dev.daarkolabs.tandem.session.ModelOption
 import dev.daarkolabs.tandem.session.PendingStage
 import dev.daarkolabs.tandem.session.NoticeKind
@@ -82,6 +85,9 @@ class ChatRowsBuilder(private val options: RowOptions) {
     private var lastSize = 0
     private var lastCwd: String? = null
 
+    /** The previous build's [ChatState.edits]: a review that changed reopens the cached turn of its call. */
+    private var lastEdits: Map<String, EditReview> = emptyMap()
+
     /** The previous build's rows after the cached turns, by key: an equal row keeps this instance. */
     private var live: Map<String, ChatRow> = emptyMap()
 
@@ -103,7 +109,8 @@ class ChatRowsBuilder(private val options: RowOptions) {
         if (!cacheHolds(state)) reset()
         lastSize = entries.size
         lastCwd = state.cwd
-        reopenReferencedTurns(entries)
+        reopenReferencedTurns(entries, state.edits)
+        lastEdits = state.edits
 
         val region = Region(state, frozenEnd)
         val nextBodies = Bodies()
@@ -253,12 +260,13 @@ class ChatRowsBuilder(private val options: RowOptions) {
 
     /**
      * Opens the cached turns that entries after the cache refer to again, from the earliest, and from the earliest cached turn whose
-     * usage notice changed (its card's answer came, or `Retry` was pressed, deviation 7); their rows keep their instances.
+     * usage notice changed (its card's answer came, or `Retry` was pressed, deviation 7), and from the earliest cached turn whose
+     * call's edit review changed ([edits], spec 3.4); their rows keep their instances.
      */
-    private fun reopenReferencedTurns(entries: List<ChatEntry>) {
+    private fun reopenReferencedTurns(entries: List<ChatEntry>, edits: Map<String, EditReview>) {
         var scanFrom = frozenEnd
         while (frozen.isNotEmpty()) {
-            var earliest = changedUsageTurn(entries)
+            var earliest = minOf(changedUsageTurn(entries), changedEditTurn(edits))
             for (index in scanFrom until entries.size) {
                 val entry = entries[index]
                 val parent = parentOf(entry)
@@ -283,6 +291,16 @@ class ChatRowsBuilder(private val options: RowOptions) {
             usageTurns.removeAll { it >= earliest }
             reopened.clear()
         }
+    }
+
+    /** The earliest cached turn that owns a call whose review differs from the previous build's; [Int.MAX_VALUE] for none. */
+    private fun changedEditTurn(edits: Map<String, EditReview>): Int {
+        if (edits === lastEdits) return Int.MAX_VALUE
+        var earliest = Int.MAX_VALUE
+        for (id in edits.keys + lastEdits.keys) {
+            if (edits[id] != lastEdits[id]) callOwner[id]?.let { earliest = minOf(earliest, it) }
+        }
+        return earliest
     }
 
     /** The earliest cached turn with a usage notice that is no longer the same instance at its index; [Int.MAX_VALUE] for none. */
@@ -443,6 +461,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
                     gap(Kind.USER, it),
                     imageRefs(entry.images),
                     caption = if (entry.folded) FOLDED_CAPTION else null,
+                    chips = entry.context.toImmutableList(),
                 )
             }
             // Thinking rows are the main thread's; a subagent message of an unknown agent shows its text and calls only.
@@ -525,7 +544,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
             val built = bodies[result]?.takeIf { it.input === block.input }
                 ?: Body(
                     block.input,
-                    ToolBodies.body(named, block.input, result.content, shown, result.isError).let { body ->
+                    ToolBodies.body(named, block.input, result.content, shown, result.isError, ToolKinds.isTandem(block.name)).let { body ->
                         if (named == ToolKind.PLAN && !result.isError && body !is ToolBody.Markdown) draftedPlan(block, region) ?: body else body
                     },
                     ToolBodies.stats(named, block.input, shown),
@@ -551,8 +570,52 @@ class ChatRowsBuilder(private val options: RowOptions) {
             ToolKind.SHELL -> block.input?.string("command")?.let(ToolLabels::oneLine)
             else -> null
         }
-        val built = ToolCall(block.id, block.name, kind, state, label, stats, body, children, progress, subject)
+        val review = if (ToolKinds.isTandem(block.name)) region.edits[block.id] else null
+        val built = if (review == null) {
+            ToolCall(block.id, block.name, kind, state, label, stats, body, children, progress, subject)
+        } else {
+            val (reviewLabel, tag, action) = reviewed(block, named, state, label, result != null, turnOpen, review, region.cwd)
+            ToolCall(block.id, block.name, kind, state, reviewLabel, stats, body, children, progress, subject, review, tag, action)
+        }
         return liveCalls[block.id]?.takeIf { it == built } ?: built
+    }
+
+    /**
+     * The label, tag and action of a Tandem edit under [review] (spec 3.4). While the call waits for its result in an open turn, its
+     * phase speaks: queued, reviewing (with `Show diff`), then what the user decided until the result lands. A call the CLI withdrew
+     * while the turn goes on says so whatever its result (spec 3.2, deviation 10). Once the result lands the call's own [label] is
+     * back, and an accepted edit keeps its tag while it is done.
+     */
+    private fun reviewed(
+        block: AssistantBlock.ToolUse,
+        kind: ToolKind,
+        state: ToolState,
+        label: RowLabel,
+        hasResult: Boolean,
+        turnOpen: Boolean,
+        review: EditReview,
+        cwd: String?,
+    ): Triple<RowLabel, String?, RowAction?> {
+        val waiting = !hasResult && turnOpen
+        val phase = when {
+            review.outcome == EditOutcome.STOPPED -> ToolLabels.ReviewLabel.STOPPED.takeIf { turnOpen }
+            !waiting -> null
+            review.phase == EditPhase.QUEUED -> ToolLabels.ReviewLabel.QUEUED
+            review.phase == EditPhase.OPEN -> ToolLabels.ReviewLabel.OPEN
+            review.outcome == EditOutcome.REJECTED -> ToolLabels.ReviewLabel.REJECTED
+            review.outcome != null -> ToolLabels.ReviewLabel.APPLIED
+            else -> null
+        }
+        val file = ToolLabels.fileName(block.input, cwd) ?: review.file
+        val shown = phase?.let { ToolLabels.reviewLabel(kind, it, file) } ?: label
+        val tagged = state == ToolState.DONE || waiting && phase == ToolLabels.ReviewLabel.APPLIED
+        val tag = when (review.outcome) {
+            EditOutcome.ACCEPTED_CHANGED -> TAG_WITH_YOUR_CHANGES
+            EditOutcome.AUTO -> TAG_AUTO_ACCEPTED
+            else -> null
+        }?.takeIf { tagged }
+        val action = RowAction.ShowDiff(block.id).takeIf { waiting && review.phase == EditPhase.OPEN }
+        return Triple(shown, tag, action)
     }
 
     /**
@@ -667,6 +730,7 @@ class ChatRowsBuilder(private val options: RowOptions) {
         val cwd: String? = state.cwd
         val models: List<ModelOption> = state.models
         val activeModel: String? = state.activeModel
+        val edits: Map<String, EditReview> = state.edits
         val pending: Set<String> = state.pendingPermissions.mapNotNullTo(HashSet()) { it.toolUseId }
         val tasks: Map<String, TaskInfo> = state.tasks.values.filter { it.toolUseId != null }.associateBy { it.toolUseId!! }
         val turns = ArrayList<IntRange>()

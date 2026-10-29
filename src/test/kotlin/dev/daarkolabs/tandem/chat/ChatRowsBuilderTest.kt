@@ -11,6 +11,11 @@ import dev.daarkolabs.tandem.protocol.string
 import dev.daarkolabs.tandem.session.AssistantBlock
 import dev.daarkolabs.tandem.session.ChatEntry
 import dev.daarkolabs.tandem.session.ChatState
+import dev.daarkolabs.tandem.session.ContextChip
+import dev.daarkolabs.tandem.session.ContextChipKind
+import dev.daarkolabs.tandem.session.EditOutcome
+import dev.daarkolabs.tandem.session.EditPhase
+import dev.daarkolabs.tandem.session.EditReview
 import dev.daarkolabs.tandem.session.McpResult
 import dev.daarkolabs.tandem.session.NoticeKind
 import dev.daarkolabs.tandem.session.NoticeLevel
@@ -54,6 +59,15 @@ class ChatRowsBuilderTest {
 
     /** The row of the lone Agent call. */
     private fun agent(rows: ChatRows): ToolRow = rows.rows.toolRows().single { it.calls.singleOrNull()?.kind == ToolKind.AGENT }
+
+    // spec: a user row carries its chips
+    @Test
+    fun `a user row carries its chips`() {
+        val chip = ContextChip(ContextChipKind.UNSAVED_FILE, "A.kt (unsaved)", "src/A.kt")
+        val state = ChatState(entries = listOf(ChatEntry.User("u1", "fix src/A.kt", context = listOf(chip)), ChatEntry.User("u2", "plain")))
+        val rows = ChatRowsBuilder(options).build(state).rows.filterIsInstance<UserRow>()
+        assertEquals(listOf(listOf(chip), emptyList()), rows.map { it.chips.toList() })
+    }
 
     @Test
     fun `a user row lists its images in order`() {
@@ -1701,6 +1715,110 @@ class ChatRowsBuilderTest {
         assertTrue(all.none { it is QueuedRow })
         assertEquals(listOf(p, c, i), state.entries.filterIsInstance<ChatEntry.User>().map { it.id })
         assertTrue(state.entries.filterIsInstance<ChatEntry.User>().none { it.folded })
+    }
+
+    /** The `ide-edit` first call's id (`ide-edit:35`). */
+    private val editId: String = toolUseAt("ide-edit", 35).id
+
+    /** The rows of `ide-edit` replayed up to line [upTo], then [events] reduced on the state, built by the same builder. */
+    private fun editRows(upTo: Int, vararg events: SessionEvent, name: String = "ide-edit"): Pair<ChatState, ChatRows> {
+        val builder = ChatRowsBuilder(options)
+        var (state, _) = replay(name, lines = Fixtures.lines(name).take(upTo), builder = builder)
+        for (event in events) state = reduce(state, event)
+        return state to builder.build(state)
+    }
+
+    private fun ChatRows.edit(id: String): ToolCall = rows.toolRows().flatMap { it.calls }.single { it.id == id }
+
+    private fun phase(id: String, phase: EditPhase, outcome: EditOutcome? = null): SessionEvent =
+        SessionEvent.EditPhase(id, EditReview("hello.txt", phase, outcome))
+
+    // spec: a queued edit says it waits
+    @Test
+    fun `a queued edit says it waits`() {
+        // ide-edit:38 is the tools/call; another diff is open, so the call queues.
+        val (_, rows) = editRows(38, phase(editId, EditPhase.QUEUED))
+        val call = rows.edit(editId)
+        assertEquals("Edit of hello.txt waits for the open diff", call.label.text)
+        assertEquals(persistentListOf(8..16), call.label.spans)
+        assertEquals(ToolState.RUNNING, call.state)
+        assertEquals(EditPhase.QUEUED, call.review?.phase)
+        assertNull(call.action)
+        assertNull(call.tag)
+        assertEquals(call.label, rows.rows.toolRows().single { it.calls.single().id == editId }.label)
+    }
+
+    // spec: an open edit reviews in the diff with Show diff
+    @Test
+    fun `an open edit reviews in the diff with Show diff`() {
+        val (state, rows) = editRows(38, phase(editId, EditPhase.QUEUED), phase(editId, EditPhase.OPEN))
+        val call = rows.edit(editId)
+        assertEquals("Reviewing hello.txt in the diff", call.label.text)
+        assertEquals(RowAction.ShowDiff(editId), call.action)
+        assertEquals(ToolState.RUNNING, call.state)
+        // Only the open phase offers it: once decided, the action goes.
+        val done = ChatRowsBuilder(options).build(reduce(state, phase(editId, EditPhase.DONE, EditOutcome.ACCEPTED))).edit(editId)
+        assertNull(done.action)
+        assertEquals("Edited hello.txt", done.label.text)
+        // A call without a review (the built-in tools, a reloaded session) has neither.
+        val plain = replay("tools-edit").second.rows.toolRows().flatMap { it.calls }
+        assertTrue(plain.all { it.action == null && it.review == null && it.tag == null })
+    }
+
+    // spec: an accepted edit with changes carries its tag
+    @Test
+    fun `an accepted edit with changes carries its tag`() {
+        // Decided, before its result (ide-edit:41) lands.
+        val (_, before) = editRows(38, phase(editId, EditPhase.OPEN), phase(editId, EditPhase.DONE, EditOutcome.ACCEPTED_CHANGED))
+        assertEquals("Edited hello.txt", before.edit(editId).label.text)
+        assertEquals("with your changes", before.edit(editId).tag)
+        // With its result: DONE, the tag stays.
+        val (_, after) = editRows(41, phase(editId, EditPhase.DONE, EditOutcome.ACCEPTED_CHANGED))
+        val call = after.edit(editId)
+        assertEquals(ToolState.DONE, call.state)
+        assertEquals("Edited hello.txt", call.label.text)
+        assertEquals("with your changes", call.tag)
+        assertEquals(DiffStats(1, 1), call.stats)
+        // A plain Accept has no tag.
+        assertNull(editRows(41, phase(editId, EditPhase.DONE, EditOutcome.ACCEPTED)).second.edit(editId).tag)
+        // A review that changes after its turn was cached reopens that turn (the whole fixture: two turns).
+        val builder = ChatRowsBuilder(options)
+        val (state, _) = replay("ide-edit", builder = builder)
+        val reopened = builder.build(reduce(state, phase(editId, EditPhase.DONE, EditOutcome.ACCEPTED_CHANGED)))
+        assertEquals("with your changes", reopened.edit(editId).tag)
+    }
+
+    // spec: an auto-accepted edit carries its tag
+    @Test
+    fun `an auto-accepted edit carries its tag`() {
+        val (_, rows) = editRows(41, phase(editId, EditPhase.DONE, EditOutcome.AUTO))
+        val call = rows.edit(editId)
+        assertEquals("Edited hello.txt", call.label.text)
+        assertEquals("auto-accepted", call.tag)
+        assertNull(call.action)
+    }
+
+    // spec: a stopped review says Claude stopped waiting
+    @Test
+    fun `a stopped review says Claude stopped waiting`() {
+        // ide-edit-stop:42 is the CLI's notifications/cancelled for the held call (ide-edit-stop:36); the turn is still open.
+        val id = toolUseAt("ide-edit-stop", 36).id
+        val (_, open) = editRows(42, phase(id, EditPhase.OPEN), phase(id, EditPhase.DONE, EditOutcome.STOPPED), name = "ide-edit-stop")
+        val call = open.edit(id)
+        assertEquals("Claude stopped waiting for this edit.", call.label.text)
+        assertNull(call.action)
+        // Once the turn ends (ide-edit-stop:46), the CLI's user-rejected result makes it an interrupted row.
+        val (_, ended) = editRows(46, phase(id, EditPhase.DONE, EditOutcome.STOPPED), name = "ide-edit-stop")
+        val interrupted = ended.edit(id)
+        assertEquals(ToolState.INTERRUPTED, interrupted.state)
+        assertEquals("Edit hello.txt · Interrupted", interrupted.label.text)
+        // A rejected review keeps the denied form, before and after its result (ide-edit:105).
+        val writeId = toolUseAt("ide-edit", 101).id
+        val rejected = SessionEvent.EditPhase(writeId, EditReview("new.txt", EditPhase.DONE, EditOutcome.REJECTED))
+        assertEquals("Rejected creating new.txt", editRows(104, rejected).second.edit(writeId).label.text)
+        val denied = editRows(105, rejected).second.edit(writeId)
+        assertEquals(ToolState.DENIED, denied.state)
+        assertEquals("Rejected creating new.txt", denied.label.text)
     }
 }
 
