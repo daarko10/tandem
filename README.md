@@ -28,6 +28,7 @@ A fast, native JetBrains plugin for Claude Code. Free and open source.
 ./gradlew test          # unit and protocol fixture tests
 ./gradlew buildPlugin   # ZIP in build/distributions/
 ```
+Install the ZIP with Settings | Plugins | ⚙ | Install Plugin from Disk.
 
 ## Working on Tandem with Claude Code
 Run `./scripts/setup-agent.sh` once. It installs the plugins, language server and docs servers this repo expects.

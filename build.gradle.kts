@@ -1,6 +1,7 @@
 import kotlinx.kover.gradle.plugin.dsl.AggregationType
 import kotlinx.kover.gradle.plugin.dsl.CoverageUnit
 import kotlinx.kover.gradle.plugin.dsl.GroupingEntityType
+import org.jetbrains.changelog.Changelog
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.models.ProductRelease
@@ -11,6 +12,8 @@ plugins {
     id("org.jetbrains.intellij.platform")
     // Coverage of the unit, fixture and platform tests; build-time only, nothing of it goes into the plugin.
     id("org.jetbrains.kotlinx.kover")
+    // CHANGELOG.md's section for this version becomes the plugin's change notes; build-time only.
+    id("org.jetbrains.changelog")
 }
 
 kotlin {
@@ -91,10 +94,31 @@ dependencies {
 intellijPlatform {
     pluginConfiguration {
         version = providers.gradleProperty("version")
+        // Rendered here, as a plain string: a provider reading the changelog extension would hold the project, which the
+        // configuration cache cannot store. The configuration cache still notices an edit to CHANGELOG.md.
+        changeNotes = changelog.let { notes ->
+            notes.renderItem(
+                (notes.getOrNull(providers.gradleProperty("version").get()) ?: notes.getUnreleased())
+                    .withHeader(false).withEmptySections(false),
+                Changelog.OutputType.HTML,
+            )
+        }
         ideaVersion {
             sinceBuild = providers.gradleProperty("pluginSinceBuild")
             untilBuild = provider { null }
         }
+    }
+
+    // Marketplace signing and upload read the owner's secrets from the environment only (the release workflow's secrets);
+    // without them signPlugin and publishPlugin fail, and nothing else needs them.
+    signing {
+        certificateChain = providers.environmentVariable("CERTIFICATE_CHAIN")
+        privateKey = providers.environmentVariable("PRIVATE_KEY")
+        password = providers.environmentVariable("PRIVATE_KEY_PASSWORD")
+    }
+
+    publishing {
+        token = providers.environmentVariable("PUBLISH_TOKEN")
     }
 
     pluginVerification {
@@ -107,6 +131,11 @@ intellijPlatform {
             }
         }
     }
+}
+
+changelog {
+    groups.empty()
+    repositoryUrl = providers.gradleProperty("pluginRepositoryUrl")
 }
 
 // Coverage of protocol/, session/ (with session/transcript) and chat/, whose target is 90% of lines (CLAUDE.md):

@@ -1,4 +1,4 @@
-"""Tests for the workflows: the drift loop's and the skill they run, and build.yml's jobs. Run from scripts/: python3 -m unittest
+"""Tests for the workflows: the drift loop's and the skill they run, build.yml's jobs and release.yml. Run from scripts/: python3 -m unittest
 
 They read .github/workflows/drift-fix.yml (and cli-contract.yml, build.yml) with PyYAML, which reads the `on` key as the
 boolean True. Without PyYAML they skip, except under GITHUB_ACTIONS, where a missing PyYAML is an error: these are the
@@ -41,6 +41,7 @@ if not BASH and os.environ.get("GITHUB_ACTIONS") and os.environ.get("RUNNER_OS")
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 DRIFT = os.path.join(ROOT, ".github/workflows/drift-fix.yml")
+RELEASE = os.path.join(ROOT, ".github/workflows/release.yml")
 SKILL = os.path.join(ROOT, ".claude/skills/fix-contract-drift/SKILL.md")
 # No Write(path) rule: the CLI (2.1.308) matches the Write, Edit and NotebookEdit tools against Edit(path) rules and never
 # consults a Write(path) one, so each Edit rule below covers all three.
@@ -1023,6 +1024,31 @@ class BuildFilterOutcomeTest(unittest.TestCase):
                                   env={"PATH": os.environ.get("PATH", ""), "HOME": tmp, "GIT_CEILING_DIRECTORIES": tmp, "EVENT": "pull_request", "GITHUB_OUTPUT": output})
             with open(output, encoding="utf-8") as f:
                 self.assertEqual((True, ""), (proc.returncode != 0, f.read()), proc.stdout + proc.stderr)   # no repository: red, and no verdict for the Gradle jobs
+
+
+@unittest.skipUnless(yaml, "PyYAML is not installed")
+class ReleaseWorkflowTest(unittest.TestCase):
+    """The owner presses the button (docs/launch.md): the release runs on demand from main only, and uploads only when asked."""
+
+    def test_it_runs_by_hand_from_main_only(self):
+        wf = load(RELEASE)
+        self.assertEqual(["workflow_dispatch"], list(wf[True]))
+        self.assertEqual(("boolean", False), (wf[True]["workflow_dispatch"]["inputs"]["publish"]["type"], wf[True]["workflow_dispatch"]["inputs"]["publish"]["default"]))
+        self.assertEqual({"contents": "read"}, wf["permissions"])
+        self.assertEqual("github.ref == 'refs/heads/main'", wf["jobs"]["release"]["if"])
+
+    def test_only_the_publish_step_uploads_and_it_waits_for_the_input(self):
+        wf = load(RELEASE)
+        uploads = [s.get("name") for s in steps(wf, "release") if "publishPlugin" in s.get("run", "")]
+        self.assertEqual(["Publish to the JetBrains Marketplace"], uploads)
+        self.assertEqual("inputs.publish", step(wf, "release", "Publish to the JetBrains Marketplace")["if"])
+        self.assertIn("--draft", step(wf, "release", "Draft the GitHub release")["run"])
+
+    def test_the_secrets_reach_only_the_sign_and_publish_steps(self):
+        wf = load(RELEASE)
+        with_secrets = [s.get("name") for s in steps(wf, "release") if "secrets." in json.dumps(s)]
+        self.assertEqual(["Sign", "Publish to the JetBrains Marketplace"], with_secrets)
+        self.assertNotIn("PUBLISH_TOKEN", json.dumps(step(wf, "release", "Sign")))
 
 
 if __name__ == "__main__":
