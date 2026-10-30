@@ -40,10 +40,15 @@ but cannot create one.
 2. Actions > Release > Run workflow on `main`, with the upload box **unticked**. Download the `plugin` artifact from the run
    (on an iPhone, Safari saves it to Files).
 3. On plugins.jetbrains.com, choose Upload plugin and give it the ZIP. Fill in the listing (below) and submit it.
-   JetBrains reviews every new plugin by hand; the listing appears when they approve it.
+   JetBrains reviews every new plugin by hand; the listing appears when they approve it. A rejected version is resubmitted
+   through the same Upload plugin page with the new ZIP: the Marketplace matches the plugin ID inside it and adds the
+   version to the listing. (Before approval the plugin page has no upload entry; its menu only deletes.)
 4. Publish the draft GitHub release the run created. Publishing it creates the tag `v<version>`.
 5. Marketplace > your profile > My Tokens: create a token and put it in the repository secret `PUBLISH_TOKEN` (on github.com
    in Safari, as above).
+
+Done on 2026-10-30: 0.4.0 was rejected (2026.3 EAP compatibility, internal Jewel API), 0.4.1 was approved the same day.
+The listing is https://plugins.jetbrains.com/plugin/35641-tandem (plugin 35641, `dev.daarkolabs.tandem`).
 
 ## Every later version
 1. Raise `version` in `gradle.properties`, add its section to `CHANGELOG.md` (move what is under `[Unreleased]`), merge.

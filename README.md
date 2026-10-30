@@ -2,9 +2,10 @@
 
 A fast, native JetBrains plugin for Claude Code. Free and open source.
 
-> Status: early development. macOS and Linux today; Windows in progress. Not on the JetBrains Marketplace yet.
+> Status: early. On the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/35641-tandem) since 0.4.1.
+> macOS and Linux today; Windows in progress.
 > Edits go through the IDE: the CLI's own Edit and Write tools are disabled in Tandem, which serves its own. The editable
-> diff is tested against a fake CLI that replays real recordings, and has not had a pass in a real project yet.
+> diff is tested against a fake CLI that replays real recordings and by hand on macOS; expect rough edges.
 
 ## Why
 - **Native UI.** Built with Jewel (Compose), not an embedded browser. No black screens after IDE updates.
@@ -21,6 +22,11 @@ A fast, native JetBrains plugin for Claude Code. Free and open source.
 ## Requirements
 - A JetBrains IDE, 2026.1 or newer.
 - [Claude Code](https://code.claude.com) installed and signed in (`claude --version` works in a terminal).
+
+## Install
+Settings | Plugins | Marketplace, search for **Tandem**, or open
+[plugins.jetbrains.com/plugin/35641-tandem](https://plugins.jetbrains.com/plugin/35641-tandem). Then open the Tandem tool
+window and type a prompt.
 
 ## Build from source
 ```bash
