@@ -109,9 +109,9 @@ the edits spec, 4.3).
   while the block streams and before any call event.
 - The reducer sets `edits[block.id] = EditReview(name, WRITING)` when a tandem tool block in the main draft yields a
   complete or open `file_path` whose file name is non-empty, and leaves it alone afterwards: the call's `EditEvent`s move it
-  to `QUEUED` / `OPEN` / `DONE` as today. A `result`, an interrupt (`Stopped`), the process' end, or an `EditEvent.Stopped`
-  for a review still `WRITING` ends it as `DONE` / `STOPPED` with the 2.3 notice (hard rule 5: the row never stays
-  "writing" after the turn).
+  to `QUEUED` / `OPEN` / `DONE` as today. A `result`, an interrupt (`Stopped`) or the process' end while a review is
+  still `WRITING` ends it as `DONE` / `STOPPED` with the 2.3 notice, as does the previewer's own `EditPhase` event
+  (4.3) (hard rule 5: the row never stays "writing" after the turn).
 - `SessionHandle` exposes `previews: Flow<EditPreview?>` derived from `state`:
 
 ```kotlin
@@ -160,8 +160,8 @@ fun closePreview(toolUseId: String)
   - on a non-null preview with a complete path, when `queue.open.value == null` and no other preview is shown and the
     session's mode is not auto-accept: `locate`, then `presenter.preview(...)` with the 2.1 text;
   - on later emissions for the same `toolUseId`: `updatePreview` with the recomputed text;
-  - on null, on `cancel`/`cancelAll`, on the turn's end: `closePresenter` for that id, and `EditEvent.Stopped(toolUseId)`
-    to the session when no call came (the reducer's 2.3 rule);
+  - on null, on `cancel`/`cancelAll`, on the turn's end: `closePreview` for that id, and, when no call came,
+    `EditEvent.EditPhase(toolUseId, EditReview(name, DONE, STOPPED))` with the 2.3 notice to the session;
   - the text: `write_file` → `content ?: ""`; `edit_file` → `original` until `newString != null`, then
     `EditMatcher.match(original, oldString, replaceAll = false)` applied with `newString` when it matches once, else
     `original`.
