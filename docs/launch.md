@@ -70,7 +70,7 @@ star swaps or vote rings, ever): GitHub removes them, and the project's credibil
 
 ## Launch gates (all required; none is waived by speed)
 - **Marketplace listing** approved and installable. Review is outside our control; a ZIP-only launch is not a
-  launch.
+  launch. Done: 0.4.1 approved on 2026-10-30, https://plugins.jetbrains.com/plugin/35641-tandem.
 - **Outside users:** at least ten people installed from the Marketplace and used Tandem on their own projects;
   every issue that blocks a first session is closed.
 - **Owner feel test:** the owner's own `runIde` and real-project pass after Milestone 2 and the polish round it
