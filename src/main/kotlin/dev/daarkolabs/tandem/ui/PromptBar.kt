@@ -195,7 +195,6 @@ import org.jetbrains.jewel.ui.component.Icon
 import org.jetbrains.jewel.ui.component.IconButton
 import org.jetbrains.jewel.ui.component.InlineWarningBanner
 import org.jetbrains.jewel.ui.component.LocalMenuController
-import org.jetbrains.jewel.ui.component.MenuItemState
 import org.jetbrains.jewel.ui.component.MenuScope
 import org.jetbrains.jewel.ui.component.PopupMenu
 import org.jetbrains.jewel.ui.component.Text
@@ -203,6 +202,8 @@ import org.jetbrains.jewel.ui.component.TextArea
 import org.jetbrains.jewel.ui.component.VerticalScrollbar
 import org.jetbrains.jewel.ui.icon.IconKey
 import org.jetbrains.jewel.ui.icons.AllIconsKeys
+import androidx.compose.ui.graphics.Color
+import org.jetbrains.jewel.ui.component.styling.MenuItemColors
 import org.jetbrains.jewel.ui.theme.menuStyle
 import java.awt.datatransfer.DataFlavor
 import java.nio.file.Path
@@ -1197,10 +1198,11 @@ internal fun PageRow(
     val focused by source.collectIsFocusedAsState()
     val pressed by source.collectIsPressedAsState()
     LaunchedEffect(hovered) { if (hovered) focus.requestFocus() }
-    val state = MenuItemState.of(selected = false, enabled = enabled, focused = focused, hovered = hovered, pressed = pressed)
-    val background by colors.backgroundFor(state)
-    val contentColor by colors.contentFor(state)
-    val keybindingColor by colors.keybindingTintFor(state)
+    // Jewel's own `MenuItemState` and `MenuItemColors.backgroundFor` are internal from 2026.3 on: the row picks its colours itself.
+    val look = menuItemLook(enabled = enabled, pressed = pressed, hovered = hovered, focused = focused)
+    val background = colors.background(look)
+    val contentColor = colors.content(look)
+    val keybindingColor = colors.keybindingTint(look)
     Box(
         Modifier.focusRequester(focus)
             .selectable(selected = false, enabled = enabled, interactionSource = source, indication = null) {
@@ -1675,3 +1677,39 @@ private const val POPOVER_HEIGHT_SHARE: Float = 0.6f
 
 /** The popover's height cap before the pane is measured. */
 private val POPOVER_FALLBACK_HEIGHT = 400.dp
+
+/** How a menu row is drawn, by the one of its states that wins, in Jewel's order: disabled, then pressed, hovered, focused. */
+internal enum class MenuItemLook { DISABLED, PRESSED, HOVERED, FOCUSED, PLAIN }
+
+/** The [MenuItemLook] of a row with these states, in Jewel's own precedence. */
+internal fun menuItemLook(enabled: Boolean, pressed: Boolean, hovered: Boolean, focused: Boolean): MenuItemLook = when {
+    !enabled -> MenuItemLook.DISABLED
+    pressed -> MenuItemLook.PRESSED
+    hovered -> MenuItemLook.HOVERED
+    focused -> MenuItemLook.FOCUSED
+    else -> MenuItemLook.PLAIN
+}
+
+internal fun MenuItemColors.background(look: MenuItemLook): Color = when (look) {
+    MenuItemLook.DISABLED -> backgroundDisabled
+    MenuItemLook.PRESSED -> backgroundPressed
+    MenuItemLook.HOVERED -> backgroundHovered
+    MenuItemLook.FOCUSED -> backgroundFocused
+    MenuItemLook.PLAIN -> background
+}
+
+internal fun MenuItemColors.content(look: MenuItemLook): Color = when (look) {
+    MenuItemLook.DISABLED -> contentDisabled
+    MenuItemLook.PRESSED -> contentPressed
+    MenuItemLook.HOVERED -> contentHovered
+    MenuItemLook.FOCUSED -> contentFocused
+    MenuItemLook.PLAIN -> content
+}
+
+internal fun MenuItemColors.keybindingTint(look: MenuItemLook): Color = when (look) {
+    MenuItemLook.DISABLED -> keybindingTintDisabled
+    MenuItemLook.PRESSED -> keybindingTintPressed
+    MenuItemLook.HOVERED -> keybindingTintHovered
+    MenuItemLook.FOCUSED -> keybindingTintFocused
+    MenuItemLook.PLAIN -> keybindingTint
+}

@@ -7,7 +7,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import org.jetbrains.jewel.foundation.theme.JewelTheme
-import org.jetbrains.jewel.ui.component.copyWithSize
 
 /** The body text size, 13 sp when the theme gives none. */
 @Composable
@@ -15,7 +14,7 @@ private fun bodySize(): TextUnit = JewelTheme.defaultTextStyle.fontSize.takeIf {
 
 /** Body text one point smaller (spec 4.2): the working row, the turn footer, sub-lines. */
 @Composable
-internal fun smallTextStyle(): TextStyle = JewelTheme.defaultTextStyle.copyWithSize((bodySize().value - 1).sp)
+internal fun smallTextStyle(): TextStyle = JewelTheme.defaultTextStyle.copy(fontSize = (bodySize().value - 1).sp)
 
 /**
  * The editor font one point smaller than body text, with the body's line height so that a mono span never changes a row's height

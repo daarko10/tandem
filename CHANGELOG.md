@@ -4,6 +4,12 @@ All notable changes to Tandem. The newest version's section becomes the plugin's
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-30
+
+### Fixed
+- Compatible with the 2026.3 EAP: the `+` menu's rows and the small text no longer call Jewel helpers that 2026.3 removes or
+  makes internal.
+
 ## [0.4.0] - 2026-10-28
 
 ### Added
