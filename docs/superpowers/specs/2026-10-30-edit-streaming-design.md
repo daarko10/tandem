@@ -71,8 +71,10 @@ closes, its row ends as `Stopped` with the notice `Claude did not finish this ed
 ## 3. Where the data comes from
 
 - The reducer already accumulates `input_json_delta` into `AssistantBlock.ToolUse.partialInput` for the streaming draft
-  message (`Reducer.kt`, `ChatState.kt`). A preview is derived from a `ToolUse` block whose `name` is
-  `mcp__tandem__edit_file` or `mcp__tandem__write_file`, in the main thread's draft (`parent_tool_use_id` null).
+  message (`Reducer.kt`, `ChatState.kt`). It now also feeds each delta to the block's `JsonPrefix` (4.1), kept beside
+  `partialInput` as `ToolUse.inputPrefix`, for every tool (the reader is cheap and tool-agnostic; the chat's live tool
+  rows may use it later). A preview is derived from a `ToolUse` block whose `name` is `mcp__tandem__edit_file` or
+  `mcp__tandem__write_file`, in the main thread's draft (`parent_tool_use_id` null).
 - The block's `id` (`<id-32>` in the recording) reappears as `tool_use_id` in the CLI's `can_use_tool` (line 37, which
   Tandem already auto-allows for its own tools) and as `_meta.claudecode/toolUseId` in the `tools/call` (line 38). That is
   the key that joins the preview to the proposal.
@@ -81,27 +83,70 @@ closes, its row ends as `Stopped` with the notice `Claude did not finish this ed
 
 ## 4. Data model and components
 
-### 4.1 `session/edits/PartialToolInput` (pure Kotlin, no IntelliJ)
+### 4.1 The parser: a JSON-prefix reader, and the tool knowledge apart from it (`protocol/`, pure Kotlin)
+
+The CLI and the model's output change often, so the parser is built on four principles, each with the test that
+enforces it:
+
+1. **One job per class.** `JsonPrefixReader` knows JSON and nothing about tools; `EditToolFields` knows which field of
+   which tool means what and nothing about JSON; `EditPreview` (4.2) joins them. A new tool or field is a new entry in
+   `EditToolFields`, never a change to the reader.
+2. **The whole grammar, not today's shape.** The reader follows any JSON value a prefix can begin: objects, arrays,
+   strings with every escape, numbers, `true` / `false` / `null`, nesting to a bounded depth. The model writes
+   `{"file_path": …, "old_string": …}` today; if it starts writing `{"edits": [{…}]}`, nested objects, or fields in
+   another order, the reader still reads it and only `EditToolFields` has to learn the new path.
+3. **Incremental and order-independent.** The reader is an immutable value fed one chunk at a time
+   (`JsonPrefix.feed(chunk): JsonPrefix`); feeding the chunks of a stream in any split gives the same result as feeding
+   the whole text at once. That is a property, and it is tested over every chunk boundary of the recorded stream. The
+   reducer feeds each `input_json_delta` as it arrives (4.2), so a tick costs the delta's length, not the input's.
+4. **Fail safe, never silent.** The reader never throws. A prefix that breaks the grammar freezes the value at the last
+   well-formed point and sets `malformed = true`; the previewer then stops updating and the call decides, and the chat
+   row says nothing wrong until the call's reply does (hard rule 5 is served by the reply, which is authoritative).
+   Depth past the bound, a string past the tools' size limit (the edits spec, 4.3) and a non-object root are read as
+   `malformed` too.
 
 ```kotlin
-/** The fields of a streamed tool input as far as it goes: a prefix of a JSON object whose values are strings or booleans. */
-data class PartialToolInput(
-    val complete: Map<String, String>,   // fields whose value has closed
-    val open: Pair<String, String>?,     // the field still streaming: its key and its value so far, unescaped
-    val closed: Boolean,                 // the object's closing brace was seen
-)
+/** A JSON value as far as a stream has written it. Immutable: feed returns the next value. Never throws. */
+sealed interface JsonPrefix {
+    val complete: Boolean          // the value's last token was seen
+    val malformed: Boolean         // the text left the grammar; the value is frozen at the last well-formed point
+    data class Obj(val fields: Map<String, JsonPrefix>, val openKey: String?, ...) : JsonPrefix   // openKey: the key being read, value in fields once its first token arrives
+    data class Arr(val items: List<JsonPrefix>, ...) : JsonPrefix
+    data class Str(val text: String, ...) : JsonPrefix        // text: unescaped so far; a cut escape is held back until it completes
+    data class Num(val text: String, ...) : JsonPrefix
+    data class Bool(val value: Boolean, ...) : JsonPrefix
+    data object Null : JsonPrefix
+    data object Empty : JsonPrefix                            // nothing yet
 
-object PartialToolInputs {
-    /** Never throws. A prefix the reader cannot follow gives what it read up to the problem. */
-    fun parse(partialJson: String): PartialToolInput
+    fun feed(chunk: String): JsonPrefix
+}
+
+object JsonPrefixReader {
+    val START: JsonPrefix = JsonPrefix.Empty
+    fun read(text: String): JsonPrefix = START.feed(text)
+    const val MAX_DEPTH: Int = 32
+}
+
+/** Which fields of Tandem's tools the preview reads: one table, beside TandemTools, the server's own schema. */
+object EditToolFields {
+    data class Shape(val path: String, val oldText: String?, val newText: String?, val content: String?, val replaceAll: String?)
+    val byTool: Map<String, Shape>   // "edit_file" to Shape("file_path", "old_string", "new_string", null, "replace_all"), "write_file" to Shape("file_path", null, null, "content", null)
+    /** Reads the preview's fields out of a prefix by the tool's shape; absent or non-string fields read as null. */
+    fun of(tool: String, prefix: JsonPrefix): EditFields?
 }
 ```
 
-Rules: a string value is unescaped as it goes; an escape cut by the chunk boundary (`\` or an incomplete `\uXXXX` at the
-end) is held back until it completes, so `open` never shows half an escape; non-string values (`replace_all`) are
-skipped; an unknown key is kept, the caller ignores it; a prefix that is not an object, or breaks the grammar, ends the
-read at the last good field. Re-parsed from the start on each throttled tick (inputs stay under the tools' 64 KB limit;
-the edits spec, 4.3).
+`EditToolFields.byTool` is generated from the same descriptions `TandemTools` answers `tools/list` with (the input
+schema's property names), so the stream reader and the server's advertised schema cannot drift apart: one test asserts
+that every `Shape` field is a property of the tool's `inputSchema`, and the other way round for the fields the preview
+needs.
+
+**The contract with the CLI** (what would break this, and the test that would tell us): the preview assumes that the
+concatenated `partial_json` of a block is a prefix of the call's `arguments` and ends equal to it, and that the call
+names the block in `_meta.claudecode/toolUseId`. `ContractTest` and `FixtureDecodeTest` assert both on every `ide-edit*`
+fixture and on the nightly's recording, so a CLI that starts sending snapshots instead of deltas, re-keys the meta, or
+reorders frames turns the nightly red and lands in the drift loop as decoder drift (`classify_drift.py` learns the two
+assertions' messages). The previewer itself treats a missing or mismatched key as "no preview" (2.4), never as an error.
 
 ### 4.2 `session/`: the preview in `ChatState`
 
@@ -210,13 +255,20 @@ bounds the rate. Hard rule 1 holds: no I/O, no parsing on the EDT.
 
 ## 8. Testing
 
-- **Fixture (hard rule 6):** `PartialToolInputTest` replays the `input_json_delta` chunks of block `<id-32>` in
-  `ide-edit.ndjson` cumulatively and asserts the stages (`file_path` open, complete; `old_string` complete; `new_string`
-  open "beta"; closed), plus synthetic chunkings of the same text at every byte boundary, escapes split across chunks
-  (`\"`, `\n`, `\uXXXX`), a `write_file` shape, a boolean field, fields in another order, and garbage. A recording of a
-  `write_file` call (`scripts/record-scenario.sh ide-edit-write`, a new scenario that asks for a new file; needs a
-  logged-in `claude`) is added when the recorder is available; until then the `write_file` case is synthetic, and the
-  test says so.
+- **Fixture (hard rule 6):** `JsonPrefixReaderTest` replays the `input_json_delta` chunks of block `<id-32>` in
+  `ide-edit.ndjson` one by one and asserts the value after each (`file_path` open, complete; `old_string` complete;
+  `new_string` open "beta"; complete), then the property of 4.1 principle 3: the same text split at every character
+  boundary, and at every pair of boundaries, gives the same value at the end and never a `malformed` one on the way.
+  Synthetic cases cover the grammar: escapes split across chunks (`\"`, `\\`, `\n`, `\uXXXX` cut at each of its six
+  characters), nested objects and arrays, numbers, booleans and null, whitespace between tokens, a key cut mid-word,
+  depth past the bound, a non-object root, and garbage at each position (frozen value, `malformed`, no throw).
+  `EditToolFieldsTest` reads both tools' shapes from prefixes at each stage and from a nested shape it does not know
+  (null fields, no throw), and checks the shapes against `TandemTools`' schemas. A recording of a `write_file` call
+  (`scripts/record-scenario.sh ide-edit-write`, a new scenario that asks for a new file; needs a logged-in `claude`) is
+  added when the recorder is available; until then the `write_file` case is synthetic, and the test says so.
+- **Contract (the nightly):** `ContractTest` and `FixtureDecodeTest` assert, for every tandem tool block in the
+  `ide-edit*` fixtures and the nightly's `ide-edit` recording, that the block's concatenated `partial_json` equals the
+  `tools/call`'s `arguments` as JSON text and that `_meta.claudecode/toolUseId` names the block (4.1).
 - **Reducer:** `WRITING` appears at the first path, survives `MessageStop`, moves on with the call's events, and ends
   `STOPPED` on `result` / interrupt / process end; `previews` emits the stages and null at the end; a subagent's block
   and a non-tandem tool never produce one.
@@ -233,7 +285,7 @@ bounds the rate. Hard rule 1 holds: no I/O, no parsing on the EDT.
 
 ## 9. Task slices (dependencies in brackets; each green on its own)
 
-T1 `PartialToolInput` + fixture test. T2 reducer `WRITING`, `EditPreview`, `previews` [T1]. T3 `IdeEditTools.locate`
+T1 `JsonPrefixReader` and `EditToolFields` + fixture, property and contract tests. T2 reducer `WRITING`, `EditPreview`, `previews` [T1]. T3 `IdeEditTools.locate`
 refactor, `DiffPresenter.preview/updatePreview/closePreview`, `EditDiff` adoption [none]. T4 `EditPreviewer` in
 `TandemEdits`, `EditSessions.previews`, `TandemSessions` wiring, tests [T2, T3]. T5 chat row `WRITING` + `Show diff`
 [T2]. T6 IDE test [T4, T5]. T7 docs: `docs/design.md` (the edit flow), `docs/protocol.md` (the delta-to-call key,
