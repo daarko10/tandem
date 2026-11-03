@@ -84,9 +84,6 @@ import kotlin.time.Duration.Companion.seconds
  */
 @ExtendWith(IdeTestShard::class)
 class ToolWindowIdeTest {
-    private val pluginZip = Path.of(System.getProperty("tandem.pluginZip"))
-    private val fakeClaude = System.getProperty("tandem.fakeClaude")
-    private val ideVersion = System.getProperty("tandem.ideVersion")
 
     @Test
     fun `a typed prompt is sent and the streamed reply is rendered`() {
@@ -441,7 +438,7 @@ class ToolWindowIdeTest {
         val project = newProject()
         val seeded = "33333333-3333-4333-8333-333333333333"
         // A session from an earlier run, in the CLI's transcript folder for the project: the sidebar lists it as "Seeded".
-        val transcript = Path.of(fakeClaude).resolveSibling("fixtures/transcripts/history-reply.jsonl").readText() +
+        val transcript = fixturesDir.resolve("transcripts/history-reply.jsonl").readText() +
             """{"type":"custom-title","customTitle":"Seeded","sessionId":"$seeded"}""" + "\n"
         configDir.resolve("projects").resolve(TranscriptFolder.key(project.toRealPath().toString())).createDirectories()
             .resolve("$seeded.jsonl").writeText(transcript)
@@ -1448,7 +1445,7 @@ class ToolWindowIdeTest {
         val configDir = Files.createTempDirectory("tandem-config")
         val project = newProject()
         val seeded = "44444444-4444-4444-8444-444444444444"
-        val transcript = Path.of(fakeClaude).resolveSibling("fixtures/transcripts/history-reply.jsonl").readText() +
+        val transcript = fixturesDir.resolve("transcripts/history-reply.jsonl").readText() +
             """{"type":"custom-title","customTitle":"Seeded","sessionId":"$seeded"}""" + "\n"
         configDir.resolve("projects").resolve(TranscriptFolder.key(project.toRealPath().toString())).createDirectories()
             .resolve("$seeded.jsonl").writeText(transcript)
@@ -1855,20 +1852,6 @@ class ToolWindowIdeTest {
         assertEquals(HELLO, hello.readText(), "the file unchanged on disk")
     }
 
-    /**
-     * [waitFor] for the edit tests, which spend long in the diff: a locally cached IDE in its trial may cover the window with JetBrains'
-     * modal feedback dialog at any time, which is dismissed (`No, Thanks`) on every poll; it is never Tandem's.
-     */
-    private fun Driver.editWait(what: String, timeout: kotlin.time.Duration, condition: () -> Boolean) {
-        waitFor(what, timeout) {
-            ui.xx(TRIAL_FEEDBACK_NO).list().forEach { it.click() }
-            condition()
-        }
-    }
-
-    /** Writes `hello.txt` (`alpha\nline two\n`) into [project], the file the `ide-edit*` fixtures' calls name (spec 9.6). */
-    private fun writeHello(project: Path): Path = project.resolve("hello.txt").also { it.writeText(HELLO) }
-
     /** The frames in the fake's log [log] so far. */
     private fun readLog(log: Path): List<JsonObject> =
         log.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject }
@@ -1885,22 +1868,10 @@ class ToolWindowIdeTest {
 
     private fun JsonObject.isErrorReply(): Boolean = this["isError"]?.jsonPrimitive?.booleanOrNull == true
 
-    /** A Swing control of the diff's bar, by its Swing name (IDE-edits spec 3.8). */
-    private fun Driver.diffButton(swingName: String): UiComponent = ui.x("//div[@name='$swingName']")
-
-    /** Whether the diff's editor tab (or window), titled `Tandem: hello.txt`, is shown: the tabs and the tab's label both name it. */
-    private fun Driver.diffTabShown(): Boolean =
-        ui.xx("//div[contains(@visible_text, 'Tandem: hello.txt') or contains(@accessiblename, 'Tandem: hello.txt')]").list().isNotEmpty()
-
     /** Whether the selected text editor is `hello.txt`'s and holds the keyboard focus. */
     private fun Driver.helloEditorFocused(): Boolean = withContext(OnDispatcher.EDT) {
         val editor = service<FileEditorManagerRef>(singleProject()).getSelectedTextEditor()
         editor?.getVirtualFile()?.getName() == "hello.txt" && editor.getContentComponent().isFocusOwner()
-    }
-
-    /** The text of [relativePath]'s `Document` in the IDE: what its editor shows. */
-    private fun Driver.documentText(relativePath: String): String? = withContext(OnDispatcher.EDT) {
-        findFile(relativePath)?.let { service<FileDocumentManagerRef>().getDocument(it) }?.getText()
     }
 
     /** The one prompt sent: `What colour?` as its text block, then a PNG image block with data. */
@@ -1924,10 +1895,6 @@ class ToolWindowIdeTest {
 
         override fun getTransferData(flavor: DataFlavor): Any = if (flavor == DataFlavor.imageFlavor) image else throw UnsupportedFlavorException(flavor)
     }
-
-    /** The Tandem tool window. Call on the EDT. */
-    private fun Driver.tandemWindow(): ToolWindowRef =
-        service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")
 
     /** Makes the Tandem tool window [width] pixels wide, or leaves it if it is narrower already. */
     private fun Driver.narrowToolWindow(width: Int) {
@@ -1971,15 +1938,6 @@ class ToolWindowIdeTest {
     /** ShowContent's list of the tool window's contents. */
     private fun Driver.contentList(): UiComponent = ui.x("//div[@class='MyList' or @class='JBList' or @class='ListWithFilter']")
 
-    /** Makes the tool window wide enough to dock the sidebar: the IDE gives it less than 500 dp. */
-    private fun Driver.widenToolWindow() {
-        withContext(OnDispatcher.EDT) {
-            val window = service<ToolWindowManagerRef>(singleProject()).getToolWindow("Tandem") ?: error("no Tandem tool window")
-            val width = window.getComponent().getWidth()
-            if (width < WIDE) window.stretchWidth(WIDE - width)
-        }
-    }
-
     /**
      * What the footer's model control reads for [fixture] (`fixtures/<fixture>.ndjson`, next to the fake CLI) with no model picked
      * (spec 2.3, `<Model>`): the display name of the entry other than `default`, in its first control_response that lists models,
@@ -1988,7 +1946,7 @@ class ToolWindowIdeTest {
      * model's wire id.
      */
     private fun defaultModelName(fixture: String): String {
-        val lines = Path.of(fakeClaude).resolveSibling("fixtures/$fixture.ndjson").readLines().filter { it.isNotBlank() }
+        val lines = fixturesDir.resolve("$fixture.ndjson").readLines().filter { it.isNotBlank() }
             .map { Json.parseToJsonElement(it).jsonObject }
         val running = lines.first { it.type == "system" && it["subtype"]?.jsonPrimitive?.content == "init" }["model"]!!.jsonPrimitive.content
         val models = lines.filter { it.type == "control_response" }
@@ -2009,7 +1967,7 @@ class ToolWindowIdeTest {
      * equal message ids); then the title `Seeded` for session [seeded].
      */
     private fun longTranscript(seeded: String, turns: Int = 30): String {
-        val lines = Path.of(fakeClaude).resolveSibling("fixtures/transcripts/history-reply.jsonl").readLines()
+        val lines = fixturesDir.resolve("transcripts/history-reply.jsonl").readLines()
         val user = Json.parseToJsonElement(lines[2]).jsonObject
         val assistant = Json.parseToJsonElement(lines[17]).jsonObject
         val message = assistant["message"]!!.jsonObject
@@ -2038,134 +1996,8 @@ class ToolWindowIdeTest {
         }
     }
 
-    /** A new project folder with one file. */
-    private fun newProject(): Path {
-        val project = Files.createTempDirectory("tandem-ide-test").resolve("demo").createDirectories()
-        project.resolve("README.md").writeText("# Demo\n")
-        return project
-    }
-
-    /**
-     * Starts the IDE on [project] with the plugin and the fake CLI, opens the tool window, runs [script], and returns the frames
-     * the plugin wrote to the CLI's stdin, each process's `__spawn__` line included. The Nth process the plugin starts replays
-     * fixture N of [fixtures] (the last one once they run out). [configDir] becomes the CLI's config directory
-     * (`CLAUDE_CONFIG_DIR`), and the fake CLI holds every permission request back until [gateFile] exists and sleeps
-     * [lineDelayMs] before each stream line. The frames go to [sentLog] as the fake CLI reads them, so that [script] can wait for one.
-     * [extraEnv] adds variables to the IDE's environment, which the fake CLI inherits; with [browserLog] a link the plugin opens in
-     * the browser is a `{"type":"__browse__","url":…}` line in [sentLog] instead (`tandem.browserOpener=log`). [systemProperties] are
-     * set in the IDE's JVM (`tandem.addFolder`, say).
-     */
-    private fun runChat(
-        name: String,
-        fixtures: List<String>,
-        configDir: Path? = null,
-        gateFile: Path? = null,
-        project: Path = newProject(),
-        sentLog: Path = Files.createTempFile("tandem-sent", ".ndjson"),
-        lineDelayMs: Int? = null,
-        extraEnv: Map<String, String> = emptyMap(),
-        browserLog: Boolean = false,
-        systemProperties: Map<String, String> = emptyMap(),
-        script: Driver.() -> Unit,
-    ): List<JsonObject> {
-        ideContext(
-            name,
-            fixtures,
-            configDir,
-            gateFile,
-            project,
-            sentLog,
-            lineDelayMs,
-            extraEnv = extraEnv,
-            browserLog = browserLog,
-            systemProperties = systemProperties,
-        ).runTandem(name, script)
-        return if (sentLog.exists()) sentLog.readLines().filter { it.isNotBlank() }.map { Json.parseToJsonElement(it).jsonObject } else emptyList()
-    }
-
-    /** The IDE [runChat] starts, with the plugin and the fake CLI; each [runTandem] on it starts it again, with what it kept. */
-    private fun ideContext(
-        name: String,
-        fixtures: List<String>,
-        configDir: Path?,
-        gateFile: Path?,
-        project: Path,
-        sentLog: Path,
-        lineDelayMs: Int? = null,
-        extraEnv: Map<String, String> = emptyMap(),
-        browserLog: Boolean = false,
-        systemProperties: Map<String, String> = emptyMap(),
-    ): IDETestContext =
-        Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
-            PluginConfigurator(this).installPluginFromPath(pluginZip)
-            applyVMOptionsPatch {
-                addSystemProperty("tandem.claudePath", fakeClaude)
-                addSystemProperty("idea.trust.all.projects", true)
-                addSystemProperty("jb.consents.confirmation.enabled", false)
-                addSystemProperty("ide.show.tips.on.startup.default.value", false)
-                withEnv("TANDEM_FAKE_FIXTURES", fixtures.joinToString(","))
-                withEnv("TANDEM_FAKE_LOG", sentLog.toString())
-                if (configDir != null) withEnv("CLAUDE_CONFIG_DIR", configDir.toString())
-                if (gateFile != null) withEnv("TANDEM_FAKE_GATE_FILE", gateFile.toString())
-                if (lineDelayMs != null) withEnv("TANDEM_FAKE_LINE_DELAY_MS", lineDelayMs.toString())
-                extraEnv.forEach { (key, value) -> withEnv(key, value) }
-                if (browserLog) addSystemProperty("tandem.browserOpener", "log")
-                systemProperties.forEach { (key, value) -> addSystemProperty(key, value) }
-            }
-        }
-
-    /**
-     * Starts this IDE, opens the tool window, runs [script], takes a screenshot named [shot] and closes the IDE. Fails on any error
-     * the IDE's log attributes to the plugin.
-     */
-    private fun IDETestContext.runTandem(shot: String, script: Driver.() -> Unit) {
-        val context = this
-        context.runIdeWithDriver().useDriverAndCloseIde {
-            waitFor("project opened", 5.minutes) { getOpenProjects().isNotEmpty() }
-            waitFor("Tandem plugin loaded", 2.minutes) { isPluginLoaded("dev.daarkolabs.tandem") }
-            // A freshly opened IDE is busy (indexing, startup activities) and drops early keystrokes.
-            waitForIndicators(5.minutes)
-            // IDE balloons (e.g. about JVM options) can cover the prompt box and swallow clicks.
-            closeAndDisableAllBalloonNotifications()
-            // A locally cached IDE whose trial has run a few days asks for feedback in a modal dialog that covers everything.
-            dismissTrialFeedback()
-            openToolWindow("Tandem")
-            waitFor("tool window shown", 2.minutes) { newSessionButton().present() }
-            script()
-            // Kept as a test artifact for people to look at.
-            takeScreenshot(shot)
-        }
-
-        // Any exception attributed to the plugin (e.g. a class from an undeclared IDE module) fails the test.
-        val logs = context.paths.testHome.walk().filter { it.fileName.toString() == "idea.log" }.toList()
-        assertTrue(logs.isNotEmpty(), "no idea.log under ${context.paths.testHome}")
-        val pluginErrors = logs.flatMap { it.readLines() }.filter { "Plugin: dev.daarkolabs.tandem" in it }
-        assertTrue(pluginErrors.isEmpty(), "errors attributed to Tandem:\n" + pluginErrors.joinToString("\n"))
-    }
-
-    /**
-     * Closes the trial's `Tell us about your experience` dialog with `No, Thanks` if it shows within 2 s (the IDE is idle by then): a JetBrains
-     * dialog of a locally cached IDE, not Tandem's, which would take every click and key of the test.
-     */
-    private fun Driver.dismissTrialFeedback() {
-        val noThanks = ui.x(TRIAL_FEEDBACK_NO)
-        val shown = runCatching { waitFor("the trial feedback dialog", 2.seconds) { noThanks.present() } }.isSuccess
-        if (shown) {
-            noThanks.click()
-            waitFor("the trial feedback dialog closed", 30.seconds) { !noThanks.present() }
-        }
-    }
-
     // Compose semantics nodes appear in the Driver's UI hierarchy as ComposeNode, with their text and role. They
     // report 0x0 bounds, so a plain click() hits the node's top-left corner pixel; click a point inside instead.
-
-    private fun Driver.promptBox(): UiComponent = ui.x(PROMPT_BOX)
-
-    private fun Driver.button(text: String): UiComponent = ui.x("//div[@class='ComposeNode' and @role='Button' and @text='$text']")
-
-    /** The sidebar row whose text (title, time, badge) contains [title] and each of [also]. */
-    private fun Driver.row(title: String, vararg also: String): UiComponent =
-        ui.x("$ROW[" + (listOf(title) + also).joinToString(" and ") { "contains(@text, '$it')" } + "]")
 
     /** The sidebar row that has the keyboard focus, if its text contains [title]. */
     private fun Driver.focusedRow(title: String): UiComponent = ui.x("$ROW[@focused='true' and contains(@text, '$title')]")
@@ -2195,10 +2027,6 @@ class ToolWindowIdeTest {
         "//div[@class='ComposeNode' and @role='DropdownList' and @contentdescription='Model' and " +
             "(starts-with(@visible_text,'$name') or starts-with(@text,'$name'))]",
     )
-
-    /** An icon button, found by what it says to assistive technology. */
-    private fun Driver.iconButton(description: String): UiComponent =
-        ui.x("//div[@class='ComposeNode' and @role='Button' and @contentdescription='$description']")
 
     /** A question card's option (a radio button or a checkbox), found by its label, which is what it says to assistive technology. */
     private fun Driver.option(label: String): UiComponent = ui.x(
@@ -2230,13 +2058,6 @@ class ToolWindowIdeTest {
     )
 
     /**
-     * The node that assistive technology knows as [description]: a tool row (a lone call, a group or a group's sub-row) by its label,
-     * an MCP server row (`echo, Connected`), the MCP panel.
-     */
-    private fun Driver.described(description: String): UiComponent =
-        ui.x("//div[@class='ComposeNode' and @contentdescription='$description']")
-
-    /**
      * The header of a running group, a row only a running group has: its sentence ends with `…` and reads `Reading <count>…` or
      * holds a clause separator (`Read a file, finding files…`).
      */
@@ -2248,9 +2069,6 @@ class ToolWindowIdeTest {
     /** The editable text (a text field or area) that has the keyboard focus, if it holds [text]. */
     private fun Driver.focusedEditable(text: String): UiComponent = ui.x("$EDITABLE[@focused='true' and @editabletext='$text']")
 
-    /** The sidebar's filter. */
-    private fun Driver.filterBox(): UiComponent = ui.x("$EDITABLE[@contentdescription='Filter sessions']")
-
     /** The button that says [text], if it has the keyboard focus. */
     private fun Driver.focusedButton(text: String): UiComponent =
         ui.x("//div[@class='ComposeNode' and @role='Button' and @text='$text' and @focused='true']")
@@ -2259,34 +2077,12 @@ class ToolWindowIdeTest {
     private fun Driver.focusedIconButton(description: String): UiComponent =
         ui.x("//div[@class='ComposeNode' and @role='Button' and @contentdescription='$description' and @focused='true']")
 
-    /** The header's "+". */
-    private fun Driver.newSessionButton(): UiComponent = iconButton("New session")
-
-    /**
-     * Creates a session with the header's "+" and the popup's defaults; it is selected. The popup is a window of its own, and a
-     * click that lands while it is still being placed moves nothing (seen once on a loaded CI runner: the popup open, no session),
-     * so a Create that leaves the popup open is pressed once more, and the helper returns only with the new session's prompt box.
-     */
-    private fun Driver.newSession() {
-        newSessionButton().click(Point(10, 10))
-        waitFor("the new-session popup", 30.seconds) { button("Create").present() }
-        clickButton("Create")
-        val closed = runCatching { waitFor("the popup closed", 5.seconds) { !button("Create").present() } }.isSuccess
-        if (!closed) clickButton("Create")
-        waitFor("the new session's prompt box", 30.seconds) { promptBox().present() }
-    }
-
     /**
      * Does what the context menu key does: runs the IDE's ShowPopupMenu, which the keymap binds to it, on what has the focus. The
      * robot cannot press that key under Xvfb, where it arrives as an undefined key.
      */
     private fun Driver.contextMenuKey() {
         invokeAction("ShowPopupMenu")
-    }
-
-    /** Opens the sidebar over the chat with the header's toggle. */
-    private fun Driver.openSidebar() {
-        iconButton("Show sessions").click(Point(10, 10))
     }
 
     /**
@@ -2336,13 +2132,6 @@ class ToolWindowIdeTest {
     private fun Driver.containing(text: String): UiComponent =
         ui.x("//div[@class='ComposeNode' and (contains(@visible_text,'$text') or contains(@text,'$text'))]")
 
-    private fun Driver.waitForText(text: String) {
-        waitFor("'$text' rendered", 2.minutes) { text(text).present() }
-    }
-
-    /** The node whose text is [text]. */
-    private fun Driver.text(text: String): UiComponent = ui.x("//div[@class='ComposeNode' and @visible_text='$text']")
-
     /** As [waitForText], for [text] as a part of a node's text, such as one pair of a wrapping line. */
     private fun Driver.waitForTextContaining(text: String) {
         waitFor("'$text' rendered within a text", 2.minutes) { ui.x("//div[@class='ComposeNode' and contains(@visible_text, '$text')]").present() }
@@ -2371,16 +2160,6 @@ class ToolWindowIdeTest {
         waitFor("the turn ended", 1.minutes) { iconButton("Send").present() && !iconButton("Stop").present() }
     }
 
-    /** Types [text] into the prompt box like a person and presses Send, checking each step landed. */
-    private fun Driver.typePrompt(text: String) {
-        promptBox().click(Point(20, 20))
-        waitFor("prompt box focused", 30.seconds) { ui.x("$PROMPT_BOX[@focused='true']").present() }
-        promptBox().keyboard { typeText(text, 20) }
-        waitFor("prompt box holds '$text'", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='$text']").present() }
-        iconButton("Send").click(Point(10, 10))
-        waitFor("prompt box cleared after Send", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
-    }
-
     /**
      * Answers the open permission card with Allow once: with Enter when the card has the focus, which must then sit on Allow once,
      * never on Deny; else, when the Driver does not see the card's focus, with a click (the keyboard path stays on runIde checklist 6,
@@ -2403,18 +2182,9 @@ class ToolWindowIdeTest {
         }
     }
 
-    private fun Driver.clickButton(text: String) {
-        button(text).click(Point(12, 10))
-    }
-
     private val JsonObject.type: String? get() = this["type"]?.jsonPrimitive?.content
 
     private companion object {
-        /** How wide [widenToolWindow] makes the tool window, in pixels: past 500 dp at the scale the tests run at. */
-        const val WIDE = 900
-
-        const val EDITABLE = "//div[@class='ComposeNode' and @editabletext]"
-
         /** The first attached or sent image: a thumbnail, or its placeholder while it decodes. */
         const val FIRST_IMAGE = "//div[@class='ComposeNode' and @contentdescription='[Image #1]']"
 
@@ -2457,12 +2227,7 @@ class ToolWindowIdeTest {
         /** The most key presses a test makes to move the focus or a menu's selection to a control. */
         const val MAX_PRESSES = 40
 
-        /** `hello.txt` as the `ide-edit*` IDE tests write it, and after the recorded `alpha` → `beta` edit. */
-        const val HELLO = "alpha\nline two\n"
-        const val BETA = "beta\nline two\n"
-
-        /** The diff bar's controls: their Swing names and accessible names (IDE-edits spec 3.8). */
-        const val ACCEPT_BUTTON = "tandem.edit.accept"
+        /** The diff bar's other controls (Accept is [ACCEPT_BUTTON]): their Swing names and accessible names (IDE-edits spec 3.8). */
         const val ACCEPT_ALL_BUTTON = "tandem.edit.acceptAll"
         const val REJECT_BUTTON = "tandem.edit.reject"
         const val REASON_FIELD = "tandem.edit.reason"
@@ -2470,9 +2235,6 @@ class ToolWindowIdeTest {
 
         /** The footer's hint while `Accept all` holds for the turn. */
         const val ACCEPT_ALL_HINT = "Accepting all edits this turn"
-
-        /** The `No, Thanks` button of JetBrains' trial feedback dialog (`Tell us about your experience`). */
-        const val TRIAL_FEEDBACK_NO = "//div[@class='JButton' and (@visible_text='No, Thanks' or @accessiblename='No, Thanks')]"
 
         /** A text editor: a file's, or a side of a diff. */
         const val EDITOR = "//div[@class='EditorComponentImpl']"
@@ -2485,15 +2247,6 @@ class ToolWindowIdeTest {
 
         /** The transcript, the chat's list of rows. */
         const val TRANSCRIPT = "//div[@class='ComposeNode' and @contentdescription='Transcript']"
-
-        /** Every sidebar row. */
-        const val ROW = "//div[@class='ComposeNode' and @role='Tab']"
-
-        /**
-         * The prompt box: the last editable text, since a docked sidebar's filter box comes first. A sidebar open over the chat
-         * comes after it, so the tests type prompts only while it is closed.
-         */
-        const val PROMPT_BOX = "($EDITABLE)[last()]"
 
         /**
          * A permission card's button that has the keyboard focus. The card puts the focus on its default button when it opens, so a
