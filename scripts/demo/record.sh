@@ -4,20 +4,25 @@
 #
 #   scripts/demo/record.sh [extra Gradle arguments, e.g. --init-script <file>]
 #   scripts/demo/record.sh --cut-only   (cuts build/demo/raw.mp4 again by its marks, for a change to the captions or the GIF settings)
+#   --publish (before any other argument, with or without --cut-only) also copies the four GIFs into docs/media/ for the README;
+#   tandem.gif must then be under 3 MB.
 #
-# Writes build/demo/: raw.mp4 (the whole screen recording), scene-{1,2,3}.mp4 (1600 px wide, with a caption band), scene-{1,2,3}.gif and
+# Writes build/demo/: raw.mp4 (the whole screen recording), scene-{1,2,3}.mp4 (1280 px wide, with a caption band), scene-{1,2,3}.gif and
 # tandem.gif (all three, 960 px wide, 12 fps, one palette). Needs ffmpeg (x11grab) and, with no DISPLAY, Xvfb. Without a font (fc-match)
 # or drawtext, the captions are left out.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 OUT=build/demo
-WIDTH=1600
-HEIGHT=1000
+WIDTH=1280
+HEIGHT=800
 FPS=15
 GIF_WIDTH=960
 GIF_FPS=12
 GIF_LIMIT=$((10 * 1024 * 1024))
+# Each scene plays this many times faster than recorded: every Driver step costs the IDE a second or more under x11grab, which a
+# viewer should not sit through. Typing, streaming and pauses speed up alike.
+SPEEDS=(1.2 1.6 1)
 CAPTIONS=(
   "An edit opens as a native diff. Change it, Accept, and it lands through the IDE."
   "Sessions run side by side. Switch while both are working."
@@ -27,8 +32,16 @@ CAPTIONS=(
 for tool in ffmpeg ffprobe; do command -v "$tool" >/dev/null || { echo "record.sh: $tool not found" >&2; exit 1; }; done
 MARKS="$PWD/$OUT/marks.txt"
 CUT_ONLY=false
-if [ "${1:-}" = "--cut-only" ]; then
-  CUT_ONLY=true
+PUBLISH=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cut-only) CUT_ONLY=true ;;
+    --publish) PUBLISH=true ;;
+    *) break ;;
+  esac
+  shift
+done
+if [ "$CUT_ONLY" = true ]; then
   [ -f "$OUT/raw.mp4" ] && [ -f "$OUT/record-start.txt" ] && [ -f "$MARKS" ] || { echo "record.sh: nothing recorded in $OUT" >&2; exit 1; }
 fi
 
@@ -88,10 +101,16 @@ for n in 1 2 3; do
   start=$(mark "scene-$n" start)
   end=$(mark "scene-$n" end)
   [ -n "$start" ] && [ -n "$end" ] || { echo "record.sh: no marks for scene $n in $MARKS" >&2; exit 1; }
-  filter="fps=$FPS"
+  # A scene's `cut`/`resume` marks pair up: the recording between them (the IDE catching up between two steps) is left out.
+  filter="setpts=PTS/${SPEEDS[$((n - 1))]},fps=$FPS"
+  cuts=$(awk -v cut="scene-$n cut" -v resume="scene-$n resume" -v start="$start" '
+    $1 " " $2 == cut { from = $3 }
+    $1 " " $2 == resume && from != "" { printf "%sbetween(t,%.3f,%.3f)", (n++ ? "+" : ""), (from - start) / 1000 + 0.3, ($3 - start) / 1000 + 0.3; from = "" }
+  ' "$MARKS")
+  [ -z "$cuts" ] || filter="select='not($cuts)',setpts=N/FRAME_RATE/TB,$filter"
   if [ -n "$FONT" ]; then
     printf '%s' "${CAPTIONS[$((n - 1))]}" >"$OUT/caption-$n.txt"
-    filter="$filter,pad=iw:ih+64:0:0:color=0x1e1f22,drawtext=fontfile=$FONT:textfile=$OUT/caption-$n.txt:fontcolor=0xdfe1e5:fontsize=30:x=(w-text_w)/2:y=h-47"
+    filter="$filter,pad=iw:ih+56:0:0:color=0x1e1f22,drawtext=fontfile=$FONT:textfile=$OUT/caption-$n.txt:fontcolor=0xdfe1e5:fontsize=26:x=(w-text_w)/2:y=h-41"
   fi
   ffmpeg -hide_banner -loglevel error -y -ss "$(seconds "$start" -0.3)" -to "$(seconds "$end" 0.3)" -i "$OUT/raw.mp4" \
     -vf "$filter" -an -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p -movflags +faststart "$OUT/scene-$n.mp4"
@@ -114,3 +133,10 @@ for file in "$OUT"/scene-*.mp4 "$OUT"/scene-*.gif "$OUT/tandem.gif"; do
 done
 size=$(stat -c %s "$OUT/tandem.gif")
 if [ "$size" -gt "$GIF_LIMIT" ]; then echo "record.sh: tandem.gif is over 10 MB" >&2; exit 1; fi
+
+if [ "$PUBLISH" = true ]; then
+  [ "$size" -le $((3 * 1048576)) ] || { echo "record.sh: tandem.gif is over 3 MB, not published" >&2; exit 1; }
+  mkdir -p docs/media
+  cp "$OUT/tandem.gif" "$OUT"/scene-1.gif "$OUT"/scene-2.gif "$OUT"/scene-3.gif docs/media/
+  echo "record.sh: published to docs/media/"
+fi

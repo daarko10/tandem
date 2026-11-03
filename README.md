@@ -2,6 +2,8 @@
 
 A fast, native JetBrains plugin for Claude Code. Free and open source.
 
+![Tandem: an edit opens as a native diff, two sessions side by side, a terminal session appears in the sidebar](docs/media/tandem.gif)
+
 > Status: early. On the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/35641-tandem) since 0.4.1.
 > macOS and Linux today; Windows in progress.
 > Edits go through the IDE: the CLI's own Edit and Write tools are disabled in Tandem, which serves its own. The editable

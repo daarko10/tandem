@@ -24,6 +24,8 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.createFile
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
@@ -46,14 +48,15 @@ class DemoRecordingIdeTest {
         val project = newProject()
         writeHello(project)
         runChat("demo-edit", fixtures = listOf("ide-edit"), project = project, lineDelayMs = LINE_DELAY_MS, systemProperties = IDE_PROPERTIES) {
-            prepare(toolWindowWidth = 680)
+            prepare(toolWindowWidth = SCREEN_WIDTH * 55 / 100)
             openFile("hello.txt", waitForCodeAnalysis = false)
             newSession()
+            focusPrompt()
             scene(1) {
-                pause(1500)
-                typePrompt("Change alpha to beta in hello.txt", keyDelayMs = KEY_DELAY_MS)
-                editWait("the diff", 1.minutes) { diffTabShown() && diffButton(ACCEPT_BUTTON).present() }
-                pause(2000)
+                pause(600)
+                send("Change alpha to beta in hello.txt", keyDelayMs = KEY_DELAY_MS)
+                soon("the diff", 1.minutes) { diffTabShown() && diffButton(ACCEPT_BUTTON).present() }
+                pause(1200)
                 // The recorded reply (ide-edit) says the person made `beta` into `beta!` in the diff before accepting: do just that, so the
                 // reply tells the truth. The proposal is the diff's editor furthest to the right.
                 val right = ui.xx(DIFF_EDITOR).list().maxBy { it.component.getLocationOnScreen().x }
@@ -63,13 +66,13 @@ class DemoRecordingIdeTest {
                     key(KeyEvent.VK_END)
                     typeText("!", KEY_DELAY_MS)
                 }
-                pause(1200)
+                pause(700)
                 diffButton(ACCEPT_BUTTON).click()
-                editWait("the diff closed", 30.seconds) { !diffButton(ACCEPT_BUTTON).present() }
-                editWait("the editor shows beta!", 30.seconds) { documentText("hello.txt") == "beta!\nline two\n" }
-                editWait("the row", 1.minutes) { described("Edited hello.txt").present() }
-                waitFor("the turn ended", 1.minutes) { iconButton("Send").present() }
-                pause(3000)
+                soon("the diff closed", 30.seconds) { !diffButton(ACCEPT_BUTTON).present() }
+                soon("the editor shows beta!", 30.seconds) { documentText("hello.txt") == "beta!\nline two\n" }
+                soon("the row", 1.minutes) { described("Edited hello.txt").present() }
+                soon("the turn ended", 1.minutes) { iconButton("Send").present() }
+                pause(1800)
             }
         }
     }
@@ -86,25 +89,37 @@ class DemoRecordingIdeTest {
             systemProperties = IDE_PROPERTIES,
         ) {
             prepare(toolWindowWidth = null)
-            waitFor("the sidebar docked beside the chat", 30.seconds) { filterBox().present() }
+            soon("the sidebar docked beside the chat", 30.seconds) { filterBox().present() }
+            // The scene starts as the first prompt is typed: creating the session is setup.
+            newSessionFromSidebar()
+            focusPrompt()
             scene(2) {
-                pause(1200)
-                newSessionFromSidebar()
-                typePrompt("Which of 17, 19 and 21 is prime? One word.", keyDelayMs = KEY_DELAY_MS)
-                newSessionFromSidebar()
-                typePrompt("Is 17, 19 or 21 prime? Step by step.", keyDelayMs = KEY_DELAY_MS)
-                pause(2500)
+                send("Which of 17, 19 and 21 is prime? One word.", keyDelayMs = KEY_DELAY_MS)
+                pause(600)
+                // The second session: the clicks show, the IDE's catching up after Create is cut from the recording.
+                clickButton("New session")
+                soon("the new-session popup") { button("Create").present() }
+                pause(500)
+                clickButton("Create")
+                mark("scene-2 cut")
+                soon("the popup closed") { !button("Create").present() }
+                soon("the new session's prompt box") { promptBox().present() }
+                focusPrompt()
+                mark("scene-2 resume")
+                pause(300)
+                send("Is 17, 19 or 21 prime? Step by step.", keyDelayMs = KEY_DELAY_MS)
+                pause(1500)
                 // Back to the first while both work, then to the second again.
                 row("One word").click(Point(10, 10))
-                pause(2500)
+                pause(1800)
                 row("Step by step").click(Point(10, 10))
-                pause(1500)
+                pause(1000)
                 resultGate.createFile()
-                waitFor("the second turn ended", 1.minutes) { iconButton("Send").present() && !iconButton("Stop").present() }
-                pause(1500)
+                soon("the second turn ended", 1.minutes) { iconButton("Send").present() && !iconButton("Stop").present() }
+                pause(1000)
                 row("One word").click(Point(10, 10))
-                waitFor("the first turn ended", 1.minutes) { iconButton("Send").present() && !iconButton("Stop").present() }
-                pause(2500)
+                soon("the first turn ended", 1.minutes) { iconButton("Send").present() && !iconButton("Stop").present() }
+                pause(1800)
             }
         }
     }
@@ -125,22 +140,22 @@ class DemoRecordingIdeTest {
             systemProperties = IDE_PROPERTIES,
         ) {
             prepare(toolWindowWidth = null)
-            waitFor("the sidebar docked beside the chat", 30.seconds) { filterBox().present() }
+            soon("the sidebar docked beside the chat", 30.seconds) { filterBox().present() }
             newSessionFromSidebar()
-            typePrompt("Which of 17, 19 and 21 is prime?", keyDelayMs = 5L)
-            waitFor("the turn ended", 1.minutes) { iconButton("Send").present() && !iconButton("Stop").present() }
+            send("Which of 17, 19 and 21 is prime?", keyDelayMs = 5L)
+            soon("the turn ended", 1.minutes) { iconButton("Send").present() && !iconButton("Stop").present() }
             scene(3) {
-                pause(2000)
+                pause(800)
                 // What `claude` started in a terminal in the project writes: the recorded transcript, as of now.
                 val now = Instant.now().toString()
                 val transcript = fixturesDir.resolve("transcripts/history-reply.jsonl").readText()
                     .replace(Regex("\"timestamp\":\"[^\"]*\""), "\"timestamp\":\"$now\"")
                 folder.resolve("$terminalSession.jsonl").writeText(transcript, options = arrayOf(StandardOpenOption.CREATE_NEW))
-                waitFor("the terminal session listed", 30.seconds) { row(TERMINAL_TITLE).present() }
-                pause(2500)
+                soon("the terminal session listed", 30.seconds) { row(TERMINAL_TITLE).present() }
+                pause(1500)
                 row(TERMINAL_TITLE).click(Point(10, 10))
                 waitForText("pong")
-                pause(3500)
+                pause(2200)
             }
         }
     }
@@ -169,10 +184,33 @@ class DemoRecordingIdeTest {
     /** The docked sidebar's "New session", then the popup's Create. */
     private fun Driver.newSessionFromSidebar() {
         clickButton("New session")
-        waitFor("the new-session popup", 30.seconds) { button("Create").present() }
+        soon("the new-session popup", 30.seconds) { button("Create").present() }
         clickButton("Create")
-        waitFor("the popup closed", 30.seconds) { !button("Create").present() }
-        waitFor("the new session's prompt box", 30.seconds) { promptBox().present() }
+        soon("the popup closed", 30.seconds) { !button("Create").present() }
+        soon("the new session's prompt box", 30.seconds) { promptBox().present() }
+    }
+
+    /** Puts the focus in the prompt box, ahead of a scene, so that the scene starts with the typing. */
+    private fun Driver.focusPrompt() {
+        promptBox().click(Point(20, 20))
+        soon("prompt box focused") { ui.x("$PROMPT_BOX[@focused='true']").present() }
+    }
+
+    /**
+     * The prompt box takes [text], typed a key every [keyDelayMs], and Send sends it: `typePrompt` with [soon]'s quick polls, so that the
+     * recording has no idle second between the steps.
+     */
+    private fun Driver.send(text: String, keyDelayMs: Long) {
+        if (!ui.x("$PROMPT_BOX[@focused='true']").present()) focusPrompt()
+        promptBox().keyboard { typeText(text, keyDelayMs) }
+        soon("prompt box holds '$text'") { ui.x("$PROMPT_BOX[@editabletext='$text']").present() }
+        iconButton("Send").click(Point(10, 10))
+        soon("prompt box cleared after Send") { ui.x("$PROMPT_BOX[@editabletext='']").present() }
+    }
+
+    /** [waitFor] polling every 100 ms instead of every second, so that a scene moves on as soon as the IDE has caught up. */
+    private fun soon(what: String, timeout: Duration = 30.seconds, condition: () -> Boolean) {
+        waitFor(what, timeout, 100.milliseconds, condition = condition)
     }
 
     /** Runs [body] between scene [number]'s start and end marks. */
@@ -187,25 +225,25 @@ class DemoRecordingIdeTest {
         Files.writeString(Path.of(file), "$what ${System.currentTimeMillis()}\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND)
     }
 
-    /** Waits [millis] for a viewer to read, closing JetBrains' trial feedback dialog should it show all the same. */
+    /**
+     * Waits [millis] for a viewer to read. It queries nothing: a Driver query costs up to a second here, which would stretch every pause
+     * (the trial feedback dialog is kept away by [IDE_PROPERTIES] instead).
+     */
+    @Suppress("UnusedReceiverParameter")
     private fun Driver.pause(millis: Long) {
-        val until = System.currentTimeMillis() + millis
-        while (System.currentTimeMillis() < until) {
-            ui.xx(TRIAL_FEEDBACK_NO).list().forEach { it.click() }
-            Thread.sleep(minOf(200L, maxOf(0L, until - System.currentTimeMillis())))
-        }
+        Thread.sleep(millis)
     }
 
     private companion object {
         /** The screen `scripts/demo/record.sh` records. */
-        const val SCREEN_WIDTH = 1600
-        const val SCREEN_HEIGHT = 1000
+        const val SCREEN_WIDTH = 1280
+        const val SCREEN_HEIGHT = 800
 
         /** How long the fake CLI sleeps before each streamed line, so that text visibly streams. */
         const val LINE_DELAY_MS = 25
 
         /** Scene 2's slower stream, so that the second reply streams while the first session is shown again. */
-        const val SLOW_LINE_DELAY_MS = 250
+        const val SLOW_LINE_DELAY_MS = 120
 
         /** The pause between typed keys: a person typing, briskly. */
         const val KEY_DELAY_MS = 30L
@@ -213,8 +251,11 @@ class DemoRecordingIdeTest {
         /** The terminal session's title in the sidebar: its transcript's `ai-title`. */
         const val TERMINAL_TITLE = "Pong"
 
-        /** No trial feedback survey in the middle of a scene (the platform's `evaluation.feedback.enabled` registry key). */
-        val IDE_PROPERTIES: Map<String, String> = mapOf("evaluation.feedback.enabled" to "false")
+        /**
+         * No trial feedback survey in the middle of a scene (the platform's `evaluation.feedback.enabled` registry key), and the UI at 125 %
+         * so that its text reads in a GIF at README width.
+         */
+        val IDE_PROPERTIES: Map<String, String> = mapOf("evaluation.feedback.enabled" to "false", "ide.ui.scale" to "1.25")
 
         /** A text editor: a side of the diff. */
         const val DIFF_EDITOR = "//div[@class='EditorComponentImpl']"

@@ -28,7 +28,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
       - name: Install ffmpeg and Xvfb
         run: sudo apt-get update && sudo apt-get install -y ffmpeg xvfb fonts-inter
-      # No DISPLAY: the script starts its own 1600x1000 Xvfb and records it.
+      # No DISPLAY: the script starts its own 1280x800 Xvfb and records it.
       - name: Record
         run: env -u DISPLAY scripts/demo/record.sh
       - uses: actions/upload-artifact@v7
