@@ -63,6 +63,24 @@ class FakeClaudeTest {
         assertEquals(listOf("$real/hello.txt", "$real/new.txt"), asked)
     }
 
+    // TANDEM_FAKE_EDIT_DIR: the call names a file outside the project, the init keeps the working directory
+    @Test
+    fun `the edit dir switch points the call outside the working directory`() {
+        val elsewhere = dir.resolve("elsewhere").toFile().apply { mkdirs() }.toPath().toRealPath().toString()
+        val fake = start("ide-edit", mapOf("TANDEM_FAKE_EDIT_DIR" to elsewhere))
+        val lines = handshake(fake).toMutableList()
+        fake.prompt()
+        lines += fake.readUntil({ answerAsHost(it) }) { it.type == "result" }
+
+        val real = dir.toRealPath().toString()
+        assertTrue(lines.none { "<path>" in it.toString() }, lines.toString())
+        assertEquals(listOf(real), lines.filter { it.type == "system" && it.string("subtype") == "init" }.map { it.string("cwd") })
+        val calls = lines.filter { it.rpcMethod() == "tools/call" }.map { it.rpc()["params"]!!.jsonObject["arguments"]!!.jsonObject.string("file_path") }
+        assertEquals(listOf("$elsewhere/hello.txt"), calls)
+        val asked = lines.filter { it.subtype() == "can_use_tool" }.map { it.request()["input"]!!.jsonObject.string("file_path") }
+        assertEquals(listOf("$elsewhere/hello.txt"), asked)
+    }
+
     // spec: interrupt withdraws an unanswered call
     @Test
     fun `interrupt withdraws an unanswered call`() {

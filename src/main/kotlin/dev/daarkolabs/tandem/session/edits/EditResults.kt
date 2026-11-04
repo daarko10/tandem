@@ -93,7 +93,8 @@ object EditResults {
 
     fun directory(path: String): ToolReply = error("$path is a directory.")
 
-    fun outside(path: String): ToolReply = error("$path is outside the project and its added folders; Tandem edits files there only.")
+    fun outside(path: String): ToolReply =
+        error("$path is outside the project, its added folders and the files open in the editor; Tandem edits files there only.")
 
     fun binary(path: String): ToolReply = error("$path is a binary file; Tandem edits text files only.")
 

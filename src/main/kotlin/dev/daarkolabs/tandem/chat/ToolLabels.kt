@@ -69,12 +69,17 @@ object ToolLabels {
         return s.take(head) + "…" + s.takeLast(keep - head)
     }
 
-    /** [path] relative to [cwd] when strictly under it; equal to it, outside it or without a cwd: its file name. */
+    /**
+     * [path] relative to [cwd] when strictly under it; outside it, the whole [path] as given (a file open in the editor from
+     * elsewhere is part of the workspace, and its bare name would read as a project file's); equal to it or without a cwd: its file
+     * name.
+     */
     fun relativePath(path: String, cwd: String?): String {
         if (!cwd.isNullOrEmpty()) {
             val base = cwd.trimEnd('/', '\\')
             val under = path.length > base.length + 1 && path.startsWith(base) && (path[base.length] == '/' || path[base.length] == '\\')
             if (under) path.substring(base.length + 1).trimEnd('/', '\\').takeIf { it.isNotEmpty() }?.let { return it }
+            if (path.trimEnd('/', '\\') != base) return path
         }
         return basename(path)
     }
