@@ -27,7 +27,7 @@ star swaps or vote rings, ever): GitHub removes them, and the project's credibil
 ## Tactics while developing
 1. **Build everything to be shown.** The launch GIF has three scenes: an edit opening as a native diff and
    being accepted; two sessions running in parallel; a session started in a terminal appearing in the sidebar.
-   A change that cannot appear in one of those scenes, in a benchmark or in the comparison table needs a stated
+   A change that cannot appear in one of those scenes, in a benchmark or in design.md's table needs a stated
    reason to exist before Milestone 3.
 2. **Keep the demo re-recordable.** The three scenes are driven by fixtures or a script under `scripts/`, so
    the GIF can be recorded again after any UI change without staging it by hand.
@@ -40,9 +40,10 @@ star swaps or vote rings, ever): GitHub removes them, and the project's credibil
 5. **Benchmarks are a feature.** Time to first token, idle and streaming memory, and plugin ZIP size are
    measured by a repeatable script kept in the repository, against CC GUI and the official plugin on the same
    machine, so the numbers in the README and the article can be re-run by anyone.
-6. **The comparison table is live.** design.md's table of CC GUI pains and Tandem decisions gains a row each
-   time a decision is proven in code or a benchmark, and the README version never lists a row that `main`
-   does not yet deliver.
+6. **Highlight Tandem, don't compare.** design.md's table of CC GUI pains and Tandem decisions is the
+   engineering record and gains a row each time a decision is proven in code or a benchmark. The README, the
+   listing and the posts say what Tandem does; other plugins are named only in docs/benchmarks.md, with the
+   versions measured, never with their issue trackers.
 7. **The contract run is the immune system.** Protocol work is not done until `cli-contract.yml` covers it.
    A red run is the first thing to fix in any session, and the fix is a pull request carrying the run's recording
    promoted to a fixture and the decoder change, with a description written for a reader: those pull requests are
@@ -77,7 +78,7 @@ star swaps or vote rings, ever): GitHub removes them, and the project's credibil
   produces. Agents cannot pass this gate: feel, focus and freezes are judged by hand (CLAUDE.md).
 - **Windows:** tested by one real user, or the README's first screen says "macOS and Linux today; Windows in
   progress". Silence is not an option.
-- **Launch assets:** the GIF (tactic 1), the benchmarks (tactic 5), the comparison table in the README
+- **Launch assets:** the GIF (tactic 1), the benchmarks (tactic 5), the README's "What you get" section
   (tactic 6), and repository topics set: claude-code, jetbrains-plugin, stream-json, intellij.
 
 ## Outward-facing rules
