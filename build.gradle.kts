@@ -149,6 +149,8 @@ kover {
             disabledForTestTasks.add("integrationTest")
             // The demo plays in another JVM too, and koverVerify (part of check) would otherwise run it.
             disabledForTestTasks.add("demoRecord")
+            // So does the time-to-first-token benchmark.
+            disabledForTestTasks.add("benchTtft")
             // Only Tandem's classes: by default the agent instruments every class the test JVM loads, the whole IntelliJ Platform.
             includedClasses.add("dev.daarkolabs.tandem.*")
         }
@@ -245,8 +247,11 @@ tasks {
         systemProperty("tandem.ideTestShard", providers.systemProperty("tandem.ideTestShard").getOrElse(""))
         // An IDE of the same release already unpacked (IdeHarness's testCase): no download. Empty downloads it.
         systemProperty("tandem.ideHome", providers.systemProperty("tandem.ideHome").getOrElse(""))
-        // The launch demo's scenes run only under demoRecord.
-        filter { excludeTestsMatching("*DemoRecordingIdeTest") }
+        // The launch demo's scenes run only under demoRecord, the benchmark only under benchTtft.
+        filter {
+            excludeTestsMatching("*DemoRecordingIdeTest")
+            excludeTestsMatching("*TtftBenchmarkIdeTest")
+        }
         // IDE Starter downloads the IDE under test and keeps its logs and screenshots in out/ide-tests (gitignored).
     }
 
@@ -274,6 +279,42 @@ tasks {
             )
         }
         systemProperty("tandem.demo", "true")
+        systemProperty("tandem.ideHome", providers.systemProperty("tandem.ideHome").getOrElse(""))
+    }
+
+    register<Test>("benchTtft") {
+        description = "Time to first token of Tandem and the other Claude plugins against the real CLI, for scripts/bench/ttft/run.sh."
+        group = "verification"
+        testLogging { events("passed", "skipped", "failed") }
+        testClassesDirs = integrationTest.output.classesDirs
+        classpath = integrationTest.runtimeClasspath
+        useJUnitPlatform()
+        filter { includeTestsMatching("*TtftBenchmarkIdeTest") }
+        val pluginZip = buildPlugin.flatMap { it.archiveFile }
+        inputs.file(pluginZip)
+        // A measurement is never up to date.
+        outputs.upToDateWhen { false }
+        val benchDir = layout.buildDirectory.dir("bench").map { it.asFile.path }
+        val benchIde = providers.gradleProperty("tandem.bench.ideVersion").orElse("2026.2.3")
+        val benchRun = providers.gradleProperty("tandem.bench.run").orElse("1")
+        val benchMarks = providers.gradleProperty("tandem.bench.marks").orElse(benchDir.map { "$it/marks.jsonl" })
+        val benchClaude = providers.gradleProperty("tandem.bench.claude").orElse("claude")
+        val detector = layout.projectDirectory.file("scripts/bench/ttft/detect.py").asFile.path
+        jvmArgumentProviders += CommandLineArgumentProvider {
+            listOf(
+                "-Dtandem.pluginZip=${pluginZip.get().asFile.path}",
+                // Air needs 2026.2, so every plugin runs on the same 2026.2 build.
+                "-Dtandem.ideVersion=${benchIde.get()}",
+                "-Dtandem.bench.dir=${benchDir.get()}",
+                "-Dtandem.bench.run=${benchRun.get()}",
+                "-Dtandem.bench.marks=${benchMarks.get()}",
+                "-Dtandem.bench.claude=${benchClaude.get()}",
+                "-Dtandem.bench.detector=$detector",
+            )
+        }
+        systemProperty("tandem.bench", "true")
+        // Screenshots of a plugin's setup pages, for working out an adapter.
+        systemProperty("tandem.bench.explore", providers.gradleProperty("tandem.bench.explore").getOrElse("false"))
         systemProperty("tandem.ideHome", providers.systemProperty("tandem.ideHome").getOrElse(""))
     }
 }
