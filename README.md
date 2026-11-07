@@ -1,3 +1,5 @@
+**English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
+
 # Tandem
 
 A fast, native JetBrains plugin for Claude Code. Free and open source.
