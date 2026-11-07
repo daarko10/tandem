@@ -147,6 +147,8 @@ kover {
         // Measures the test task only: the IDE Starter tests run the plugin in another JVM, and reports must never start them.
         instrumentation {
             disabledForTestTasks.add("integrationTest")
+            // The demo plays in another JVM too, and koverVerify (part of check) would otherwise run it.
+            disabledForTestTasks.add("demoRecord")
             // Only Tandem's classes: by default the agent instruments every class the test JVM loads, the whole IntelliJ Platform.
             includedClasses.add("dev.daarkolabs.tandem.*")
         }
@@ -241,8 +243,37 @@ tasks {
         }
         // Set by build.yml's IDE test jobs: <index>/<total> runs every total-th test of each class (IdeTestShard). Empty runs all.
         systemProperty("tandem.ideTestShard", providers.systemProperty("tandem.ideTestShard").getOrElse(""))
-        // An IDE already unpacked (IdeHome's ideTestCase): no download. Empty downloads the release we compile against.
+        // An IDE of the same release already unpacked (IdeHarness's testCase): no download. Empty downloads it.
         systemProperty("tandem.ideHome", providers.systemProperty("tandem.ideHome").getOrElse(""))
+        // The launch demo's scenes run only under demoRecord.
+        filter { excludeTestsMatching("*DemoRecordingIdeTest") }
         // IDE Starter downloads the IDE under test and keeps its logs and screenshots in out/ide-tests (gitignored).
+    }
+
+    register<Test>("demoRecord") {
+        description = "Plays the launch GIF's three scenes in a real IDE against the fake CLI, for scripts/demo/record.sh to record."
+        group = "verification"
+        testLogging { events("passed", "skipped", "failed") }
+        testClassesDirs = integrationTest.output.classesDirs
+        classpath = integrationTest.runtimeClasspath
+        useJUnitPlatform()
+        filter { includeTestsMatching("*DemoRecordingIdeTest") }
+        val pluginZip = buildPlugin.flatMap { it.archiveFile }
+        inputs.file(pluginZip)
+        // A recording is never up to date.
+        outputs.upToDateWhen { false }
+        val fakeClaude = layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path
+        val ideVersion = providers.gradleProperty("platformVersion")
+        val marks = providers.gradleProperty("tandem.demoMarks").orElse(layout.buildDirectory.file("demo/marks.txt").map { it.asFile.path })
+        jvmArgumentProviders += CommandLineArgumentProvider {
+            listOf(
+                "-Dtandem.pluginZip=${pluginZip.get().asFile.path}",
+                "-Dtandem.fakeClaude=$fakeClaude",
+                "-Dtandem.ideVersion=${ideVersion.get()}",
+                "-Dtandem.demoMarks=${marks.get()}",
+            )
+        }
+        systemProperty("tandem.demo", "true")
+        systemProperty("tandem.ideHome", providers.systemProperty("tandem.ideHome").getOrElse(""))
     }
 }

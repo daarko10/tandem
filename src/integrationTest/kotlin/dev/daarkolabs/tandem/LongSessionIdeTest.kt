@@ -66,7 +66,7 @@ class LongSessionIdeTest {
         // A rename, as the sidebar's own Rename writes it, so the row is easy to find (both sizes share one generated title).
         transcript.appendText("""{"type":"custom-title","customTitle":"$title","sessionId":"${transcript.name.removeSuffix(".jsonl")}"}""" + "\n")
 
-        val context = Starter.newContext("long-session-$turns", ideTestCase(project, ideVersion)).apply {
+        val context = Starter.newContext("long-session-$turns", testCase(project)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
             applyVMOptionsPatch {
                 addSystemProperty("tandem.claudePath", fakeClaude)
