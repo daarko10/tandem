@@ -16,6 +16,7 @@ import com.intellij.ide.starter.ide.IDETestContext
 import com.intellij.ide.starter.plugins.PluginConfigurator
 import com.intellij.ide.starter.runner.Starter
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.ExtendWith
 import java.awt.Point
 import java.awt.event.KeyEvent
 import java.nio.file.Files
@@ -43,7 +44,7 @@ import kotlin.time.Duration.Companion.seconds
  * EDT while waiting. The numbers go to stdout and to `build/reports/long-session/<turns>.json`. Nothing is asserted about the times:
  * the test fails only when a step does not finish within 60 s.
  */
-@org.junit.jupiter.api.extension.ExtendWith(IdeTestShard::class)
+@ExtendWith(IdeTestShard::class)
 class LongSessionIdeTest {
     private val pluginZip = Path.of(System.getProperty("tandem.pluginZip"))
     private val fakeClaude = System.getProperty("tandem.fakeClaude")
