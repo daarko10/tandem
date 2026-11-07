@@ -55,6 +55,11 @@ class UserBubbleTest {
         )
         assertEquals(listOf(BubbleSegment("mail a@hello.txt", false)), bubbleSegments("mail a@hello.txt", known))
         assertEquals(listOf(BubbleSegment("@hello.txt", true)), bubbleSegments("@hello.txt", known))
+        // An open file outside the project is known by its absolute path, and its chip is drawn as any other.
+        assertEquals(
+            listOf(BubbleSegment("see ", false), BubbleSegment("@/tmp/elsewhere/notes.md", true)),
+            bubbleSegments("see @/tmp/elsewhere/notes.md", known + "/tmp/elsewhere/notes.md"),
+        )
         assertEquals(listOf(BubbleSegment("", false)), bubbleSegments("", known))
     }
 

@@ -47,7 +47,9 @@ class ToolLabelsTest {
     fun `names are relative to cwd and middle-truncated`() {
         assertEquals("b/c.kt", ToolLabels.relativePath("/a/b/c.kt", "/a"))
         assertEquals("a", ToolLabels.relativePath("/a", "/a"))
-        assertEquals("y.kt", ToolLabels.relativePath("/x/y.kt", "/a"))
+        // A file outside the cwd (one open in the editor from elsewhere, an added folder's) by its whole path, not its bare name.
+        assertEquals("/x/y.kt", ToolLabels.relativePath("/x/y.kt", "/a"))
+        assertEquals("/ab/c.kt", ToolLabels.relativePath("/ab/c.kt", "/a"))
         assertEquals("b/c.kt", ToolLabels.relativePath("/a/b/c.kt", "/a/"))
         val long = "a".repeat(24) + "b" + "c".repeat(24)
         val truncated = ToolLabels.middleTruncate(long, 48)
@@ -269,7 +271,7 @@ class ToolLabelsTest {
     fun `a path equal to cwd keeps its basename`() {
         assertEquals("Read <path>", ToolLabels.label(ToolKind.READ, "Read", input("file_path" to "<path>"), ToolState.DONE, null, "<path>").text)
         assertEquals("c.kt", ToolLabels.relativePath("/a/b/c.kt", null))
-        assertEquals("c.kt", ToolLabels.relativePath("C:\\a\\b\\c.kt", "D:\\x"))
+        assertEquals("C:\\a\\b\\c.kt", ToolLabels.relativePath("C:\\a\\b\\c.kt", "D:\\x"))
         assertEquals("b\\c.kt", ToolLabels.relativePath("C:\\a\\b\\c.kt", "C:\\a"))
     }
 
@@ -388,7 +390,7 @@ class ToolLabelsTest {
     fun `reading a range needs offset or limit and a line count`() {
         val result = buildJsonObject { putJsonObject("file") { put("startLine", 3); put("numLines", 0) } }
         val input = buildJsonObject { put("file_path", "/a/b.kt"); put("offset", 3) }
-        assertEquals("Read b.kt", ToolLabels.label(ToolKind.READ, "Read", input, ToolState.DONE, result, "/x").text)
+        assertEquals("Read b.kt", ToolLabels.label(ToolKind.READ, "Read", input, ToolState.DONE, result, "/a").text)
     }
 
     // spec: mcp__tandem__write_file is CREATE

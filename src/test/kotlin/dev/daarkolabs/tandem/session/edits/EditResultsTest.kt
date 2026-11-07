@@ -204,9 +204,9 @@ class EditResultsTest {
     }
 
     @Test
-    fun `outside the project and its added folders`() {
+    fun `outside the project, its added folders and the open files`() {
         assertEquals(
-            error("/etc/hosts is outside the project and its added folders; Tandem edits files there only."),
+            error("/etc/hosts is outside the project, its added folders and the files open in the editor; Tandem edits files there only."),
             EditResults.outside("/etc/hosts"),
         )
     }
