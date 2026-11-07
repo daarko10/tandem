@@ -13,6 +13,9 @@
     automatically), where you can change the proposal before accepting it, and lands through the editor, so undo and
     unsaved buffers work. Claude is told what the file now says. <code>@</code> in the prompt picks a file, and the
     editor's selection can go with the prompt.<br/><br/>
+    在 JetBrains IDE 中使用 Claude Code 的原生聊天；使用你已安装的 <code>claude</code> CLI，沿用它已有的登录或接口配置。每处编辑在写入前都会在 IDE 的 diff 中打开。<br/>
+    JetBrains IDE で Claude Code を使うためのネイティブなチャット。インストール済みの <code>claude</code> CLI を、設定済みのサインインやエンドポイントのまま使います。すべての編集は、書き込まれる前に IDE の差分ビューで開きます。<br/>
+    JetBrains IDE 안에서 Claude Code를 쓰는 네이티브 채팅. 설치된 <code>claude</code> CLI를 이미 설정된 로그인이나 엔드포인트 그대로 사용합니다. 모든 편집은 기록되기 전에 IDE의 diff에서 열립니다.<br/><br/>
     Tandem is an independent project and is not affiliated with or endorsed by Anthropic.
     Claude and Claude Code are trademarks of Anthropic, PBC.
     ]]></description>
