@@ -36,7 +36,7 @@ jobs:
           fi
           # --no-renames: a file moved from src/ to docs/ lists both paths, so the move runs Gradle. A failed diff fails the job.
           files="$(git diff --no-renames --name-only HEAD^1 HEAD)"
-          skip='^(docs/|scripts/|\.claude/|\.github/actions/|\.github/workflows/(cli-contract|drift-fix|macos-ide-test)\.yml$|\.github/CODEOWNERS$|README\.md$|CLAUDE\.md$|LICENSE$)'
+          skip='^(docs/|scripts/|\.claude/|\.github/actions/|\.github/workflows/(cli-contract|drift-fix|macos-ide-test|demo)\.yml$|\.github/CODEOWNERS$|README\.md$|CLAUDE\.md$|LICENSE$)'
           # grep -v exits 0 when some path is not skippable, 1 when every path is, and 2 or more on an error (a bad pattern): an error is red, never a skip.
           rc=0; grep -qvE "$skip" <<<"$files" || rc=$?
           if [ "$rc" -gt 1 ]; then

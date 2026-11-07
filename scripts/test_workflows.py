@@ -957,13 +957,15 @@ class BuildWorkflowTest(unittest.TestCase):
 
     def test_every_ide_test_class_is_sharded(self):
         root = os.path.join(ROOT, "src/integrationTest/kotlin")
+        with open(os.path.join(ROOT, "build.gradle.kts"), encoding="utf-8") as f:
+            excluded = set(re.findall(r'excludeTestsMatching\("\*(\w+)"\)', f.read()))   # integrationTest leaves these out (the demo's scenes)
         classes = []
         for dirpath, _, names in os.walk(root):
             for name in names:
                 path = os.path.join(dirpath, name)
                 with open(path, encoding="utf-8") as f:
                     text = f.read()
-                if re.search(r"(?m)^\s*@Test\b", text):
+                if re.search(r"(?m)^\s*@Test\b", text) and name.removesuffix(".kt") not in excluded:
                     classes.append((os.path.relpath(path, root), "@ExtendWith(IdeTestShard::class)" in text))
         self.assertTrue(classes, "no IDE test class found")
         self.assertEqual([], [path for path, sharded in classes if not sharded])      # a class without the extension would run whole in each of the three shards
@@ -982,7 +984,7 @@ class BuildFilterOutcomeTest(unittest.TestCase):
         for head in ({"docs/a.md": "b\n"}, {"docs/superpowers/specs/new.md": "b\n"}, {"scripts/test_x.py": "b\n"},
                      {".claude/skills/s/SKILL.md": "b\n"}, {".github/actions/anthropic-token/action.yml": "b\n"},
                      {".github/workflows/drift-fix.yml": "b\n"}, {".github/workflows/cli-contract.yml": "b\n"},
-                     {".github/workflows/macos-ide-test.yml": "b\n"}, {".github/CODEOWNERS": "* @x\n"},
+                     {".github/workflows/macos-ide-test.yml": "b\n"}, {".github/workflows/demo.yml": "b\n"}, {".github/CODEOWNERS": "* @x\n"},
                      {"README.md": "y\n", "CLAUDE.md": "y\n", "LICENSE": "y\n", "docs/a.md": None}):
             self.assertGradle("false", head)
 
