@@ -5,7 +5,10 @@
 
     <description><![CDATA[
     A fast, native chat inside JetBrains IDEs that works with Claude Code.<br/>
-    Uses your own installed <code>claude</code> CLI and its sign-in; Tandem never reads your credentials.
+    Uses your own installed <code>claude</code> CLI and the sign-in it already has, subscription or API key; nothing to
+    configure, and Tandem never reads your credentials. No webview, no Node, no bundled SDK: new models and commands work
+    the day the CLI ships them. Sessions in a sidebar (ones started in a terminal show up too), model, effort and
+    permission-mode pickers, permission cards, an MCP panel, a slash-command palette and <code>! command</code>.
     Claude's edits go through the IDE: each one opens in the native diff viewer (unless you choose to accept edits
     automatically), where you can change the proposal before accepting it, and lands through the editor, so undo and
     unsaved buffers work. Claude is told what the file now says. <code>@</code> in the prompt picks a file, and the
