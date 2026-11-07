@@ -14,6 +14,7 @@ import com.intellij.driver.sdk.findFile
 import com.intellij.driver.sdk.getOpenProjects
 import com.intellij.driver.sdk.invokeAction
 import com.intellij.driver.sdk.isPluginLoaded
+import com.intellij.driver.sdk.openEditor
 import com.intellij.driver.sdk.openFile
 import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.singleProject
@@ -29,6 +30,7 @@ import com.intellij.ide.starter.models.TestCase
 import com.intellij.ide.starter.plugins.PluginConfigurator
 import com.intellij.ide.starter.project.LocalProjectInfo
 import com.intellij.ide.starter.runner.Starter
+import dev.daarkolabs.tandem.chat.ToolLabels
 import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
 import kotlinx.serialization.json.Json
@@ -1711,6 +1713,57 @@ class ToolWindowIdeTest {
         assertFalse(reply.isErrorReply())
     }
 
+    // spec: a file open in an editor counts as part of the workspace, wherever it lives
+    @Test
+    fun `a file opened from outside the project is mentioned and edited`() {
+        val project = newProject()
+        // File | Open on a single file: an editor tab, under neither the project's folder nor any content root.
+        val elsewhere = Files.createTempDirectory("tandem-elsewhere").toRealPath()
+        val outside = elsewhere.resolve("hello.txt").also { it.writeText(HELLO) }
+        val log = Files.createTempFile("tandem-sent", ".ndjson")
+        val sent = runChat(
+            "edit-outside",
+            fixtures = listOf("ide-edit"),
+            project = project,
+            sentLog = log,
+            // The replayed call names `hello.txt` in that folder, not in the project (fake-claude.py rule (o)).
+            extraEnv = mapOf("TANDEM_FAKE_EDIT_DIR" to elsewhere.toString()),
+        ) {
+            val file = utility(LocalFileSystemRef::class).getInstance().refreshAndFindFileByPath(outside.toString())
+                ?: error("the VFS has no $outside")
+            openEditor(file)
+            newSession()
+            focusPromptBox()
+            promptBox().keyboard { typeText("Change alpha to beta in @hel", 20) }
+            waitFor("the file palette", 1.minutes) { described("Files").present() }
+            waitFor("the outside file listed by its absolute path", 30.seconds) { described(outside.toString()).present() }
+            ui.keyboard { enter() }
+            waitFor("the mention inserted", 30.seconds) {
+                ui.x("$PROMPT_BOX[@editabletext='Change alpha to beta in @$outside ']").present()
+            }
+            ui.keyboard { enter() }
+            waitFor("prompt box cleared after Enter", 30.seconds) { ui.x("$PROMPT_BOX[@editabletext='']").present() }
+            editWait("the diff", 1.minutes) { diffButton(ACCEPT_BUTTON).present() }
+            // The tab shows the title cut to its width: its start is the absolute path's, not `Tandem: hello.txt`.
+            val titleStart = "Tandem: ${outside.toString().take(12)}"
+            editWait("the diff names the file by its absolute path", 30.seconds) {
+                ui.xx("//div[contains(@visible_text, '$titleStart') or contains(@accessiblename, '$titleStart')]").list().isNotEmpty()
+            }
+            diffButton(ACCEPT_BUTTON).click()
+            editWait("the edit's reply in the fake's log", 30.seconds) { toolReplies(readLog(log)).isNotEmpty() }
+            editWait("the diff closed", 30.seconds) { !diffButton(ACCEPT_BUTTON).present() }
+            editWait("the row names the file by its absolute path", 1.minutes) {
+                described("Edited ${ToolLabels.middleTruncate(outside.toString(), 48)}").present()
+            }
+        }
+        val prompt = sent.single { it.type == "user" }["message"]!!.jsonObject["content"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("Change alpha to beta in @$outside"), prompt.map { it["text"]!!.jsonPrimitive.content })
+        val reply = toolReplies(sent).single()
+        assertFalse(reply.isErrorReply(), reply.toString())
+        assertEquals(BETA, outside.readText(), "the outside file changed on disk")
+        assertFalse(project.resolve("hello.txt").exists(), "nothing was written in the project")
+    }
+
     @Test
     fun `a hand change in the diff reaches Claude`() {
         val project = newProject()
@@ -2299,6 +2352,13 @@ interface ContentRef {
 }
 
 /** The platform's `FileDocumentManager`, for a file's `Document` as its editor shows it. */
+@Remote("com.intellij.openapi.vfs.LocalFileSystem")
+interface LocalFileSystemRef {
+    fun getInstance(): LocalFileSystemRef
+
+    fun refreshAndFindFileByPath(path: String): VirtualFile?
+}
+
 @Remote("com.intellij.openapi.fileEditor.FileDocumentManager")
 interface FileDocumentManagerRef {
     fun getDocument(file: VirtualFile): Document?

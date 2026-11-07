@@ -4,6 +4,10 @@ All notable changes to Tandem. The newest version's section becomes the plugin's
 
 ## [Unreleased]
 
+### Fixed
+- Files opened from outside the project (File | Open) are listed by `@` and can be edited; a file counts as part of the
+  workspace while it is open in an editor.
+
 ## [0.4.1] - 2026-10-30
 
 ### Fixed

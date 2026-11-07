@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -43,7 +44,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * out), and kept until a file is created, deleted, moved or renamed in a listed folder: a change under an excluded or ignored one
  * (`build/` during a build, `.git/` during a commit) is not a change of the list. The re-reads run one at a time, with at most one
  * more waiting ([rereads] is conflated), however many event batches come while one runs. [matching] ranks them with the IDE's own
- * matcher (`NameUtil.buildMatcher`); [known] holds the last list read, for the bubble's chips.
+ * matcher (`NameUtil.buildMatcher`); [known] holds the last list read, for the bubble's chips. A file open in an editor outside the
+ * base directory counts as part of the workspace while it is open (spec 3.5): it is listed first, by its absolute path, and only
+ * the open file itself, never its folder.
  */
 @Service(Service.Level.PROJECT)
 class ProjectFiles(private val project: Project, private val scope: CoroutineScope) {
@@ -61,6 +64,14 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
     private var roots: List<String> = emptyList()
 
     private val mutableKnown = MutableStateFlow<Set<String>>(emptySet())
+
+    /** The last list walked, as a set; [known] is it plus [outsideOpen]. */
+    @Volatile
+    private var walkedKnown: Set<String> = emptySet()
+
+    /** The open editors' files outside the base directory, as [candidates] last saw them. */
+    @Volatile
+    private var outsideOpen: List<String> = emptyList()
 
     /** The paths of the last list read; empty until the first, which starts with the service, off the EDT. */
     val known: StateFlow<Set<String>> = mutableKnown.asStateFlow()
@@ -123,8 +134,28 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
         return folders.any { folder -> folder != null && walkedInto(folder, roots, index, types) }
     }
 
-    /** Every file of the project, relative to its base directory; read once, then from the cache until the files change. */
+    /**
+     * The open editors' files outside the base directory by absolute path ([openOutside]), then every file of the project relative
+     * to its base directory, read once and then from the cache until the files change.
+     */
     suspend fun candidates(): List<String> {
+        val walked = walked()
+        val outside = openOutside()
+        if (outside != outsideOpen) {
+            outsideOpen = outside
+            publishKnown()
+        }
+        return if (outside.isEmpty()) walked else outside + walked
+    }
+
+    /** Sets [known] to the last list walked and the open files outside the base. */
+    private fun publishKnown() {
+        val outside = outsideOpen
+        mutableKnown.value = if (outside.isEmpty()) walkedKnown else walkedKnown + outside
+    }
+
+    /** Every file of the project, relative to its base directory; read once, then from the cache until the files change. */
+    private suspend fun walked(): List<String> {
         var read: List<String> = emptyList()
         repeat(MAX_READS) {
             val started = synchronized(lock) {
@@ -140,13 +171,15 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
             synchronized(lock) {
                 if (generation == started) {
                     cache = read
-                    mutableKnown.value = read.toHashSet()
+                    walkedKnown = read.toHashSet()
+                    publishKnown()
                     return read
                 }
             }
         }
         // The files kept changing while they were read: give the last list, uncached, and the next change reads again.
-        mutableKnown.value = read.toHashSet()
+        walkedKnown = read.toHashSet()
+        publishKnown()
         return read
     }
 
@@ -170,8 +203,13 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
      * changes; null when it has none, is not loaded, or no such file is known (spec 3.5). In a `readAction`, off the EDT.
      */
     suspend fun unsavedText(path: String): String? = readAction {
-        val base = project.guessProjectDir()
-        val file = base?.findFileByRelativePath(path) ?: LocalFileSystem.getInstance().findFileByPath(path)
+        // An absolute path (an open editor's file outside the base) is looked up as such, never under the base.
+        val absolute = runCatching { Path.of(path).isAbsolute }.getOrDefault(false)
+        val file = if (absolute) {
+            LocalFileSystem.getInstance().findFileByPath(path)
+        } else {
+            project.guessProjectDir()?.findFileByRelativePath(path)
+        }
         val documents = FileDocumentManager.getInstance()
         file?.takeIf { !it.isDirectory }?.let(documents::getCachedDocument)?.takeIf(documents::isDocumentUnsaved)?.text
     }
@@ -183,12 +221,21 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
         editors.selectedFiles.toList() + editors.openFiles.toList()
     }
 
-    /** The files open in editors, the selected one first, as paths relative to the base directory, each once. */
+    /**
+     * The files open in editors, the selected one first, each once: relative to the base directory, or by absolute path when outside
+     * it (spec 3.5: a file open in an editor counts as part of the workspace, wherever it lives).
+     */
     val openFirst: List<String>
         get() {
-            val base = project.guessProjectDir() ?: return emptyList()
-            return openFiles().mapNotNull { relativePath(it, base) }.distinct()
+            val base = project.guessProjectDir()
+            return openFiles().mapNotNull { file -> base?.let { relativePath(file, it) } ?: absolutePath(file) }.distinct()
         }
+
+    /** The files open in editors outside the base directory, by absolute path, each once, the selected one first. */
+    private fun openOutside(): List<String> {
+        val base = project.guessProjectDir()
+        return openFiles().filter { base == null || relativePath(it, base) == null }.mapNotNull(::absolutePath).distinct()
+    }
 
     private fun collect(): List<String> {
         val base = project.guessProjectDir() ?: return emptyList()
@@ -246,5 +293,8 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
 
         private fun relativePath(file: VirtualFile, base: VirtualFile): String? =
             VfsUtilCore.getRelativePath(file, base, '/')?.takeIf { it.isNotEmpty() }
+
+        /** A local, non-directory [file]'s absolute path; null for any other (a diff, a scratch in a non-local file system). */
+        private fun absolutePath(file: VirtualFile): String? = file.takeIf { it.isInLocalFileSystem && !it.isDirectory }?.path
     }
 }

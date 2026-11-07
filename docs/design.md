@@ -165,8 +165,9 @@ Key choices:
    inside the diff never means Save All), Accept all, and Reject with an optional reason. Accept writes the right side with
    one `WriteCommandAction` (one undo step, one Local History entry), saves the file to disk before the CLI is answered, and
    the answer carries the file as it now is, hand changes included. In `acceptEdits` and `bypassPermissions`, or after Accept
-   all (for the rest of the turn), edits apply without a diff, and the checks (the project's folders, binary, size, plan mode)
-   never widen. Pending edits queue one diff at a time across the project's sessions; the chat rows say where each is, and
+   all (for the rest of the turn), edits apply without a diff, and the checks (the project's folders and the files open in an
+   editor, binary, size, plan mode) never widen. A file open in an editor tab counts as part of the workspace, wherever it
+   lives: one opened from outside the project (File | Open) is listed by `@` by its absolute path and can be edited. Pending edits queue one diff at a time across the project's sessions; the chat rows say where each is, and
    Stop withdraws a waiting call. A CLI that did not take the server shows the notice `Edits are off in this session`. `@` in
    the composer opens a file palette that inserts the CLI's own `@path` mention (a file with unsaved changes goes as a text
    block of the editor's buffer instead), and the editor's selection travels with the prompt as a chip the user can remove.

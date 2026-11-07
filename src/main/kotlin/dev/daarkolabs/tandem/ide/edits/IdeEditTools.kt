@@ -7,6 +7,7 @@ import com.intellij.openapi.diagnostic.debug
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileTypes.FileTypeRegistry
 import com.intellij.openapi.fileTypes.UnknownFileType
 import com.intellij.openapi.project.Project
@@ -31,6 +32,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import org.jetbrains.annotations.VisibleForTesting
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
@@ -40,9 +42,10 @@ import java.nio.file.Path
  * Tandem's `edit_file` and `write_file` in the IDE (spec 4.3): checks the call, builds the [EditProposal], has it reviewed ([review],
  * the diff) unless an auto-accept mode applies, and applies the accepted text to the file's `Document` in one write command, saved to
  * disk before the reply is returned (spec 3.2). Paths must resolve, after `toRealPath()`, under the project's base path or one of the
- * session's added folders ([roots]). Every failure the user did not choose is told in the session's chat through [notify]
- * (`Could not apply the edit to <file>: <reason>`, hard rule 5). Only the write command and the save run on the EDT; the file lookup
- * and the matching run on `Dispatchers.IO`, the result text on `Dispatchers.Default`.
+ * session's added folders ([roots]), or to a file open in an editor ([openFiles]), wherever it lives. Every failure the user did not
+ * choose is told in the session's chat through [notify] (`Could not apply the edit to <file>: <reason>`, hard rule 5). Only the write
+ * command and the save run on the EDT; the file lookup and the matching run on `Dispatchers.IO`, the result text on
+ * `Dispatchers.Default`.
  */
 class IdeEditTools(
     private val project: Project,
@@ -246,7 +249,7 @@ class IdeEditTools(
             val size = args.content.toByteArray(Charsets.UTF_8).size.toLong()
             if (size > MAX_CONTENT_BYTES) return@withContext Checked.Refusal(EditResults.tooLarge(given, StringUtil.formatFileSize(size)))
         }
-        val path = resolve(given, call.session) ?: return@withContext Checked.Refusal(EditResults.outside(given))
+        val (path, outside) = resolve(given, call.session) ?: return@withContext Checked.Refusal(EditResults.outside(given))
         if (Files.isDirectory(path)) return@withContext Checked.Refusal(EditResults.directory(given))
         if (!Files.exists(path)) {
             return@withContext when (args) {
@@ -262,7 +265,7 @@ class IdeEditTools(
             return@withContext Checked.Refusal(EditResults.tooLarge(given, StringUtil.formatFileSize(file.length)))
         }
         if (isBinary(file, path)) return@withContext Checked.Refusal(EditResults.binary(given))
-        readAction { existingFile(call, path, file, args) }
+        readAction { existingFile(call, path, file, args, outside) }
     }
 
     private fun newFile(call: ToolCall, path: Path, args: Args.Write): Checked {
@@ -274,13 +277,16 @@ class IdeEditTools(
     }
 
     /** In a read action: the document, the match and its range markers, or the refusal. */
-    private fun existingFile(call: ToolCall, path: Path, file: VirtualFile, args: Args): Checked {
+    private fun existingFile(call: ToolCall, path: Path, file: VirtualFile, args: Args, outside: Boolean): Checked {
         val document: Document = FileDocumentManager.getInstance().getDocument(file)
             ?: return Checked.Refusal(EditResults.binary(args.filePath))
         val text = document.immutableCharSequence.toString()
         return when (args) {
             is Args.Write -> Checked.Ready(
-                EditProposal(call, file, path, document, text, EditMatcher.normalizeNewlines(args.content), emptyList(), false, TandemTools.WRITE_FILE),
+                EditProposal(
+                    call, file, path, document, text, EditMatcher.normalizeNewlines(args.content), emptyList(), false, TandemTools.WRITE_FILE,
+                    outside = outside,
+                ),
             )
             is Args.Edit -> when (val match = EditMatcher.match(text, args.oldString, args.replaceAll)) {
                 Match.NotFound -> Checked.Refusal(EditResults.notFound(args.filePath, text))
@@ -288,14 +294,20 @@ class IdeEditTools(
                 is Match.Found -> {
                     val markers = match.ranges.map { document.createRangeMarker(it.first, it.last + 1) }
                     val proposed = EditMatcher.apply(text, match, args.newString)
-                    Checked.Ready(EditProposal(call, file, path, document, text, proposed, match.ranges, false, TandemTools.EDIT_FILE, markers))
+                    Checked.Ready(
+                        EditProposal(call, file, path, document, text, proposed, match.ranges, false, TandemTools.EDIT_FILE, markers, outside),
+                    )
                 }
             }
         }
     }
 
-    /** [given] as a real path under one of the roots (the project's base path, the session's added folders), or null. */
-    private fun resolve(given: String, session: SessionId): Path? {
+    /**
+     * [given] as a real path under one of the roots (the project's base path, the session's added folders), or, outside them, the
+     * real path of a file open in an editor (spec 4.3: a file open in an editor tab counts as part of the workspace, wherever it
+     * lives), with whether it is that outside one; null for any other path.
+     */
+    private suspend fun resolve(given: String, session: SessionId): Pair<Path, Boolean>? {
         val raw = try {
             Path.of(given)
         } catch (_: InvalidPathException) {
@@ -305,8 +317,23 @@ class IdeEditTools(
         val real = realPath(raw.normalize()) ?: return null
         val rootPaths = (listOfNotNull(project.basePath?.let { Path.of(it) }) + roots(session))
             .mapNotNull { runCatching { it.toRealPath() }.getOrNull() }
-        return real.takeIf { candidate -> rootPaths.any { candidate.startsWith(it) } }
+        if (rootPaths.any { real.startsWith(it) }) return real to false
+        val open = readAction { openFiles().filter { it.isInLocalFileSystem && !it.isDirectory }.map { it.path } }
+        return if (open.any { realPathOf(it) == real }) real to true else null
     }
+
+    /** The real path of the open editor's file at the VFS path [vfsPath], or null when it is gone or cannot be read. */
+    private fun realPathOf(vfsPath: String): Path? = try {
+        Path.of(vfsPath).toRealPath()
+    } catch (_: IOException) {
+        null
+    } catch (_: InvalidPathException) {
+        null
+    }
+
+    /** The files open in editors (the rule of [resolve]); read in a read action. Tests replace it. */
+    @VisibleForTesting
+    internal var openFiles: () -> List<VirtualFile> = { FileEditorManager.getInstance(project).openFiles.toList() }
 
     /** [path] with its links resolved: its deepest existing ancestor's real path and the names below it. */
     private fun realPath(path: Path): Path? {

@@ -35,6 +35,8 @@ Reads --session-id <id>, --resume <id>, --fork-session and --add-dir <dir> from 
                           test can hold a stop (the host waits for the exit) while something else happens
   TANDEM_FAKE_EDIT_CANCEL_MS  rule (p): a replayed `tools/call` left unanswered this long is withdrawn as on an `interrupt`, without
                           the interrupt's receipt (the CLI's own MCP_TOOL_TIMEOUT; unset or 0: never)
+  TANDEM_FAKE_EDIT_DIR    rule (o): in a fixture with `mcp_message` frames, `<path>/<name>` names <name> in this directory, not
+                          in the working directory (a file outside the project); `init.cwd` stays the working directory
   TANDEM_FAKE_RESULT_GATE_FILE  before emitting each replayed `result` line (a turn's end), wait until this file exists, checking
                           every 100 ms for up to 60 s, then emit it anyway: a test holds the turn running until it has seen
                           what shows only while a turn runs, in place of a slow stream
@@ -123,7 +125,9 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
       arguments, the `can_use_tool` input, `init.cwd` and the result lines. Other fixtures keep `<path>` as recorded (rows such
       as `Read <path>` in `tools-read` are drawn from it). The directory is escaped once, as inside a JSON string: inside a
       `stream_event`'s `partial_json` (JSON within a JSON string) a `\\` or `"` in it would come out malformed. Neither occurs in
-      a Linux or macOS temporary directory.
+      a Linux or macOS temporary directory. With TANDEM_FAKE_EDIT_DIR set, `<path>/` (a file under the recording's directory:
+      the call's `file_path`, the `can_use_tool` input, the result lines) becomes that directory and a `/` instead, so the call
+      names a file outside the project; a bare `<path>` (`init.cwd`) stays the working directory.
   (p) A host `interrupt` read while a replayed `tools/call` waits for its reply withdraws the call when the fixture recorded the
       withdrawal (a `notifications/cancelled` for that call's JSON-RPC id before the next `tools/call`, `ide-edit-stop:42`): the
       fake, without waiting for an `mcp_response`, sends the recorded lines from the call to the turn's `result` in order (the
@@ -173,6 +177,8 @@ exit_delay_ms = int(os.environ.get("TANDEM_FAKE_EXIT_DELAY_MS") or 0)
 edit_cancel_ms = int(os.environ.get("TANDEM_FAKE_EDIT_CANCEL_MS") or 0)  # rule (p)
 PATH_PLACEHOLDER = "<path>"  # rule (o)
 escaped_cwd = json.dumps(os.getcwd())[1:-1]  # rule (o): the working directory as it appears inside a JSON string
+edit_dir = os.environ.get("TANDEM_FAKE_EDIT_DIR") or None  # rule (o): where `<path>/<name>` points instead of the working directory
+escaped_edit_dir = json.dumps(edit_dir)[1:-1] if edit_dir else None
 host_replies = {}  # rule (n): tool use id -> the host's mcp_response to its tools/call
 TIMED_OUT = object()  # read_host's answer when its timeout passed with no frame
 stdin_buffer = bytearray()  # what was read from stdin and not yet split into lines: read with select, so a wait can time out (rule (p))
@@ -311,6 +317,8 @@ def emit(message):
 
 def write_line(line):
     if edit_fixture:
+        if escaped_edit_dir:
+            line = line.replace(PATH_PLACEHOLDER + "/", escaped_edit_dir + "/")  # rule (o), TANDEM_FAKE_EDIT_DIR
         line = line.replace(PATH_PLACEHOLDER, escaped_cwd)  # rule (o)
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
@@ -649,6 +657,8 @@ def log_disk(message, tool_use_id):
     text = None
     if isinstance(file_path, str):
         try:
+            if edit_dir:
+                file_path = file_path.replace(PATH_PLACEHOLDER + "/", edit_dir + "/")
             with open(file_path.replace(PATH_PLACEHOLDER, os.getcwd()), encoding="utf-8") as file:
                 text = file.read()
         except (OSError, UnicodeDecodeError):

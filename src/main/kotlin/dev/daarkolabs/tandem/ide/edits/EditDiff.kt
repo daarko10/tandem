@@ -109,10 +109,10 @@ class EditDiff(private val project: Project) : DiffPresenter {
     }
 
     private fun open(proposal: EditProposal, result: CompletableDeferred<Decision>) {
-        val name = proposal.fileName
+        val name = proposal.shownName
         val factory = DiffContentFactory.getInstance()
         val document = proposal.document
-        val fileType = proposal.file?.fileType ?: FileTypeManager.getInstance().getFileTypeByFileName(name)
+        val fileType = proposal.file?.fileType ?: FileTypeManager.getInstance().getFileTypeByFileName(proposal.fileName)
         // A new file's left side is an empty document, not EmptyContent: with an EmptyContent side the platform picks its one-side
         // viewer, which applies FORCE_READ_ONLY_CONTENTS[0] (the left's `true`) to the side it shows, so the proposal was read-only.
         val left = when {

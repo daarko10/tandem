@@ -69,15 +69,54 @@ class ProjectFilesTest {
         val files = ProjectFiles.getInstance(project.get())
         // No editor is open in the headless project: none comes first.
         assertEquals(emptyList(), files.openFirst)
-        // The selected editor's file, then the other open ones, each once, relative to the base; one outside it is left out.
+        // The selected editor's file, then the other open ones, each once, relative to the base; one outside it by its absolute path.
         val outside = vfs.refreshAndFindFileByNioFile(Files.createTempFile("outside", ".txt"))!!
         files.openFiles = { listOf(c, a, c, outside) }
         try {
-            assertEquals(listOf("b/c.txt", "a.txt"), files.openFirst)
-            assertEquals(listOf("b/c.txt", "a.txt"), mentionPalette(MentionQuery(0, "t"), files.candidates(), files.openFirst).rows.take(2))
+            assertEquals(listOf("b/c.txt", "a.txt", outside.path), files.openFirst)
+            assertEquals(
+                listOf("b/c.txt", "a.txt", outside.path),
+                mentionPalette(MentionQuery(0, "t"), files.candidates(), files.openFirst).rows.take(3),
+            )
         } finally {
             files.openFiles = { emptyList() }
         }
+    }
+
+    // spec: a file open in an editor counts as part of the workspace, wherever it lives
+    @Test
+    fun `an open file outside the base is a candidate by its absolute path, a closed one is not`() = timeoutRunBlocking(30.seconds) {
+        write("in.txt" to "i\n")
+        val folder = Files.createTempDirectory("tandem-outside").toRealPath()
+        val open = folder.resolve("notes-open.md").also { it.writeText("o\n") }
+        val closed = folder.resolve("notes-closed.md").also { it.writeText("c\n") }
+        val vfs = LocalFileSystem.getInstance()
+        val openFile = vfs.refreshAndFindFileByNioFile(open)!!
+        vfs.refreshAndFindFileByNioFile(closed)!!
+        val files = ProjectFiles.getInstance(project.get())
+        files.openFiles = { listOf(openFile) }
+        try {
+            val candidates = files.candidates()
+            assertEquals(open.toString(), candidates.first(), "an open outside file comes first: $candidates")
+            assertTrue(closed.toString() !in candidates && candidates.none { it.endsWith("notes-closed.md") }, candidates.toString())
+            assertTrue("in.txt" in candidates, candidates.toString())
+            assertTrue(open.toString() in files.known.value, "a bubble draws its chip")
+            assertEquals(listOf(open.toString()), files.matching("notes"))
+            assertEquals(listOf(open.toString()), files.openFirst)
+            // Its unsaved buffer goes with the prompt as for a project file.
+            val document = withContext(Dispatchers.EDT) { FileDocumentManager.getInstance().getDocument(openFile)!! }
+            edtWriteAction { document.setText("changed\n") }
+            try {
+                assertEquals("changed\n", files.unsavedText(open.toString()))
+            } finally {
+                withContext(Dispatchers.EDT) { FileDocumentManager.getInstance().saveAllDocuments() }
+            }
+        } finally {
+            files.openFiles = { emptyList() }
+        }
+        // Closed again: it is no longer listed, and nothing outside the base was walked.
+        val after = files.candidates()
+        assertTrue(after.none { it.startsWith(folder.toString()) }, after.toString())
     }
 
     // spec: a change under an ignored folder keeps the list

@@ -1788,6 +1788,17 @@ class ChatRowsBuilderTest {
         assertEquals("with your changes", reopened.edit(editId).tag)
     }
 
+    // spec: a file open in an editor counts as part of the workspace, wherever it lives
+    @Test
+    fun `an edit of a file outside the cwd is named by its absolute path`() {
+        val outside = "/elsewhere/notes.md"
+        val lines = Fixtures.lines("ide-edit").take(41).map { it.replace("<path>/hello.txt", outside) }
+        val builder = ChatRowsBuilder(options)
+        val (state, _) = replay("ide-edit", lines = lines, builder = builder)
+        val rows = builder.build(reduce(state, SessionEvent.EditPhase(editId, EditReview("notes.md", EditPhase.DONE, EditOutcome.ACCEPTED))))
+        assertEquals("Edited $outside", rows.edit(editId).label.text)
+    }
+
     // spec: an auto-accepted edit carries its tag
     @Test
     fun `an auto-accepted edit carries its tag`() {

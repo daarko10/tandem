@@ -200,6 +200,51 @@ class IdeEditToolsTest {
         }
     }
 
+    // spec: a file open in an editor counts as part of the workspace, wherever it lives
+    @Test
+    fun `a file open in an editor outside the roots is edited, by its absolute path in the diff`() {
+        val outside = Files.createTempDirectory("tandem-outside").toRealPath().resolve("notes.md")
+        Files.writeString(outside, HELLO)
+        val proposals = CopyOnWriteArrayList<EditProposal>()
+        review = { proposals += it; Decision.Accepted(it.proposed, all = false) }
+        tools.openFiles = { listOf(vfs(outside)) }
+        try {
+            val reply = run(editCall(outside, "alpha", "beta"))
+            assertFalse(reply.isError, reply.text)
+            assertEquals("beta\nline two\n", Files.readString(outside))
+            assertEquals(outside.toString(), proposals.single().shownName, "the diff names it by its absolute path")
+            // Opened through a link, the real path is what counts.
+            val link = Files.createTempDirectory("tandem-link").toRealPath().resolve("via")
+            Files.createSymbolicLink(link, outside.parent)
+            try {
+                assertFalse(run(editCall(link.resolve("notes.md"), "beta", "gamma")).isError)
+                assertEquals("gamma\nline two\n", Files.readString(outside))
+            } finally {
+                Files.deleteIfExists(link)
+                Files.deleteIfExists(link.parent)
+            }
+            // A file beside it that is not open stays outside, and so does a new file there.
+            val beside = outside.resolveSibling("beside.md")
+            Files.writeString(beside, HELLO)
+            assertReply(EditResults.outside(beside.toString()), run(editCall(beside, "alpha", "beta")))
+            assertReply(EditResults.outside(outside.resolveSibling("new.md").toString()), run(writeCall(outside.resolveSibling("new.md"), "x")))
+            Files.deleteIfExists(beside)
+        } finally {
+            tools.openFiles = { emptyList() }
+            Files.deleteIfExists(outside)
+            Files.deleteIfExists(outside.parent)
+        }
+    }
+
+    @Test
+    fun `a file under the base path is named by its file name in the diff`() {
+        val path = write("hello.txt", HELLO)
+        val proposals = CopyOnWriteArrayList<EditProposal>()
+        review = { proposals += it; Decision.Accepted(it.proposed, all = false) }
+        assertFalse(run(editCall(path, "alpha", "beta")).isError)
+        assertEquals("hello.txt", proposals.single().shownName)
+    }
+
     @Test
     fun `a file over the IDE's limit is refused`() {
         // The IDE's own limit (idea.max.content.load.filesize), one byte over it.
