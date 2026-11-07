@@ -57,7 +57,7 @@ private val ideVersion: String get() = System.getProperty("tandem.ideVersion")
  * already unpacked there (the Gradle cache's `idea-<version>` of the same release, say), which saves the download's 1.3 GB and the
  * unpacked copy's 4 GB on a small disk.
  */
-private fun testCase(project: Path): TestCase<LocalProjectInfo> {
+internal fun testCase(project: Path): TestCase<LocalProjectInfo> {
     val home = System.getProperty("tandem.ideHome").orEmpty()
     // withVersion puts the public downloader back, so it is only for the downloaded IDE.
     if (home.isBlank()) return TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)
