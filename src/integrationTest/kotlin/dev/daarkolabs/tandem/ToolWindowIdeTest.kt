@@ -24,10 +24,7 @@ import com.intellij.driver.sdk.waitFor
 import com.intellij.driver.sdk.waitForIndicators
 import com.intellij.ide.starter.driver.engine.runIdeWithDriver
 import com.intellij.ide.starter.ide.IDETestContext
-import com.intellij.ide.starter.ide.IdeProductProvider
-import com.intellij.ide.starter.models.TestCase
 import com.intellij.ide.starter.plugins.PluginConfigurator
-import com.intellij.ide.starter.project.LocalProjectInfo
 import com.intellij.ide.starter.runner.Starter
 import dev.daarkolabs.tandem.session.CLI_MODEL_ALIASES
 import dev.daarkolabs.tandem.session.transcript.TranscriptFolder
@@ -2096,7 +2093,7 @@ class ToolWindowIdeTest {
         browserLog: Boolean = false,
         systemProperties: Map<String, String> = emptyMap(),
     ): IDETestContext =
-        Starter.newContext(name, TestCase(IdeProductProvider.IU, LocalProjectInfo(project)).withVersion(ideVersion)).apply {
+        Starter.newContext(name, ideTestCase(project, ideVersion)).apply {
             PluginConfigurator(this).installPluginFromPath(pluginZip)
             applyVMOptionsPatch {
                 addSystemProperty("tandem.claudePath", fakeClaude)
