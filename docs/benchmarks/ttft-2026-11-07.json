@@ -1,0 +1,1143 @@
+{
+ "date": "2026-11-07",
+ "results_file": "benchmarks/ttft-2026-11-07.json",
+ "results_link": "benchmarks/ttft-2026-11-07.json",
+ "machine": {
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "cores": 4,
+  "ram_gb": 16,
+  "os": "Ubuntu 24.04.5 LTS",
+  "kernel": "6.18.44-fc-v310",
+  "note": "a cloud container, not a desktop"
+ },
+ "ide": {
+  "name": "IntelliJ IDEA",
+  "version": "2026.2.3",
+  "build": "262.10968.63"
+ },
+ "screen": "1600x1000",
+ "fps": 30,
+ "cli": "2.1.319 (Claude Code)",
+ "model_requested": "sonnet (ANTHROPIC_MODEL=sonnet in the IDE's environment)",
+ "prompt": "Reply with exactly the single word PONG and nothing else.",
+ "prompt_warm": "Reply with exactly the single word PONG and nothing else. (2)",
+ "method": "scripts/bench/ttft/run.sh; detection by scripts/bench/ttft/detect.py",
+ "plugins": [
+  {
+   "key": "tandem",
+   "name": "Tandem",
+   "id": 35641,
+   "table_name": "Tandem",
+   "version": "0.4.1",
+   "runs": [
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 1,
+     "phase": "cold",
+     "enter_ms": 1794052138024,
+     "ttft_ms": 2176,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 10,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       222,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794052140200,
+     "evidence": "benchmarks/evidence/tandem-cold-1.png"
+    },
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 1,
+     "phase": "warm",
+     "enter_ms": 1794052154321,
+     "ttft_ms": 1346,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 8,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       361,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794052155667,
+     "evidence": "benchmarks/evidence/tandem-warm-1.png"
+    },
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 2,
+     "phase": "cold",
+     "enter_ms": 1794053702812,
+     "ttft_ms": 1755,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 9,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       222,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794053704567,
+     "evidence": "benchmarks/evidence/tandem-cold-2.png"
+    },
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 2,
+     "phase": "warm",
+     "enter_ms": 1794053719814,
+     "ttft_ms": 1453,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 8,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       361,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794053721267,
+     "evidence": "benchmarks/evidence/tandem-warm-2.png"
+    },
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 3,
+     "phase": "cold",
+     "enter_ms": 1794054178372,
+     "ttft_ms": 2328,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 9,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       222,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794054180700,
+     "evidence": "benchmarks/evidence/tandem-cold-3.png"
+    },
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 3,
+     "phase": "warm",
+     "enter_ms": 1794054195922,
+     "ttft_ms": 1811,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 9,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       361,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794054197733,
+     "evidence": "benchmarks/evidence/tandem-warm-3.png"
+    },
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 4,
+     "phase": "cold",
+     "enter_ms": 1794054628899,
+     "ttft_ms": 2134,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 10,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       222,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794054631033,
+     "evidence": "benchmarks/evidence/tandem-cold-4.png"
+    },
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 4,
+     "phase": "warm",
+     "enter_ms": 1794054645890,
+     "ttft_ms": 2010,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 8,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       361,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794054647900,
+     "evidence": "benchmarks/evidence/tandem-warm-4.png"
+    },
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 5,
+     "phase": "cold",
+     "enter_ms": 1794055067378,
+     "ttft_ms": 2455,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 10,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       222,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794055069833,
+     "evidence": "benchmarks/evidence/tandem-cold-5.png"
+    },
+    {
+     "plugin": "tandem",
+     "name": "Tandem",
+     "version": "0.4.1",
+     "run": 5,
+     "phase": "warm",
+     "enter_ms": 1794055084894,
+     "ttft_ms": 1673,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 9,
+      "line": "PONG",
+      "line_box": [
+       1275,
+       361,
+       36,
+       10
+      ]
+     },
+     "frame_ms": 1794055086567,
+     "evidence": "benchmarks/evidence/tandem-warm-5.png"
+    }
+   ],
+   "status": "measured"
+  },
+  {
+   "key": "anthropic",
+   "name": "Claude Code [Beta] (Anthropic)",
+   "id": 27310,
+   "table_name": "Claude Code [Beta] (Anthropic)",
+   "version": "0.1.14-beta",
+   "runs": [
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 1,
+     "phase": "cold",
+     "enter_ms": 1794052279356,
+     "ttft_ms": 1777,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 9,
+      "line": "@ PONG",
+      "line_box": [
+       45,
+       815,
+       47,
+       10
+      ]
+     },
+     "frame_ms": 1794052281133,
+     "evidence": "benchmarks/evidence/anthropic-cold-1.png"
+    },
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 1,
+     "phase": "warm",
+     "enter_ms": 1794052292532,
+     "ttft_ms": 1635,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 9,
+      "line": "@ PONG",
+      "line_box": [
+       44,
+       797,
+       48,
+       10
+      ]
+     },
+     "frame_ms": 1794052294167,
+     "evidence": "benchmarks/evidence/anthropic-warm-1.png"
+    },
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 2,
+     "phase": "cold",
+     "enter_ms": 1794053889681,
+     "ttft_ms": 1786,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 9,
+      "line": "@ PONG",
+      "line_box": [
+       45,
+       815,
+       47,
+       10
+      ]
+     },
+     "frame_ms": 1794053891467,
+     "evidence": "benchmarks/evidence/anthropic-cold-2.png"
+    },
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 2,
+     "phase": "warm",
+     "enter_ms": 1794053904146,
+     "ttft_ms": 1687,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 9,
+      "line": "@ PONG",
+      "line_box": [
+       44,
+       797,
+       48,
+       10
+      ]
+     },
+     "frame_ms": 1794053905833,
+     "evidence": "benchmarks/evidence/anthropic-warm-2.png"
+    },
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 3,
+     "phase": "cold",
+     "enter_ms": 1794054349015,
+     "ttft_ms": 1752,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 9,
+      "line": "@ PONG",
+      "line_box": [
+       45,
+       815,
+       47,
+       10
+      ]
+     },
+     "frame_ms": 1794054350767,
+     "evidence": "benchmarks/evidence/anthropic-cold-3.png"
+    },
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 3,
+     "phase": "warm",
+     "enter_ms": 1794054363093,
+     "ttft_ms": 1974,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 9,
+      "line": "@ PONG",
+      "line_box": [
+       44,
+       815,
+       48,
+       10
+      ]
+     },
+     "frame_ms": 1794054365067,
+     "evidence": "benchmarks/evidence/anthropic-warm-3.png"
+    },
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 4,
+     "phase": "cold",
+     "enter_ms": 1794054782994,
+     "ttft_ms": 1673,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 9,
+      "line": "@ PONG",
+      "line_box": [
+       45,
+       815,
+       47,
+       10
+      ]
+     },
+     "frame_ms": 1794054784667,
+     "evidence": "benchmarks/evidence/anthropic-cold-4.png"
+    },
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 4,
+     "phase": "warm",
+     "enter_ms": 1794054796704,
+     "ttft_ms": 1663,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 9,
+      "line": "@ PONG",
+      "line_box": [
+       44,
+       797,
+       48,
+       10
+      ]
+     },
+     "frame_ms": 1794054798367,
+     "evidence": "benchmarks/evidence/anthropic-warm-4.png"
+    },
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 5,
+     "phase": "cold",
+     "enter_ms": 1794055226818,
+     "ttft_ms": 1715,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 9,
+      "line": "@ PONG",
+      "line_box": [
+       45,
+       815,
+       47,
+       10
+      ]
+     },
+     "frame_ms": 1794055228533,
+     "evidence": "benchmarks/evidence/anthropic-cold-5.png"
+    },
+    {
+     "plugin": "anthropic",
+     "name": "Claude Code [Beta] (Anthropic)",
+     "version": "0.1.14-beta",
+     "run": 5,
+     "phase": "warm",
+     "enter_ms": 1794055240364,
+     "ttft_ms": 2169,
+     "model": "claude-sonnet-5-5",
+     "detection": {
+      "anchor": "\\(2\\)",
+      "region": [
+       41,
+       685,
+       1518,
+       283
+      ],
+      "masks": [],
+      "baseline_pongs": 1,
+      "frames_read": 10,
+      "line": "@ PONG",
+      "line_box": [
+       44,
+       797,
+       48,
+       10
+      ]
+     },
+     "frame_ms": 1794055242533,
+     "evidence": "benchmarks/evidence/anthropic-warm-5.png"
+    }
+   ],
+   "status": "measured"
+  },
+  {
+   "key": "air",
+   "name": "Air (JetBrains)",
+   "id": 33314,
+   "table_name": "Air (JetBrains)",
+   "version": "262.8665.532-linux-x86_64",
+   "runs": [
+    {
+     "plugin": "air",
+     "name": "Air (JetBrains)",
+     "version": "262.8665.532-linux-x86_64",
+     "run": 1,
+     "phase": "cold",
+     "enter_ms": 1794052441983,
+     "ttft_ms": null,
+     "model": null,
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       500,
+       40,
+       1062,
+       931
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 181,
+      "line": null,
+      "line_box": null
+     },
+     "failure": "timeout",
+     "failure_detail": "no reply line within 90.0 s of the Enter",
+     "screenshot": "benchmarks/evidence/air-cold-1-failed.png"
+    },
+    {
+     "plugin": "air",
+     "name": "Air (JetBrains)",
+     "version": "262.8665.532-linux-x86_64",
+     "run": 1,
+     "phase": "warm",
+     "enter_ms": null,
+     "ttft_ms": null,
+     "model": null,
+     "failure": "no reply to the cold prompt",
+     "failure_detail": "no reply to the cold prompt",
+     "screenshot": "benchmarks/evidence/air-warm-1-failed.png"
+    }
+   ],
+   "status": "not measured",
+   "reason": "Air 262.8665.532 (linux-x86_64) lists Claude as an agent, but its chat view does not take a Claude subscription: after the Claude agent was installed from the ACP registry, the prompt got 'Choose AI Provider', whose 'Claude Subscription' entry says 'This will open the Air Terminal in a new tab. Anthropic TOS does not allow us to use GUI in this case' (an earlier attempt read 'Claude subscription works in Terminal view only'); the other entries are an Anthropic Console sign-in, a JetBrains AI sign-in or an API key. The harness never signs in or hands over credentials, and this machine's CLI is signed in with a subscription.",
+   "screenshot": "benchmarks/evidence/air-cold-1-failed.png"
+  },
+  {
+   "key": "ccgui",
+   "name": "CC GUI",
+   "id": 29342,
+   "table_name": "CC GUI",
+   "version": "0.6.4",
+   "runs": [
+    {
+     "plugin": "ccgui",
+     "name": "CC GUI",
+     "version": "0.6.4",
+     "run": 1,
+     "phase": "cold",
+     "enter_ms": 1794052798703,
+     "ttft_ms": null,
+     "model": null,
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       1037,
+       84,
+       522,
+       884
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 181,
+      "line": null,
+      "line_box": null
+     },
+     "failure": "timeout",
+     "failure_detail": "no reply line within 90.0 s of the Enter",
+     "screenshot": "benchmarks/evidence/ccgui-cold-1-failed.png"
+    },
+    {
+     "plugin": "ccgui",
+     "name": "CC GUI",
+     "version": "0.6.4",
+     "run": 1,
+     "phase": "warm",
+     "enter_ms": null,
+     "ttft_ms": null,
+     "model": null,
+     "failure": "no reply to the cold prompt",
+     "failure_detail": "no reply to the cold prompt",
+     "screenshot": "benchmarks/evidence/ccgui-warm-1-failed.png"
+    }
+   ],
+   "status": "not measured",
+   "reason": "CC GUI 0.6.4 installs its Claude Code SDK (v0.3.319, from npm) on first use, which the harness did; the prompt then got 'Provider Not Configured: No AI provider is configured yet, or access to the local configuration has not been authorized', which needs the user to set up a provider, or to authorize the plugin's access to the local Claude configuration, in its Provider Management. The harness does not grant a plugin access to credentials or configuration.",
+   "screenshot": "benchmarks/evidence/ccgui-cold-1-failed.png"
+  },
+  {
+   "key": "ccwithgui",
+   "name": "Claude Code with GUI",
+   "id": 30313,
+   "table_name": "Claude Code with GUI",
+   "version": "0.35.3",
+   "runs": [
+    {
+     "plugin": "ccwithgui",
+     "name": "Claude Code with GUI",
+     "version": "0.35.3",
+     "run": 1,
+     "phase": "cold",
+     "enter_ms": 1794053232942,
+     "ttft_ms": null,
+     "model": null,
+     "detection": {
+      "anchor": "nothing\\s*else",
+      "region": [
+       500,
+       40,
+       1062,
+       931
+      ],
+      "masks": [],
+      "baseline_pongs": 0,
+      "frames_read": 181,
+      "line": null,
+      "line_box": null
+     },
+     "failure": "timeout",
+     "failure_detail": "no reply line within 90.0 s of the Enter",
+     "screenshot": "benchmarks/evidence/ccwithgui-cold-1-failed.png"
+    },
+    {
+     "plugin": "ccwithgui",
+     "name": "Claude Code with GUI",
+     "version": "0.35.3",
+     "run": 1,
+     "phase": "warm",
+     "enter_ms": null,
+     "ttft_ms": null,
+     "model": null,
+     "failure": "no reply to the cold prompt",
+     "failure_detail": "no reply to the cold prompt",
+     "screenshot": "benchmarks/evidence/ccwithgui-warm-1-failed.png"
+    }
+   ],
+   "status": "not measured",
+   "reason": "Claude Code with GUI 0.35.3 opens its chat as a webview editor tab (with Fable 5.1 preselected as its model), but in this harness (JCEF under Xvfb, run as root with JCEF's sandbox off) the webview took no clicks or keys from the IDE Starter's robot: the prompt box stayed empty, and its model menu and usage-statistics banner did not respond, in four attempts. This is likely a limit of the harness, not of the plugin.",
+   "screenshot": "benchmarks/evidence/ccwithgui-cold-1-failed.png"
+  }
+ ],
+ "floor": {
+  "key": "floor",
+  "name": "Floor: IDE terminal, `echo PONG`",
+  "id": null,
+  "table_name": null,
+  "version": "",
+  "runs": [
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 1,
+    "phase": "cold",
+    "enter_ms": 1794052004446,
+    "ttft_ms": 87,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 0,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      713,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794052004533,
+    "evidence": "benchmarks/evidence/floor-cold-1.png"
+   },
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 1,
+    "phase": "warm",
+    "enter_ms": 1794052011692,
+    "ttft_ms": 75,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 1,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      762,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794052011767,
+    "evidence": "benchmarks/evidence/floor-warm-1.png"
+   },
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 2,
+    "phase": "cold",
+    "enter_ms": 1794053559831,
+    "ttft_ms": 136,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 0,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      713,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794053559967,
+    "evidence": "benchmarks/evidence/floor-cold-2.png"
+   },
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 2,
+    "phase": "warm",
+    "enter_ms": 1794053567640,
+    "ttft_ms": 93,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 1,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      762,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794053567733,
+    "evidence": "benchmarks/evidence/floor-warm-2.png"
+   },
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 3,
+    "phase": "cold",
+    "enter_ms": 1794054039715,
+    "ttft_ms": 118,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 0,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      713,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794054039833,
+    "evidence": "benchmarks/evidence/floor-cold-3.png"
+   },
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 3,
+    "phase": "warm",
+    "enter_ms": 1794054046678,
+    "ttft_ms": 89,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 1,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      762,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794054046767,
+    "evidence": "benchmarks/evidence/floor-warm-3.png"
+   },
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 4,
+    "phase": "cold",
+    "enter_ms": 1794054494064,
+    "ttft_ms": 103,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 0,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      713,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794054494167,
+    "evidence": "benchmarks/evidence/floor-cold-4.png"
+   },
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 4,
+    "phase": "warm",
+    "enter_ms": 1794054501116,
+    "ttft_ms": 84,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 1,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      762,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794054501200,
+    "evidence": "benchmarks/evidence/floor-warm-4.png"
+   },
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 5,
+    "phase": "cold",
+    "enter_ms": 1794054930733,
+    "ttft_ms": 134,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 0,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      713,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794054930867,
+    "evidence": "benchmarks/evidence/floor-cold-5.png"
+   },
+   {
+    "plugin": "floor",
+    "name": "Floor: IDE terminal, `echo PONG`",
+    "version": "",
+    "run": 5,
+    "phase": "warm",
+    "enter_ms": 1794054937662,
+    "ttft_ms": 71,
+    "model": null,
+    "detection": {
+     "anchor": "echo",
+     "region": [
+      41,
+      685,
+      1518,
+      283
+     ],
+     "masks": [],
+     "baseline_pongs": 1,
+     "frames_read": 6,
+     "line": "PONG",
+     "line_box": [
+      55,
+      762,
+      30,
+      10
+     ]
+    },
+    "frame_ms": 1794054937733,
+    "evidence": "benchmarks/evidence/floor-warm-5.png"
+   }
+  ],
+  "description": "the IDE's own terminal running `echo PONG`, measured the same way: the time from the Enter to the first frame showing the output, which is what the recording, the Driver's key events and the detection add to any number above."
+ }
+}

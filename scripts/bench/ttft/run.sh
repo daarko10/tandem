@@ -123,4 +123,4 @@ if [ "$PUBLISH" = true ]; then
   python3 -I scripts/bench/ttft/report.py "docs/benchmarks/ttft-$DATE.json" --write docs/benchmarks.md
   echo "run.sh: wrote docs/benchmarks/ttft-$DATE.json, docs/benchmarks/evidence/ and docs/benchmarks.md"
 fi
-python3 -I scripts/bench/ttft/report.py "$OUT/ttft-$DATE.json"
+python3 -I scripts/bench/ttft/report.py "$OUT/ttft-$DATE.json" | tee "$OUT/ttft-$DATE.md"

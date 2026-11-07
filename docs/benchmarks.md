@@ -61,7 +61,29 @@ uploads the results as an artifact.
 
 ### Results
 <!-- ttft:begin -->
-Not measured yet.
+Measured 2026-11-07 by `scripts/bench/ttft/run.sh`, with every run in [`benchmarks/ttft-2026-11-07.json`](benchmarks/ttft-2026-11-07.json) and each detected frame in [`benchmarks/evidence/`](benchmarks/evidence/).
+
+- Machine: Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, 16 GB RAM, Ubuntu 24.04.5 LTS, kernel 6.18.44-fc-v310 (a cloud container, not a desktop).
+- IDE: IntelliJ IDEA 2026.2.3 (build 262.10968.63), under Xvfb at 1600x1000, recorded at 30 fps.
+- CLI: `claude` 2.1.319 (Claude Code). Model asked for: sonnet (ANTHROPIC_MODEL=sonnet in the IDE's environment).
+- Prompt: `Reply with exactly the single word PONG and nothing else.`; the warm run's: `Reply with exactly the single word PONG and nothing else. (2)`.
+
+Time to first token is the wall-clock time from the Enter that sends the prompt to the first recorded frame showing the reply, in seconds: the median, then each run in order. A cold run is the first prompt after the IDE starts; a warm run is the second prompt in the same session, sent right after the first reply.
+
+| Plugin | Version | Model | Cold | Warm |
+|---|---|---|---|---|
+| Floor: IDE terminal, `echo PONG` | IDE 2026.2.3 | none | **0.12 s** (0.09, 0.14, 0.12, 0.10, 0.13) | **0.08 s** (0.07, 0.09, 0.09, 0.08, 0.07) |
+| Tandem (35641) | 0.4.1 | claude-sonnet-5-5 | **2.18 s** (2.18, 1.75, 2.33, 2.13, 2.46) | **1.67 s** (1.35, 1.45, 1.81, 2.01, 1.67) |
+| Claude Code [Beta] (Anthropic) (27310) | 0.1.14-beta | claude-sonnet-5-5 | **1.75 s** (1.78, 1.79, 1.75, 1.67, 1.72) | **1.69 s** (1.64, 1.69, 1.97, 1.66, 2.17) |
+| Air (JetBrains) (33314) | 262.8665.532-linux-x86_64 | | not measured | not measured |
+| CC GUI (29342) | 0.6.4 | | not measured | not measured |
+| Claude Code with GUI (30313) | 0.35.3 | | not measured | not measured |
+
+The first row is the method's floor: the IDE's own terminal running `echo PONG`, measured the same way: the time from the Enter to the first frame showing the output, which is what the recording, the Driver's key events and the detection add to any number above.
+
+- **Air (JetBrains)** not measured: Air 262.8665.532 (linux-x86_64) lists Claude as an agent, but its chat view does not take a Claude subscription: after the Claude agent was installed from the ACP registry, the prompt got 'Choose AI Provider', whose 'Claude Subscription' entry says 'This will open the Air Terminal in a new tab. Anthropic TOS does not allow us to use GUI in this case' (an earlier attempt read 'Claude subscription works in Terminal view only'); the other entries are an Anthropic Console sign-in, a JetBrains AI sign-in or an API key. The harness never signs in or hands over credentials, and this machine's CLI is signed in with a subscription. ([screenshot](benchmarks/evidence/air-cold-1-failed.png))
+- **CC GUI** not measured: CC GUI 0.6.4 installs its Claude Code SDK (v0.3.319, from npm) on first use, which the harness did; the prompt then got 'Provider Not Configured: No AI provider is configured yet, or access to the local configuration has not been authorized', which needs the user to set up a provider, or to authorize the plugin's access to the local Claude configuration, in its Provider Management. The harness does not grant a plugin access to credentials or configuration. ([screenshot](benchmarks/evidence/ccgui-cold-1-failed.png))
+- **Claude Code with GUI** not measured: Claude Code with GUI 0.35.3 opens its chat as a webview editor tab (with Fable 5.1 preselected as its model), but in this harness (JCEF under Xvfb, run as root with JCEF's sandbox off) the webview took no clicks or keys from the IDE Starter's robot: the prompt box stayed empty, and its model menu and usage-statistics banner did not respond, in four attempts. This is likely a limit of the harness, not of the plugin. ([screenshot](benchmarks/evidence/ccwithgui-cold-1-failed.png))
 <!-- ttft:end -->
 
 ## On a machine: memory
@@ -93,6 +115,6 @@ Machine: not measured yet. CLI version: not measured yet. Model: not measured ye
 
 | Plugin | Version | Time to first token | Idle memory: IDE / children | Streaming memory: IDE / children |
 |---|---|---|---|---|
-| Tandem | not measured yet | not measured yet | not measured yet | not measured yet |
-| Claude Code [Beta] (Anthropic) | not measured yet | not measured yet | not measured yet | not measured yet |
-| CC GUI | not measured yet | not measured yet | not measured yet | not measured yet |
+| Tandem | 0.4.1 | 2.18 s (cold median, see above) | not measured yet | not measured yet |
+| Claude Code [Beta] (Anthropic) | 0.1.14-beta | 1.75 s (cold median, see above) | not measured yet | not measured yet |
+| CC GUI | 0.6.4 | not measured (see above) | not measured yet | not measured yet |

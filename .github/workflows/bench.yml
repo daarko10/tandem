@@ -68,6 +68,7 @@ jobs:
           name: bench-ttft
           path: |
             build/bench/*.json
+            build/bench/*.md
             build/bench/results.jsonl
             build/bench/marks.jsonl
             build/bench/evidence
