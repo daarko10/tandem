@@ -188,7 +188,7 @@ class Frames:
             label_file = os.path.join(self.work, "label.txt")
             with open(label_file, "w") as f:
                 f.write(label)
-            text = (f",pad=iw:ih+34:0:34:color=black,drawtext=fontfile={font}:textfile={label_file}:fontcolor=white:fontsize=18:x=8:y=8")
+            text = (f",pad=iw:ih+46:0:46:color=black,drawtext=fontfile={font}:textfile={label_file}:fontcolor=white:fontsize=15:line_spacing=4:x=8:y=6")
         vf = (f"crop={w0}:{height}:{x0}:{top},{box}{text},scale='min(800,iw)':-2:flags=lanczos,"
               "split[a][b];[a]palettegen=max_colors=64[p];[b][p]paletteuse=dither=none")
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -243,7 +243,7 @@ def detect(frames: Frames, enter_ms: int, anchor: str, timeout_s: float = 90, st
         return {**result, "hit": False, "reason": f"no reply line within {covered / 1000:.1f} s of the Enter"}
     result.update({"hit": True, "frame_ms": t, "ttft_ms": t - enter_ms, "line": line.text, "line_box": line.box()})
     if evidence:
-        frames.evidence(t, line, evidence, f"{label}  TTFT {t - enter_ms} ms  (frame {t}, Enter {enter_ms})".strip())
+        frames.evidence(t, line, evidence, f"{label}: TTFT {t - enter_ms} ms".strip(": ") + f"\nEnter {enter_ms}, frame {t} (epoch ms)")
         result["evidence"] = evidence
     return result
 

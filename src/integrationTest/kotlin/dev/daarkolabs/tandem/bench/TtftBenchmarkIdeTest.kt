@@ -4,6 +4,7 @@ import com.intellij.driver.client.Driver
 import com.intellij.driver.client.Remote
 import com.intellij.driver.client.service
 import com.intellij.driver.model.OnDispatcher
+import com.intellij.driver.model.RemoteMouseButton
 import com.intellij.driver.sdk.closeAndDisableAllBalloonNotifications
 import com.intellij.driver.sdk.getOpenProjects
 import com.intellij.driver.sdk.invokeAction
@@ -90,6 +91,7 @@ internal const val SCREEN_WIDTH = 1600
 internal const val SCREEN_HEIGHT = 1000
 internal val REPLY_TIMEOUT: Duration = 90.seconds
 internal const val KEY_DELAY_MS = 15L
+private val JCEF_REGISTRY: Map<String, String> = mapOf("ide.browser.jcef.sandbox.enable" to "false", "ide.browser.jcef.run-under-superuser.allowed" to "true")
 
 /** A screen rectangle, in pixels. */
 internal data class Region(val x: Int, val y: Int, val width: Int, val height: Int) {
@@ -182,10 +184,22 @@ internal fun measure(adapter: Adapter) {
     project.resolve("README.md").writeText("# Pong\n\nA small project for the time-to-first-token benchmark.\n")
     val context = Starter.newContext("ttft-${adapter.key}-$run", testCase(project)).apply {
         zips.forEach { PluginConfigurator(this).installPluginFromPath(it) }
+        // The benchmark's IDE may run as root (a container), where JCEF refuses its sandbox and suspends every webview: these registry
+        // keys run JCEF without it, as the IDE's own notification offers.
+        val options = paths.configDir.resolve("options").createDirectories()
+        options.resolve("ide.general.xml").writeText(
+            "<application>\n  <component name=\"Registry\">\n" +
+                JCEF_REGISTRY.entries.joinToString("") { "    <entry key=\"${it.key}\" value=\"${it.value}\" />\n" } +
+                "  </component>\n</application>\n",
+        )
+        paths.configDir.resolve("early-access-registry.txt").writeText(JCEF_REGISTRY.entries.joinToString("") { "${it.key}\n${it.value}\n" })
         applyVMOptionsPatch {
             addSystemProperty("idea.trust.all.projects", true)
             addSystemProperty("jb.consents.confirmation.enabled", false)
             addSystemProperty("ide.show.tips.on.startup.default.value", false)
+            JCEF_REGISTRY.forEach { (key, value) -> addSystemProperty(key, value) }
+            // The CLI stays at the version measured.
+            withEnv("DISABLE_AUTOUPDATER", "1")
             // The same model for every plugin that runs the CLI with its defaults (docs/benchmarks.md).
             withEnv("ANTHROPIC_MODEL", "sonnet")
             adapter.ideProperties.forEach { (key, value) -> addSystemProperty(key, value) }
@@ -245,7 +259,6 @@ internal fun measure(adapter: Adapter) {
                     ),
                 )
                 ok = waitForReplyOnScreen(before, enterMs, anchor, region, masks)
-                Files.deleteIfExists(before)
                 if (!ok) {
                     fail(phase, "timeout")
                     continue
@@ -349,13 +362,82 @@ internal fun screenText(region: Region? = null): String {
     }
 }
 
+/** A line of text tesseract read on the screen, in screen pixels. */
+internal data class ScreenLine(val text: String, val x: Int, val y: Int, val width: Int, val height: Int) {
+    val center: Point get() = Point(x + width / 2, y + height / 2)
+}
+
+/** The lines of text on the screen (or in [region]), read at twice the size, in screen coordinates; with [words], each word alone. */
+internal fun screenLines(region: Region? = null, words: Boolean = false): List<ScreenLine> {
+    val shot = Files.createTempFile("ttft-screen", ".png")
+    try {
+        grabScreen(shot)
+        val r = region ?: Region(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+        val crop = Files.createTempFile("ttft-crop", ".png")
+        exec(listOf("ffmpeg", "-v", "error", "-y", "-i", shot.toString(), "-vf", "crop=${r.width}:${r.height}:${r.x}:${r.y},scale=iw*2:ih*2,format=gray", crop.toString()))
+        val tsv = exec(listOf("tesseract", crop.toString(), "stdout", "--psm", "3", "tsv"))
+        Files.deleteIfExists(crop)
+        val rows = tsv.lines().drop(1).map { it.split('\t') }.filter { it.size == 12 && it[0] == "5" && it[11].isNotBlank() }
+        return rows.groupBy { if (words) it.subList(1, 6).joinToString(",") else it.subList(1, 5).joinToString(",") }.values.map { line ->
+            val left = line.minOf { it[6].toInt() }
+            val top = line.minOf { it[7].toInt() }
+            val right = line.maxOf { it[6].toInt() + it[8].toInt() }
+            val bottom = line.maxOf { it[7].toInt() + it[9].toInt() }
+            ScreenLine(line.joinToString(" ") { it[11] }, r.x + left / 2, r.y + top / 2, (right - left) / 2, (bottom - top) / 2)
+        }
+    } finally {
+        Files.deleteIfExists(shot)
+    }
+}
+
+/** A click as a person makes it: the pointer moves there first, and the button is held for a moment (a webview misses instant clicks). */
+internal fun Driver.slowClick(point: Point) {
+    ui.moveMouse(point)
+    Thread.sleep(300)
+    ui.robot.pressMouse(RemoteMouseButton.LEFT)
+    Thread.sleep(120)
+    ui.robot.releaseMouse(RemoteMouseButton.LEFT)
+    Thread.sleep(300)
+}
+
+/** Waits for a line (or with [word], a word) matching [pattern] on the screen (or in [region]) and clicks its middle. */
+internal fun Driver.clickScreenText(what: String, pattern: Regex, region: Region? = null, timeout: Duration = 1.minutes, word: Boolean = false) {
+    val deadline = now() + timeout.inWholeMilliseconds
+    var seen = emptyList<ScreenLine>()
+    while (now() < deadline) {
+        seen = screenLines(region, word)
+        val line = seen.firstOrNull { pattern.containsMatchIn(it.text) }
+        if (line != null) {
+            slowClick(line.center)
+            Thread.sleep(1000)
+            return
+        }
+        Thread.sleep(1000)
+    }
+    error("$what: no '$pattern' on screen after $timeout; read: ${seen.joinToString(" | ") { it.text }.take(400)}")
+}
+
+/** Waits for a line matching [pattern] on the screen (or in [region]) and returns it. */
+internal fun waitForLine(what: String, pattern: Regex, region: Region? = null, timeout: Duration = 1.minutes): ScreenLine {
+    val deadline = now() + timeout.inWholeMilliseconds
+    while (now() < deadline) {
+        screenLines(region).firstOrNull { pattern.containsMatchIn(it.text) }?.let { return it }
+        Thread.sleep(1000)
+    }
+    error("$what: no '$pattern' on screen after $timeout")
+}
+
 /** Waits until the screen (or [region]) shows text matching [pattern] and returns that text. */
-internal fun waitForScreenText(what: String, pattern: Regex, region: Region? = null, timeout: Duration = 1.minutes): String {
+internal fun waitForScreenText(what: String, pattern: Regex, region: Region? = null, timeout: Duration = 1.minutes): String =
+    waitForScreen(what, region, timeout) { pattern.containsMatchIn(it) }
+
+/** Waits until the text tesseract reads on the screen (or [region]) satisfies [ok], and returns that text. */
+internal fun waitForScreen(what: String, region: Region?, timeout: Duration, ok: (String) -> Boolean): String {
     val deadline = now() + timeout.inWholeMilliseconds
     var last = ""
     while (now() < deadline) {
         last = screenText(region)
-        if (pattern.containsMatchIn(last)) return last
+        if (ok(last)) return last
         Thread.sleep(1000)
     }
     error("$what: not on screen after $timeout; last read: ${last.replace('\n', ' ').take(300)}")
@@ -369,13 +451,17 @@ internal object AnthropicAdapter : Adapter("anthropic", "Claude Code [Beta] (Ant
         invokeAction("com.anthropic.code.plugin.actions.OpenClaudeInTerminalAction")
         waitFor("the terminal", 1.minutes) { runCatching { toolWindowRegion("Terminal") }.isSuccess }
         val region = toolWindowRegion("Terminal")
-        // A folder the CLI has not seen asks whether to trust it first: the default answer is Yes.
-        val first = waitForScreenText("the CLI's UI", Regex("trust|for shortcuts|Try \"|bypass|>", RegexOption.IGNORE_CASE), region, 2.minutes)
-        if (Regex("trust", RegexOption.IGNORE_CASE).containsMatchIn(first)) {
-            ui.keyboard { enter() }
+        // A folder the CLI has not seen asks whether to trust it first; the selected answer is `No, exit`, the next one `Yes`.
+        val first = waitForScreenText("the CLI's UI", Regex("trust this folder|for shortcuts|Try \"", RegexOption.IGNORE_CASE), region, 2.minutes)
+        if (Regex("trust this folder", RegexOption.IGNORE_CASE).containsMatchIn(first)) {
+            ui.keyboard {
+                down()
+                enter()
+            }
             Thread.sleep(2000)
         }
-        waitForScreenText("the CLI's prompt", Regex("for shortcuts|Try \"|\\? for", RegexOption.IGNORE_CASE), region, 1.minutes)
+        // Its prompt line names the shortcuts; a UI that words it otherwise gets the same 30 s and is then typed into anyway.
+        runCatching { waitForScreenText("the CLI's prompt", Regex("for shortcuts|Try \"|\\? for", RegexOption.IGNORE_CASE), region, 30.seconds) }
         Thread.sleep(1500)
         return toolWindowRegion("Terminal")
     }
@@ -386,38 +472,151 @@ internal object AnthropicAdapter : Adapter("anthropic", "Claude Code [Beta] (Ant
     }
 }
 
+/** Text a webview shows while it is not ready for a prompt. */
+private val NOT_READY = Regex("suspended|Waiting for backend|Loading|Initializing|starting", RegexOption.IGNORE_CASE)
+
 /**
- * A plugin whose chat is a webview in tool window [toolWindowId]: it is driven by clicking into its prompt box, [inputFromBottom]
- * pixels above the tool window's bottom edge, and typing; [ready] is text its UI shows once it takes a prompt.
+ * A plugin whose chat is a webview: [show] opens it and returns the region it covers, its prompt box is clicked [inputFromBottom]
+ * pixels above that region's bottom edge, and the prompt is typed there. Ready means the region shows some text and none of [NOT_READY].
  */
-internal abstract class WebviewAdapter(key: String, name: String, private val toolWindowId: String, private val ready: Regex, private val inputFromBottom: Int) :
-    Adapter(key, name) {
+internal abstract class WebviewAdapter(key: String, name: String, private val inputFromBottom: Int = 70) : Adapter(key, name) {
+    abstract fun Driver.show(): Region
+
+    private var region: Region? = null
+
     override fun Driver.open(): Region? {
-        openToolWindow(toolWindowId)
-        val region = toolWindowRegion(toolWindowId)
-        waitForScreenText("$name's UI", ready, region, 2.minutes)
-        Thread.sleep(2000)
-        return toolWindowRegion(toolWindowId)
+        val shown = show()
+        region = shown
+        waitForScreen("$name's UI ready", shown, 2.minutes) { it.count { c -> c.isLetter() } > 20 && !NOT_READY.containsMatchIn(it) }
+        Thread.sleep(3000)
+        return shown
     }
 
     override fun Driver.focusInput() {
-        val region = toolWindowRegion(toolWindowId)
-        ui.clickMouse(Point(region.x + region.width / 2, region.y + region.height - inputFromBottom))
+        val r = region ?: error("not open")
+        slowClick(Point(r.x + r.width / 2, r.y + r.height - inputFromBottom))
         Thread.sleep(500)
     }
 }
 
-internal object CcGuiAdapter : WebviewAdapter("ccgui", "CC GUI", "CCG", Regex("[A-Za-z]{3,}"), 70) {
+/** The editor area, where plugins that open their chat as an editor tab show it. */
+internal fun Driver.editorRegion(): Region = ui.x("//div[@class='EditorsSplitters']").region()
+
+internal object CcGuiAdapter : WebviewAdapter("ccgui", "CC GUI") {
     override fun install(): Pair<List<Path>, String> = marketplacePlugin(29342)
+
+    override fun Driver.show(): Region {
+        openToolWindow("CCG")
+        Thread.sleep(2000)
+        val region = toolWindowRegion("CCG")
+        // On its first start the chat says the Claude Code SDK it runs is not installed: `Go to Install` opens its settings, where
+        // the SDK is installed from npm, once, before any chat (setup, not timed). Then back to the chat.
+        waitForScreen("CC GUI's first page", region, 2.minutes) { it.count { c -> c.isLetter() } > 20 && !NOT_READY.containsMatchIn(it) }
+        // It checks for the SDK after the page shows.
+        val first = runCatching { waitForScreenText("CC GUI's SDK check", Regex("Go to Install|not installed|Install v", RegexOption.IGNORE_CASE), region, 20.seconds) }.getOrDefault("")
+        if (Regex("Go to Install|not installed|Install v", RegexOption.IGNORE_CASE).containsMatchIn(first)) {
+            if (!Regex("Install v").containsMatchIn(first)) {
+                // `Go to Install` is the small button at the right end of the warning's line.
+                val warning = screenLines(region).first { Regex("not installed", RegexOption.IGNORE_CASE).containsMatchIn(it.text) }
+                slowClick(Point(region.x + region.width - 60, warning.center.y))
+                Thread.sleep(2000)
+            }
+            // The Install button's white-on-blue label does not OCR: it sits under the `Target version` line.
+            val target = waitForLine("the SDK's target version", Regex("Target version"), region)
+            slowClick(Point(target.x + 80, target.center.y + 45))
+            Thread.sleep(3000)
+            waitForScreen("the SDK installed", region, 5.minutes) { !Regex("Install v|Installing", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+            grabScreen(benchDir.resolve("screens/ccgui-sdk-$runIndex.png"))
+            // Back to the chat: the arrow at the left of the `Settings` title.
+            val settings = waitForLine("CC GUI's settings title", Regex("Settings$"), Region(region.x, region.y, region.width, 80))
+            slowClick(Point(region.x + 32, settings.center.y))
+            Thread.sleep(3000)
+        }
+        if (System.getProperty("tandem.bench.explore") == "true") {
+            slowClick(Point(region.x + region.width - 25, region.y + 25))
+            Thread.sleep(3000)
+            grabScreen(benchDir.resolve("screens/ccgui-settings-$runIndex.png"))
+            runCatching { clickScreenText("Provider Management", Regex("Provider"), Region(region.x, region.y, 90, region.height), 10.seconds) }
+            Thread.sleep(3000)
+            grabScreen(benchDir.resolve("screens/ccgui-providers-$runIndex.png"))
+        }
+        return region
+    }
 }
 
-internal object CcWithGuiAdapter : WebviewAdapter("ccwithgui", "Claude Code with GUI", "Claude Code", Regex("[A-Za-z]{3,}"), 70) {
+internal object CcWithGuiAdapter : WebviewAdapter("ccwithgui", "Claude Code with GUI") {
     override fun install(): Pair<List<Path>, String> = marketplacePlugin(30313)
+
+    override fun Driver.show(): Region {
+        // It opens its chat as an editor tab named Claude Code on the project's first start; the action opens it otherwise.
+        val tab = ui.x("//div[@class='EditorTabLabel' and contains(@visible_text, 'Claude Code')]")
+        if (!runCatching { waitFor("its editor tab", 20.seconds) { tab.present() } }.isSuccess) invokeAction("ClaudeCode.Open")
+        Thread.sleep(2000)
+        val region = editorRegion()
+        waitForScreenText("its chat", Regex("Past Conversations|Ask before edits|Enter to send", RegexOption.IGNORE_CASE), region, 2.minutes)
+        // The usage-statistics question sits over the prompt box.
+        runCatching { clickScreenText("Decline usage statistics", Regex("^Decline$"), region, 5.seconds) }
+        // Its model picker shows another model by default: pick Sonnet (setup, not timed).
+        // Best effort: the run records the model the CLI answered with either way.
+        runCatching {
+            clickScreenText("its model picker", Regex("^(Fable|Opus|Sonnet|Haiku|Default)$"), Region(region.x, region.y + region.height - 120, region.width, 120), word = true)
+            grabScreen(benchDir.resolve("screens/ccwithgui-models-$runIndex.png"))
+            clickScreenText("Sonnet in its model menu", Regex("Sonnet"), region, 10.seconds)
+        }.onFailure { ui.keyboard { escape() } }
+        grabScreen(benchDir.resolve("screens/ccwithgui-picked-$runIndex.png"))
+        Thread.sleep(1000)
+        return region
+    }
+
+    override fun Driver.focusInput() {
+        val region = editorRegion()
+        // Its prompt box takes the keyboard after a click on the box's text line.
+        val box = screenLines(Region(region.x, region.y + region.height - 160, region.width, 160))
+            .firstOrNull { Regex("reference files|Enter to send|Reply with", RegexOption.IGNORE_CASE).containsMatchIn(it.text) }
+        val target = box?.center ?: Point(region.x + region.width / 2, region.y + region.height - 80)
+        slowClick(target)
+        Thread.sleep(500)
+    }
 }
 
-/** JetBrains' Air, with Claude Code as its agent. */
-internal object AirAdapter : WebviewAdapter("air", "Air (JetBrains)", "Air", Regex("[A-Za-z]{3,}"), 70) {
+/** JetBrains' Air, with Claude Code as its agent: its `New Session` button in the main toolbar, then the agent picker. */
+internal object AirAdapter : WebviewAdapter("air", "Air (JetBrains)") {
     override fun install(): Pair<List<Path>, String> = marketplacePlugin(33314, "linux-x86_64")
+
+    override fun Driver.show(): Region {
+        val button = ui.x("//div[contains(@visible_text, 'New Session') or contains(@accessiblename, 'New Session')]")
+        waitFor("Air's New Session button", 1.minutes) { button.present() }
+        button.click()
+        Thread.sleep(5000)
+        val region = editorRegion()
+        // The agent picker under the prompt box names Junie by default: pick Claude Code (setup, not timed).
+        clickScreenText("Air's agent picker", Regex("Junie$"), Region(region.x, region.y + region.height / 2, region.width, region.height / 2))
+        grabScreen(benchDir.resolve("screens/air-agents-$runIndex.png"))
+        clickScreenText("Claude in Air's agent list", Regex("^Claude$"), region, 20.seconds, word = true)
+        Thread.sleep(3000)
+        // Air installs its Claude Agent (an ACP adapter for Claude Code) from the ACP registry on first use (setup, not timed).
+        if (Regex("Install Claude Agent", RegexOption.IGNORE_CASE).containsMatchIn(screenText(region))) {
+            clickScreenText("Install the Claude Agent", Regex("^Install$"), region, 20.seconds, word = true)
+            Thread.sleep(5000)
+            grabScreen(benchDir.resolve("screens/air-installing-$runIndex.png"))
+            waitForScreen("the Claude Agent installed", region, 5.minutes) { !Regex("Install Claude Agent|Installing", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+        }
+        grabScreen(benchDir.resolve("screens/air-picked-$runIndex.png"))
+        // Air's Claude agent signs in on its own: with no Anthropic API key it offers only its terminal view, whose sign-in Tandem's
+        // benchmark never drives (it does not touch credentials).
+        val shown = screenText(region)
+        check(!Regex("Terminal view only|Add API Key", RegexOption.IGNORE_CASE).containsMatchIn(shown)) {
+            "Air's Claude agent offers its chat view only with an Anthropic API key (it read: Claude subscription works in Terminal view only)"
+        }
+        return region
+    }
+
+    override fun Driver.focusInput() {
+        val region = editorRegion()
+        val box = screenLines(region).firstOrNull { Regex("Ask|Type|task|Reply with", RegexOption.IGNORE_CASE).containsMatchIn(it.text) }
+        slowClick(box?.center ?: Point(region.x + region.width / 2, region.y + region.height / 2 - 30))
+        Thread.sleep(600)
+    }
 }
 
 @Remote("com.intellij.openapi.wm.ToolWindowManager")

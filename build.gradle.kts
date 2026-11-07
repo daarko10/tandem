@@ -313,6 +313,8 @@ tasks {
             )
         }
         systemProperty("tandem.bench", "true")
+        // Screenshots of a plugin's setup pages, for working out an adapter.
+        systemProperty("tandem.bench.explore", providers.gradleProperty("tandem.bench.explore").getOrElse("false"))
         systemProperty("tandem.ideHome", providers.systemProperty("tandem.ideHome").getOrElse(""))
     }
 }

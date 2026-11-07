@@ -3,8 +3,11 @@
 # prompt, on this machine. Needs a signed-in `claude` (or ANTHROPIC_API_KEY), Xvfb (or a DISPLAY of at least 1600x1000), ffmpeg,
 # tesseract and python3.
 #
-#   scripts/bench/ttft/run.sh [--runs N] [--plugins "floor tandem anthropic air ccgui ccwithgui"] [--keep-video] [--no-publish]
-#                             [--note plugin=reason]... [-- extra Gradle arguments, e.g. --init-script <file>]
+#   scripts/bench/ttft/run.sh [--runs N] [--plugins "floor tandem anthropic air ccgui ccwithgui"] [--once "plugin ..."] [--keep-video]
+#                             [--no-publish] [--note plugin=reason]... [-- extra Gradle arguments, e.g. --init-script <file>]
+#
+# --once names plugins tried in the first run only (ones known not to reply here, to record why without five failed IDE starts);
+# --note replaces the reason a plugin that never replied is reported with.
 #
 # For run 1..N, and within a run for every plugin in turn (so that network variance spreads over all of them), it starts the screen
 # recording, runs `./gradlew benchTtft` for that plugin (a fresh IDE: one cold prompt, then one warm prompt in the same session),
@@ -24,6 +27,7 @@ HEIGHT=1000
 FPS=30
 RUNS=5
 PLUGINS="floor tandem anthropic air ccgui ccwithgui"
+ONCE=""
 KEEP_VIDEO=false
 PUBLISH=true
 NOTES=()
@@ -31,6 +35,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --runs) RUNS=$2; shift ;;
     --plugins) PLUGINS=$2; shift ;;
+    --once) ONCE=$2; shift ;;
     --keep-video) KEEP_VIDEO=true ;;
     --no-publish) PUBLISH=false ;;
     --note) NOTES+=(--note "$2"); shift ;;
@@ -80,6 +85,7 @@ gradle buildPlugin compileIntegrationTestKotlin
 
 for run in $(seq "$RUNS"); do
   for plugin in $PLUGINS; do
+    if [ "$run" -gt 1 ] && [[ " $ONCE " == *" $plugin "* ]]; then continue; fi
     rm -rf out/ide-tests/tests/*
     echo "run.sh: $plugin, run $run"
     video="$OUT/rec/$plugin-$run.mkv"

@@ -1,0 +1,81 @@
+# Time to first token of Tandem and the other Claude plugins (docs/benchmarks.md) with scripts/bench/ttft/run.sh, on a GitHub runner.
+# Run it by hand. It needs the repository secret ANTHROPIC_API_KEY, which reaches the CLI as that environment variable; without it the
+# run is skipped with a notice. The results (the JSON, the evidence frames, the rendered table) are the artifact `bench-ttft`; nothing is
+# posted, committed or published anywhere.
+name: TTFT benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Cold and warm runs per plugin
+        default: "5"
+      claude_version:
+        description: The @anthropic-ai/claude-code version to install (latest when empty)
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Measure time to first token
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: Skip without an API key
+        if: ${{ env.ANTHROPIC_API_KEY == '' }}
+        run: echo "::notice::ANTHROPIC_API_KEY is not set, so the benchmark did not run."
+      # The IDE under test (IntelliJ IDEA 2026.2.3, downloaded by the IDE Starter), its caches and the recordings need room.
+      - name: Free disk space
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        uses: jlumbroso/free-disk-space@v2.0.0
+        with:
+          tool-cache: false
+          large-packages: false
+      - uses: actions/checkout@v7
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+      - uses: actions/setup-java@v6
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        with:
+          distribution: zulu
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+      - uses: actions/setup-node@v5
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        with:
+          node-version: 22
+      - name: Install ffmpeg, Xvfb, tesseract and the claude CLI
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        env:
+          CLAUDE_VERSION: ${{ inputs.claude_version }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg xvfb tesseract-ocr fonts-dejavu-core
+          npm install -g "@anthropic-ai/claude-code${CLAUDE_VERSION:+@$CLAUDE_VERSION}"
+          claude --version
+      # No DISPLAY: the script starts its own 1600x1000 Xvfb and records it. The IDE Starter downloads the IDE.
+      - name: Measure
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        env:
+          RUNS: ${{ inputs.runs }}
+        run: env -u DISPLAY scripts/bench/ttft/run.sh --runs "$RUNS" --no-publish
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() && env.ANTHROPIC_API_KEY != '' }}
+        with:
+          name: bench-ttft
+          path: |
+            build/bench/*.json
+            build/bench/results.jsonl
+            build/bench/marks.jsonl
+            build/bench/evidence
+            build/bench/screens
+          if-no-files-found: warn
+      - name: Upload test IDE logs
+        if: ${{ failure() && env.ANTHROPIC_API_KEY != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-ttft-ide-logs
+          path: out/ide-tests/tests/**/log/**
