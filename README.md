@@ -1,3 +1,5 @@
+**English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
+
 # Tandem
 
 A fast, native JetBrains plugin for Claude Code. Free and open source.
@@ -43,7 +45,7 @@ as the CLI really speaks it.
 ## Size
 The 0.4.1 ZIP is 4.0 MB: four jars, no Node, no webview, no native libraries. The script that measures Marketplace ZIPs,
 and the numbers for the other plugins for Claude Code, are in [docs/benchmarks.md](docs/benchmarks.md). Opening a
-1000-turn conversation from the sidebar takes 1.4 s in the IDE test, with no UI freeze (same document). Time to first
+1000-turn conversation from the sidebar takes 1.4 s in the IDE test, with no UI freeze; that measurement is in the same document. Time to first
 token and memory are not measured yet.
 
 ## Requirements
