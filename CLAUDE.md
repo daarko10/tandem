@@ -59,6 +59,7 @@ Read `docs/launch.md` before any work described as ship, release, publish, launc
 - Say plainly what was verified and what was not. If tests fail, show the output.
 - Ask before anything destructive or outward-facing (force push, deleting data, publishing to the Marketplace).
 - Work on a feature branch, never directly on `main`. Scratch files go in `scratch/` (gitignored).
+- `README.zh-CN.md`, `README.ja.md` and `README.ko.md` follow `README.md`; a change to the English README changes them in the same pull request.
 - A red nightly `CLI contract` run usually already has the loop's pull request (`gh pr list --label contract-drift`): review that instead of fixing by hand (docs/launch.md, tactic 7).
 
 ## Conventions
