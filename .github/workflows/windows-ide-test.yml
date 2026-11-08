@@ -36,6 +36,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: true
+      # The runner's own console (a Windows Terminal window with the agent's log) is on the desktop the IDEs open on. The first
+      # IDE comes up in front of it, but once that IDE has closed the console is the foreground window and every later IDE opens
+      # behind it, where the driver's screen clicks never land (the first run: 1 passed, 45 failed at their first click). With every
+      # window minimized before the tests, each IDE is the only window on the desktop.
+      - name: Minimize the runner's windows
+        shell: pwsh
+        run: (New-Object -ComObject Shell.Application).MinimizeAll()
       # A Windows runner has a desktop session: no xvfb-run here. Git Bash runs the wrapper script; the fake CLI runs through
       # fake-claude.cmd under the runner's own `python` (python3 is the Store alias on Windows, so that is the one printed).
       - name: Run the IDE test
