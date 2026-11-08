@@ -22,6 +22,9 @@ kotlin {
 
 // The plugin's version as a constant (ide/TandemBuild.kt), which Tandem's MCP server names itself with: the platform's ways to read a
 // plugin's own descriptor at run time are internal API, which the Plugin Verifier refuses.
+// The fake CLI the test tasks run: a Windows process cannot start a .py file, so fake-claude.cmd (which calls it) stands in there.
+val fakeClaudeFile: String = if (System.getProperty("os.name").startsWith("Windows")) "fake-claude.cmd" else "fake-claude.py"
+
 val generateTandemBuild by tasks.registering {
     val version = providers.gradleProperty("version")
     val output = layout.buildDirectory.dir("generated/tandemBuild")
@@ -210,7 +213,7 @@ tasks {
         // Protocol tests run against recorded CLI transcripts; they never spawn a real `claude`.
         systemProperty("tandem.fixtures", layout.projectDirectory.dir("src/test/resources/fixtures").asFile.path)
         // Platform tests start sessions against a fake CLI that replays a fixture, never a real `claude`.
-        systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path)
+        systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/$fakeClaudeFile").asFile.path)
         // Set by the nightly CLI contract workflow: a directory of freshly recorded live transcripts.
         systemProperty("tandem.contractDir", providers.systemProperty("tandem.contractDir").getOrElse(""))
         // A GC log, which CI uploads with the test IDE's logs when the build fails: it shows what the test JVM's heap did, such as
@@ -234,7 +237,7 @@ tasks {
         useJUnitPlatform()
         val pluginZip = buildPlugin.flatMap { it.archiveFile }
         inputs.file(pluginZip)
-        val fakeClaude = layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path
+        val fakeClaude = layout.projectDirectory.file("src/test/resources/$fakeClaudeFile").asFile.path
         val ideVersion = providers.gradleProperty("platformVersion")
         jvmArgumentProviders += CommandLineArgumentProvider {
             listOf(
@@ -267,7 +270,7 @@ tasks {
         inputs.file(pluginZip)
         // A recording is never up to date.
         outputs.upToDateWhen { false }
-        val fakeClaude = layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path
+        val fakeClaude = layout.projectDirectory.file("src/test/resources/$fakeClaudeFile").asFile.path
         val ideVersion = providers.gradleProperty("platformVersion")
         val marks = providers.gradleProperty("tandem.demoMarks").orElse(layout.buildDirectory.file("demo/marks.txt").map { it.asFile.path })
         jvmArgumentProviders += CommandLineArgumentProvider {
