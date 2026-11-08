@@ -168,9 +168,14 @@ class SessionManagerTest {
 
     private fun test(block: suspend CoroutineScope.() -> Unit): Unit = runBlocking { withTimeout(30_000, block) }
 
-    /** Writes the [fixture] transcript (by default `history-reply`) as session [id]'s, through [edit]. */
+    /**
+     * Writes the [fixture] transcript (by default `history-reply`) as session [id]'s, through [edit], with the fixture's redacted
+     * `<uuid-N>` placeholders as `uuid-N`: a fork passes a line's uuid on the command line (`--resume-session-at`), and on Windows
+     * the fake CLI's `.cmd` shim runs through `cmd.exe`, which reads `<` and `>` as redirections. Real uuids have no such characters.
+     */
     private fun seed(id: String, fixture: String = "history-reply", edit: (String) -> String = { it }) {
-        folder.resolve("$id.jsonl").writeText(edit(Fixtures.transcript(fixture).readText()))
+        val text = Fixtures.transcript(fixture).readText().replace(Regex("<(uuid-\\d+)>"), "$1")
+        folder.resolve("$id.jsonl").writeText(edit(text))
     }
 
     /** The complete lines of the fake's log: a `__spawn__` line per process, then each frame the host wrote to that process. */
@@ -1164,10 +1169,10 @@ class SessionManagerTest {
         val history = original.state.value
         assertEquals(3, history.prompts().size)
         val x = assertNotNull(history.entries.filterIsInstance<ChatEntry.Assistant>().first().lastUuid)
-        assertEquals("<uuid-14>", x)
+        assertEquals("uuid-14", x)
 
         val fork = assertNotNull(manager.fork(seeded, x))
-        val tail = listOf("--resume", seeded, "--fork-session", "--session-id", fork.id, "--resume-session-at", "<uuid-14>")
+        val tail = listOf("--resume", seeded, "--fork-session", "--session-id", fork.id, "--resume-session-at", "uuid-14")
         assertEquals(tail, forkTail(fork.id))
         assertEquals(listOf("Remember the word ALPHA. Reply with exactly one word: OK"), fork.state.value.prompts())
         assertEquals("Remember word ALPHA (fork)", fork.title.value)
@@ -1210,7 +1215,7 @@ class SessionManagerTest {
         val created = manager.create(NewSessionOptions())
         awaitLog { spawns().size == 1 }
         assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id))
-        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id, "<uuid-14>"))
+        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id, "uuid-14"))
         assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult("not-a-session-id"))
         assertEquals(listOf(original, created), manager.sessions.value)
         assertNull(manager.selected.value)
@@ -1223,13 +1228,13 @@ class SessionManagerTest {
         seed(seeded, fixture = "fork-at-origin")
         val manager = manager(maxLive = 8)
         val f = assertNotNull(manager.fork(seeded)) // no prompt: no transcript of its own
-        val g = assertNotNull(manager.fork(f.id, "<uuid-14>"))
-        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", g.id, "--resume-session-at", "<uuid-14>"), forkTail(g.id))
+        val g = assertNotNull(manager.fork(f.id, "uuid-14"))
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", g.id, "--resume-session-at", "uuid-14"), forkTail(g.id))
         assertEquals(listOf("Remember the word ALPHA. Reply with exactly one word: OK"), g.state.value.prompts())
 
-        val h = assertNotNull(manager.fork(seeded, "<uuid-14>"))
+        val h = assertNotNull(manager.fork(seeded, "uuid-14"))
         val i = assertNotNull(manager.fork(h.id))
-        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", i.id, "--resume-session-at", "<uuid-14>"), forkTail(i.id))
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", i.id, "--resume-session-at", "uuid-14"), forkTail(i.id))
         assertEquals(h.state.value.entries, i.state.value.entries)
         assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", f.id), forkTail(f.id))
     }
@@ -1292,6 +1297,9 @@ class SessionManagerTest {
         // Both processes are up and known to their sessions.
         while (handles.any { it.liveSession()?.process == null }) delay(20)
         val processes = handles.map { it.liveSession()!!.process!! }
+        // Both fakes run (the fake logs `__spawn__` first): on Windows the process is the fake's `.cmd` shim, and killNow lists its
+        // descendants to kill them with it, so a fake whose shim is killed while it is being spawned would outlive its session.
+        awaitLog { spawns().size == 2 }
 
         // What a JVM shutdown hook does: it cannot wait for coroutines, so the processes go while the manager's scope still runs.
         manager.killAllNow()
@@ -3001,9 +3009,9 @@ class SessionManagerTest {
         val manager = manager()
         manager.open(seeded, spawn = false)
         manager.addFolder(seeded, extra)
-        val fork = assertNotNull(manager.fork(seeded, "<uuid-14>"))
+        val fork = assertNotNull(manager.fork(seeded, "uuid-14"))
         assertEquals(listOf(AddedFolder(extra, FolderState.PENDING)), fork.folders.value)
-        assertEquals(listOf("--resume-session-at", "<uuid-14>", "--add-dir", extra), forkTail(fork.id).takeLast(4))
+        assertEquals(listOf("--resume-session-at", "uuid-14", "--add-dir", extra), forkTail(fork.id).takeLast(4))
     }
 
     // spec: removing a folder respawns without it

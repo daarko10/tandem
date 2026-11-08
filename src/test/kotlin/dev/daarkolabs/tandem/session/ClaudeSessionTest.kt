@@ -734,8 +734,9 @@ class ClaudeSessionTest {
 
     /**
      * A session on a [ScriptedProcess]: the test writes the CLI's lines with [write], and every frame the host writes lands in
-     * [stdin]. Answers go through the session's own request path (spec 9.2). With [child], the real process first starts that shell
-     * Python code as a child process and then copies its stdin to [stdin]: a process the CLI started, which outlives it.
+     * [stdin]. Answers go through the session's own request path (spec 9.2). With [child], the real process first starts that
+     * Python code as a child process on its own stdin, stdout and stderr (named, since a Windows child inherits no handle by
+     * default) and then copies its stdin to [stdin]: a process the CLI started, which outlives it and holds its pipes.
      */
     private class ScriptedSession(
         tmp: Path,
@@ -748,7 +749,8 @@ class ClaudeSessionTest {
         val stdin: File = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val process = ScriptedProcess(
             Processes.builder(
-                "import subprocess, sys\nif sys.argv[2]:\n    subprocess.Popen([sys.executable, '-c', sys.argv[2]])\n" + Processes.COPY_TO_ARGV1,
+                "import subprocess, sys\nif sys.argv[2]:\n    subprocess.Popen([sys.executable, '-c', sys.argv[2]], stdin=0, stdout=1, stderr=2)\n" +
+                    Processes.COPY_TO_ARGV1,
                 stdin.path, child ?: "",
             ).start(),
         )
@@ -1045,9 +1047,17 @@ class ClaudeSessionTest {
     }
 
     /** The processes [ScriptedSession.process] started, once there is one: a test that kills its process kills these in the end. */
+    /** The Python processes the scripted process started (its `child`), once there is one: not a Windows `conhost.exe`. */
     private suspend fun ScriptedSession.children(): List<ProcessHandle> = withTimeout(5_000) {
-        while (process.descendants().count() == 0L) delay(20)
-        process.descendants().toList()
+        fun pythons(): List<ProcessHandle> = process.descendants().filter { handle ->
+            handle.info().command().orElse("").substringAfterLast('\\').substringAfterLast('/').startsWith("python", ignoreCase = true)
+        }.toList()
+        var found = pythons()
+        while (found.isEmpty()) {
+            delay(20)
+            found = pythons()
+        }
+        found
     }
 
     /**
