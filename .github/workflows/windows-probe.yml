@@ -1,0 +1,185 @@
+# A probe of Windows for the Windows support spec (docs/superpowers/specs/2026-11-08-windows-support-design.md): there is no
+# Windows machine in the development sandbox, so a `windows-latest` runner answers what reading the code cannot. By hand only
+# (Actions > Windows probe > Run workflow, or `gh workflow run windows-probe.yml --ref <branch>`). It installs the CLI, runs the
+# platform-sensitive JVM tests, starts the fake CLI under Python, and runs the CLI without any sign-in to see how it fails. No
+# credential of any kind is given to anything here, and nothing is published.
+name: Windows probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: Windows probe
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+
+      - name: Which Python, Node and Git the runner has
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "::group::python"; where python python3 py || true; python --version || true; python3 --version || true; py -3 --version || true; echo "::endgroup::"
+          echo "::group::node"; where node npm || true; node --version; npm --version; npm prefix -g; echo "::endgroup::"
+          echo "::group::git"; where git bash sh || true; git --version; git config --show-origin core.autocrlf || echo "core.autocrlf unset"; echo "::endgroup::"
+          echo "::group::checkout line endings"; for f in src/test/resources/fake-claude.py src/test/resources/fixtures/plain-reply.ndjson gradlew; do printf '%s: %s CR bytes\n' "$f" "$(tr -cd '\r' < "$f" | wc -c)"; done; echo "::endgroup::"
+          echo "::group::environment names"; env | cut -d= -f1 | grep -iE '^(path|comspec|pathext|userprofile|home|appdata|localappdata|shell|claude.*)$' | sort; echo "PATHEXT=$PATHEXT"; echo "::endgroup::"
+
+      # (a) The CLI as npm installs it: where `claude`, `claude.cmd` and `claude.ps1` land, and what the shims hold.
+      - name: Install the CLI with npm
+        shell: bash
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Where claude ended up (cmd)
+        shell: cmd
+        continue-on-error: true
+        run: |
+          where claude
+          echo exit=%ERRORLEVEL%
+          where claude.cmd
+          where claude.exe
+          echo exit=%ERRORLEVEL%
+          echo PATHEXT=%PATHEXT%
+          dir "%APPDATA%\npm\claude*"
+          dir "%USERPROFILE%\.local\bin" 2>nul || echo no %USERPROFILE%\.local\bin
+      - name: What the npm shims hold
+        shell: bash
+        continue-on-error: true
+        run: |
+          prefix="$(npm prefix -g)"
+          ls -la "$prefix"/claude* || true
+          for f in "$prefix"/claude "$prefix"/claude.cmd "$prefix"/claude.ps1; do
+            echo "::group::$f"; cat "$f" 2>/dev/null || echo "(missing)"; echo; echo "::endgroup::"
+          done
+          echo "::group::claude --version"; claude --version; echo "exit=$?"; echo "::endgroup::"
+
+      # (d) How the CLI fails on Windows without a sign-in: no key, no token, nothing is given to it. A hang is cut at 90 s.
+      - name: claude --version and a prompt with no credentials
+        shell: bash
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ""
+        run: |
+          unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+          ls -la "$USERPROFILE/.claude" 2>/dev/null || echo "no ~/.claude yet"
+          echo "::group::claude --version"; claude --version; echo "exit=$?"; echo "::endgroup::"
+          echo "::group::claude -p (stream-json)"
+          set +e
+          timeout 90 claude -p "Reply with PONG" --output-format stream-json --verbose < /dev/null > probe-prompt.ndjson 2> probe-prompt.stderr
+          echo "exit=$?"
+          echo "--- stdout"; cat probe-prompt.ndjson; echo; echo "--- stderr"; cat probe-prompt.stderr
+          echo "::endgroup::"
+          echo "::group::CLAUDE_CODE_GIT_BASH_PATH"; where bash || true; echo "::endgroup::"
+          echo "::group::~/.claude afterwards (names only)"; ls -la "$USERPROFILE/.claude" 2>/dev/null || echo "none"; ls "$USERPROFILE/.claude/projects" 2>/dev/null || echo "no projects folder"; echo "::endgroup::"
+
+      # What the JDK makes of the shims: canExecute on each, ProcessBuilder on claude.cmd, and whether destroying the shim's
+      # process leaves its node child alive (the Stop button's problem).
+      - name: ProcessBuilder and the shims (jshell)
+        shell: bash
+        continue-on-error: true
+        run: |
+          prefix="$(cygpath -w "$(npm prefix -g)")"
+          export TANDEM_PROBE_PREFIX="$prefix"
+          cat > probe.jsh <<'EOF'
+          import java.io.*; import java.nio.file.*; import java.util.*; import java.util.concurrent.*;
+          String prefix = System.getenv("TANDEM_PROBE_PREFIX");
+          for (String n : List.of("claude", "claude.cmd", "claude.ps1", "claude.exe")) { File f = new File(prefix, n); System.out.println(n + ": exists=" + f.exists() + " isFile=" + f.isFile() + " canExecute=" + f.canExecute()); }
+          System.out.println("file.encoding=" + System.getProperty("file.encoding") + " stdout.encoding=" + System.getProperty("stdout.encoding") + " native.encoding=" + System.getProperty("native.encoding") + " line.separator=" + Arrays.toString(System.lineSeparator().getBytes()));
+          System.out.println("user.home=" + System.getProperty("user.home") + " USERPROFILE=" + System.getenv("USERPROFILE") + " HOME=" + System.getenv("HOME"));
+          System.out.println("PATH key as the JVM sees it: " + System.getenv().keySet().stream().filter(k -> k.equalsIgnoreCase("PATH")).toList() + " getenv(PATH) null? " + (System.getenv("PATH") == null) + " map.get(\"PATH\") null? " + (System.getenv().get("PATH") == null));
+          for (String n : List.of("claude.cmd", "claude")) {
+            try {
+              Process p = new ProcessBuilder(new File(prefix, n).getPath(), "--version").redirectErrorStream(true).start();
+              p.getOutputStream().close();
+              String out = new String(p.getInputStream().readAllBytes(), "UTF-8").trim();
+              System.out.println("ProcessBuilder(" + n + " --version): exit=" + p.waitFor() + " out=" + out);
+            } catch (Exception e) { System.out.println("ProcessBuilder(" + n + " --version) threw: " + e); }
+          }
+          try {
+            Process p = new ProcessBuilder(new File(prefix, "claude.cmd").getPath(), "--input-format", "stream-json", "--output-format", "stream-json", "--verbose").redirectErrorStream(true).start();
+            Thread.sleep(6000);
+            List<ProcessHandle> kids = p.descendants().toList();
+            System.out.println("shim pid=" + p.pid() + " alive=" + p.isAlive() + " descendants=" + kids.size());
+            for (ProcessHandle h : kids) System.out.println("  child pid=" + h.pid() + " " + h.info().command().orElse("?"));
+            p.destroy(); // what terminate() does first on the shim; children are not touched here on purpose
+            Thread.sleep(2000);
+            System.out.println("after destroy(shim): shim alive=" + p.isAlive() + " children alive=" + kids.stream().filter(ProcessHandle::isAlive).count());
+            for (ProcessHandle h : kids) h.destroyForcibly();
+            Thread.sleep(1000);
+            System.out.println("after destroyForcibly(children): children alive=" + kids.stream().filter(ProcessHandle::isAlive).count());
+          } catch (Exception e) { System.out.println("stream-json spawn threw: " + e); }
+          /exit
+          EOF
+          jshell -R-Dfile.encoding=UTF-8 probe.jsh
+
+      # (c) The fake CLI under Python on Windows: does it start and emit its first line?
+      - name: The fake CLI under Python
+        shell: bash
+        continue-on-error: true
+        env:
+          TANDEM_FAKE_FIXTURE: plain-reply
+        run: |
+          set +e
+          echo "::group::modules"; python -c "import fcntl" ; echo "import fcntl exit=$?"; python -c "import select; select.select([0], [], [], 0)"; echo "select on stdin exit=$?"; echo "::endgroup::"
+          for py in python python3; do
+            echo "::group::$py fake-claude.py"
+            printf '%s\n' '{"type":"control_request","request_id":"tandem-1","request":{"subtype":"initialize"}}' '{"type":"user","message":{"role":"user","content":"hi"},"uuid":"11111111-1111-1111-1111-111111111111"}' \
+              | timeout 20 "$py" -I src/test/resources/fake-claude.py --session-id 22222222-2222-2222-2222-222222222222 > "fake-$py.out" 2> "fake-$py.err"
+            echo "exit=$?"; echo "--- first 3 stdout lines"; head -c 600 "fake-$py.out" | head -n 3; echo; echo "--- stderr"; cat "fake-$py.err"
+            echo "--- CR bytes in stdout: $(tr -cd '\r' < "fake-$py.out" | wc -c)"
+            echo "::endgroup::"
+          done
+          echo "::group::python stdout encoding"; python -c "import sys; print(sys.stdout.encoding, sys.stdin.encoding, sys.getfilesystemencoding())"; echo "::endgroup::"
+
+      # (b) The pure-JVM tests that touch paths, the environment, processes or the watch service. --continue and continue-on-error:
+      # every class runs and the report is uploaded whatever is red.
+      - name: Platform-sensitive JVM tests
+        shell: cmd
+        continue-on-error: true
+        env:
+          CI: "true"
+        run: >
+          gradlew.bat test --continue --no-daemon
+          --tests "*Transcript*" --tests "*CliEnvironment*" --tests "*ClaudeBinary*" --tests "*SessionIndex*"
+          --tests "*ShellRunner*" --tests "*EditMatcher*" --tests "*FolderCheck*" --tests "*ToolLabels*"
+          --tests "*FixtureDecode*" --tests "*Robustness*" --tests "*FakeClaude*" --tests "*LongSession*"
+          --tests "*ContextBreakdownModel*" --tests "*ChatRowsBuilder*"
+      - name: Test summary
+        shell: bash
+        if: ${{ always() }}
+        run: |
+          for f in build/test-results/test/*.xml; do
+            [ -f "$f" ] || continue
+            head -2 "$f" | grep -o '<testsuite name="[^"]*" tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' || true
+          done
+          echo "::group::failures"
+          grep -h -o '<testcase name="[^"]*" classname="[^"]*"[^>]*>\s*<failure message="[^"]\{0,300\}' build/test-results/test/*.xml 2>/dev/null | sed 's/&#10;/ /g; s/&quot;/"/g' | head -n 60 || true
+          echo "::endgroup::"
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: windows-probe-test-reports
+          path: |
+            build/reports/tests/test
+            build/test-results/test
+            probe-prompt.ndjson
+            probe-prompt.stderr
+          if-no-files-found: ignore
+
+      # The native installer, last, so that it does not stand in front of npm's shims above: where its claude.exe lands.
+      - name: The native installer
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          irm https://claude.ai/install.ps1 | iex
+          Write-Host "--- after the native installer"
+          Get-ChildItem "$env:USERPROFILE\.local\bin" -ErrorAction SilentlyContinue | Format-Table Name, Length
+          where.exe claude
+          & "$env:USERPROFILE\.local\bin\claude.exe" --version
