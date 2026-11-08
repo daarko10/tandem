@@ -11,20 +11,36 @@ import java.util.concurrent.TimeUnit
  * CLI). Paths go to the snippets as arguments (`sys.argv[1:]`), never quoted into the code.
  */
 object Processes {
-    /** `python3`, `python`, then `py -3`: the first that answers `--version` within 5 s (a developer's Windows has only the Store alias under `python3`). */
+    /**
+     * `python3`, `python`, then `py -3`: the first that answers within 5 s (a developer's Windows has only the Store alias under
+     * `python3`), as the interpreter it runs itself. A launcher (`py`, a venv's or a tool cache's `python3.exe`) puts the real
+     * interpreter and its children in a job that dies with the launcher, so a test that kills its process would kill the children
+     * it means to outlive it.
+     */
     val python: List<String> by lazy {
         val candidates: List<List<String>> = listOf(listOf("python3"), listOf("python"), listOf("py", "-3"))
-        candidates.firstOrNull(::answers) ?: error("no Python found: tried ${candidates.joinToString { it.joinToString(" ") }}")
+        candidates.firstNotNullOfOrNull(::interpreter)
+            ?: error("no Python 3 found: tried ${candidates.joinToString { it.joinToString(" ") }}")
     }
 
-    private fun answers(command: List<String>): Boolean = try {
-        val process: Process = ProcessBuilder(command + "--version").redirectErrorStream(true).start()
+    private fun interpreter(command: List<String>): List<String>? = try {
+        val code = "import sys;print(getattr(sys,'_base_executable',None) or sys.executable) if sys.version_info[0]==3 else None"
+        val process: Process = ProcessBuilder(command + listOf("-c", code)).redirectErrorStream(true).start()
         process.outputStream.close()
         val done: Boolean = process.waitFor(5, TimeUnit.SECONDS)
         if (!done) process.destroyForcibly()
-        done && process.exitValue() == 0 && process.inputStream.bufferedReader().readText().startsWith("Python 3")
+        val printed: String = if (done && process.exitValue() == 0) process.inputStream.bufferedReader().readText().trim() else ""
+        when {
+            printed.isEmpty() || printed == "None" -> null
+            java.io.File(printed).isFile -> {
+                // A Windows tool cache's python3.exe beside python.exe may be such a launcher: take python.exe.
+                val beside = java.io.File(printed).resolveSibling("python.exe")
+                listOf(if (printed.endsWith("python3.exe", ignoreCase = true) && beside.isFile) beside.path else printed)
+            }
+            else -> command
+        }
     } catch (_: java.io.IOException) {
-        false
+        null
     }
 
     /**
