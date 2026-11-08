@@ -53,6 +53,9 @@ class ClaudeBinaryTest {
 
     @Test
     fun `non-executable files are skipped`() {
+        // Windows has no execute bit (canExecute is true for every readable file): there, what cannot run is a name outside PATHEXT,
+        // `on Windows a file without a PATHEXT extension cannot run`.
+        assumeTrue(!windows, "Windows has no execute bit; its counterpart is the PATHEXT test")
         File(tmp.toFile(), "a").apply { mkdirs() }.resolve("claude").writeText("not executable")
         assertNull(ClaudeBinary.find(null, "$tmp/a", locations, windows = false))
     }
@@ -177,7 +180,8 @@ class ClaudeBinaryTest {
 
     @Test
     fun `detect without arguments searches the login shell's PATH`() {
-        val shellBin = executable("login-shell-bin")
+        // Under the running system's own rules: on Windows only claude.exe or claude.cmd count, never the bare claude.
+        val shellBin = executable("login-shell-bin", if (windows) "claude.exe" else "claude")
         val hook = System.getProperty("tandem.claudePath")
         System.clearProperty("tandem.claudePath")
         ShellEnvironment.source = { mapOf("PATH" to "$tmp/login-shell-bin") }
