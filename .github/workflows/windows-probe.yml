@@ -2,11 +2,16 @@
 # Windows machine in the development sandbox, so a `windows-latest` runner answers what reading the code cannot. By hand only
 # (Actions > Windows probe > Run workflow, or `gh workflow run windows-probe.yml --ref <branch>`). It installs the CLI, runs the
 # platform-sensitive JVM tests, starts the fake CLI under Python, and runs the CLI without any sign-in to see how it fails. No
-# credential of any kind is given to anything here, and nothing is published.
+# credential of any kind is given to anything here, and nothing is published. Until the file is on the default branch, a push
+# to the branch feat/windows runs it (below).
 name: Windows probe
 
 on:
   workflow_dispatch:
+  # A workflow that is not on the default branch cannot be dispatched (the API answers "not found on the default branch"), so
+  # while it lives on the probe's branch a push there runs it. Remove this trigger when the file reaches main.
+  push:
+    branches: [ feat/windows ]
 
 jobs:
   probe:
