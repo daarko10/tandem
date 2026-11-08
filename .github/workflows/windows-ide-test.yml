@@ -17,7 +17,8 @@ jobs:
   ide-test:
     name: IDE test (Windows)
     runs-on: windows-latest
-    timeout-minutes: 90
+    # About two minutes a test on a Windows runner (40 tests took 84 minutes in the first round), plus the IDE's download.
+    timeout-minutes: 150
     # Nightly only in the repository itself, not in forks; by hand anywhere; on a pull request only for the label.
     if: >-
       ${{ (github.event_name == 'schedule' && !github.event.repository.fork)
@@ -62,6 +63,8 @@ jobs:
         if: ${{ always() }}
         with:
           name: ide-test-logs-windows
+          # Only the log folders, not **/log/**: that glob also stats the IDEs' config, plugins and system folders, and an IDE
+          # a cut-off test left running holds system/.port, which fails the whole upload on Windows (EACCES).
           path: |
-            out/ide-tests/tests/**/log/**
+            out/ide-tests/tests/*/*/log/**
             build/reports/tests/integrationTest
