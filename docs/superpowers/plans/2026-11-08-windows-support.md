@@ -269,7 +269,7 @@ class ShellRunner(…, private val os: String = System.getProperty("os.name"))  
 
 | Task | Commit | Run | Conclusion and what counted |
 |---|---|---|---|
-| 1 | | | |
+| 1 | 883517f | https://github.com/daarko10/tandem/actions/runs/42463265661 | red as expected (the job fails on red now). `FakeClaudeTest` 8 tests, 0 failures; `FixtureDecodeTest`, `RobustnessTest`, `ChatRowsBuilderTest`, `TranscriptFilesTest`, `TranscriptFolderTest` 0 failures; `error=193` only in `ClaudeBinaryTest`, `TandemSessionsTest`, `TandemSettingsTest` (their own `#!/bin/sh` scripts, Tasks 2 and 3), never from the fake. Round 1 (5f31e00, run 42461361858) had 3 `FakeClaudeTest` reds: the temp dir's 8.3 name `RUNNER~1` against `toRealPath()`. Reds beyond the plan's list: `SessionNotifierTest` 2, `ProjectFilesTest` 1, `EditDiffTest` 1, `IdeEditToolsTest` 2 (CRLF in new files), and the platform's project leak check. |
 | 2 | | | |
 | 3 | | | |
 | 3a | | | |
