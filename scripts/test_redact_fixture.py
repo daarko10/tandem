@@ -325,6 +325,27 @@ class RedactTest(unittest.TestCase):
         (out,), _ = self.redact({"type": "system", "subtype": "x", "note": "see /home/u/x.md: now"})
         self.assertEqual("see <path>: now", out["note"])
 
+    def test_windows_paths_and_whole_path_values_are_redacted(self):
+        # The Windows probe's init (CLI 2.1.319): drive paths with backslashes and with slashes, a path with a space under a
+        # `_path` key and the messaging pipe, whose name is no path but is the machine's.
+        (out,), err = self.redact({"type": "system", "subtype": "init", "session_id": "s", "cwd": "D:\\a\\x",
+                                   "original_cwd": "D:\\a\\x", "additional_directories": ["D:/a/x"],
+                                   "memory_paths": {"auto": "C:\\Users\\u\\.claude\\projects\\D--a-x\\memory\\"},
+                                   "powershell_path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+                                   "messaging_socket_path": "\\\\.\\pipe\\LOCAL\\cc-msg-99515e41e58895660e75e16124c68b74",
+                                   "note": "see D:\\a\\x\\f.txt: now, and d:/a/x too"})
+        self.assertEqual("<path>", out["cwd"])
+        self.assertEqual("<path>", out["original_cwd"])
+        self.assertEqual(["<path>"], out["additional_directories"])
+        self.assertEqual("<path>", out["memory_paths"]["auto"])
+        self.assertEqual("<path>", out["powershell_path"])
+        self.assertEqual("<path>", out["messaging_socket_path"])
+        self.assertEqual("see <path>: now, and <path> too", out["note"])
+        self.assertEqual("", err)
+        # A `_path` key whose value is already a placeholder, or no path at all, is left alone.
+        (out,), _ = self.redact({"type": "system", "subtype": "x", "file_path": "<path>/hello.txt", "blocked_path": "relative/x"})
+        self.assertEqual(("<path>/hello.txt", "relative/x"), (out["file_path"], out["blocked_path"]))
+
     def test_a_path_under_the_work_dir_keeps_its_file_name(self):
         work = os.path.join(self.dir.name, "work")
         os.makedirs(work)

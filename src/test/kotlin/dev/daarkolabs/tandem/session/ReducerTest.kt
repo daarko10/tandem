@@ -288,6 +288,22 @@ class ReducerTest {
     }
 
     @Test
+    fun `the not-signed-in notice sends the user to a terminal and never offers a login`() {
+        // Hard rule 3: auth belongs to the CLI. The CLI's own text says "Please run /login" (fixture not-logged-in); Tandem's notice does not.
+        val state = reduce(
+            ChatState(),
+            cli(
+                """{"type":"assistant","error":"authentication_failed","is_api_error_message":true,""" +
+                    """"message":{"id":"m","model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]}}""",
+            ),
+        )
+        val text = (state.entries.last() as ChatEntry.Notice).text
+        assertTrue(text.contains("Run `claude` in a terminal to sign in"), text)
+        assertFalse(text.contains("/login"), text)
+        assertFalse(text.contains("login"), text)
+    }
+
+    @Test
     fun `a notice from the host is shown and changes nothing else`() {
         val before = reduce(ChatState(), SessionEvent.UserSent("u1", "hi"))
         val text = "Permission mode auto is not supported yet; using default."
