@@ -189,7 +189,7 @@ jobs:
           distribution: zulu
           java-version: 21
       - uses: gradle/actions/setup-gradle@v6
-      # Git Bash runs the wrapper script; the runner image has Python 3 as `python` (no `python3`), which fake-claude.cmd runs.
+      # Git Bash runs the wrapper script; the fake runs through fake-claude.cmd, which calls `python`, the runner image's Python 3.
       - name: Test
         shell: bash
         run: |
