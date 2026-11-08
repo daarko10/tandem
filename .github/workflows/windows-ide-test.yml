@@ -1,0 +1,60 @@
+# The IDE test (IDE Starter + UI Driver: a real IDE with the built plugin installed, driven like a person would) on Windows.
+# A Windows runner costs about twice a Linux one and the IDE test is the slowest job, so it does not run on every push;
+# build.yml runs the unit, fixture and platform tests on Windows for every push to main and every pull request that changes
+# what Gradle reads, and the IDE test on Linux. Runs nightly on the default branch, by hand (Actions > Windows IDE test >
+# Run workflow, or `gh workflow run windows-ide-test.yml --ref <branch>`, once this file is on the default branch), and on
+# a pull request when it gets the `windows-ide-test` label. It blocks nothing: a red here is the next Windows slice's list.
+name: Windows IDE test
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    types: [ labeled ]
+
+jobs:
+  ide-test:
+    name: IDE test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    # Nightly only in the repository itself, not in forks; by hand anywhere; on a pull request only for the label.
+    if: >-
+      ${{ (github.event_name == 'schedule' && !github.event.repository.fork)
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request' && github.event.label.name == 'windows-ide-test') }}
+    steps:
+      # The Starter unpacks the IDE under out/ide-tests, deep below the checkout: Git's 260-character limit would cut the paths
+      # the IDE's own files take (the runner image already has LongPathsEnabled for everything else).
+      - name: Allow long paths
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+      # A Windows runner has a desktop session: no xvfb-run here. Git Bash runs the wrapper script; the fake CLI runs through
+      # fake-claude.cmd under the runner's own `python` (python3 is the Store alias on Windows, so that is the one printed).
+      - name: Run the IDE test
+        shell: bash
+        run: python --version && set -o pipefail && ./gradlew integrationTest 2>&1 | tee integration.log
+      - name: Report IDE test failures
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          grep -ho 'failure message="[^"]*' build/test-results/integrationTest/*.xml 2>/dev/null \
+            | sed -E 's/^failure message="//; s/&#10;/ /g; s/\x1b\[[0-9;]*m//g; s/\?\[[0-9;]*m//g' \
+            | cut -c1-400 | head -n 10 \
+            | while IFS= read -r line; do echo "::error title=IDE test (Windows)::${line}"; done
+          find out/ide-tests -name idea.log -print0 2>/dev/null | xargs -0 grep -h 'Plugin: dev.daarkolabs.tandem' \
+            | sort -u | head -n 10 | while IFS= read -r line; do echo "::error title=IDE log (Windows)::${line}"; done
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: ide-test-logs-windows
+          path: |
+            out/ide-tests/tests/**/log/**
+            build/reports/tests/integrationTest
