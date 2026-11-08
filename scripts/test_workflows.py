@@ -877,7 +877,7 @@ class NightlyStepOutcomeTest(unittest.TestCase):
 
 BUILD = os.path.join(ROOT, ".github/workflows/build.yml")
 FILTER = "Decide whether the Gradle jobs run"
-GRADLE_JOBS = ("build", "build-macos", "verify", "ide-test")
+GRADLE_JOBS = ("build", "build-macos", "build-windows", "verify", "ide-test")
 BASE = {"README.md": "x\n", "src/main/kotlin/A.kt": "a\n", "docs/a.md": "a\n"}
 
 
@@ -984,7 +984,8 @@ class BuildFilterOutcomeTest(unittest.TestCase):
         for head in ({"docs/a.md": "b\n"}, {"docs/superpowers/specs/new.md": "b\n"}, {"scripts/test_x.py": "b\n"},
                      {".claude/skills/s/SKILL.md": "b\n"}, {".github/actions/anthropic-token/action.yml": "b\n"},
                      {".github/workflows/drift-fix.yml": "b\n"}, {".github/workflows/cli-contract.yml": "b\n"},
-                     {".github/workflows/macos-ide-test.yml": "b\n"}, {".github/workflows/demo.yml": "b\n"}, {".github/CODEOWNERS": "* @x\n"},
+                     {".github/workflows/macos-ide-test.yml": "b\n"}, {".github/workflows/windows-ide-test.yml": "b\n"},
+                     {".github/workflows/windows-probe.yml": "b\n"}, {".github/workflows/demo.yml": "b\n"}, {".github/CODEOWNERS": "* @x\n"},
                      {"README.md": "y\n", "CLAUDE.md": "y\n", "LICENSE": "y\n", "docs/a.md": None}):
             self.assertGradle("false", head)
 
