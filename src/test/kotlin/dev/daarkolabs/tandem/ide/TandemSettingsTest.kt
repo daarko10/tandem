@@ -21,6 +21,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.io.File
+import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -54,12 +55,32 @@ class TandemSettingsTest {
         TandemSettings.getInstance().loadState(TandemSettings.State())
     }
 
-    /** A shell script named [name] in a directory of its own, running [body]. */
-    private fun script(name: String, body: String): String =
-        tempDir.get().resolve(name).createDirectories().resolve("claude").also {
-            it.writeText("#!/bin/sh\n$body\n")
-            it.toFile().setExecutable(true)
-        }.toString()
+    /**
+     * A `claude` in a directory of its own named [name]: a shell script running [sh], or on Windows `claude.cmd` running [cmd]
+     * (`@echo off` first).
+     */
+    private fun script(name: String, sh: String, cmd: String): String {
+        val dir = tempDir.get().resolve(name).createDirectories()
+        val file = if (windows) dir.resolve("claude.cmd").also { it.writeText("@echo off\r\n${cmd.replace("\n", "\r\n")}\r\n") }
+        else dir.resolve("claude").also { it.writeText("#!/bin/sh\n$sh\n") }
+        file.toFile().setExecutable(true)
+        return file.toString()
+    }
+
+    /** A `claude` that prints [line] and exits 0. */
+    private fun printing(name: String, line: String): String = script(name, "echo '$line'", "echo $line")
+
+    /** A `claude` that exits 0 and prints nothing. */
+    private fun quiet(name: String): String = script(name, "exit 0", "exit /b 0")
+
+    /** A `claude` that waits until [gate] exists, then prints [line]. */
+    private fun gated(name: String, gate: Path, line: String): String = script(
+        name,
+        "while [ ! -e '$gate' ]; do sleep 0.05; done; echo '$line'",
+        ":wait\nif not exist \"$gate\" (\n  ping -n 1 127.0.0.1 >nul\n  goto wait\n)\necho $line",
+    )
+
+    private val windows: Boolean = System.getProperty("os.name").startsWith("Windows")
 
     /** A `PATH` that finds [executable] first, then the system's tools, for a check that detects by the login shell's `PATH`. */
     private fun pathFinding(executable: String): String = File(executable).parent + File.pathSeparator + System.getenv("PATH")
@@ -86,8 +107,8 @@ class TandemSettingsTest {
     @Test
     fun `settings round-trip and the path override wins`() {
         // tandem.claudePath names an executable already, so the override has to be another one to show that it wins.
-        val custom = tempDir.get().resolve("custom").createDirectories().resolve("my-claude").also {
-            it.writeText("#!/bin/sh\n")
+        val custom = tempDir.get().resolve("custom").createDirectories().resolve(if (windows) "my-claude.cmd" else "my-claude").also {
+            it.writeText(if (windows) "@rem\r\n" else "#!/bin/sh\n")
             it.toFile().setExecutable(true)
         }.toString()
         val settings = TandemSettings.getInstance()
@@ -121,7 +142,7 @@ class TandemSettingsTest {
 
     @Test
     fun `detect ignores the saved path, which find tries first`() {
-        val saved = script("saved", "exit 0")
+        val saved = quiet("saved")
         TandemSettings.getInstance().loadState(TandemSettings.State().apply { claudePath = saved })
         assertEquals(saved, ClaudeBinary.find())
         assertEquals(System.getProperty("tandem.claudePath"), ClaudeBinary.detect()?.path)
@@ -138,8 +159,8 @@ class TandemSettingsTest {
     @Test
     fun `the page shows what Tandem detects, warns about a saved path that cannot run and tests the detected one`() =
         timeoutRunBlocking(30.seconds) {
-            val detected = script("detected", "echo 'detected 2.0'")
-            val saved = script("saved", "echo 'saved 1.0'")
+            val detected = printing("detected", "detected 2.0")
+            val saved = printing("saved", "saved 1.0")
             val notExecutable = tempDir.get().resolve("plain").createDirectories().resolve("claude").also { it.writeText("") }
             TandemSettings.getInstance().loadState(TandemSettings.State().apply { claudePath = notExecutable.toString() })
             val hook = System.getProperty("tandem.claudePath")
@@ -174,7 +195,7 @@ class TandemSettingsTest {
 
     @Test
     fun `a check that answers after a later Test does not overwrite the Test's answer`() = timeoutRunBlocking(30.seconds) {
-        val answering = script("answering", "echo 'answer 1.0'")
+        val answering = printing("answering", "answer 1.0")
         val fake = System.getProperty("tandem.claudePath")
         // The page's first look at the login shell's environment, the detection that check() runs, waits until released.
         val entered = CountDownLatch(1)
@@ -211,10 +232,10 @@ class TandemSettingsTest {
     fun `Apply during a Test keeps the Test's answer`() = timeoutRunBlocking(30.seconds) {
         // It answers only once the test lets it, so that Apply's check certainly comes while the Test runs.
         val gate = tempDir.get().resolve("gate")
-        val slow = script("slow", "while [ ! -e '$gate' ]; do sleep 0.05; done; echo 'slow 1.0'")
+        val slow = gated("slow", gate, "slow 1.0")
         // The page's own check detects the first; Apply's, the second: which one shows says that Apply's check has answered.
-        val before = script("detected-before-apply", "exit 0")
-        val after = script("detected-after-apply", "exit 0")
+        val before = quiet("detected-before-apply")
+        val after = quiet("detected-after-apply")
         val applied = AtomicBoolean(false)
         withoutHook {
             ShellEnvironment.source = { System.getenv() + ("PATH" to pathFinding(if (applied.get()) after else before)) }
@@ -242,9 +263,9 @@ class TandemSettingsTest {
     @Test
     fun `a check asked during a Test that answers after it does not overwrite the Test's answer`() = timeoutRunBlocking(30.seconds) {
         val gate = tempDir.get().resolve("gate-during")
-        val slow = script("slow-during", "while [ ! -e '$gate' ]; do sleep 0.05; done; echo 'slow 2.0'")
-        val before = script("detected-before-check", "exit 0")
-        val after = script("detected-by-check", "exit 0")
+        val slow = gated("slow-during", gate, "slow 2.0")
+        val before = quiet("detected-before-check")
+        val after = quiet("detected-by-check")
         // The third look at the login shell's environment, Apply's check after the page's own and the Test's, waits, and detects
         // the second executable: when it shows, the check has answered.
         val calls = AtomicInteger()

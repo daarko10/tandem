@@ -3,6 +3,7 @@ package dev.daarkolabs.tandem.ide
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayInputStream
@@ -29,14 +30,14 @@ class ClaudeBinaryTest {
 
     @Test
     fun `nothing found when PATH and the install locations are empty`() {
-        assertNull(ClaudeBinary.find(override = null, path = "$tmp/a:$tmp/b", locations = locations, windows = false))
+        assertNull(ClaudeBinary.find(override = null, path = pathOf("a", "b"), locations = locations, windows = false))
     }
 
     @Test
     fun `PATH order wins, then the install locations in their order`() {
         val second = executable("b")
         val claudeLocal = executable("home/.claude/local")
-        assertEquals(Found(second, Where.PATH), ClaudeBinary.find(null, "$tmp/a:$tmp/b", locations, windows = false))
+        assertEquals(Found(second, Where.PATH), ClaudeBinary.find(null, pathOf("a", "b"), locations, windows = false))
         assertEquals(Found(claudeLocal, Where.INSTALL_LOCATION), ClaudeBinary.find(null, "$tmp/a", locations, windows = false))
         val localBin = executable("home/.local/bin")
         assertEquals(Found(localBin, Where.INSTALL_LOCATION), ClaudeBinary.find(null, "$tmp/a", locations, windows = false))
@@ -107,9 +108,12 @@ class ClaudeBinaryTest {
         assertEquals("the tandem.claudePath system property", Where.OVERRIDE.description)
     }
 
-    /** A shell script named [name] that runs [body]. */
-    private fun script(name: String, body: String): String =
-        File(tmp.toFile(), name).apply { writeText("#!/bin/sh\n$body\n"); setExecutable(true) }.path
+    private val windows: Boolean = System.getProperty("os.name").startsWith("Windows")
+
+    /** A shell script named [name] that runs [sh], or on Windows `<name>.cmd` that runs [cmd] (`@echo off` first). */
+    private fun script(name: String, sh: String, cmd: String): String =
+        if (windows) File(tmp.toFile(), "$name.cmd").apply { writeText("@echo off\r\n${cmd.replace("\n", "\r\n")}\r\n") }.path
+        else File(tmp.toFile(), name).apply { writeText("#!/bin/sh\n$sh\n"); setExecutable(true) }.path
 
     /** [names] joined into a `PATH` value, each an absolute path under the temporary directory. */
     private fun pathOf(vararg names: String): String = names.joinToString(File.pathSeparator) { File(tmp.toFile(), it).path }
@@ -155,6 +159,11 @@ class ClaudeBinaryTest {
      */
     private fun claudeWithInterpreterBeside(): String {
         val dir = File(tmp.toFile(), "install-location").apply { mkdirs() }
+        if (windows) {
+            // npm's claude.cmd calls the node beside it by its own directory, %~dp0.
+            dir.resolve("tandem-test-node.cmd").writeText("@echo 2.0.0 (Claude Code)\r\n")
+            return dir.resolve("claude.cmd").apply { writeText("@call \"%~dp0tandem-test-node.cmd\" %*\r\n") }.path
+        }
         dir.resolve("tandem-test-node").apply { writeText("#!/bin/sh\necho '2.0.0 (Claude Code)'\n"); setExecutable(true) }
         return dir.resolve("claude").apply { writeText("#!/usr/bin/env tandem-test-node\n"); setExecutable(true) }.path
     }
@@ -167,14 +176,19 @@ class ClaudeBinaryTest {
 
     @Test
     fun `version is the first line the executable prints`() = runBlocking {
-        assertEquals("2.1.301 (Claude Code)", ClaudeBinary.version(script("claude", "echo; echo '2.1.301 (Claude Code)'; echo more")))
+        assertEquals("2.1.301 (Claude Code)", ClaudeBinary.version(script("claude", "echo; echo '2.1.301 (Claude Code)'; echo more", "echo.\necho 2.1.301 (Claude Code)\necho more")))
         // It runs as a session's CLI does, with Tandem's entrypoint.
-        assertEquals("sdk-tandem", ClaudeBinary.version(script("env", "echo \"\$CLAUDE_CODE_ENTRYPOINT\"")))
+        assertEquals("sdk-tandem", ClaudeBinary.version(script("env", "echo \"\$CLAUDE_CODE_ENTRYPOINT\"", "echo %CLAUDE_CODE_ENTRYPOINT%")))
     }
 
     @Test
     fun `version runs in the environment it is given, as a session's CLI would get it`() = runBlocking {
-        val probe = script("probe", "echo \"\$TANDEM_PROBE \$CLAUDE_CODE_ENTRYPOINT \${CLAUDECODE:-none}\"")
+        val probe = script(
+            "probe",
+            "echo \"\$TANDEM_PROBE \$CLAUDE_CODE_ENTRYPOINT \${CLAUDECODE:-none}\"",
+            // cmd prints an unset variable's name, not nothing.
+            "if defined CLAUDECODE (echo %TANDEM_PROBE% %CLAUDE_CODE_ENTRYPOINT% %CLAUDECODE%) else (echo %TANDEM_PROBE% %CLAUDE_CODE_ENTRYPOINT% none)",
+        )
         val environment = mapOf("TANDEM_PROBE" to "from-shell", "CLAUDECODE" to "1")
         assertEquals("from-shell sdk-tandem none", ClaudeBinary.version(probe, environment = environment))
     }
@@ -183,7 +197,7 @@ class ClaudeBinaryTest {
     fun `version runs in the login shell's environment by default`() = runBlocking {
         ShellEnvironment.source = { mapOf("TANDEM_PROBE" to "login-shell") }
         try {
-            assertEquals("login-shell", ClaudeBinary.version(script("probe", "echo \"\$TANDEM_PROBE\"")))
+            assertEquals("login-shell", ClaudeBinary.version(script("probe", "echo \"\$TANDEM_PROBE\"", "echo %TANDEM_PROBE%")))
         } finally {
             ShellEnvironment.reset()
         }
@@ -191,16 +205,17 @@ class ClaudeBinaryTest {
 
     @Test
     fun `version says how a run failed`() = runBlocking {
-        assertEquals("Exited with code 3: unknown option", ClaudeBinary.version(script("bad", "echo 'unknown option' >&2; exit 3")))
-        assertEquals("It printed nothing", ClaudeBinary.version(script("quiet", "exit 0")))
+        assertEquals("Exited with code 3: unknown option", ClaudeBinary.version(script("bad", "echo 'unknown option' >&2; exit 3", ">&2 echo unknown option\nexit /b 3")))
+        assertEquals("It printed nothing", ClaudeBinary.version(script("quiet", "exit 0", "exit /b 0")))
         val missing = ClaudeBinary.version("$tmp/missing")
         assertTrue(missing.startsWith("Could not run it: "), missing)
     }
 
     @Test
     fun `version stops an executable that does not answer`() = runBlocking {
+        assumeTrue(!windows, "finds its sleepers by their arguments, which Windows does not give")
         // The script's child sleeps with an argument no other process has, so that it can be found.
-        val hanging = script("hanging", "sleep 41.25")
+        val hanging = script("hanging", "sleep 41.25", "")
         assertEquals("No answer within 500ms", ClaudeBinary.version(hanging, timeout = 500.milliseconds))
         fun sleepers(): List<ProcessHandle> =
             ProcessHandle.allProcesses().filter { it.isAlive && "41.25" in it.info().arguments().orElse(emptyArray()) }.toList()
@@ -209,8 +224,9 @@ class ClaudeBinaryTest {
 
     @Test
     fun `version does not wait for output that something else keeps open`() = runBlocking {
+        assumeTrue(!windows, "finds its sleepers by their arguments, which Windows does not give")
         // It exits at once, but leaves a child behind that holds its output open: the output never ends while that child lives.
-        val leaky = script("leaky", "sleep 42.75 &\nexit 0")
+        val leaky = script("leaky", "sleep 42.75 &\nexit 0", "")
         fun sleepers(): List<ProcessHandle> =
             ProcessHandle.allProcesses().filter { it.isAlive && "42.75" in it.info().arguments().orElse(emptyArray()) }.toList()
         try {

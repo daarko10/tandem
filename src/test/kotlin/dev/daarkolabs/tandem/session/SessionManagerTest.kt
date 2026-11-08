@@ -1313,7 +1313,9 @@ class SessionManagerTest {
         manager.sessions.first { it.isEmpty() } // only the close still knows the session now
 
         manager.killAllNow()
-        assertEquals(137, runInterruptible(Dispatchers.IO) { process.waitFor() }, "killed (SIGKILL), not ended by the close")
+        // SIGKILL's 137; on Windows TerminateProcess's 1, which a close's own end would not give either (it waits ~2 s first).
+        val killed = if (System.getProperty("os.name").startsWith("Windows")) 1 else 137
+        assertEquals(killed, runInterruptible(Dispatchers.IO) { process.waitFor() }, "killed (SIGKILL), not ended by the close")
         closing.join()
     }
 
@@ -1502,7 +1504,7 @@ class SessionManagerTest {
     fun `a turn that goes from waiting for a permission straight to idle asks for attention`() = test {
         // The status is a state, which conflates: the RUNNING between an answered request and the end of the turn may never be
         // seen. Here there is none: the turn's result comes while the request is still pending.
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val process = ScriptedProcess(Processes.sink())
         val index = SessionIndex({ listOf(folder) }, "/project")
         val manager = SessionManager(scope, index, { _, _ -> process }, { "claude" }, dir, maxLive = { 4 })
         val handle = manager.create(NewSessionOptions())
@@ -1533,7 +1535,7 @@ class SessionManagerTest {
 
     @Test
     fun `a permission answered outside a turn does not ask for attention as a finished turn`() = test {
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val process = ScriptedProcess(Processes.sink())
         val (manager, handle) = scripted(process)
         try {
             // A request while no turn runs: it asks for attention as a request, and the user looks at it.
@@ -1555,7 +1557,7 @@ class SessionManagerTest {
     fun `a process that fails during a turn asks for attention, and a Stop does not`() = test {
         // The process exits with code 3 once the test lets it, in the middle of the turn.
         val gate = dir.resolve("exit-now")
-        val failing = ScriptedProcess(ProcessBuilder("sh", "-c", "while [ ! -e '$gate' ]; do sleep 0.05; done; exit 3").start())
+        val failing = ScriptedProcess(Processes.exitAfterGate(gate, 3).start())
         val (manager, handle) = scripted(failing)
         try {
             manager.send(handle.id, "Count to a hundred")
@@ -1570,7 +1572,7 @@ class SessionManagerTest {
             manager.close(handle.id)
         }
 
-        val stopped = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val stopped = ScriptedProcess(Processes.sink())
         val (other, second) = scripted(stopped)
         try {
             other.send(second.id, "Count to a hundred")
@@ -1594,7 +1596,7 @@ class SessionManagerTest {
 
     @Test
     fun `a turn that ends while a resumed-as-new session is taken over asks for attention`() = test {
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val process = ScriptedProcess(Processes.sink())
         val (manager, handle) = scripted(process)
         val resumedAs = UUID.randomUUID().toString()
         // Between the new row taking the process and the manager adding it, the turn in progress ends.
@@ -2336,7 +2338,7 @@ class SessionManagerTest {
     fun `two actions run one after the other`() = test {
         // A process whose input the test reads, and whose answers the test writes.
         val written = dir.resolve("host-frames.log")
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > '$written'").start())
+        val process = ScriptedProcess(Processes.recorder(written).start())
         val (manager, handle) = scripted(process)
         fun mcpRequests(): List<JsonObject> =
             if (!written.exists()) emptyList()

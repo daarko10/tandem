@@ -395,11 +395,17 @@ class TandemSessionsTest {
         // As npm, Volta or Bun install it: `#!/usr/bin/env node`, with node in the same directory, which PATH does not list.
         val fake = System.getProperty("tandem.claudePath")
         val bin = tempDir.get().resolve("install-location").createDirectories()
-        bin.resolve("tandem-test-node").writeText("#!/bin/sh\nshift\nexec python3 '$fake' \"\$@\"\n")
-        bin.resolve("claude").writeText("#!/usr/bin/env tandem-test-node\n")
-        listOf("tandem-test-node", "claude").forEach { bin.resolve(it).toFile().setExecutable(true) }
+        val claude: Path = if (System.getProperty("os.name").startsWith("Windows")) {
+            // npm's claude.cmd calls the node beside it by its own directory, %~dp0, as this one calls the fake's .cmd.
+            bin.resolve("tandem-test-node.cmd").writeText("@call \"$fake\" %*\r\n")
+            bin.resolve("claude.cmd").also { it.writeText("@call \"%~dp0tandem-test-node.cmd\" %*\r\n") }
+        } else {
+            bin.resolve("tandem-test-node").writeText("#!/bin/sh\nshift\nexec python3 '$fake' \"\$@\"\n")
+            bin.resolve("claude").also { it.writeText("#!/usr/bin/env tandem-test-node\n") }
+        }
+        Files.list(bin).use { files -> files.forEach { it.toFile().setExecutable(true) } }
         val dir = tempDir.get().resolve("interpreter-beside").createDirectories()
-        System.setProperty("tandem.claudePath", bin.resolve("claude").toString())
+        System.setProperty("tandem.claudePath", claude.toString())
         try {
             val state = openProjectAsync(dir).useProjectAsync { project ->
                 val sessions = TandemSessions.get(project)

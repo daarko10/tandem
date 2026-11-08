@@ -60,6 +60,6 @@ class ScriptedProcess(private val real: Process) : Process() {
 
     companion object {
         /** A scripted process whose real one reads its input and does nothing else until it is ended. */
-        fun quiet(): ScriptedProcess = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        fun quiet(): ScriptedProcess = ScriptedProcess(Processes.sink())
     }
 }

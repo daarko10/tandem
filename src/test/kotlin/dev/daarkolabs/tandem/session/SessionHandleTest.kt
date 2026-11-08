@@ -91,7 +91,7 @@ class SessionHandleTest {
         val init = """{"type":"system","subtype":"init","session_id":"$id","model":"claude-test"}"""
         // A CLI that reports its init at once, then records every frame the host writes.
         val launcher = ProcessLauncher { _, dir ->
-            ProcessBuilder("sh", "-c", "printf '%s\\n' '$init'; cat > '$stdin'").directory(dir.toFile()).start()
+            Processes.recorder(stdin, init).directory(dir.toFile()).start()
         }
         val processes = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val handle = SessionHandle(id, scope, ChatState(), MutableStateFlow(emptyList()), createdAt = 0, forkOf = "original", pendingTitle = "Pong (fork)")

@@ -61,7 +61,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
-/** Runs [ClaudeSession] against a fake CLI (a shell script), so no real `claude` is needed. */
+/** Runs [ClaudeSession] against a fake CLI (a Python snippet), so no real `claude` is needed. */
 class ClaudeSessionTest {
     private val fixtures = File(System.getProperty("tandem.fixtures") ?: "src/test/resources/fixtures")
     private val tmp: Path = File(System.getProperty("java.io.tmpdir")).toPath()
@@ -70,13 +70,32 @@ class ClaudeSessionTest {
     /** The Python fake CLI that the test task also hands to the platform tests. */
     private val fakeClaude: String = System.getProperty("tandem.claudePath") ?: "src/test/resources/fake-claude.py"
 
-    private fun fakeCli(script: String) = ProcessLauncher { _, dir -> ProcessBuilder("sh", "-c", script).directory(dir.toFile()).start() }
+    /** A fake CLI that runs the Python [code] with [args] as `sys.argv[1:]`. */
+    private fun fakeCli(code: String, vararg args: String) =
+        ProcessLauncher { _, dir -> Processes.builder(code, *args).directory(dir.toFile()).start() }
+
+    /** Prints `sys.argv[1]`'s file, then copies stdin to `sys.argv[2]`'s: `cat fixture; cat > stdin`. */
+    private fun catThenRecord(fixture: String, stdin: File) =
+        fakeCli(Processes.CAT_ARGV1 + Processes.COPY_TO_ARGV1.replace("sys.argv[1]", "sys.argv[2]"), File(fixtures, fixture).path, stdin.path)
+
+    /** Copies stdin to [stdin]: `cat > stdin`. */
+    private fun record(stdin: File) = fakeCli(Processes.COPY_TO_ARGV1, stdin.path)
+
+    /** Ignores stdin, starts a child that starts a grandchild, and all three sleep: the worst case for cleanup. */
+    private val sleepers: String = """
+        |import subprocess, sys, time
+        |subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); time.sleep(600)"])
+        |time.sleep(600)
+        |""".trimMargin()
+
+    /** The exit code of a process killed with [Process.destroyForcibly]: SIGKILL's 137, or Windows' TerminateProcess code 1. */
+    private val killed: Int = if (System.getProperty("os.name").startsWith("Windows")) 1 else 137
 
     @Test
     fun `replays a transcript into state and records what the host wrote`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         // Echo the fixture, then keep reading stdin until the host closes it, like the CLI does.
-        val launcher = fakeCli("cat '${File(fixtures, "plain-reply.ndjson").path}'; cat > '${stdin.path}'")
+        val launcher = catThenRecord("plain-reply.ndjson", stdin)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId, model = "claude-sonnet-5-5"), launcher)
         session.start()
@@ -96,7 +115,7 @@ class ClaudeSessionTest {
     @Test
     fun `sendUserMessage writes one frame with the image blocks after the text`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
-        val launcher = fakeCli("cat '${File(fixtures, "user-image.ndjson").path}'; cat > '${stdin.path}'")
+        val launcher = catThenRecord("user-image.ndjson", stdin)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
         session.start()
@@ -118,7 +137,7 @@ class ClaudeSessionTest {
     @Test
     fun `image ids are the entry uuid and the index`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
-        val launcher = fakeCli("cat '${File(fixtures, "user-image.ndjson").path}'; cat > '${stdin.path}'")
+        val launcher = catThenRecord("user-image.ndjson", stdin)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
         session.start()
@@ -137,7 +156,7 @@ class ClaudeSessionTest {
     @Test
     fun `blank text with an image makes an entry with no text, as on reload`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
-        val launcher = fakeCli("cat > '${stdin.path}'")
+        val launcher = record(stdin)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
         session.start()
@@ -159,7 +178,7 @@ class ClaudeSessionTest {
     @Test
     fun `cancelling the owning scope leaves no process or child process behind`() = runBlocking {
         // Ignores stdin and spawns a grandchild: the worst case for cleanup.
-        val launcher = fakeCli("sleep 600 & sleep 600")
+        val launcher = fakeCli(sleepers)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
         session.start()
@@ -183,7 +202,7 @@ class ClaudeSessionTest {
         // Starting a process cannot be interrupted, so a cancellation can arrive while it starts: here, from inside the launch.
         val launcher = ProcessLauncher { _, dir ->
             scope.cancel()
-            ProcessBuilder("sh", "-c", "cat > /dev/null").directory(dir.toFile()).start().also { started.complete(it) }
+            Processes.builder(Processes.SINK).directory(dir.toFile()).start().also { started.complete(it) }
         }
         ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher).start()
         val process = withTimeout(5_000) { started.await() }
@@ -200,7 +219,7 @@ class ClaudeSessionTest {
     @Test
     fun `killNow stops the process tree synchronously`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("sleep 600 & sleep 600"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli(sleepers))
         session.start()
         val process = withTimeout(5_000) {
             while ((session.process?.descendants()?.count() ?: 0L) < 2L) kotlinx.coroutines.delay(20)
@@ -242,7 +261,7 @@ class ClaudeSessionTest {
     @Test
     fun `a crash is reported with the exit code and stderr`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("echo 'bad flag' >&2; exit 3"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("import sys\nsys.stderr.buffer.write(b'bad flag\\n')\nsys.exit(3)"))
         session.start()
         val final = withTimeout(10_000) { session.state.first { it.ended } }
         val notice = assertNotNull(final.entries.last() as? ChatEntry.Notice)
@@ -336,7 +355,9 @@ class ClaudeSessionTest {
     @Test
     fun `keep_alive and unknown lines advance lastFrameAt without a state emission`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val launcher = fakeCli("echo '{\"type\":\"keep_alive\"}'; sleep 0.2; echo '{\"type\":\"no_such_type\"}'; sleep 0.2")
+        val launcher = fakeCli(
+            "import sys, time\nfor line in ('{\"type\":\"keep_alive\"}', '{\"type\":\"no_such_type\"}'):\n    sys.stdout.buffer.write((line + '\\n').encode())\n    sys.stdout.buffer.flush()\n    time.sleep(0.2)",
+        )
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher)
         // One log of both flows, in the order they changed: a frame time, or a new chat state.
         val log = Collections.synchronizedList(mutableListOf<Any>())
@@ -361,7 +382,10 @@ class ClaudeSessionTest {
     @Test
     fun `the injected clock stamps the prompt, the turn and every line`() = runBlocking {
         // Waits for initialize and the prompt before it answers, so the turn has started when its lines come.
-        val launcher = fakeCli("read a; read b; cat '${File(fixtures, "plain-reply.ndjson").path}'; cat > /dev/null")
+        val launcher = fakeCli(
+            "import sys\nsys.stdin.buffer.readline()\nsys.stdin.buffer.readline()\n" + Processes.CAT_ARGV1 + Processes.SINK,
+            File(fixtures, "plain-reply.ndjson").path,
+        )
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), launcher, clock = { 1_000L })
         session.start()
@@ -382,7 +406,7 @@ class ClaudeSessionTest {
         val result = """{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"$newSessionId",""" +
             """"errors":["No conversation found with session ID: $newSessionId"]}"""
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, resumeSessionId = newSessionId), fakeCli("echo '$result'; exit 1"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, resumeSessionId = newSessionId), fakeCli("import sys\nsys.stdout.buffer.write((sys.argv[1] + '\\n').encode())\nsys.stdout.buffer.flush()\nsys.exit(1)", result))
         session.start()
         val ended = withTimeout(10_000) { session.state.first { it.ended } }
         assertEquals(newSessionId, ended.sessionId)
@@ -411,7 +435,7 @@ class ClaudeSessionTest {
     @Test
     fun `a resumed session starts from the loaded history`() = runBlocking {
         val history = ChatState(entries = listOf(ChatEntry.User("u0", "earlier")), effort = "low")
-        val launcher = fakeCli("cat '${File(fixtures, "plain-reply.ndjson").path}'; cat > /dev/null")
+        val launcher = fakeCli(Processes.CAT_ARGV1 + Processes.SINK, File(fixtures, "plain-reply.ndjson").path)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, resumeSessionId = "s1"), launcher, initialState = history)
         session.start()
@@ -427,10 +451,10 @@ class ClaudeSessionTest {
         val history = ChatState(requestedModel = "sonnet", permissionMode = PermissionMode.ACCEPT_EDITS, effort = "low")
 
         val picked = SessionConfig("claude", tmp, resumeSessionId = "s1", model = "opus", effort = "high", permissionMode = PermissionMode.PLAN)
-        val overridden = ClaudeSession(scope, picked, fakeCli("true"), initialState = history).state.value
+        val overridden = ClaudeSession(scope, picked, fakeCli("pass"), initialState = history).state.value
         assertEquals(Triple("opus", PermissionMode.PLAN, "high"), Triple(overridden.requestedModel, overridden.permissionMode, overridden.effort))
 
-        val kept = ClaudeSession(scope, SessionConfig("claude", tmp, resumeSessionId = "s1"), fakeCli("true"), initialState = history).state.value
+        val kept = ClaudeSession(scope, SessionConfig("claude", tmp, resumeSessionId = "s1"), fakeCli("pass"), initialState = history).state.value
         assertEquals(Triple("sonnet", PermissionMode.ACCEPT_EDITS, "low"), Triple(kept.requestedModel, kept.permissionMode, kept.effort))
         scope.cancel()
     }
@@ -439,17 +463,17 @@ class ClaudeSessionTest {
     fun `the spawn's --permission-mode is the launch mode`() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val auto = SessionConfig("claude", tmp, sessionId = newSessionId, permissionMode = PermissionMode.AUTO)
-        assertEquals(PermissionMode.AUTO, ClaudeSession(scope, auto, fakeCli("true")).state.value.launchPermissionMode)
+        assertEquals(PermissionMode.AUTO, ClaudeSession(scope, auto, fakeCli("pass")).state.value.launchPermissionMode)
         val none = SessionConfig("claude", tmp, sessionId = newSessionId)
         val history = ChatState(launchPermissionMode = PermissionMode.PLAN)
-        assertEquals(null, ClaudeSession(scope, none, fakeCli("true"), initialState = history).state.value.launchPermissionMode)
+        assertEquals(null, ClaudeSession(scope, none, fakeCli("pass"), initialState = history).state.value.launchPermissionMode)
         scope.cancel()
     }
 
     @Test
     fun `a permission mode change shows before the CLI confirms it`() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("true"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("pass"))
         session.setPermissionMode(PermissionMode.PLAN)
         assertEquals(PermissionMode.PLAN, session.state.value.permissionMode)
         scope.cancel()
@@ -459,7 +483,7 @@ class ClaudeSessionTest {
     fun `setEffort sends apply_flag_settings and records the previous level`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > '${stdin.path}'"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), record(stdin))
         session.start()
         session.setEffort("high")
         assertEquals("high", session.state.value.effort)
@@ -483,7 +507,7 @@ class ClaudeSessionTest {
     fun `setModel sends set_model and records the model shown before under its request id`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > '${stdin.path}'"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), record(stdin))
         session.start()
         session.setModel("opus")
         // The request id is what lets a refusal put back the model shown before (Reducer, ModelChange).
@@ -510,7 +534,7 @@ class ClaudeSessionTest {
     fun `rename asks the CLI to rename the session`() = runBlocking {
         val stdin = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > '${stdin.path}'"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), record(stdin))
         session.start()
         session.rename("Alpha")
 
@@ -612,7 +636,7 @@ class ClaudeSessionTest {
     @Test
     fun `a read cut off by killing the process ends the session quietly`() = runBlocking {
         val output = CutOffOutput()
-        val process = CutOffProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start(), output, cutOnKill = true)
+        val process = CutOffProcess(Processes.sink(), output, cutOnKill = true)
         val run = CutOffSession(process, tmp, newSessionId)
         run.session.start()
         withTimeout(5_000) { while (run.session.process == null) delay(20) }
@@ -622,7 +646,7 @@ class ClaudeSessionTest {
         assertEquals(emptyList(), run.uncaught.map { it.stackTraceToString().take(1500) }, "the process was killed: its output ending is no failure")
         // The session ends as for any process that ends: with its exit code in the chat.
         val notice = assertNotNull(run.session.state.value.entries.last() as? ChatEntry.Notice)
-        assertEquals("The claude CLI exited with code 137.", notice.text)
+        assertEquals("The claude CLI exited with code $killed.", notice.text)
         run.scope.coroutineContext.job.cancelAndJoin()
     }
 
@@ -630,7 +654,7 @@ class ClaudeSessionTest {
     fun `a process killed at once during a turn ends it as interrupted, not failed`() = runBlocking {
         // As the JVM shutdown hook kills it when the IDE exits: the turn in progress is not one that failed, but it did end.
         val output = CutOffOutput()
-        val process = CutOffProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start(), output, cutOnKill = true)
+        val process = CutOffProcess(Processes.sink(), output, cutOnKill = true)
         val run = CutOffSession(process, tmp, newSessionId)
         run.session.start()
         withTimeout(5_000) { while (run.session.process == null) delay(20) }
@@ -649,7 +673,7 @@ class ClaudeSessionTest {
     @Test
     fun `a read that fails while the process runs on is not swallowed`() = runBlocking {
         val output = CutOffOutput()
-        val real = ProcessBuilder("sh", "-c", "cat > /dev/null").start()
+        val real = Processes.sink()
         val run = CutOffSession(CutOffProcess(real, output, cutOnKill = false), tmp, newSessionId)
         run.session.start()
         withTimeout(5_000) { while (run.session.process == null) delay(20) }
@@ -693,7 +717,7 @@ class ClaudeSessionTest {
     fun `cancelling a session while a read waits on an interruptible output is no failure`() = runBlocking {
         // Cancelling interrupts the reading thread; an interruptible stream then throws InterruptedIOException, an IOException.
         val output = QuietOutput()
-        val real = ProcessBuilder("sh", "-c", "cat > /dev/null").start()
+        val real = Processes.sink()
         val uncaught: MutableList<Throwable> = Collections.synchronizedList(ArrayList())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> uncaught.add(e) })
         val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), ProcessLauncher { _, _ -> QuietProcess(real, output) })
@@ -711,7 +735,7 @@ class ClaudeSessionTest {
     /**
      * A session on a [ScriptedProcess]: the test writes the CLI's lines with [write], and every frame the host writes lands in
      * [stdin]. Answers go through the session's own request path (spec 9.2). With [child], the real process first starts that shell
-     * command in the background and then becomes the `cat` itself: a process the CLI started, which outlives it.
+     * Python code as a child process and then copies its stdin to [stdin]: a process the CLI started, which outlives it.
      */
     private class ScriptedSession(
         tmp: Path,
@@ -722,7 +746,12 @@ class ClaudeSessionTest {
         hostTools: HostTools? = null,
     ) {
         val stdin: File = File.createTempFile("tandem-stdin", ".ndjson").apply { deleteOnExit() }
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", (child?.let { "$it & exec " } ?: "") + "cat > '${stdin.path}'").start())
+        val process = ScriptedProcess(
+            Processes.builder(
+                "import subprocess, sys\nif sys.argv[2]:\n    subprocess.Popen([sys.executable, '-c', sys.argv[2]])\n" + Processes.COPY_TO_ARGV1,
+                stdin.path, child ?: "",
+            ).start(),
+        )
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val session = ClaudeSession(
             scope,
@@ -973,7 +1002,7 @@ class ClaudeSessionTest {
     fun `a process exit fails every waiting request with Ended`() = runBlocking {
         // Reads initialize and both requests, then exits by itself: nothing closes the bare session.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("read a; read b; read c"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("import sys\nfor _ in range(3):\n    sys.stdin.buffer.readline()"))
         session.start()
         val replies = List(2) { async { session.request(10_000) { HostMessages.mcpStatus(it) } } }
 
@@ -986,7 +1015,7 @@ class ClaudeSessionTest {
     @Test
     fun `close while a request waits answers Ended`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("cat > /dev/null"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli(Processes.SINK))
         session.start()
         val sent = CompletableDeferred<Unit>()
         val reply = async { session.request(10_000) { sent.complete(Unit); HostMessages.mcpStatus(it) } }
@@ -1033,7 +1062,7 @@ class ClaudeSessionTest {
     @Test
     fun `a child that keeps the CLI's stderr open holds back neither the end nor close`() = runBlocking {
         // A tool's subprocess or an MCP server the CLI started can outlive it with its stderr: a read of that pipe never ends.
-        val run = ScriptedSession(tmp, newSessionId, child = "sleep 600 >&2")
+        val run = ScriptedSession(tmp, newSessionId, child = "import time; time.sleep(600)")
         val children = run.children()
         try {
             run.session.start()
@@ -1044,7 +1073,7 @@ class ClaudeSessionTest {
 
             run.die()
             val ended = withTimeout(5_000) { run.session.state.first { it.ended } }
-            assertEquals("The claude CLI exited with code 137.", (ended.entries.last() as ChatEntry.Notice).text)
+            assertEquals("The claude CLI exited with code $killed.", (ended.entries.last() as ChatEntry.Notice).text)
             assertEquals(Reply.Ended, withTimeout(1_000) { waiting.await() })
             assertEquals(Reply.Ended, withTimeout(1_000) { run.session.request(60_000) { HostMessages.mcpStatus(it) } })
             assertTrue(children.all { it.isAlive }, "the child still holds the stderr")
@@ -1058,14 +1087,14 @@ class ClaudeSessionTest {
     fun `the CLI's stdin is closed once it has exited, ahead of the end`() = runBlocking {
         // The JDK closes it only once the waiting stderr read has returned, which this child holds back until its stdin ends. What the
         // child writes to stderr then is in the exit notice.
-        val run = ScriptedSession(tmp, newSessionId, child = "exec 3<&0; { cat <&3 > /dev/null; echo 'stdin closed' >&2; }")
+        val run = ScriptedSession(tmp, newSessionId, child = "import sys; sys.stdin.buffer.read(); sys.stderr.buffer.write(b'stdin closed\\n')")
         val children = run.children()
         try {
             run.session.start()
             run.stderrReadWaits()
             run.die()
             val ended = withTimeout(5_000) { run.session.state.first { it.ended } }
-            assertEquals("The claude CLI exited with code 137.\nstdin closed", (ended.entries.last() as ChatEntry.Notice).text)
+            assertEquals("The claude CLI exited with code $killed.\nstdin closed", (ended.entries.last() as ChatEntry.Notice).text)
             run.close()
         } finally {
             children.forEach { it.destroyForcibly() }
@@ -1076,7 +1105,7 @@ class ClaudeSessionTest {
     fun `an output that fails as the process is destroyed ends the session, not fails it`() = runBlocking {
         // destroyForcibly closes the pipes at once, while isAlive turns false only once the JDK has seen the exit: a read that fails
         // in between is the end of the output. Here the stderr fails a moment ahead of the kill, while the process still runs.
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "exec cat > /dev/null").start())
+        val process = ScriptedProcess(Processes.sink())
         val run = CutOffSession(process, tmp, newSessionId)
         try {
             process.errorStream.close()
@@ -1086,7 +1115,7 @@ class ClaudeSessionTest {
             process.destroyForcibly()
             val ended = withTimeout(5_000) { run.session.state.first { it.ended } }
             assertEquals(emptyList(), run.uncaught.map { it.stackTraceToString().take(1500) }, "the output ended with the process")
-            assertEquals("The claude CLI exited with code 137.", (ended.entries.last() as ChatEntry.Notice).text)
+            assertEquals("The claude CLI exited with code $killed.", (ended.entries.last() as ChatEntry.Notice).text)
         } finally {
             process.destroyForcibly()
             run.scope.coroutineContext.job.cancelAndJoin()
@@ -1096,7 +1125,7 @@ class ClaudeSessionTest {
     @Test
     fun `a request after the end answers Ended at once`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("exit 0"))
+        val session = ClaudeSession(scope, SessionConfig("claude", tmp, sessionId = newSessionId), fakeCli("pass"))
         session.start()
         withTimeout(10_000) { session.state.first { it.ended } }
         var built = 0
