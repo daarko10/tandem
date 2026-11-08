@@ -169,7 +169,8 @@ jobs:
         run: |
           status=1
           for i in $(seq 1 8); do
-            cmd //c "gradlew.bat test --continue --no-daemon"; status=$?
+            status=0
+            cmd //c "gradlew.bat test --continue --no-daemon" || status=$?
             if ls build/test-results/test/*.xml > /dev/null 2>&1; then break; fi
             echo "attempt $i produced no test result (a dependency download failed?)"; sleep 30
           done
