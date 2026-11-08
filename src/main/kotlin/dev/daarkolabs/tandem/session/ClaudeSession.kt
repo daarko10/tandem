@@ -1051,7 +1051,8 @@ class ClaudeSession(
      * closed under it: that thread then ends when the last process that holds the pipe does, and nothing waits for it.
      */
     private suspend fun readStderr(p: Process) {
-        val read = { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } }
+        // UTF-8 as stdout is read and stdin written: Node writes UTF-8 to a pipe whatever the console's code page is on Windows.
+        val read = { p.errorStream.bufferedReader(Charsets.UTF_8).useLines { lines -> lines.forEach { stderrTail.add(it) } } }
         CompletableFuture.runAsync(read, Dispatchers.IO.asExecutor()).await()
     }
 

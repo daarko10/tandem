@@ -22,6 +22,13 @@ class TranscriptFolderTest {
     }
 
     @Test
+    fun `a Windows path keys with its drive letter`() {
+        // docs/protocol.md 11.1: the CLI keys its physical working directory, drive letter and all; a UNC path starts with two.
+        assertEquals("C--Users-dev-app", TranscriptFolder.key("""C:\Users\dev\app"""))
+        assertEquals("--server-share-proj", TranscriptFolder.key("""\\server\share\proj"""))
+    }
+
+    @Test
     fun `a character outside the basic plane becomes one dash per UTF-16 unit, as in the CLI`() {
         // U+1F600 is a surrogate pair. The CLI runs a JavaScript regex over UTF-16 units, so it writes two dashes;
         // a Kotlin Regex would see one code point and write one, and Tandem would look in the wrong folder.

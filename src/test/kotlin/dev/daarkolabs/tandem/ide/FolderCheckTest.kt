@@ -51,6 +51,16 @@ class FolderCheckTest {
     }
 
     @Test
+    fun `a file system root is refused`() {
+        // `--add-dir D:\` is the one argument a .cmd shim cannot be given cleanly (its backslash escapes the closing quote).
+        val drive = tmp.toAbsolutePath().root
+        assertEquals(
+            FolderCheck.Refused("Could not add $drive: a drive's root cannot be added, pick a folder in it."),
+            checkFolder(drive, root, emptyList()),
+        )
+    }
+
+    @Test
     fun `a sibling that shares the project's prefix is outside`() {
         val sibling = tmp.resolve("x/app2").createDirectories()
         assertEquals(FolderCheck.Add(sibling.toRealPath().toString()), checkFolder(sibling, root, emptyList()))

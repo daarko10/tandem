@@ -76,7 +76,95 @@ class ClaudeBinaryTest {
             ),
             ClaudeBinary.installLocations(home = "/u", windows = false),
         )
-        assertEquals(listOf("/u/.local/bin", "/u/.claude/local"), ClaudeBinary.installLocations(home = "/u", windows = true))
+        assertEquals(
+            listOf("/u/.local/bin", "/u/.claude/local", "/u/AppData/Roaming/npm"),
+            ClaudeBinary.installLocations(home = "/u", windows = true, appData = null),
+        )
+    }
+
+    @Test
+    fun `the install locations on Windows end with npm's prefix, from APPDATA or the home's default`() {
+        val expected = listOf("/u/.local/bin", "/u/.claude/local", "/u/AppData/Roaming/npm")
+        assertEquals(expected, ClaudeBinary.installLocations("/u", windows = true, appData = "/u/AppData/Roaming"))
+        assertEquals(expected, ClaudeBinary.installLocations("/u", windows = true, appData = null))
+        assertEquals(expected, ClaudeBinary.installLocations("/u", windows = true, appData = ""))
+        assertEquals(listOf("/u/.local/bin", "/u/.claude/local", "/r/npm"), ClaudeBinary.installLocations("/u", windows = true, appData = "/r"))
+    }
+
+    @Test
+    fun `on Windows PATH is read under whatever name the environment gives it`() {
+        val exe = executable("win-bin", "claude.exe")
+        val environment = mapOf("Path" to "$tmp/win-bin", "HOME" to "/u")
+        assertEquals("Path" to "$tmp/win-bin", ClaudeBinary.pathVariable(environment))
+        assertNull(ClaudeBinary.pathVariable(mapOf("HOME" to "/u")))
+        assertEquals(Found(exe, Where.PATH), ClaudeBinary.detect(override = null, environment = environment, home = "$tmp/home", windows = true))
+    }
+
+    @Test
+    fun `on Windows the exe then the cmd shim are taken and the bare claude never`() {
+        val exe = executable("all", "claude.exe")
+        executable("all", "claude.cmd")
+        executable("all", "claude")
+        assertEquals(Found(exe, Where.PATH), ClaudeBinary.find(null, "$tmp/all", locations, windows = true))
+        val cmd = executable("cmd-only", "claude.cmd")
+        executable("cmd-only", "claude")
+        assertEquals(Found(cmd, Where.PATH), ClaudeBinary.find(null, "$tmp/cmd-only", locations, windows = true))
+        // npm's POSIX shim, `#!/bin/sh`: CreateProcess cannot run it (error 193).
+        executable("bare", "claude")
+        assertNull(ClaudeBinary.find(null, "$tmp/bare", locations, windows = true))
+    }
+
+    @Test
+    fun `on Windows a file without a PATHEXT extension cannot run`() {
+        assertFalse(ClaudeBinary.isExecutable(executable("w", "claude.ps1"), windows = true, pathExt = null))
+        assertFalse(ClaudeBinary.isExecutable(executable("w", "fake-claude.py"), windows = true, pathExt = null))
+        assertFalse(ClaudeBinary.isExecutable(executable("w", "claude"), windows = true, pathExt = null))
+        assertTrue(ClaudeBinary.isExecutable(executable("w", "claude.cmd"), windows = true, pathExt = null))
+        assertTrue(ClaudeBinary.isExecutable(executable("w", "x.py"), windows = true, pathExt = ".PY;.EXE"))
+        assertFalse(ClaudeBinary.isExecutable(executable("w", "claude.cmd"), windows = true, pathExt = ".PY;.EXE"))
+        // Outside Windows the extension says nothing.
+        assertTrue(ClaudeBinary.isExecutable(executable("w", "claude"), windows = false, pathExt = ".EXE"))
+    }
+
+    @Test
+    fun `on Windows extensions compare ignoring case`() {
+        assertTrue(ClaudeBinary.isExecutable(executable("c", "Claude.EXE"), windows = true, pathExt = ".exe;.cmd"))
+        assertTrue(ClaudeBinary.isExecutable(executable("c", "claude.Cmd"), windows = true, pathExt = ".EXE;.CMD"))
+    }
+
+    @Test
+    fun `on Windows a quoted PATH entry is searched without its quotes`() {
+        // Installers write `"C:\Program Files\nodejs"` into PATH, and Windows' own `where` accepts it.
+        val exe = executable("quoted", "claude.exe")
+        assertEquals(Found(exe, Where.PATH), ClaudeBinary.find(null, "\"$tmp/quoted\"", locations, windows = true))
+    }
+
+    @Test
+    fun `an npm cmd shim is run as the exe it calls`() {
+        val cmd = executable("npm", "claude.cmd")
+        val exe = executable("npm/node_modules/@anthropic-ai/claude-code/bin", "claude.exe")
+        assertEquals(File(exe), ClaudeBinary.npmTarget(File(cmd)))
+        assertEquals(Found(exe, Where.PATH), ClaudeBinary.find(null, "$tmp/npm", locations, windows = true))
+        assertEquals(exe, ClaudeBinary.resolveShim(cmd, windows = true), "a saved claude.cmd too")
+        assertEquals(cmd, ClaudeBinary.resolveShim(cmd, windows = false))
+    }
+
+    @Test
+    fun `a cmd shim without the exe beside it is run as it is`() {
+        // pnpm's, yarn's and nvm-windows' shims have no claude.exe in that place: the shim runs, and a stop kills its tree.
+        val cmd = executable("pnpm", "claude.cmd")
+        assertNull(ClaudeBinary.npmTarget(File(cmd)))
+        assertEquals(Found(cmd, Where.PATH), ClaudeBinary.find(null, "$tmp/pnpm", locations, windows = true))
+        assertEquals(cmd, ClaudeBinary.resolveShim(cmd, windows = true))
+    }
+
+    @Test
+    fun `the not-runnable text names the Windows extensions`() {
+        assertEquals(
+            "C:\\x\\claude.ps1 is not something Windows can run (no .exe, .cmd or .bat)",
+            ClaudeBinary.notRunnableText("C:\\x\\claude.ps1", windows = true),
+        )
+        assertEquals("Configured path is not executable", ClaudeBinary.notRunnableText("/x/claude", windows = false))
     }
 
     @Test

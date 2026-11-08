@@ -17,6 +17,12 @@ private const val OUTPUT_LIMIT: Int = 64 * 1024
 /** How often [ClaudeBinary.version] looks for output while there is none. */
 private const val POLL_MILLIS: Long = 20
 
+/** What Windows runs by name when `PATHEXT` is unset: the extensions `cmd.exe` itself falls back to. */
+private const val DEFAULT_PATHEXT: String = ".COM;.EXE;.BAT;.CMD"
+
+/** Where npm's `claude.cmd` shim keeps the `claude.exe` it calls, below the shim's own directory (npm's global prefix). */
+private const val NPM_CLAUDE_EXE: String = "node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+
 /** A `claude` [ClaudeBinary.detect] found, and [where]. */
 internal data class Found(val path: String, val where: Where)
 
@@ -35,50 +41,102 @@ internal object ClaudeBinary {
     /** How long [version] waits for an answer by default. */
     val VERSION_TIMEOUT: Duration = 5.seconds
 
-    /** The `claude` sessions run: the path saved in Settings | Tools | Tandem when it can run, else the one Tandem [detect]s. */
-    fun find(): String? = configured()?.takeIf(::isExecutable) ?: detect()?.path
+    /**
+     * The `claude` sessions run: the path saved in Settings | Tools | Tandem when it can run (a saved npm `claude.cmd` as the
+     * `claude.exe` it calls, [resolveShim]), else the one Tandem [detect]s.
+     */
+    fun find(): String? = configured()?.takeIf { isExecutable(it) }?.let { resolveShim(it) } ?: detect()?.path
 
     /**
      * The `claude` Tandem finds by itself, whatever the settings say: the `tandem.claudePath` system property (a test hook) when it is
      * executable, then each entry of the login shell's `PATH` ([ShellEnvironment], which an IDE started from the Dock or Finder does
-     * not have), then the CLI's usual [installLocations]. Blocks while the platform is still loading the shell's environment.
+     * not have; on Windows the IDE's own `Path`, [pathVariable]), then the CLI's usual [installLocations]. Blocks while the platform
+     * is still loading the shell's environment.
      */
     fun detect(
         override: String? = System.getProperty("tandem.claudePath"),
         environment: Map<String, String> = ShellEnvironment.get(),
         home: String = System.getProperty("user.home"),
         windows: Boolean = SystemInfo.isWindows,
-    ): Found? = find(override, environment["PATH"].orEmpty(), installLocations(home, windows), windows)
+    ): Found? = find(override, pathVariable(environment)?.second.orEmpty(), installLocations(home, windows), windows)
+
+    /**
+     * The `PATH` of [environment] under whatever name it has, as its name to its value, or null when it has none. Windows names it
+     * `Path`, and a plain map (unlike the JDK's and the platform's environment maps there) does not look it up ignoring case.
+     */
+    fun pathVariable(environment: Map<String, String>): Pair<String, String>? =
+        environment.keys.firstOrNull { it.equals("PATH", ignoreCase = true) }?.let { it to environment.getValue(it) }
 
     /** The path saved in Settings | Tools | Tandem, or null when none is. Reads only the settings, which store it trimmed. */
     fun configured(): String? = TandemSettings.getInstance().state.claudePath
 
-    /** Whether [path] is a file that can be run. A directory is not, though its execute bit (the right to search it) may be set. */
-    fun isExecutable(path: String): Boolean = File(path).let { it.isFile && it.canExecute() }
+    /**
+     * Whether [path] is a file that can be run. A directory is not, though its execute bit (the right to search it) may be set. On
+     * Windows ([windows]) `canExecute` is true for every file the user can read, so the name must also end in an extension of
+     * [pathExt] (`PATHEXT`; `.COM;.EXE;.BAT;.CMD` when it is unset or blank), compared ignoring case: `claude.ps1`, npm's POSIX
+     * `claude` shim and `fake-claude.py` are no programs to `CreateProcess` (error 193).
+     */
+    fun isExecutable(path: String, windows: Boolean = SystemInfo.isWindows, pathExt: String? = System.getenv("PATHEXT")): Boolean {
+        val file = File(path)
+        if (!file.isFile || !file.canExecute()) return false
+        if (!windows) return true
+        val extensions = (pathExt?.takeIf { it.isNotBlank() } ?: DEFAULT_PATHEXT).split(';').filter { it.isNotBlank() }
+        return extensions.any { file.name.endsWith(it, ignoreCase = true) }
+    }
 
     /**
-     * Where `claude` is usually installed, for a `PATH` that lacks it: the CLI's own installers (the native one's `~/.local/bin`, the
-     * older local install's `~/.claude/local`), then, outside Windows, Homebrew's bin on Apple silicon and on Intel (also npm's global
-     * bin for a Node from Homebrew or nodejs.org), then the global bins of npm with the user prefix its documentation suggests, of Bun
-     * and of Volta.
+     * Where `claude` is usually installed, for a `PATH` that lacks it: the CLI's own installers (the native one's `~/.local/bin`, which
+     * on Windows the installer does not put on the `PATH`; the older local install's `~/.claude/local`), then on Windows npm's global
+     * prefix (`%APPDATA%\npm` from [appData], else `<home>\AppData\Roaming\npm`, npm's own default), where `claude.cmd` lands; elsewhere
+     * Homebrew's bin on Apple silicon and on Intel (also npm's global bin for a Node from Homebrew or nodejs.org), then the global bins
+     * of npm with the user prefix its documentation suggests, of Bun and of Volta.
      */
-    fun installLocations(home: String, windows: Boolean): List<String> {
+    fun installLocations(home: String, windows: Boolean, appData: String? = System.getenv("APPDATA")): List<String> {
         val installers = listOf("$home/.local/bin", "$home/.claude/local")
-        if (windows) return installers
+        if (windows) return installers + "${appData?.takeIf { it.isNotBlank() } ?: "$home/AppData/Roaming"}/npm"
         return installers + listOf("/opt/homebrew/bin", "/usr/local/bin", "$home/.npm-global/bin", "$home/.bun/bin", "$home/.volta/bin")
     }
 
-    /** [override] wins when it is executable; then each `PATH` entry; then the [locations], in their order. */
+    /**
+     * [override] wins when it is executable; then each `PATH` entry; then the [locations], in their order. On Windows ([windows]) the
+     * names are `claude.exe` then `claude.cmd`, never the bare `claude` (npm's `#!/bin/sh` shim, which Windows cannot run); a `PATH`
+     * entry loses the double quotes an installer may have written around it; and a found `claude.cmd` is the `claude.exe` it calls
+     * when that exists ([resolveShim]).
+     */
     fun find(override: String?, path: String, locations: List<String>, windows: Boolean): Found? {
-        override?.takeIf(::isExecutable)?.let { return Found(it, Where.OVERRIDE) }
-        val names = if (windows) listOf("claude.exe", "claude.cmd", "claude") else listOf("claude")
-        val dirs = path.split(File.pathSeparator).filter { it.isNotBlank() }.map { it to Where.PATH } +
+        override?.takeIf { isExecutable(it, windows) }?.let { return Found(resolveShim(it, windows), Where.OVERRIDE) }
+        val names = if (windows) listOf("claude.exe", "claude.cmd") else listOf("claude")
+        val dirs = path.split(File.pathSeparator).filter { it.isNotBlank() }
+            .map { (if (windows) it.removeSurrounding("\"") else it) to Where.PATH } +
             locations.map { it to Where.INSTALL_LOCATION }
         return dirs.asSequence()
             .flatMap { (dir, where) -> names.asSequence().map { File(dir, it) to where } }
             .firstOrNull { (file, _) -> file.isFile && file.canExecute() }
-            ?.let { (file, where) -> Found(file.path, where) }
+            ?.let { (file, where) -> Found(resolveShim(file.path, windows), where) }
     }
+
+    /**
+     * What to run for [path]: on Windows ([windows]) a `claude.cmd` becomes its [npmTarget] when there is one, so that the process
+     * Tandem holds is the CLI itself and not `cmd.exe` (whose `destroy` leaves `claude.exe` and a `conhost.exe` running), and so that no
+     * argument has to survive `cmd.exe`'s quoting; anything else, and a `.cmd` with no `claude.exe` in npm's place (pnpm's, yarn's or
+     * nvm-windows' shim), is run as it is, and a stop kills its whole tree.
+     */
+    internal fun resolveShim(path: String, windows: Boolean = SystemInfo.isWindows): String {
+        if (!windows) return path
+        val file = File(path)
+        if (!file.name.equals("claude.cmd", ignoreCase = true)) return path
+        return npmTarget(file)?.path ?: path
+    }
+
+    /** The `claude.exe` npm's [cmd] shim calls, `<its directory>/node_modules/@anthropic-ai/claude-code/bin/claude.exe`, if it is a file. */
+    fun npmTarget(cmd: File): File? = File(cmd.absoluteFile.parentFile, NPM_CLAUDE_EXE).takeIf { it.isFile }
+
+    /**
+     * The settings page's status line for a saved [path] that [isExecutable] refuses: on Windows ([windows]) it names what would run,
+     * since the file may well exist and be readable.
+     */
+    fun notRunnableText(path: String, windows: Boolean = SystemInfo.isWindows): String =
+        if (windows) "$path is not something Windows can run (no .exe, .cmd or .bat)" else "Configured path is not executable"
 
     /**
      * The environment to run [binary] in: [environment] with the binary's directory at the end of its `PATH`, unless the `PATH` has it

@@ -170,14 +170,15 @@ class TandemSettingsTest {
                 val page = withContext(Dispatchers.EDT) {
                     configurable.createComponent().also { configurable.reset() }
                 }
-                while (labels(page).let { detected !in it || "Configured path is not executable" !in it }) delay(20)
+                val notRunnable = ClaudeBinary.notRunnableText(notExecutable.toString())
+                while (labels(page).let { detected !in it || notRunnable !in it }) delay(20)
 
                 // A path that runs, applied: the warning goes.
                 withContext(Dispatchers.EDT) {
                     assertNotNull(UIUtil.findComponentOfType(page, TextFieldWithBrowseButton::class.java)).text = saved
                     configurable.apply()
                 }
-                while ("Configured path is not executable" in labels(page)) delay(20)
+                while (notRunnable in labels(page)) delay(20)
                 assertTrue(detected in labels(page))
 
                 // Test with an empty field runs the detected executable, not the saved one.
