@@ -149,15 +149,15 @@ jobs:
 
       # (b) The whole unit, fixture and platform suite (what `gradlew test` runs), failing the job on red. --continue: every class
       # runs and the report is uploaded whatever is red.
-      # The wrapper's own download of the distribution times out after 10 s with no retry (gradle-wrapper.properties), and three
-      # runs in a row died there before a single test started. Fetch it first, up to six times, so a slow services.gradle.org
-      # costs a minute and not the run.
+      # The wrapper's own download of the distribution times out after 10 s with no retry (gradle-wrapper.properties), and four
+      # runs in a row died there before a single test started (a timeout, then 504s from the GitHub release that
+      # services.gradle.org redirects to). Fetch it first, up to 24 times 30 s apart, so an outage costs minutes and not the run.
       - name: Fetch the Gradle distribution
         shell: bash
         run: |
-          for i in 1 2 3 4 5 6; do
+          for i in $(seq 1 24); do
             cmd //c "gradlew.bat --version --no-daemon" && exit 0
-            echo "attempt $i failed"; sleep 20
+            echo "attempt $i failed"; sleep 30
           done
           exit 1
       - name: Tests
