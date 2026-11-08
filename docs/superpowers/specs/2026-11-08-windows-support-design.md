@@ -184,6 +184,26 @@ in text a Bash command printed. Fix: none until a tester sees the MSYS form in a
 with `/`, which the CLI's Node resolves on Windows; a tester confirms the CLI reads the file. Proof: read; unknown for the
 two CLI-side forms.
 
+**R18. The line separator of a file Tandem creates.** Measured (run 42463265661, `IdeEditToolsTest` `a new file is created
+with its directories`, `write_file creates a new file of an unknown type`, `EditDiffTest` `a new file's proposal is
+editable…`): the text Claude sends (`one\ntwo\n`) reaches the new file as `one\r\ntwo\r\n`, because a file created with
+`createChildData` has no separator of its own and `FileDocumentManagerImpl` saves it with the project's default,
+`CodeStyle.getSettings(project).getLineSeparator()`, which is `System.lineSeparator()` (CRLF on Windows) unless the user set
+one. Decision: the file holds exactly the text Claude sent, `\n` stays `\n`, for a new file from `write_file` and for `Accept`
+in the editable diff, so the reply Claude gets (`EditResults.created`, built from the `Document`, always `\n`) and the disk
+agree on every OS; `IdeEditTools.create` sets the new file's detected separator to LF before the document is saved. An
+existing file keeps its own separator, as before (`EditMatcher.normalizeNewlines`, R10). A user who wants CRLF in a new file
+has the IDE's own line-separator action, as for any file. Proof: `IdeEditToolsTest` `a new file keeps the LF it was sent
+whatever the platform's separator` sets the project's default to CRLF on every OS, and the probe.
+
+**R19. The spelling of an outside file's path for the `@` palette.** Measured (the same run, `ProjectFilesTest` `an open file
+outside the base is a candidate by its absolute path…`): `ProjectFiles` yields the VFS path `C:/Users/…`; the test and the
+CLI's own `@path` read the native `C:\Users\…`. Decision: native separators for a path outside the base (the VFS path with
+`File.separatorChar`: `C:\Users\dev\notes.md`, `\\server\share\x` for a UNC path), as the file chooser and the CLI show it; inside
+the base the relative path keeps `/`, which Node resolves on Windows (R10). `unsavedText` looks an absolute path up with
+`findFileByNioFile`, which takes either spelling. Proof: `ProjectFilesTest` `an outside path is spelt natively` (pure, every
+OS), and the probe.
+
 ### 3.4 Chat and keys
 
 **R11. Key caps and glyphs.** `ui/cards/CardKeys.kt:70`, `chat/QueuedSends.kt:45` and `:81`, `ui/PromptBar.kt:506` and

@@ -1,5 +1,6 @@
 package dev.daarkolabs.tandem.ide.edits
 
+import com.intellij.application.options.CodeStyle
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.edtWriteAction
@@ -158,6 +159,23 @@ class IdeEditToolsTest {
         val reply = run(writeCall(path, "one\r\ntwo\n"))
         assertReply(EditResults.created(path.toString(), "one\ntwo\n", changed = false), reply)
         assertEquals("one\ntwo\n", Files.readString(path))
+    }
+
+    // spec: R18, a new file holds exactly the text Claude sent, whatever the platform's line separator
+    @Test
+    fun `a new file keeps the LF it was sent whatever the platform's separator`() {
+        val path = dir.resolve("crlf/new.txt")
+        // The project's default separator set to CRLF reproduces Windows' default on every OS; the platform gives it to a new file.
+        val settings = CodeStyle.createTestSettings(CodeStyle.getSettings(project)).apply { LINE_SEPARATOR = "\r\n" }
+        CodeStyle.setTemporarySettings(project, settings)
+        try {
+            assertEquals("\r\n", CodeStyle.getSettings(project).lineSeparator, "the project's default separator is CRLF, as on Windows")
+            assertReply(EditResults.created(path.toString(), "one\ntwo\n", changed = false), run(writeCall(path, "one\ntwo\n")))
+            assertEquals("one\ntwo\n", Files.readString(path), "the disk holds the text as sent, no CR")
+            assertEquals("one\ntwo\n", timeoutRunBlocking(30.seconds) { documentOf(path).text })
+        } finally {
+            CodeStyle.dropTemporarySettings(project)
+        }
     }
 
     @Test

@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -45,8 +46,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * (`build/` during a build, `.git/` during a commit) is not a change of the list. The re-reads run one at a time, with at most one
  * more waiting ([rereads] is conflated), however many event batches come while one runs. [matching] ranks them with the IDE's own
  * matcher (`NameUtil.buildMatcher`); [known] holds the last list read, for the bubble's chips. A file open in an editor outside the
- * base directory counts as part of the workspace while it is open (spec 3.5): it is listed first, by its absolute path, and only
- * the open file itself, never its folder.
+ * base directory counts as part of the workspace while it is open (spec 3.5): it is listed first, by its absolute path spelt
+ * natively (`C:\Users\…` on Windows, as the file chooser and the CLI's `@path` show it; Windows spec R19), and only the open file
+ * itself, never its folder.
  */
 @Service(Service.Level.PROJECT)
 class ProjectFiles(private val project: Project, private val scope: CoroutineScope) {
@@ -203,10 +205,10 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
      * changes; null when it has none, is not loaded, or no such file is known (spec 3.5). In a `readAction`, off the EDT.
      */
     suspend fun unsavedText(path: String): String? = readAction {
-        // An absolute path (an open editor's file outside the base) is looked up as such, never under the base.
-        val absolute = runCatching { Path.of(path).isAbsolute }.getOrDefault(false)
-        val file = if (absolute) {
-            LocalFileSystem.getInstance().findFileByPath(path)
+        // An absolute path (an open editor's file outside the base, in either spelling) is looked up as such, never under the base.
+        val absolute = runCatching { Path.of(path) }.getOrNull()?.takeIf { it.isAbsolute }
+        val file = if (absolute != null) {
+            LocalFileSystem.getInstance().findFileByNioFile(absolute)
         } else {
             project.guessProjectDir()?.findFileByRelativePath(path)
         }
@@ -294,7 +296,19 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
         private fun relativePath(file: VirtualFile, base: VirtualFile): String? =
             VfsUtilCore.getRelativePath(file, base, '/')?.takeIf { it.isNotEmpty() }
 
-        /** A local, non-directory [file]'s absolute path; null for any other (a diff, a scratch in a non-local file system). */
-        private fun absolutePath(file: VirtualFile): String? = file.takeIf { it.isInLocalFileSystem && !it.isDirectory }?.path
+        /**
+         * A local, non-directory [file]'s absolute path, spelt natively ([nativePath]); null for any other (a diff, a scratch in a
+         * non-local file system).
+         */
+        private fun absolutePath(file: VirtualFile): String? =
+            file.takeIf { it.isInLocalFileSystem && !it.isDirectory }?.path?.let { nativePath(it) }
+
+        /**
+         * [vfsPath] (`/`-separated) spelt with the platform's [separator] (Windows spec R19): `C:/Users/dev/x.md` is `C:\Users\dev\x.md`
+         * and a UNC `//server/share/x` is `\\server\share\x` on Windows; unchanged where the separator is `/`.
+         */
+        @VisibleForTesting
+        internal fun nativePath(vfsPath: String, separator: Char = File.separatorChar): String =
+            if (separator == '/') vfsPath else vfsPath.replace('/', separator)
     }
 }
