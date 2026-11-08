@@ -49,6 +49,8 @@ jobs:
       - name: Run the IDE test
         shell: bash
         run: python --version && set -o pipefail && ./gradlew integrationTest 2>&1 | tee integration.log
+      # Each pipeline ends in `|| true`: the step's shell runs with pipefail, and a grep that matches nothing (no failure message,
+      # no idea.log line naming the plugin) would otherwise end the report with exit code 1 or xargs's 123.
       - name: Report IDE test failures
         if: ${{ failure() }}
         shell: bash
@@ -56,9 +58,9 @@ jobs:
           grep -ho 'failure message="[^"]*' build/test-results/integrationTest/*.xml 2>/dev/null \
             | sed -E 's/^failure message="//; s/&#10;/ /g; s/\x1b\[[0-9;]*m//g; s/\?\[[0-9;]*m//g' \
             | cut -c1-400 | head -n 10 \
-            | while IFS= read -r line; do echo "::error title=IDE test (Windows)::${line}"; done
+            | while IFS= read -r line; do echo "::error title=IDE test (Windows)::${line}"; done || true
           find out/ide-tests -name idea.log -print0 2>/dev/null | xargs -0 grep -h 'Plugin: dev.daarkolabs.tandem' \
-            | sort -u | head -n 10 | while IFS= read -r line; do echo "::error title=IDE log (Windows)::${line}"; done
+            | sort -u | head -n 10 | while IFS= read -r line; do echo "::error title=IDE log (Windows)::${line}"; done || true
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
