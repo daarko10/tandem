@@ -70,13 +70,15 @@ class ProjectFilesTest {
         val files = ProjectFiles.getInstance(project.get())
         // No editor is open in the headless project: none comes first.
         assertEquals(emptyList(), files.openFirst)
-        // The selected editor's file, then the other open ones, each once, relative to the base; one outside it by its absolute path.
+        // The selected editor's file, then the other open ones, each once, relative to the base; one outside it by its absolute path,
+        // spelt natively (`C:\Users\…` on Windows, spec R19).
         val outside = vfs.refreshAndFindFileByNioFile(Files.createTempFile("outside", ".txt"))!!
+        val outsidePath = outside.toNioPath().toString()
         files.openFiles = { listOf(c, a, c, outside) }
         try {
-            assertEquals(listOf("b/c.txt", "a.txt", outside.path), files.openFirst)
+            assertEquals(listOf("b/c.txt", "a.txt", outsidePath), files.openFirst)
             assertEquals(
-                listOf("b/c.txt", "a.txt", outside.path),
+                listOf("b/c.txt", "a.txt", outsidePath),
                 mentionPalette(MentionQuery(0, "t"), files.candidates(), files.openFirst).rows.take(3),
             )
         } finally {
