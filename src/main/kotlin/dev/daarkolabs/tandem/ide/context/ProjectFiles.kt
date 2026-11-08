@@ -94,6 +94,16 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
         busy.first { it == 0 }
     }
 
+    /**
+     * The files open in editors, the selected ones first; tests replace it. Declared before [init]: the first read it launches runs
+     * on another thread and calls [openOutside] at once, so every property it reads must already be assigned.
+     */
+    @VisibleForTesting
+    internal var openFiles: () -> List<VirtualFile> = {
+        val editors = FileEditorManager.getInstance(project)
+        editors.selectedFiles.toList() + editors.openFiles.toList()
+    }
+
     init {
         project.messageBus.connect(scope).subscribe(
             VirtualFileManager.VFS_CHANGES,
@@ -214,13 +224,6 @@ class ProjectFiles(private val project: Project, private val scope: CoroutineSco
         }
         val documents = FileDocumentManager.getInstance()
         file?.takeIf { !it.isDirectory }?.let(documents::getCachedDocument)?.takeIf(documents::isDocumentUnsaved)?.text
-    }
-
-    /** The files open in editors, the selected ones first; tests replace it. */
-    @VisibleForTesting
-    internal var openFiles: () -> List<VirtualFile> = {
-        val editors = FileEditorManager.getInstance(project)
-        editors.selectedFiles.toList() + editors.openFiles.toList()
     }
 
     /**
