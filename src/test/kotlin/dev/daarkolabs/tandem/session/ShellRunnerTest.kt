@@ -20,6 +20,7 @@ import kotlin.io.path.readText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -197,6 +198,100 @@ class ShellRunnerTest {
         assertEquals(listOf("/bin/sh", "-lc", "x"), Shells.argv("x", mapOf("SHELL" to ""), os = "Linux"))
         assertEquals(listOf("C:\\W\\cmd.exe", "/c", "x"), Shells.argv("x", mapOf("ComSpec" to "C:\\W\\cmd.exe"), os = "Windows 11"))
         assertEquals(listOf("cmd.exe", "/c", "x"), Shells.argv("x", emptyMap(), os = "Windows 11"))
+    }
+
+    /** The Windows environment the Git Bash tests start from: every candidate present, so that removing one shows the next (R6). */
+    private val windowsEnvironment: Map<String, String> = mapOf(
+        "CLAUDE_CODE_GIT_BASH_PATH" to "D:\\portable\\git\\bash.exe",
+        "Path" to "C:\\WINDOWS\\system32;C:\\Tools;",
+        "ProgramFiles" to "C:\\Program Files",
+        "ProgramFiles(x86)" to "C:\\Program Files (x86)",
+        "LOCALAPPDATA" to "C:\\Users\\u\\AppData\\Local",
+        "ComSpec" to "C:\\WINDOWS\\system32\\cmd.exe",
+    )
+
+    private val programFilesBash = "C:\\Program Files\\Git\\bin\\bash.exe"
+    private val programFilesX86Bash = "C:\\Program Files (x86)\\Git\\bin\\bash.exe"
+    private val localAppDataBash = "C:\\Users\\u\\AppData\\Local\\Programs\\Git\\bin\\bash.exe"
+
+    @Test
+    fun `on Windows the shell is Git Bash from the variable, then PATH outside System32, then Git for Windows' folders`() {
+        val present = mutableSetOf(
+            "D:\\portable\\git\\bash.exe", "C:\\WINDOWS\\system32\\bash.exe", "C:\\Tools\\bash.exe",
+            programFilesBash, programFilesX86Bash, localAppDataBash,
+        )
+        val exists: (String) -> Boolean = { it in present }
+        assertEquals(
+            Shells.Choice(listOf("D:\\portable\\git\\bash.exe", "-lc", "x"), null),
+            Shells.choose("x", windowsEnvironment, os = "Windows 11", exists = exists),
+        )
+        val withoutVariable = windowsEnvironment - "CLAUDE_CODE_GIT_BASH_PATH"
+        assertEquals("C:\\Tools\\bash.exe", Shells.gitBash(withoutVariable, exists), "PATH, never System32's WSL launcher")
+        assertEquals(
+            Shells.Choice(listOf("C:\\Tools\\bash.exe", "-lc", "x"), null),
+            Shells.choose("x", withoutVariable, os = "Windows 11", exists = exists),
+        )
+        present -= "C:\\Tools\\bash.exe"
+        assertEquals(programFilesBash, Shells.gitBash(withoutVariable, exists))
+        present -= programFilesBash
+        assertEquals(programFilesX86Bash, Shells.gitBash(withoutVariable, exists))
+        present -= programFilesX86Bash
+        assertEquals(localAppDataBash, Shells.gitBash(withoutVariable, exists))
+        present -= localAppDataBash
+        assertNull(Shells.gitBash(withoutVariable, exists), "System32's bash.exe alone is not Git Bash")
+        // The variable's name is what Windows gives it: `PATH` in one process, `Path` in another.
+        assertEquals("C:\\Tools\\bash.exe", Shells.gitBash(mapOf("PATH" to "C:\\Tools"), { it == "C:\\Tools\\bash.exe" }))
+        assertEquals("C:\\Tools\\bash.exe", Shells.gitBash(mapOf("PATH" to "\"C:\\Tools\\\""), { it == "C:\\Tools\\bash.exe" }), "a quoted entry with a trailing separator")
+    }
+
+    /** Review Focus 1: Git uninstalled, the variable kept. */
+    @Test
+    fun `a CLAUDE_CODE_GIT_BASH_PATH that names no file is skipped`() {
+        val exists: (String) -> Boolean = { it == programFilesBash }
+        assertEquals(programFilesBash, Shells.gitBash(windowsEnvironment, exists))
+        assertEquals(
+            Shells.Choice(listOf(programFilesBash, "-lc", "x"), null),
+            Shells.choose("x", windowsEnvironment, os = "Windows 11", exists = exists),
+        )
+    }
+
+    @Test
+    fun `without Git Bash the Windows shell is ComSpec with the note`() {
+        val none: (String) -> Boolean = { false }
+        assertEquals(
+            Shells.Choice(listOf("C:\\W\\cmd.exe", "/c", "x"), Shells.GIT_BASH_MISSING_NOTE),
+            Shells.choose("x", mapOf("ComSpec" to "C:\\W\\cmd.exe"), os = "Windows 11", exists = none),
+        )
+        assertEquals(
+            Shells.Choice(listOf("cmd.exe", "/c", "x"), Shells.GIT_BASH_MISSING_NOTE),
+            Shells.choose("x", emptyMap(), os = "Windows 11", exists = none),
+        )
+        assertEquals("Ran in cmd.exe: Git Bash was not found", Shells.GIT_BASH_MISSING_NOTE)
+    }
+
+    @Test
+    fun `the Linux and macOS choice is unchanged and has no note`() {
+        val never: (String) -> Boolean = { error("no file is looked at off Windows") }
+        assertEquals(Shells.Choice(listOf("/bin/zsh", "-lc", "x"), null), Shells.choose("x", mapOf("SHELL" to "/bin/zsh"), os = "Linux", exists = never))
+        assertEquals(Shells.Choice(listOf("/bin/zsh", "-lc", "x"), null), Shells.choose("x", emptyMap(), os = "Mac OS X", exists = never))
+        assertEquals(Shells.Choice(listOf("/bin/zsh", "-lc", "x"), null), Shells.choose("x", mapOf("SHELL" to " "), os = "Mac OS X", exists = never))
+        assertEquals(Shells.Choice(listOf("/bin/sh", "-lc", "x"), null), Shells.choose("x", emptyMap(), os = "Linux", exists = never))
+        assertEquals(Shells.Choice(listOf("/bin/sh", "-lc", "x"), null), Shells.choose("x", mapOf("SHELL" to ""), os = "Linux", exists = never))
+    }
+
+    /** Deviation 1: the note is the row's first line, the result's and the frames', so it travels through the output. */
+    @Test
+    fun `without Git Bash the note is the output's first line`() {
+        unix()
+        val launcher = ShellLauncher { argv, directory, _ ->
+            ProcessBuilder("/bin/sh", "-c", argv.last()).directory(directory.toFile()).redirectErrorStream(true).start()
+        }
+        val shell = ShellRunner(launcher, environment = { mapOf("ComSpec" to "cmd.exe") }, os = "Windows 11")
+        val batches = Collections.synchronizedList(ArrayList<String>())
+        val result = run("printf hi", shell) { batches += it }
+        assertEquals("${Shells.GIT_BASH_MISSING_NOTE}\nhi", result.output)
+        assertEquals(ShellEnd.Exited(0), result.end)
+        assertTrue(batches.first().startsWith(Shells.GIT_BASH_MISSING_NOTE), "the first batch starts with the note: $batches")
     }
 
     @Test
