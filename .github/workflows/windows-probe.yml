@@ -163,7 +163,16 @@ jobs:
             head -2 "$f" | grep -o '<testsuite name="[^"]*" tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' || true
           done
           echo "::group::failures"
-          grep -h -o '<testcase name="[^"]*" classname="[^"]*"[^>]*>\s*<failure message="[^"]\{0,300\}' build/test-results/test/*.xml 2>/dev/null | sed 's/&#10;/ /g; s/&quot;/"/g' | head -n 60 || true
+          python3 -I - <<'PY'
+          import glob, re
+          shown = 0
+          for path in sorted(glob.glob("build/test-results/test/*.xml")):
+              text = open(path, encoding="utf-8", errors="replace").read()
+              for m in re.finditer(r'<testcase name="([^"]*)" classname="([^"]*)"[^>]*>\s*<(?:failure|error) message="([^"]{0,300})', text):
+                  if shown < 80:
+                      print(m.group(2).rsplit(".", 1)[-1], "|", m.group(1), "|", m.group(3).replace("&#10;", " ").replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">"))
+                  shown += 1
+          PY
           echo "::endgroup::"
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
@@ -178,6 +187,7 @@ jobs:
 
       # The native installer, last, so that it does not stand in front of npm's shims above: where its claude.exe lands.
       - name: The native installer
+        if: ${{ always() }}
         shell: pwsh
         continue-on-error: true
         run: |

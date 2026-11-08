@@ -209,8 +209,9 @@ class FakeClaudeTest {
         fake.readUntil({}) { it.type == "result" }
     }
 
+    /** Starts the fake in the directory's real path: Windows' temporary folder is named by its 8.3 short form (RUNNER~1), which a child's cwd would keep. */
     private fun start(fixture: String, env: Map<String, String> = emptyMap(), workingDirectory: Path = dir): Fake =
-        Fake(fakeClaude, workingDirectory, fixture, env).also { fakes += it }
+        Fake(fakeClaude, workingDirectory.toRealPath(), fixture, env).also { fakes += it }
 
     /** What a host answers at once: every `mcp_message` with [toolReply] for a `tools/call`, every `can_use_tool` with allow. */
     private fun answerAsHost(frame: JsonObject, toolReply: (JsonElement?) -> JsonObject = reply("done", isError = false)) {
