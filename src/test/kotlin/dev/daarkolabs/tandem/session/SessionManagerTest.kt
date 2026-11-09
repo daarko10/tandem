@@ -107,9 +107,13 @@ class SessionManagerTest {
     private val log: Path get() = dir.resolve("fake-cli.log")
     private val folder: Path get() = dir.resolve("transcripts")
 
+    /** When this test began, with a second of slack against the clock the OS stamps processes with. */
+    private var testStarted: Instant = Instant.EPOCH
+
     @BeforeEach
     fun createFolder() {
         folder.createDirectories()
+        testStarted = Instant.now().minusSeconds(1)
     }
 
     @AfterEach
@@ -123,6 +127,15 @@ class SessionManagerTest {
         // access the file because it is being used by another process` (Build and test (Windows) on b60dda7, job 128962723063).
         fun started(): List<ProcessHandle> = ProcessHandle.current().descendants().filter { it.isAlive && it.pid() !in earlierDescendants }.toList()
         while (started().isNotEmpty() && System.nanoTime() < deadline) delay(20)
+        // A descendant whose parent has already exited is an orphan the JVM's process tree no longer reaches (the Windows probe of
+        // c3a898c still met the error above with the two waits in place): so also wait for every python, cmd.exe or conhost.exe on
+        // the machine that started during this test, whatever its parent. On Unix the names do not match and this is a no-op.
+        val shimNames = setOf("python.exe", "python3.exe", "cmd.exe", "conhost.exe")
+        fun strays(): List<ProcessHandle> = ProcessHandle.allProcesses().filter { h ->
+            h.isAlive && h.info().startInstant().orElse(Instant.EPOCH) >= testStarted &&
+                h.info().command().orElse("").substringAfterLast('\\').substringAfterLast('/').lowercase() in shimNames
+        }.toList()
+        while (strays().isNotEmpty() && System.nanoTime() < deadline) delay(20)
         val leaked = ownFakeProcesses()
         leaked.forEach { it.destroyForcibly() } // so that the next test starts clean
         assertEquals(emptyList(), leaked.map { it.pid() }, "fake CLI processes outlived the manager's scope")
