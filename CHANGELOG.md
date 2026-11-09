@@ -4,6 +4,24 @@ All notable changes to Tandem. The newest version's section becomes the plugin's
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-09
+
+### Added
+- Tandem runs on Windows, with the CLI installed by npm (`claude.cmd`, whose `claude.exe` Tandem runs directly) or by the
+  native installer (`%USERPROFILE%\.local\bin\claude.exe`). `! command` runs in Git Bash, as the CLI's Bash tool does,
+  and in `cmd.exe` with a note when Git Bash is missing. Every test runs on `windows-latest` in CI; the plugin has not yet
+  been tried on a real Windows machine, so reports from Windows users are welcome in the issue tracker.
+- Settings | Tools | Tandem says when a saved `claude` path is not something Windows can run (no `.exe`, `.cmd` or `.bat`).
+
+### Fixed
+- The project file list behind the `@` palette could fail at project open with a `NullPointerException`: its first read ran
+  before the service had finished constructing.
+- Closing a session whose CLI had left a child process behind could wait forever on Windows: the session's stdout read now
+  runs on a thread the close does not wait for, as the stderr read already did, and a close returns once the CLI's process
+  tree is gone.
+- On Windows, a file Tandem creates keeps the `\n` line endings Claude sent instead of the project's default `\r\n`, and a
+  file outside the project is shown as `C:\…` in the `@` palette.
+
 ## [0.4.2] - 2026-11-07
 
 ### Fixed
