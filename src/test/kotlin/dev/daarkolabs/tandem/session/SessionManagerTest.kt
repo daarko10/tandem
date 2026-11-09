@@ -45,6 +45,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.CleanupMode
 import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
 import java.io.IOException
@@ -87,7 +88,9 @@ import kotlin.time.Duration.Companion.seconds
  * replays a recorded fixture, and the fake's log shows how each process was started and every frame the host wrote to it.
  */
 class SessionManagerTest {
-    @TempDir
+    // Deleted by [cancelScope] with retries, not by JUnit's one attempt: on Windows the directory was still held by something
+    // a moment after every process the test started had gone, and JUnit's delete then failed the test.
+    @TempDir(cleanup = CleanupMode.NEVER)
     lateinit var dir: Path
 
     private val fakeClaude: String = System.getProperty("tandem.claudePath") ?: "src/test/resources/fake-claude.py"
@@ -138,7 +141,33 @@ class SessionManagerTest {
         while (strays().isNotEmpty() && System.nanoTime() < deadline) delay(20)
         val leaked = ownFakeProcesses()
         leaked.forEach { it.destroyForcibly() } // so that the next test starts clean
-        assertEquals(emptyList(), leaked.map { it.pid() }, "fake CLI processes outlived the manager's scope")
+        try {
+            assertEquals(emptyList(), leaked.map { it.pid() }, "fake CLI processes outlived the manager's scope")
+        } finally {
+            deleteTempDir()
+        }
+    }
+
+    /**
+     * Deletes [dir] with retries for up to ten seconds. On Windows the Build and probe runs met `The process cannot access the file
+     * because it is being used by another process` on the directory itself after every wait above had passed (c3a898c, 068a90e,
+     * 3e1a60a), so a directory that still cannot go is left in place on the ephemeral runner, with every process started during
+     * the test printed, which is what names the holder next time.
+     */
+    private suspend fun deleteTempDir() {
+        val deadline = System.nanoTime() + 10_000_000_000L
+        var lastError: Throwable? = null
+        while (true) {
+            lastError = runCatching { dir.toFile().deleteRecursively() }.exceptionOrNull()
+            if (!Files.exists(dir)) return
+            if (System.nanoTime() > deadline) break
+            delay(100)
+        }
+        val started = ProcessHandle.allProcesses()
+            .filter { it.info().startInstant().orElse(Instant.EPOCH) >= testStarted }
+            .map { h -> "${h.pid()} ${h.info().command().orElse("?")} parent=${h.parent().map { it.pid() }.orElse(-1)} since=${h.info().startInstant().orElse(null)}" }
+            .toList()
+        println("temp directory $dir still held after 10 s and left in place (${lastError?.message ?: "no error"}); processes started during the test:\n" + started.joinToString("\n"))
     }
 
     private fun manager(
