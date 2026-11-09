@@ -181,7 +181,10 @@ Key choices:
    with spaces or of directories. **Status: implemented on feat/ide-edits; the manual pass in `runIde` (focus on the right
    side, Ctrl+S in the diff, the editor-tab preference, undo as one step, Enter in the mention palette) is the owner's.**
 3. **Parity.** Slash commands, plan mode, AskUserQuestion, rewind, subagent status.
-4. **Hardening.** Windows/WSL, Remote Development, IDE matrix in CI, published benchmarks.
+4. **Hardening.** Windows: CI green on `windows-latest` (unit, fixture, platform tests; the IDE test nightly), no WSL, no
+   Remote Development; a user's report changes the README (spec docs/superpowers/specs/2026-11-08-windows-support-design.md,
+   `CLAUDE.md`'s Windows section). **Status: implemented on feat/windows.** Still open: Remote Development, the IDE matrix in
+   CI, published benchmarks.
 
 ## Open questions
 - Does the platform's classloader expose kotlinx.serialization to plugins? We bundle 1.9.0 (tree API only) for now.

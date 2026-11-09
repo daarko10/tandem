@@ -8,8 +8,11 @@ Usage: redact_fixture.py <in.ndjson> <out.ndjson> [<in> <out> ...]
   the `agent_id` of the lines it produces and the `parent_tool_use_id` pointing at its tool_use stay correlated.
 - Replaces long base64 payloads (the `data` of a base64 source and the `base64` of an image tool_use_result) with
   "<base64>". Only a `data` or `base64` value of at least 256 base64 characters counts, so short strings are never touched.
-- Replaces absolute paths with <path>, e-mail addresses with <email>, git branch names with <branch> and the
-  entrypoint (how the recording was started) with <entrypoint>. A path under the recording's working directory (a
+- Replaces absolute paths with <path> (a Unix path under /root, /home, /Users, /tmp, /private, /var or /opt, and a
+  Windows drive path, `C:\…` or `C:/…`), e-mail addresses with <email>, git branch names with <branch> and the
+  entrypoint (how the recording was started) with <entrypoint>. A value under a `*_path` key that is one whole
+  absolute path (`powershell_path`, with a space; a `\\\\.\\pipe\\…` name as `messaging_socket_path` on Windows)
+  becomes <path> wherever it is. A path under the recording's working directory (a
   line's top-level `cwd`, its resolved path and its macOS /private twin) keeps its tail: `<path>/hello.txt`, when that
   directory is a temporary one (the recorders' mktemp -d), so a recording made in a project never shows its file names.
 - Empties environment-specific lists in system/init and in the initialize control_response
@@ -81,7 +84,10 @@ NONCE_KEYS = URL_KEYS[:2]
 REDACTED_RE = re.compile(r"REDACTED_[A-Z0-9_]+")
 # A path ends before a quote or backtick and leaves a trailing colon or period out ("rule to `/home/u/CLAUDE.md`: when",
 # "not found in /home/u/a.txt. The file"); one right after a placeholder (<path>/tmp/x) is a work-dir file's tail, kept.
-PATH_RE = re.compile(r"(?<!<path>)(?:/(?:root|home|Users|tmp|private|var|opt)|[A-Za-z]:\\\\)(?:[^\s\"'`]*[^\s\"'`:.])?")
+PATH_RE = re.compile(r"(?<!<path>)(?:/(?:root|home|Users|tmp|private|var|opt)|(?<!\w)[A-Za-z]:[\\/])(?:[^\s\"'`]*[^\s\"'`:.])?")  # (?<!\w): not the `s:/` of https://
+# A whole value under a `*_path` key: a Unix or drive path, or a Windows pipe name (`\\.\pipe\LOCAL\cc-msg-<hash>`).
+PATH_KEY_RE = re.compile(r"_path$")
+WHOLE_PATH_RE = re.compile(r"(?:/|[A-Za-z]:[\\/]|\\\\)\S.*")
 API_ID_RE = re.compile(r"^(?:toolu|srvtoolu|msg|req)_[A-Za-z0-9]+$")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PLACEHOLDER_RE = re.compile(r"<[A-Za-z_]\w*-\d+>")
@@ -193,6 +199,8 @@ def scrub(node, key=None):
             return "<base64>"
         if work_dir_re:
             node = work_dir_re.sub("<path>", node)
+        if key and PATH_KEY_RE.search(key) and WHOLE_PATH_RE.fullmatch(node):
+            return "<path>"
         node = PATH_RE.sub("<path>", node)
         return EMAIL_RE.sub("<email>", node)
     return node

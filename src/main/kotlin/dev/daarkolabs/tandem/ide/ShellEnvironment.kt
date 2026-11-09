@@ -10,6 +10,11 @@ import org.jetbrains.annotations.TestOnly
  * `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), without `/opt/homebrew/bin`, `~/.local/bin` or what the user's shell profile adds. The
  * platform runs the login shell once at startup and keeps what it printed; that is where a terminal finds `claude`, and what it gives
  * the CLI. When the platform did not load it (the IDE was started from a terminal, or the shell failed), it is the IDE's own.
+ *
+ * On Windows the platform runs no shell: the map is the IDE's own environment, the user and system variables from the registry as
+ * they were when the IDE started (plus what the Toolbox or a terminal added), which is also where a terminal finds `claude`. A
+ * variable set after the IDE started (npm's or the installer's `Path` entry, `CLAUDE_CONFIG_DIR`) reaches Tandem at the next IDE
+ * start, as it reaches Explorer; until then [ClaudeBinary.installLocations] covers the `Path` entry not yet seen.
  */
 internal object ShellEnvironment {
     private val platform: () -> Map<String, String> = EnvironmentUtil::getEnvironmentMap

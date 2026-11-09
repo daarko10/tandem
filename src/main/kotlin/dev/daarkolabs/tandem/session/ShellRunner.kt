@@ -9,6 +9,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
+import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.CharBuffer
@@ -52,19 +53,71 @@ object Shells {
     /** Output reaches the chat at most this often. */
     const val BATCH_MILLIS: Long = 50
 
+    /** The output's first line on Windows when no Git Bash was found and the command ran in `cmd.exe` (R6, hard rule 5). */
+    const val GIT_BASH_MISSING_NOTE: String = "Ran in cmd.exe: Git Bash was not found"
+
+    /** Git for Windows' `bash.exe` below the folders the installers use, each from the environment variable named. */
+    private val GIT_FOR_WINDOWS: List<Pair<String, String>> = listOf(
+        "ProgramFiles" to "\\Git\\bin\\bash.exe",
+        "ProgramFiles(x86)" to "\\Git\\bin\\bash.exe",
+        "LOCALAPPDATA" to "\\Programs\\Git\\bin\\bash.exe",
+    )
+
+    /** The shell chosen for a command and, on Windows without Git Bash, the [note] that goes first in the output. */
+    data class Choice(val argv: List<String>, val note: String?)
+
     /**
-     * The argv that runs [command]: on Windows (unverified) `%ComSpec% /c command`; elsewhere the login shell, `$SHELL -lc command`
-     * (`/bin/zsh` when `SHELL` is missing or blank on macOS, `/bin/sh` elsewhere). A non-interactive login shell: the profile's PATH
-     * and exports reach the command, aliases and functions of `.zshrc`/`.bashrc` do not.
+     * The argv that runs [command], as [choose] picks it: on Windows Git Bash, `<bash.exe> -lc command`, as the CLI runs its own
+     * Bash tool and `!` escape there, else `%ComSpec% /c command`; elsewhere the login shell, `$SHELL -lc command` (`/bin/zsh` when
+     * `SHELL` is missing or blank on macOS, `/bin/sh` elsewhere). A non-interactive login shell: the profile's PATH and exports
+     * reach the command, aliases and functions of `.zshrc`/`.bashrc` do not.
      */
-    fun argv(command: String, environment: Map<String, String>, os: String = System.getProperty("os.name")): List<String> {
+    fun argv(command: String, environment: Map<String, String>, os: String = System.getProperty("os.name")): List<String> =
+        choose(command, environment, os).argv
+
+    /**
+     * The shell for [command]: on Windows [gitBash] with `-lc` and no note, else `%ComSpec% /c` (`cmd.exe` when `ComSpec` is
+     * missing or blank) with [GIT_BASH_MISSING_NOTE], so the user knows why Claude's shell and the row's differ; elsewhere the
+     * login shell with `-lc` and no note. [exists] says whether a path names a file; a test replaces it.
+     */
+    fun choose(
+        command: String,
+        environment: Map<String, String>,
+        os: String = System.getProperty("os.name"),
+        exists: (String) -> Boolean = { File(it).isFile },
+    ): Choice {
         if (os.lowercase().contains("windows")) {
-            val comSpec = environment["ComSpec"] ?: environment.entries.firstOrNull { it.key.equals("ComSpec", ignoreCase = true) }?.value
-            return listOf(comSpec?.takeIf { it.isNotBlank() } ?: "cmd.exe", "/c", command)
+            gitBash(environment, exists)?.let { return Choice(listOf(it, "-lc", command), null) }
+            val comSpec = variable(environment, "ComSpec")
+            return Choice(listOf(comSpec?.takeIf { it.isNotBlank() } ?: "cmd.exe", "/c", command), GIT_BASH_MISSING_NOTE)
         }
         val shell = environment["SHELL"]?.takeIf { it.isNotBlank() } ?: if (os.startsWith("Mac")) "/bin/zsh" else "/bin/sh"
-        return listOf(shell, "-lc", command)
+        return Choice(listOf(shell, "-lc", command), null)
     }
+
+    /**
+     * Git Bash on Windows (R6), the first that [exists]: `CLAUDE_CODE_GIT_BASH_PATH` (the CLI's own override; one that names no
+     * file is skipped, not run); `bash.exe` in a `PATH` entry (the variable under any case, split on `;`, quotes and a trailing
+     * separator dropped) whose path does not end in `\System32` ignoring case, since that one is WSL's launcher;
+     * `%ProgramFiles%\Git\bin\bash.exe`; `%ProgramFiles(x86)%\Git\bin\bash.exe`; `%LOCALAPPDATA%\Programs\Git\bin\bash.exe`;
+     * else null.
+     */
+    fun gitBash(environment: Map<String, String>, exists: (String) -> Boolean): String? {
+        variable(environment, "CLAUDE_CODE_GIT_BASH_PATH")?.takeIf { it.isNotBlank() && exists(it) }?.let { return it }
+        variable(environment, "PATH").orEmpty().split(';')
+            .map { it.trim().removeSurrounding("\"").trimEnd('\\', '/') }
+            .filter { it.isNotBlank() && !it.endsWith("\\System32", ignoreCase = true) }
+            .map { "$it\\bash.exe" }
+            .firstOrNull(exists)
+            ?.let { return it }
+        return GIT_FOR_WINDOWS.firstNotNullOfOrNull { (name, tail) ->
+            variable(environment, name)?.takeIf { it.isNotBlank() }?.let { "${it.trimEnd('\\', '/')}$tail" }?.takeIf(exists)
+        }
+    }
+
+    /** [environment]'s [name] under any case: Windows keeps the case a variable was set with (`Path`, `PATH`, `ComSpec`). */
+    private fun variable(environment: Map<String, String>, name: String): String? =
+        environment[name] ?: environment.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
 
     /** Starts [argv] in the directory with exactly the environment given, stderr merged into stdout in order. */
     fun defaultLauncher(): ShellLauncher = ShellLauncher { argv, directory, environment ->
@@ -102,8 +155,8 @@ sealed interface ShellEnd {
 data class ShellResult(val output: String, val end: ShellEnd, val durationMs: Long, val cut: Int)
 
 /**
- * Runs shell escapes in the user's login shell (spec 12.4), off the EDT, polling the output so that Stop, the cap and a close act at
- * once. Never logs the command or its output.
+ * Runs shell escapes in the user's login shell, on Windows in Git Bash as [Shells.choose] picks it (spec 12.4, R6), off the EDT,
+ * polling the output so that Stop, the cap and a close act at once. Never logs the command or its output.
  */
 class ShellRunner(
     private val launcher: ShellLauncher = Shells.defaultLauncher(),
@@ -111,6 +164,7 @@ class ShellRunner(
     private val clock: () -> Long = System::currentTimeMillis,
     private val timeoutMillis: Long = Shells.TIMEOUT_MILLIS,
     private val batchMillis: Long = Shells.BATCH_MILLIS,
+    private val os: String = System.getProperty("os.name"),
 ) {
     /** The shells running, from their start until they are gone: what [killAllNow] kills. */
     private val running: MutableSet<Process> = ConcurrentHashMap.newKeySet()
@@ -128,7 +182,7 @@ class ShellRunner(
      */
     suspend fun run(command: String, directory: Path, onOutput: suspend (String) -> Unit): ShellResult = withContext(Dispatchers.IO) {
         val env = environment()
-        val argv = Shells.argv(command, env)
+        val (argv, note) = Shells.choose(command, env, os)
         val started = clock()
         val p = try {
             launcher.launch(argv, directory, env)
@@ -140,6 +194,8 @@ class ShellRunner(
         val output = Output(onOutput, started)
         try {
             runCatching { p.outputStream.close() } // a command that reads stdin sees its end
+            // Windows without Git Bash: the note is the first line of the row, the result and the frames Claude gets (counted in the cap).
+            if (note != null) (note + "\n").toByteArray(Charsets.UTF_8).let { output.bytes(it, it.size) }
             val finished = try {
                 withTimeoutOrNull(timeoutMillis) {
                     pump(p, output)

@@ -18,6 +18,7 @@ import com.intellij.openapi.vfs.ReadonlyStatusHandler
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiDocumentManager
+import com.intellij.util.LineSeparator
 import dev.daarkolabs.tandem.protocol.TandemTools
 import dev.daarkolabs.tandem.protocol.ToolReply
 import dev.daarkolabs.tandem.session.SessionId
@@ -221,8 +222,8 @@ class IdeEditTools(
     }
 
     /**
-     * `write_file` of a new file: its directories, the file, its text. A file that appeared meanwhile is a change while the diff was
-     * open, found before any folder is created.
+     * `write_file` of a new file: its directories, the file, its text, saved with `\n` whatever the platform's default separator
+     * (spec R18). A file that appeared meanwhile is a change while the diff was open, found before any folder is created.
      */
     private fun create(proposal: EditProposal, finalText: String): InCommand {
         val parentPath = proposal.path.parent ?: throw IOException("the path has no parent folder")
@@ -238,6 +239,9 @@ class IdeEditTools(
         }
         val created = parent.createChildData(this, name)
         val document = FileDocumentManager.getInstance().getDocument(created) ?: throw IOException("the IDE has no text document for it")
+        // Spec R18: the file holds exactly the text Claude sent. A new file has no separator of its own (loading its empty content
+        // detected none), and the save would take the project's default, CRLF on Windows; `\n` is what the reply carries.
+        created.detectedLineSeparator = LineSeparator.LF.separatorString
         document.setText(finalText)
         return InCommand.Done(document, emptyList())
     }

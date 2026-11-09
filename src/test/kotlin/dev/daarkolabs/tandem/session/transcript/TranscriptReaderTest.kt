@@ -39,6 +39,7 @@ import java.time.Instant
 import java.util.BitSet
 import kotlin.io.path.appendText
 import kotlin.io.path.bufferedWriter
+import kotlin.io.path.createDirectories
 import kotlin.io.path.fileSize
 import kotlin.io.path.readLines
 import kotlin.io.path.writeBytes
@@ -825,8 +826,11 @@ class TranscriptReaderTest {
     @Test
     fun `a file that cannot be opened makes read throw and meta fall back to the id`(@TempDir dir: Path) {
         val id = "77777777-7777-4777-8777-777777777777"
-        // As root, a test cannot make a file unreadable: a path below a plain file cannot be opened either.
-        val unopenable = dir.resolve("not-a-folder").also { it.writeText("") }.resolve("$id.jsonl")
+        // As root, a test cannot make a file unreadable. Unix refuses to open a path below a plain file (ENOTDIR), while Windows
+        // calls that "not found", which the reader takes as no session at all; Windows refuses to open a directory (access denied),
+        // while Unix opens one and fails only on the read. Each system gets the one it refuses at the open.
+        val unopenable = if (System.getProperty("os.name").startsWith("Windows")) dir.resolve("$id.jsonl").createDirectories()
+        else dir.resolve("not-a-folder").also { it.writeText("") }.resolve("$id.jsonl")
         assertFailsWith<IOException> { runBlocking { TranscriptReader.read(unopenable) } }
         val meta = TranscriptReader.meta(unopenable)
         assertEquals(emptyMeta(id), meta)

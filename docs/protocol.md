@@ -39,6 +39,8 @@ Sources, in order of authority:
    - 2.1.312, each with its transcript, recorded with `--model sonnet`: `ide-edit`, `ide-edit-two` and `ide-edit-stop`
      (Tandem's own edit tools served as an SDK MCP server over the control channel, beside a configured stdio server:
      sections 1.1, 4.2, 4.5 and 6.2; section 10 lists the frames of each) and `ide-mention` (`@path` in a prompt, section 3).
+   - 2.1.319 (Windows, probe run on `windows-latest`): `not-logged-in`, one `-p` prompt with no sign-in and no key (section 7;
+     the Windows fields of its `init`, 5.1 and 10). No transcript: the CLI wrote none the probe kept, as for `plain-reply`.
    `synthetic-long-reply` is generated from `plain-reply` by `scripts/make_long_reply.py`, the only fixture that was not
    recorded; nothing here cites it. Re-record with `scripts/record-fixture.sh` (one-shot prompt) or
    `scripts/record-scenario.sh` (bidirectional scenarios); both copy the transcript too and redact the recording in the
@@ -72,7 +74,7 @@ A row that cites a fixture was recorded (versions in Sources); the others come f
 |---|---|
 | Version gating | Use `init.capabilities` first, `claude_code_version` second. `pending_permission_requests` on initialize from 2.1.268; `interrupt_receipt_v1` for `still_queued`; `scope` on refusal fallback is new (absent = `session`). Refuse to start below a minimum tested version and say so. |
 | Interrupt | Fixture `interrupt`: the receipt `{still_queued:[]}` arrives, then the partial `assistant`, a synthetic `user` text `[Request interrupted by user]`, the remaining stream frames, and `result{subtype:"error_during_execution", is_error:true, terminal_reason:"aborted_streaming", stop_reason:null}`. Treat that result as "stopped", not as a failure. Recorded again with 2.1.301 as `history-interrupt`, with its transcript (section 11): the same order; closing stdin afterwards ended the process with exit code 1. |
-| API error | Fixture `invalid-model`: a synthetic `assistant` line (`model:"<synthetic>"`, `error:"model_not_found"`, `api_error_status:404`), then `result{subtype:"success", is_error:true, terminal_reason:"api_error"}` (section 7). A failed turn, named by `terminal_reason`, not by the subtype. |
+| API error | Fixture `invalid-model`: a synthetic `assistant` line (`model:"<synthetic>"`, `error:"model_not_found"`, `api_error_status:404`), then `result{subtype:"success", is_error:true, terminal_reason:"api_error"}` (section 7); the same shape with `error:"authentication_failed"` when the CLI is not signed in (fixture `not-logged-in`). A failed turn, named by `terminal_reason`, not by the subtype. |
 | Undocumented stdout types | See section 10. The SDK passes them through untouched. |
 | Pre-init lines | `active_goal`/`autocompact_state` arrive **before** `system/init` (`plain-reply.ndjson:1,2,4`, 2.1.300). Do not assume `init` is first. |
 | Local commands | A typed local command (`/mcp`, `/model`, `/help`) runs no turn and is not echoed: the CLI answers with a synthetic `assistant` line carrying `local_command_*` and a zero-turn `result` (`mcp-slash.ndjson:5`-`:6`, `:17`-`:18`, 2.1.306). No model output follows; show the line as the reply (6.1, 7). |
@@ -256,10 +258,24 @@ an inherited id was not measured.
   of the login shell's `PATH` (section 1.2); then the usual install locations `~/.local/bin` (the native installer),
   `~/.claude/local` (the older local install), and outside Windows `/opt/homebrew/bin` and `/usr/local/bin` (Homebrew,
   and npm's global bin for a Node from Homebrew or nodejs.org), `~/.npm-global/bin`, `~/.bun/bin` and `~/.volta/bin`
-  (inferred locations). On Windows it looks for `claude.exe`, `claude.cmd`, then `claude`. The settings page shows what
-  it found and where. Spawn the native binary directly. When the binary's directory is not on the `PATH`, it goes to the
-  end of the child's `PATH`: a `claude` that npm, Volta or Bun installed is `#!/usr/bin/env node`, with `node` beside it.
-  At the end, so that the user's own `node` and system tools still come first.
+  (inferred locations). The settings page shows what it found and where. Spawn the native binary directly. When the
+  binary's directory is not on the `PATH`, it goes to the end of the child's `PATH`: a `claude` that npm, Volta or Bun
+  installed is `#!/usr/bin/env node`, with `node` beside it. At the end, so that the user's own `node` and system tools
+  still come first.
+- Windows (CLI 2.1.319, probe run on `windows-latest`; the Windows spec `docs/superpowers/specs/2026-11-08-windows-support-design.md`
+  R1 to R5). There is no login shell: the environment is the IDE's own (the registry's user and system variables as the IDE
+  started), and the variable is `Path`, read under whatever name it has. The names are `claude.exe` then `claude.cmd`, never the
+  bare `claude`: npm writes `claude`, `claude.cmd` and `claude.ps1` into its prefix, and the bare one is a `#!/bin/sh` shim
+  that `CreateProcess` refuses with `error=193` (measured). The install locations are `%USERPROFILE%\.local\bin` (the native
+  installer's `claude.exe`, 345 MB; the installer does not put the folder on the `Path`, measured), `%USERPROFILE%\.claude\local`
+  and `%APPDATA%\npm` (npm's documented default prefix, `<home>\AppData\Roaming\npm` when `APPDATA` is empty; the runner's
+  own prefix was `C:\npm\prefix`). A `Path` entry loses the double quotes an installer may have written around it. The npm
+  package is not a Node script: it ships `node_modules\@anthropic-ai\claude-code\bin\claude.exe` and the three shims only
+  call it (measured), so a found `claude.cmd` is run as that `.exe` when it exists beside it; a `.cmd` without one runs as it
+  is, through the `cmd.exe` the JDK arranges (the process held is `cmd.exe`, with `claude.exe` and `conhost.exe` as children,
+  which a stop kills after closing stdin: `destroy()` is `TerminateProcess` there, measured). A saved path must end in an
+  extension of `PATHEXT` (`.COM;.EXE;.BAT;.CMD` when unset, compared ignoring case): `canExecute` is true for every file on
+  Windows (measured).
 
 ### 1.4 Startup sequence
 
@@ -893,7 +909,12 @@ Emitted **at the start of every turn** (not only once). Fixture line (`plain-rep
 | `capabilities` | feature detection; open set |
 | `effort`, `betas`, `output_style`, `fast_mode_state` | display |
 
-Extra fixture fields not in types: `product_feedback_disabled`, `analytics_disabled`, `scratchpad_path`, `messaging_socket_path`, `per_turn_effort_active`, `startup_timing{...}`. Ignore unknown fields.
+Extra fixture fields not in types: `product_feedback_disabled`, `analytics_disabled`, `scratchpad_path`, `messaging_socket_path`, `per_turn_effort_active`, `startup_timing{...}`.
+On Windows (2.1.319, probe run, `not-logged-in.ndjson:1`) also `powershell_path` (the `pwsh.exe` the CLI found) and
+`memory_paths{auto}` (the project's `memory` folder under the config directory's `projects\<key>`; whether a Unix 2.1.319
+also writes it was not measured), and there `messaging_socket_path` is a named pipe, `\\.\pipe\LOCAL\cc-msg-<hash>`,
+not a socket file; the same line has `original_cwd`, `additional_directories` (the `--add-dir` folders, 1.1), `fast_mode_disabled_reason`,
+`ultrathink_available`, `ultrathink_typed_raises` and `view_mode`. Ignore unknown fields.
 
 MCP servers and commands (2.1.306). `mcp_servers` is the thin list `[{name, status, source}]` (`mcp-status.ndjson:6`): no
 error, config or tools, which come from `mcp_status` (4.4). Recorded statuses: `connected`, `failed` and `needs-auth` (`:6`),
@@ -1222,6 +1243,10 @@ API error (fixture `invalid-model`, 2.1.302, run with `--model claude-nonexisten
 `result{subtype:"success", is_error:true, terminal_reason:"api_error", stop_reason:"stop_sequence", result:<that text>}`.
 The subtype says nothing here: Tandem names the failure by `terminal_reason`, and the rejected model by the model picked
 or reported, never `<synthetic>`.
+The same shape with no sign-in and no key (fixture `not-logged-in`, 2.1.319, Windows, probe run): `init.apiKeySource:"none"`,
+then the `assistant` line with `error:"authentication_failed"`, `api_error_status:null` and the text `Not logged in · Please
+run /login`, the `result` as above (`result:<that text>`), and exit code 1. Tandem's notice for `authentication_failed` sends the
+user to `claude` in a terminal and never offers a login, the CLI's `/login` included (CLAUDE.md hard rule 3; `ReducerTest`).
 
 A local command's turn (6.1; 2.1.306) ends with a `result` that has `num_turns:0`, `duration_api_ms:0` and, for `/mcp` and
 `/model`, `local_command` (`mcp-slash.ndjson:6`, `:12`; none for `/help`, `:18`). Tandem ends a turn without a `Worked for`
@@ -1308,7 +1333,7 @@ Parse them leniently; any of them can change without notice.
 | `system/post_turn_summary` | `summarizes_uuid, status_category, status_detail, needs_action` | not in `sdk.d.ts`. After `message_stop`, before `result` |
 | `stream_event.api_message_id` | API message id on every stream frame | not in `sdk.d.ts`; equals `message_start.message.id` |
 | `message_start.message` | `container, stop_details, input_transformations, diagnostics, context_management` | API-level fields, not in the SDK types |
-| `system/init` | `analytics_disabled, product_feedback_disabled, scratchpad_path, messaging_socket_path, per_turn_effort_active, startup_timing` | not in `SDKSystemMessage` |
+| `system/init` | `analytics_disabled, product_feedback_disabled, scratchpad_path, messaging_socket_path, per_turn_effort_active, startup_timing`; on Windows (2.1.319, probe run, `not-logged-in.ndjson:1`) `powershell_path`, `memory_paths{auto}`, and `messaging_socket_path` is a named pipe (5.1) | not in `SDKSystemMessage` |
 | `result` | `api_error_status, subagent_stats, safety_stops, turn_start_resume_kind, process_*` timings | not in `SDKResultMessage` |
 | `rate_limit_event.rate_limit_info` | `overageDisabledReason, unifiedWindows{five_hour,seven_day}` | beyond the typed fields |
 | top-level `command_lifecycle` | `{command_uuid, state:"queued"\|"started"\|"completed"\|"cancelled"}` | not in `sdk.d.ts`. `command_uuid` is the `uuid` the host sent with the user message; also sent for the turn's own prompt (`queue-fold.ndjson:3`, `:5`, `:54`; `interrupt.ndjson:5`, `:7`, `:20`). Typed (`CommandLifecycle`). Section 3 |
@@ -1404,6 +1429,14 @@ where noted.
   cut to 200 characters: `/home/u/my proj.v2` gives `-home-u-my-proj-v2`, `C:\Users\dev\app` gives `C--Users-dev-app`.
 - The path is the CLI's physical working directory (`/private/tmp/…` for `/tmp/…` on macOS), so Tandem resolves the
   project path's links before computing the key, off the EDT.
+- On Windows the key carries the drive letter in the case the CLI's `process.cwd()` has it, which is the case its parent
+  gave it: CLI 2.1.319 started in `D:\a\tandem\tandem` wrote `projects\D--a-tandem-tandem` and names that folder in
+  `init.memory_paths.auto` (measured, probe run on `windows-latest`); its `init.additional_directories` spelt the same
+  directory `D:/a/tandem/tandem`, so a path from the CLI comes with either separator and Tandem compares through `Path`,
+  never strings. `toRealPath()` gives the drive letter upper-case; a lower-case `c:\…` from a shell would key as
+  `c--Users-dev-app`, which NTFS, ignoring case, opens as the same folder, and a `cwd` in other case is the project by
+  `Files.isSameFile`, as on macOS (inferred; the tester questions of the Windows spec, section 9). `user.home` is
+  `%USERPROFILE%` (measured), so the config directory is `%USERPROFILE%\.claude` unless `CLAUDE_CONFIG_DIR` says otherwise.
 - A key cut at 200 characters gets `-<hash>` appended, from the CLI's own hash, which Tandem does not reproduce. For such
   a project Tandem lists every folder whose name starts with the 200-character key and keeps the transcripts whose `cwd`
   is the project path (or that name none).
@@ -1419,7 +1452,10 @@ where noted.
   a 2.1.301 recording) and, per the SDK, subagent transcripts and tool results.
 - The file appears with the session's first prompt (section 1.1). A running CLI may be appending to it while Tandem
   reads: a last line the CLI is still writing is not a JSON object yet and is skipped.
-- Tandem watches the folders, so a session started elsewhere shows up within a few seconds on Linux and Windows. On
+- Tandem watches the folders, so a session started elsewhere shows up within a few seconds on Linux and Windows (the
+  JDK's `WatchService` is native on both: `inotify`, `ReadDirectoryChangesW`; on Windows it reports deletions too, measured
+  by `SessionIndexTest` on `windows-latest`, and a file another process holds open cannot be deleted there, so deleting a
+  session whose CLI is mid-write is the `IOException` the sidebar shows). On
   macOS the JDK's `WatchService` polls, by default every 10 s; Tandem registers the folders with the JDK's
   `SensitivityWatchEventModifier.HIGH` (looked up by name, since it is deprecated for removal), which makes it poll every
   2 s, so a session shows up within about 3 s there. A runtime without that modifier, or a watch service that rejects

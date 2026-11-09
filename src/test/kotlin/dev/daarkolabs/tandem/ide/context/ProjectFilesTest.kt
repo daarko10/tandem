@@ -13,6 +13,7 @@ import dev.daarkolabs.tandem.chat.mentionPalette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.Test
+import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
@@ -69,13 +70,15 @@ class ProjectFilesTest {
         val files = ProjectFiles.getInstance(project.get())
         // No editor is open in the headless project: none comes first.
         assertEquals(emptyList(), files.openFirst)
-        // The selected editor's file, then the other open ones, each once, relative to the base; one outside it by its absolute path.
+        // The selected editor's file, then the other open ones, each once, relative to the base; one outside it by its absolute path,
+        // spelt natively (`C:\Users\…` on Windows, spec R19).
         val outside = vfs.refreshAndFindFileByNioFile(Files.createTempFile("outside", ".txt"))!!
+        val outsidePath = outside.toNioPath().toString()
         files.openFiles = { listOf(c, a, c, outside) }
         try {
-            assertEquals(listOf("b/c.txt", "a.txt", outside.path), files.openFirst)
+            assertEquals(listOf("b/c.txt", "a.txt", outsidePath), files.openFirst)
             assertEquals(
-                listOf("b/c.txt", "a.txt", outside.path),
+                listOf("b/c.txt", "a.txt", outsidePath),
                 mentionPalette(MentionQuery(0, "t"), files.candidates(), files.openFirst).rows.take(3),
             )
         } finally {
@@ -117,6 +120,17 @@ class ProjectFilesTest {
         // Closed again: it is no longer listed, and nothing outside the base was walked.
         val after = files.candidates()
         assertTrue(after.none { it.startsWith(folder.toString()) }, after.toString())
+    }
+
+    // spec: R19, a path outside the base is spelt as the file chooser and the CLI show it
+    @Test
+    fun `an outside path is spelt natively`() {
+        assertEquals("C:\\Users\\dev\\notes.md", ProjectFiles.nativePath("C:/Users/dev/notes.md", '\\'))
+        assertEquals("\\\\server\\share\\notes.md", ProjectFiles.nativePath("//server/share/notes.md", '\\'))
+        assertEquals("/home/dev/notes.md", ProjectFiles.nativePath("/home/dev/notes.md", '/'))
+        // The platform's own separator is the default: a `/` platform keeps the VFS path, a `\\` one gets its backslashes.
+        val expected = if (File.separatorChar == '/') "/x/y.txt" else "\\x\\y.txt"
+        assertEquals(expected, ProjectFiles.nativePath("/x/y.txt"))
     }
 
     // spec: a change under an ignored folder keeps the list

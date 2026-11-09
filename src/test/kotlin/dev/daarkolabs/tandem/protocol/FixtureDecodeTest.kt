@@ -524,6 +524,18 @@ class FixtureDecodeTest {
         assertEquals("model_not_found", error.error)
     }
 
+    // spec: not-logged-in (2.1.319, Windows probe run): the CLI with no sign-in writes the invalid-model shape with authentication_failed
+    @Test
+    fun `not-logged-in - the assistant error line carries authentication_failed and the result is an api_error`() {
+        assertIs<CliMessage.SystemInit>(at("not-logged-in", 1))
+        val error = assertIs<CliMessage.Assistant>(at("not-logged-in", 2))
+        assertEquals("authentication_failed", error.error)
+        assertEquals("<synthetic>", error.model)
+        val result = assertIs<CliMessage.Result>(at("not-logged-in", 3))
+        assertTrue(result.isError)
+        assertEquals("api_error", result.terminalReason)
+    }
+
     // spec: transcripts: on-disk tool results and thinking fields decode with their camelCase names
     @Test
     fun `transcripts - on-disk tool results and thinking fields decode with their camelCase names`() {

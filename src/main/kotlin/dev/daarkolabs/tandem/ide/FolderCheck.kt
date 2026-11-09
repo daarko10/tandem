@@ -15,8 +15,9 @@ sealed interface FolderCheck {
 
 /**
  * Checks [chosen] before it is added to a session whose project is [projectRoot] and that has the folders [added] (real paths), in
- * the spec's order: not a directory; the project's root or a folder under it (path segments, both real); already added; else
- * [FolderCheck.Add] with its real path. Touches the file system: call on `Dispatchers.IO`.
+ * the spec's order: not a directory; a file system's root (a drive's `D:\` or `/`: its trailing separator is the one `--add-dir`
+ * argument that cannot be passed to a `.cmd` shim cleanly, Windows spec R4); the project's root or a folder under it (path segments,
+ * both real); already added; else [FolderCheck.Add] with its real path. Touches the file system: call on `Dispatchers.IO`.
  */
 fun checkFolder(chosen: Path, projectRoot: Path, added: List<String>): FolderCheck {
     val notFolder = FolderCheck.Refused("Could not add $chosen: it is not a folder.")
@@ -26,6 +27,7 @@ fun checkFolder(chosen: Path, projectRoot: Path, added: List<String>): FolderChe
     } catch (_: IOException) {
         return notFolder // gone between the two calls
     }
+    if (real.parent == null) return FolderCheck.Refused("Could not add $chosen: a drive's root cannot be added, pick a folder in it.")
     val root = try {
         projectRoot.toRealPath()
     } catch (_: IOException) {

@@ -52,6 +52,8 @@ class SessionIndexTest {
     // 250 characters: its folder key is cut at the CLI's limit of 200, so other projects' keys can start the same.
     private val longProject = "/" + "a".repeat(250)
 
+    private val windows: Boolean = System.getProperty("os.name").startsWith("Windows")
+
     private fun write(dir: Path, name: String, mtime: Long, text: String = "{}\n"): Path =
         dir.resolve(name).also {
             it.writeText(text)
@@ -273,8 +275,10 @@ class SessionIndexTest {
     fun `the real reader lists a transcript it cannot open by its id and does not read it again until it changes`(@TempDir dir: Path) {
         val file = write(dir, "$first.jsonl", mtime = 1_000)
         val reads = AtomicInteger()
-        // As root, a test cannot make a file unreadable: the reader opens a path below a plain file in its place.
-        val blocker = write(dir, "not-a-folder", mtime = 1_000)
+        // As root, a test cannot make a file unreadable: the reader is given a directory of the transcript's name in its place,
+        // which fails with an IOException that is no NoSuchFileException on every system (Windows refuses to open it, Unix to
+        // read it); a path below a plain file would be "not found" on Windows and so no session at all.
+        val blocker = dir.resolve("not-a-folder").createDirectories().also { it.resolve("$first.jsonl").createDirectories() }
         val index = SessionIndex({ listOf(dir) }, "/p", meta = {
             reads.incrementAndGet()
             TranscriptReader.meta(blocker.resolve(it.name))
@@ -394,6 +398,7 @@ class SessionIndexTest {
 
     @Test
     fun `with a long project path, a cwd whose dot-dot passes a link is ours only if the file system says so`(@TempDir root: Path) {
+        assumeTrue(!windows, "Win32 collapses .. before it follows a link")
         val name = "p" + "a".repeat(220)
         val project = root.resolve(name).createDirectories()
         val elsewhere = root.resolve("real").resolve("x").createDirectories()
@@ -405,6 +410,34 @@ class SessionIndexTest {
         val cwds = mapOf(first to "$root/link/../$name", second to "$root/./$name/.")
         val meta = { file: Path -> stubMeta(file, cwds.getValue(file.name.removeSuffix(".jsonl"))) }
         assertEquals(listOf(second), SessionIndex({ listOf(folder) }, project.toString(), meta).list().map { it.id })
+    }
+
+    @Test
+    fun `with a long project path, on Windows a cwd whose dot-dot passes a link is ours, since Win32 collapses the dots first`(@TempDir root: Path) {
+        assumeTrue(windows, "Win32 collapses .. before it follows a link; Unix follows the link first")
+        val name = "p" + "a".repeat(220)
+        val project = root.resolve(name).createDirectories()
+        val elsewhere = root.resolve("real").resolve("x").createDirectories()
+        assumeTrue(runCatching { root.resolve("link").createSymbolicLinkPointingTo(elsewhere) }.isSuccess, "links need privileges here")
+        val folder = root.resolve("transcripts").createDirectories()
+        write(folder, "$first.jsonl", mtime = 3_000)
+        write(folder, "$second.jsonl", mtime = 2_000)
+        // link/.. is root to Win32, which drops the dots lexically before any link is followed: the file system says it is the project.
+        val cwds = mapOf(first to "$root\\link\\..\\$name", second to "$root\\.\\$name\\.")
+        val meta = { file: Path -> stubMeta(file, cwds.getValue(file.name.removeSuffix(".jsonl"))) }
+        assertEquals(listOf(first, second), SessionIndex({ listOf(folder) }, project.toString(), meta).list().map { it.id })
+    }
+
+    @Test
+    fun `on Windows a cwd spelt with forward slashes is the project`(@TempDir root: Path) {
+        // The CLI's init lists `additional_directories` as `D:/a/tandem/tandem` while its `cwd` is `D:\a\tandem\tandem` (spec R8).
+        assumeTrue(windows, "a forward slash separates nothing on Unix")
+        val project = root.resolve("a".repeat(120)).resolve("b".repeat(120)).createDirectories()
+        val folder = root.resolve("folder").createDirectories()
+        write(folder, "$first.jsonl", mtime = 1_000)
+        val slashed = project.toString().replace('\\', '/')
+        val index = SessionIndex({ listOf(folder) }, project.toString(), meta = { stubMeta(it, cwd = slashed) })
+        assertEquals(listOf(first), index.list().map { it.id })
     }
 
     @Test
@@ -611,8 +644,9 @@ class SessionIndexTest {
 
     @Test
     fun `a folder that is deleted and created again is watched again`(@TempDir root: Path) {
-        // A polling watch service (macOS) cancels the key of a vanished folder without any event, so there is nothing to wait for.
-        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"), "needs a watch service that reports deletions")
+        // A polling watch service (macOS) cancels the key of a vanished folder without any event, so there is nothing to wait for;
+        // Linux's inotify and Windows' ReadDirectoryChangesW report it.
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux") || windows, "needs a watch service that reports deletions")
         runBlocking<Unit> {
             val folder = root.resolve("-p").createDirectories()
             newTranscript(folder)

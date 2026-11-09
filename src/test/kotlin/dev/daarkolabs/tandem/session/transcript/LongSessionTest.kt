@@ -4,6 +4,7 @@ import dev.daarkolabs.tandem.chat.ChatRows
 import dev.daarkolabs.tandem.chat.ChatRowsBuilder
 import dev.daarkolabs.tandem.chat.RowOptions
 import dev.daarkolabs.tandem.session.ChatEntry
+import dev.daarkolabs.tandem.session.Processes
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -26,8 +27,10 @@ class LongSessionTest {
         val project: Path = dir.resolve("long project").createDirectories().toRealPath()
         val config: Path = dir.resolve("config")
         val generator = ProcessBuilder(
-            "python3", "-I", "scripts/bench/make_long_session.py",
-            "--turns", "$TURNS", "--project", project.toString(), "--config", config.toString(),
+            Processes.python + listOf(
+                "-I", "scripts/bench/make_long_session.py",
+                "--turns", "$TURNS", "--project", project.toString(), "--config", config.toString(),
+            ),
         ).redirectErrorStream(true).start()
         val output: String = generator.inputStream.bufferedReader().readText()
         assertTrue(generator.waitFor(2, TimeUnit.MINUTES), "the generator did not finish")

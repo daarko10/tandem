@@ -977,7 +977,7 @@ class ClaudeSession(
     private suspend fun readLoop(p: Process) {
         val reader = p.inputStream.bufferedReader(Charsets.UTF_8)
         while (true) {
-            val line = readOutput(p) { runInterruptible { reader.readLine() } } ?: return
+            val line = readOutput(p) { abandonable { reader.readLine() } } ?: return
             val at = clock()
             _lastFrameAtMillis.value = at
             if (line.isBlank()) continue
@@ -1033,9 +1033,7 @@ class ClaudeSession(
      * Tandem ended the process, or it is over within [CUT_OFF_GRACE_MILLIS], its output is over and the exit code tells the rest. A
      * failure while it runs on, and Tandem did not end it, is one, and is thrown.
      *
-     * Cancelling a read in [runInterruptible] interrupts the reading thread: a stream that can be interrupted then throws
-     * `InterruptedIOException`, an [IOException], and runInterruptible interrupts only once the cancellation has begun. While this is
-     * being cancelled, that, or any I/O failure, is the cancellation, never a failure to show.
+     * While this is being cancelled, an I/O failure of the read is the cancellation, never a failure to show.
      */
     private suspend fun <T> readOutput(p: Process, read: suspend () -> T): T? =
         try {
@@ -1046,12 +1044,23 @@ class ClaudeSession(
         }
 
     /**
+     * Runs [read], a blocking read of one of [p]'s pipes, on a thread of [Dispatchers.IO] that a cancellation abandons rather than
+     * waits for. A read of a pipe can be neither interrupted nor closed from under it, and on Windows the JDK does not close the
+     * pipes when the process is destroyed (on Unix it does): a process the CLI started that still holds them, such as one spawned
+     * after the kill listed the descendants, would otherwise hold the cancel of the session's scope until it exits (a
+     * `cancelAndJoin` that never returned on `windows-latest`, `ClaudeSessionTest`'s scope-cancel test). The thread ends when the
+     * last holder of the pipe does; `Dispatchers.IO`'s threads are daemon threads.
+     */
+    private suspend fun <T> abandonable(read: () -> T): T = CompletableFuture.supplyAsync(read, Dispatchers.IO.asExecutor()).await()
+
+    /**
      * Reads [p]'s stderr to its end into [stderrTail], on a thread of [Dispatchers.IO] that this waits for only until it is cancelled.
      * A process the CLI started can keep the stderr open after the CLI is gone, and a read of a pipe can be neither interrupted nor
      * closed under it: that thread then ends when the last process that holds the pipe does, and nothing waits for it.
      */
     private suspend fun readStderr(p: Process) {
-        val read = { p.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderrTail.add(it) } } }
+        // UTF-8 as stdout is read and stdin written: Node writes UTF-8 to a pipe whatever the console's code page is on Windows.
+        val read = { p.errorStream.bufferedReader(Charsets.UTF_8).useLines { lines -> lines.forEach { stderrTail.add(it) } } }
         CompletableFuture.runAsync(read, Dispatchers.IO.asExecutor()).await()
     }
 
@@ -1099,6 +1108,17 @@ class ClaudeSession(
             if (!p.waitFor(2, TimeUnit.SECONDS)) p.destroyForcibly().waitFor(2, TimeUnit.SECONDS)
         }
         children.filter { it.isAlive }.forEach { it.destroyForcibly() }
+        // A kill returns before the process is gone (TerminateProcess on Windows): wait for the listed descendants too, bounded, so
+        // that a close returns with the whole tree over. Until then a descendant whose parent has already exited is an orphan the
+        // JVM's process tree no longer reaches, still holding its working directory: on Windows that directory cannot be deleted
+        // (JUnit's temp directory in `SessionManagerTest`, `The process cannot access the file because it is being used by another
+        // process`), and a user who deletes a session's folder right after closing it would meet the same.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        for (child in children) {
+            val left = deadline - System.nanoTime()
+            if (left <= 0) break
+            runCatching { child.onExit().get(left, TimeUnit.NANOSECONDS) }
+        }
         LOG.info("claude stopped")
     }
 

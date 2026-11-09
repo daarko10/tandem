@@ -877,7 +877,7 @@ class NightlyStepOutcomeTest(unittest.TestCase):
 
 BUILD = os.path.join(ROOT, ".github/workflows/build.yml")
 FILTER = "Decide whether the Gradle jobs run"
-GRADLE_JOBS = ("build", "build-macos", "verify", "ide-test")
+GRADLE_JOBS = ("build", "build-macos", "build-windows", "verify", "ide-test")
 BASE = {"README.md": "x\n", "src/main/kotlin/A.kt": "a\n", "docs/a.md": "a\n"}
 
 
@@ -940,6 +940,24 @@ class BuildWorkflowTest(unittest.TestCase):
         self.assertEqual([], [s.get("name") for s in jobs["build"]["steps"] if "unittest" in s.get("run", "")])   # once, in its own job
         self.assertIn("plugin-distribution", [s.get("with", {}).get("name") for s in jobs["build"]["steps"]])   # the ZIP people download stays Build and test's
 
+    def test_a_hanging_test_fails_in_minutes_with_its_threads_in_the_report(self):
+        # Five Windows runs of the suite lost their hosted runner about 50 minutes in, and a lost runner uploads no log: the test
+        # task fails a test after five minutes with every thread's stack in its output, and the jobs' 20-minute jstack goes to a
+        # file the failure artifact collects as well as to the log.
+        with open(os.path.join(ROOT, "build.gradle.kts"), encoding="utf-8") as f:
+            gradle = f.read()
+        self.assertIn('systemProperty("junit.jupiter.execution.timeout.default", "5m")', gradle)
+        self.assertIn('systemProperty("junit.jupiter.execution.timeout.threaddump.enabled", "true")', gradle)
+        wf = load(BUILD)
+        for job in ("build-macos", "build-windows"):
+            run = step(wf, job, "Test")["run"]
+            self.assertIn('jstack "$pid" | tee "build/hang-watch/jstack-$pid.txt"', run, job)
+            self.assertIn("mkdir -p build/hang-watch;", run, job)
+            logs = [s for s in wf["jobs"][job]["steps"] if s.get("name") == "Upload test IDE logs"]
+            self.assertEqual(1, len(logs), job)
+            self.assertIn("./build/hang-watch/", logs[0]["with"]["path"].splitlines(), job)
+            self.assertEqual("ignore", logs[0]["with"]["if-no-files-found"], job)            # a run that never reached the watch has no file
+
     def test_the_ide_test_runs_in_three_shards(self):
         wf = load(BUILD)
         job = wf["jobs"]["ide-test"]
@@ -984,7 +1002,8 @@ class BuildFilterOutcomeTest(unittest.TestCase):
         for head in ({"docs/a.md": "b\n"}, {"docs/superpowers/specs/new.md": "b\n"}, {"scripts/test_x.py": "b\n"},
                      {".claude/skills/s/SKILL.md": "b\n"}, {".github/actions/anthropic-token/action.yml": "b\n"},
                      {".github/workflows/drift-fix.yml": "b\n"}, {".github/workflows/cli-contract.yml": "b\n"},
-                     {".github/workflows/macos-ide-test.yml": "b\n"}, {".github/workflows/demo.yml": "b\n"}, {".github/CODEOWNERS": "* @x\n"},
+                     {".github/workflows/macos-ide-test.yml": "b\n"}, {".github/workflows/windows-ide-test.yml": "b\n"},
+                     {".github/workflows/windows-probe.yml": "b\n"}, {".github/workflows/demo.yml": "b\n"}, {".github/CODEOWNERS": "* @x\n"},
                      {"README.md": "y\n", "CLAUDE.md": "y\n", "LICENSE": "y\n", "docs/a.md": None}):
             self.assertGradle("false", head)
 

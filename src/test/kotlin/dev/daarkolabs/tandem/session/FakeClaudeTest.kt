@@ -63,6 +63,31 @@ class FakeClaudeTest {
         assertEquals(listOf("$real/hello.txt", "$real/new.txt"), asked)
     }
 
+    // rule (o): a directory with a backslash (every Windows path has them) is escaped once in a frame, twice inside partial_json
+    @Test
+    fun `a working directory with a backslash is escaped once in a frame and twice inside partial_json`() {
+        val windows = System.getProperty("os.name").startsWith("Windows")
+        val work = if (windows) dir else dir.resolve("with\\backslash").also { java.nio.file.Files.createDirectories(it) }
+        val fake = start("ide-edit", workingDirectory = work)
+        val lines = handshake(fake).toMutableList()
+        fake.prompt()
+        lines += fake.readUntil({ answerAsHost(it) }) { it.type == "result" }
+
+        val real = work.toRealPath().toString()
+        assertTrue(real.contains('\\'), "the directory under test has a backslash: $real")
+        val init = lines.first { it.type == "system" && it.string("subtype") == "init" }
+        assertEquals(real, init.string("cwd"))
+        val pieces = lines.filter { it.type == "stream_event" }.mapNotNull { event ->
+            val delta = event["event"]!!.jsonObject["delta"]?.jsonObject ?: return@mapNotNull null
+            if (delta["type"]?.jsonPrimitive?.content != "input_json_delta") null else ((event["api_message_id"] as? JsonPrimitive)?.content ?: "") to delta.string("partial_json")
+        }
+        val inputs = pieces.groupBy({ it.first }, { it.second }).values.map { it.joinToString("") }
+        val edit = inputs.firstOrNull { "file_path" in it }
+        assertNotNull(edit, "a tool_use streamed a file_path: $inputs")
+        val filePath = Json.parseToJsonElement(edit).jsonObject.string("file_path")
+        assertTrue(real in filePath, "the streamed file_path holds the directory ($real): $filePath")
+    }
+
     // TANDEM_FAKE_EDIT_DIR: the call names a file outside the project, the init keeps the working directory
     @Test
     fun `the edit dir switch points the call outside the working directory`() {
@@ -184,7 +209,9 @@ class FakeClaudeTest {
         fake.readUntil({}) { it.type == "result" }
     }
 
-    private fun start(fixture: String, env: Map<String, String> = emptyMap()): Fake = Fake(fakeClaude, dir, fixture, env).also { fakes += it }
+    /** Starts the fake in the directory's real path: Windows' temporary folder is named by its 8.3 short form (RUNNER~1), which a child's cwd would keep. */
+    private fun start(fixture: String, env: Map<String, String> = emptyMap(), workingDirectory: Path = dir): Fake =
+        Fake(fakeClaude, workingDirectory.toRealPath(), fixture, env).also { fakes += it }
 
     /** What a host answers at once: every `mcp_message` with [toolReply] for a `tools/call`, every `can_use_tool` with allow. */
     private fun answerAsHost(frame: JsonObject, toolReply: (JsonElement?) -> JsonObject = reply("done", isError = false)) {

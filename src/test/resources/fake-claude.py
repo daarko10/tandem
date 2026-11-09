@@ -123,10 +123,12 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
   (o) In a fixture with `mcp_message` frames, `<path>` (the redactor's name for the recording's working directory) becomes this
       process's working directory (`os.getcwd()`, the project the host spawned it in) in every replayed frame: the `tools/call`
       arguments, the `can_use_tool` input, `init.cwd` and the result lines. Other fixtures keep `<path>` as recorded (rows such
-      as `Read <path>` in `tools-read` are drawn from it). The directory is escaped once, as inside a JSON string: inside a
-      `stream_event`'s `partial_json` (JSON within a JSON string) a `\\` or `"` in it would come out malformed. Neither occurs in
-      a Linux or macOS temporary directory. With TANDEM_FAKE_EDIT_DIR set, `<path>/` (a file under the recording's directory:
-      the call's `file_path`, the `can_use_tool` input, the result lines) becomes that directory and a `/` instead, so the call
+      as `Read <path>` in `tools-read` are drawn from it). The substitution walks the message, not its text: a string value is
+      given the directory itself and `json.dumps` escapes it once; inside a `stream_event`'s `partial_json` (JSON text within a
+      JSON string) the directory is escaped for the inner JSON string first, so it comes out escaped twice. A Windows directory
+      has backslashes, so the depth matters (escaped once there, a backslash would be read by the inner JSON as the start of an
+      escape of its own); a Linux or macOS temporary directory has none. With TANDEM_FAKE_EDIT_DIR set, `<path>/` (a file under
+      the recording's directory: the call's `file_path`, the `can_use_tool` input, the result lines) becomes that directory and a `/` instead, so the call
       names a file outside the project; a bare `<path>` (`init.cwd`) stays the working directory.
   (p) A host `interrupt` read while a replayed `tools/call` waits for its reply withdraws the call when the fixture recorded the
       withdrawal (a `notifications/cancelled` for that call's JSON-RPC id before the next `tools/call`, `ide-edit-stop:42`): the
@@ -138,15 +140,22 @@ Answers given at once, whenever a host frame is read (spec 9.2 of the MCP contro
       Without a recorded withdrawal an `interrupt` there is handled as anywhere else. TANDEM_FAKE_EDIT_CANCEL_MS does the same
       once the call has waited that long, and sends no receipt (there is no interrupt to answer).
 """
+import contextlib
 import copy
-import fcntl
 import json
 import os
+import queue
 import re
-import select
 import sys
+import threading
 import time
 import uuid
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
@@ -159,6 +168,7 @@ auth_done_ms = os.environ.get("TANDEM_FAKE_AUTH_DONE_MS")
 auth_done_ms = int(auth_done_ms) if auth_done_ms else None
 extra_needs_auth = os.environ.get("TANDEM_FAKE_EXTRA_NEEDS_AUTH") or None
 SPAWN_PREFIX = '{"type":"__spawn__"'
+LOCK_OFFSET = 1 << 30  # where `locked` locks its byte on Windows
 SESSION_PLACEHOLDER = re.compile(r"<session_id-\d+>")
 SECRET_NAME_PARTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH")
 UNKNOWN_SUBTYPE = "Unknown subtype"
@@ -176,13 +186,28 @@ keep_add_dir = os.environ.get("TANDEM_FAKE_KEEP_ADD_DIR") or None
 exit_delay_ms = int(os.environ.get("TANDEM_FAKE_EXIT_DELAY_MS") or 0)
 edit_cancel_ms = int(os.environ.get("TANDEM_FAKE_EDIT_CANCEL_MS") or 0)  # rule (p)
 PATH_PLACEHOLDER = "<path>"  # rule (o)
-escaped_cwd = json.dumps(os.getcwd())[1:-1]  # rule (o): the working directory as it appears inside a JSON string
+cwd = os.getcwd()  # rule (o)
 edit_dir = os.environ.get("TANDEM_FAKE_EDIT_DIR") or None  # rule (o): where `<path>/<name>` points instead of the working directory
-escaped_edit_dir = json.dumps(edit_dir)[1:-1] if edit_dir else None
 host_replies = {}  # rule (n): tool use id -> the host's mcp_response to its tools/call
 TIMED_OUT = object()  # read_host's answer when its timeout passed with no frame
-stdin_buffer = bytearray()  # what was read from stdin and not yet split into lines: read with select, so a wait can time out (rule (p))
+stdin_buffer = bytearray()  # what was read from stdin and not yet split into lines
 stdin_closed = [False]
+stdin_chunks = queue.Queue()  # what the reader thread read: bytes, None at the end of stdin; a queue, so a wait can time out (rule (p))
+
+
+def pump_stdin():
+    """Reads stdin in chunks into [stdin_chunks] until its end: the same on every platform (Windows has no select on a pipe)."""
+    while True:
+        try:
+            chunk = os.read(0, 65536)
+        except OSError:
+            chunk = b""
+        stdin_chunks.put(chunk or None)
+        if not chunk:
+            return
+
+
+threading.Thread(target=pump_stdin, name="stdin", daemon=True).start()
 
 
 def next_host_line(deadline):
@@ -199,11 +224,16 @@ def next_host_line(deadline):
                 del stdin_buffer[:]
                 return line
             return None
-        if deadline is not None:
+        if deadline is None:
+            chunk = stdin_chunks.get()
+        else:
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or not select.select([0], [], [], remaining)[0]:
+            if remaining <= 0:
                 return TIMED_OUT
-        chunk = os.read(0, 65536)
+            try:
+                chunk = stdin_chunks.get(timeout=remaining)
+            except queue.Empty:
+                return TIMED_OUT
         if chunk:
             stdin_buffer.extend(chunk)
         else:
@@ -228,17 +258,38 @@ def loggable(name, value):
     return "<redacted>" if any(part in name.upper() for part in SECRET_NAME_PARTS) else value
 
 
+@contextlib.contextmanager
+def locked(file):
+    """Holds an exclusive lock on [file] (open, nothing read or written yet) until the block ends, for as long as another process holds it."""
+    if fcntl is not None:
+        fcntl.flock(file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(file, fcntl.LOCK_UN)
+        return
+    # Windows: one byte far beyond the end, so that a reader of the log (the test) is never held out of the text itself.
+    os.lseek(file.fileno(), LOCK_OFFSET, os.SEEK_SET)
+    msvcrt.locking(file.fileno(), msvcrt.LK_LOCK, 1)
+    try:
+        yield
+    finally:
+        file.flush()
+        os.lseek(file.fileno(), LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def record_spawn():
     """Appends this process's `__spawn__` line to the log; returns how many such lines were there before it."""
     if not log_path:
         return 0
     spawn = {
         "type": "__spawn__",
+        "pid": os.getpid(),
         "argv": args,
         "env": {name: loggable(name, value) for name, value in os.environ.items() if name.startswith("CLAUDE") or name == "NODE_OPTIONS"},
     }
-    with open(log_path, "a+", encoding="utf-8") as log:
-        fcntl.flock(log, fcntl.LOCK_EX)  # processes that start together must not count the same lines
+    with open(log_path, "a+", encoding="utf-8", newline="\n") as log, locked(log):  # processes that start together must not count the same lines
         log.seek(0)
         earlier = sum(1 for line in log if line.startswith(SPAWN_PREFIX))
         log.write(json.dumps(spawn, separators=(",", ":")) + "\n")
@@ -264,7 +315,7 @@ def read_host(timeout=None):
         if not line:
             continue
         if log_path:
-            with open(log_path, "a", encoding="utf-8") as log:
+            with open(log_path, "a", encoding="utf-8", newline="\n") as log:
                 log.write(line + "\n")
         try:
             frame = json.loads(line)
@@ -301,7 +352,26 @@ def wait_for_gate(path):
         time.sleep(0.1)
 
 
+def with_working_directory(value, in_partial_json=False):
+    """Rule (o): [value] with `<path>` in every string replaced by the working directory, as the string it is inside."""
+    if isinstance(value, dict):
+        return {key: with_working_directory(item, key == "partial_json") for key, item in value.items()}
+    if isinstance(value, list):
+        return [with_working_directory(item, in_partial_json) for item in value]
+    if not isinstance(value, str):
+        return value
+    # `partial_json` holds JSON text: the directory sits inside a string of that text, so it is escaped for it here and once more
+    # by json.dumps when the frame is written.
+    here = json.dumps(cwd)[1:-1] if in_partial_json else cwd
+    there = json.dumps(edit_dir)[1:-1] if in_partial_json else edit_dir
+    if edit_dir:
+        value = value.replace(PATH_PLACEHOLDER + "/", there + "/")  # TANDEM_FAKE_EDIT_DIR
+    return value.replace(PATH_PLACEHOLDER, here)
+
+
 def emit(message):
+    if edit_fixture:
+        message = with_working_directory(message)
     if queue_fixture:
         line = SESSION_PLACEHOLDER.sub(lambda _: escaped_session_id, json.dumps(message, separators=(",", ":")))
         line = COMMAND_PLACEHOLDER.sub(lambda m: bound.get(m.group(0), m.group(0)), line)
@@ -316,12 +386,9 @@ def emit(message):
 
 
 def write_line(line):
-    if edit_fixture:
-        if escaped_edit_dir:
-            line = line.replace(PATH_PLACEHOLDER + "/", escaped_edit_dir + "/")  # rule (o), TANDEM_FAKE_EDIT_DIR
-        line = line.replace(PATH_PLACEHOLDER, escaped_cwd)  # rule (o)
-    sys.stdout.write(line + "\n")
-    sys.stdout.flush()
+    """One frame: UTF-8 and a bare `\\n` whatever the platform's console code page and line ending."""
+    sys.stdout.buffer.write((line + "\n").encode("utf-8"))
+    sys.stdout.buffer.flush()
 
 
 def payload_of(message):
@@ -504,7 +571,7 @@ fixture_path = os.path.join(HERE, "fixtures", fixture + ".ndjson")
 if not os.path.isfile(fixture_path):
     sys.stderr.write("no fixture " + fixture + "\n")
     sys.exit(2)
-with open(fixture_path, encoding="utf-8") as f:
+with open(fixture_path, encoding="utf-8", newline="\n") as f:
     lines = [json.loads(l) for l in f if l.strip()]
 
 escaped_session_id = json.dumps(session_id())[1:-1]  # as it appears inside a JSON string
@@ -663,7 +730,7 @@ def log_disk(message, tool_use_id):
                 text = file.read()
         except (OSError, UnicodeDecodeError):
             text = None
-    with open(log_path, "a", encoding="utf-8") as log:
+    with open(log_path, "a", encoding="utf-8", newline="\n") as log:
         log.write(json.dumps({"type": "__disk__", "tool_use_id": tool_use_id, "text": text}, separators=(",", ":")) + "\n")
 
 

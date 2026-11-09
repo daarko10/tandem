@@ -27,9 +27,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.swing.JLabel
 
-/** The status line's text when the saved path cannot run. */
-private const val NOT_EXECUTABLE_TEXT: String = "Configured path is not executable"
-
 /**
  * Settings | Tools | Tandem: the `claude` to run, how many sessions may run a process at once and whether the chat shows thinking
  * rows ([TandemSettings]).
@@ -151,14 +148,15 @@ class TandemSettingsConfigurable : BoundConfigurable("Tandem") {
         val duringTest = test?.isActive == true // its answer comes later: this check must not overwrite it
         checking?.cancel()
         checking = scope.launch {
-            val (found, runs) = withContext(Dispatchers.IO) {
-                ClaudeBinary.detect() to (ClaudeBinary.configured()?.let(ClaudeBinary::isExecutable) ?: true)
+            val (found, notRunnable) = withContext(Dispatchers.IO) {
+                // The status line's text when the saved path cannot run, or null when it can or there is none.
+                ClaudeBinary.detect() to ClaudeBinary.configured()?.takeIf { !ClaudeBinary.isExecutable(it) }?.let(ClaudeBinary::notRunnableText)
             }
             showOnEdt {
                 detected.text = found?.path ?: "Not found"
                 detectedWhere.text = found?.where?.description.orEmpty()
                 if (request == statusRequests && !duringTest && test?.isActive != true) {
-                    status.text = if (runs) "" else NOT_EXECUTABLE_TEXT
+                    status.text = notRunnable.orEmpty()
                 }
             }
         }

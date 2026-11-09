@@ -22,6 +22,9 @@ kotlin {
 
 // The plugin's version as a constant (ide/TandemBuild.kt), which Tandem's MCP server names itself with: the platform's ways to read a
 // plugin's own descriptor at run time are internal API, which the Plugin Verifier refuses.
+// The fake CLI the test tasks run: a Windows process cannot start a .py file, so fake-claude.cmd (which calls it) stands in there.
+val fakeClaudeFile: String = if (System.getProperty("os.name").startsWith("Windows")) "fake-claude.cmd" else "fake-claude.py"
+
 val generateTandemBuild by tasks.registering {
     val version = providers.gradleProperty("version")
     val output = layout.buildDirectory.dir("generated/tandemBuild")
@@ -210,7 +213,7 @@ tasks {
         // Protocol tests run against recorded CLI transcripts; they never spawn a real `claude`.
         systemProperty("tandem.fixtures", layout.projectDirectory.dir("src/test/resources/fixtures").asFile.path)
         // Platform tests start sessions against a fake CLI that replays a fixture, never a real `claude`.
-        systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path)
+        systemProperty("tandem.claudePath", layout.projectDirectory.file("src/test/resources/$fakeClaudeFile").asFile.path)
         // Set by the nightly CLI contract workflow: a directory of freshly recorded live transcripts.
         systemProperty("tandem.contractDir", providers.systemProperty("tandem.contractDir").getOrElse(""))
         // A GC log, which CI uploads with the test IDE's logs when the build fails: it shows what the test JVM's heap did, such as
@@ -220,6 +223,16 @@ tasks {
         // platform's default of 2 GB that alone took 18 s of the close's 20 s on a 2-CPU CI runner. The tests need far less: the
         // heap holds about 150 MB live and grows to about 600 MB during a run.
         maxHeapSize = "1g"
+        // A test that hangs fails after five minutes (the longest test here takes seconds) with every thread's stack in the
+        // test's output, in the JUnit report CI uploads, instead of holding the suite until the job's limit: five Windows runs
+        // lost their hosted runner about 50 minutes in with nothing to read. JUnit's default timeout covers every Jupiter test
+        // and lifecycle method; the JUnit 4 classes are pure decoders, except ClaudeSessionTest, which carries its own rule.
+        systemProperty("junit.jupiter.execution.timeout.default", "5m")
+        systemProperty("junit.jupiter.execution.timeout.threaddump.enabled", "true")
+        // In its default mode the timeout only interrupts the test's thread, which ends no native pipe read and no other wait that
+        // ignores interrupts (the probe of 042c02d lost its runner with the timeout in place); in a separate thread the test is
+        // failed and the suite goes on while the stuck thread stays parked. The JUnit 4 Timeout rule has always done the same.
+        systemProperty("junit.jupiter.execution.timeout.thread.mode.default", "separate_thread")
         // On CI, name each test as it starts, so a test that hangs (as one did on macOS) is the last name in the log.
         if (providers.environmentVariable("CI").isPresent) testLogging { events("started", "skipped", "failed") }
     }
@@ -234,7 +247,7 @@ tasks {
         useJUnitPlatform()
         val pluginZip = buildPlugin.flatMap { it.archiveFile }
         inputs.file(pluginZip)
-        val fakeClaude = layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path
+        val fakeClaude = layout.projectDirectory.file("src/test/resources/$fakeClaudeFile").asFile.path
         val ideVersion = providers.gradleProperty("platformVersion")
         jvmArgumentProviders += CommandLineArgumentProvider {
             listOf(
@@ -267,7 +280,7 @@ tasks {
         inputs.file(pluginZip)
         // A recording is never up to date.
         outputs.upToDateWhen { false }
-        val fakeClaude = layout.projectDirectory.file("src/test/resources/fake-claude.py").asFile.path
+        val fakeClaude = layout.projectDirectory.file("src/test/resources/$fakeClaudeFile").asFile.path
         val ideVersion = providers.gradleProperty("platformVersion")
         val marks = providers.gradleProperty("tandem.demoMarks").orElse(layout.buildDirectory.file("demo/marks.txt").map { it.asFile.path })
         jvmArgumentProviders += CommandLineArgumentProvider {

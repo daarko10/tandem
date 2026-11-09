@@ -45,6 +45,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.CleanupMode
 import org.junit.jupiter.api.io.TempDir
 import java.io.BufferedReader
 import java.io.IOException
@@ -87,13 +88,18 @@ import kotlin.time.Duration.Companion.seconds
  * replays a recorded fixture, and the fake's log shows how each process was started and every frame the host wrote to it.
  */
 class SessionManagerTest {
-    @TempDir
+    // Deleted by [cancelScope] with retries, not by JUnit's one attempt: on Windows the directory was still held by something
+    // a moment after every process the test started had gone, and JUnit's delete then failed the test.
+    @TempDir(cleanup = CleanupMode.NEVER)
     lateinit var dir: Path
 
     private val fakeClaude: String = System.getProperty("tandem.claudePath") ?: "src/test/resources/fake-claude.py"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val ownProcesses = OwnFakeCliProcesses()
+
+    /** The JVM's descendants before this test: whatever appears later (the fakes and, on Windows, their `cmd.exe` shims) is this test's. */
+    private val earlierDescendants: Set<Long> = ProcessHandle.current().descendants().map { it.pid() }.toList().toSet()
 
     /** A session with a recorded transcript (`history-reply`, whose own title is "Pong"). */
     private val seeded = "44444444-4444-4444-8444-444444444444"
@@ -104,9 +110,13 @@ class SessionManagerTest {
     private val log: Path get() = dir.resolve("fake-cli.log")
     private val folder: Path get() = dir.resolve("transcripts")
 
+    /** When this test began, with a second of slack against the clock the OS stamps processes with. */
+    private var testStarted: Instant = Instant.EPOCH
+
     @BeforeEach
     fun createFolder() {
         folder.createDirectories()
+        testStarted = Instant.now().minusSeconds(1)
     }
 
     @AfterEach
@@ -115,9 +125,49 @@ class SessionManagerTest {
         // Cancelling the manager's scope ends every process it started.
         val deadline = System.nanoTime() + 10_000_000_000L
         while (ownFakeProcesses().isNotEmpty() && System.nanoTime() < deadline) delay(20)
+        // On Windows the fake runs under a `cmd.exe` shim whose working directory is the temp directory, and the shim exits a moment
+        // after its python: wait for every process this test started, or JUnit's delete of the directory meets `The process cannot
+        // access the file because it is being used by another process` (Build and test (Windows) on b60dda7, job 128962723063).
+        fun started(): List<ProcessHandle> = ProcessHandle.current().descendants().filter { it.isAlive && it.pid() !in earlierDescendants }.toList()
+        while (started().isNotEmpty() && System.nanoTime() < deadline) delay(20)
+        // A descendant whose parent has already exited is an orphan the JVM's process tree no longer reaches (the Windows probe of
+        // c3a898c still met the error above with the two waits in place): so also wait for every python, cmd.exe or conhost.exe on
+        // the machine that started during this test, whatever its parent. On Unix the names do not match and this is a no-op.
+        val shimNames = setOf("python.exe", "python3.exe", "cmd.exe", "conhost.exe")
+        fun strays(): List<ProcessHandle> = ProcessHandle.allProcesses().filter { h ->
+            h.isAlive && h.info().startInstant().orElse(Instant.EPOCH) >= testStarted &&
+                h.info().command().orElse("").substringAfterLast('\\').substringAfterLast('/').lowercase() in shimNames
+        }.toList()
+        while (strays().isNotEmpty() && System.nanoTime() < deadline) delay(20)
         val leaked = ownFakeProcesses()
         leaked.forEach { it.destroyForcibly() } // so that the next test starts clean
-        assertEquals(emptyList(), leaked.map { it.pid() }, "fake CLI processes outlived the manager's scope")
+        try {
+            assertEquals(emptyList(), leaked.map { it.pid() }, "fake CLI processes outlived the manager's scope")
+        } finally {
+            deleteTempDir()
+        }
+    }
+
+    /**
+     * Deletes [dir] with retries for up to ten seconds. On Windows the Build and probe runs met `The process cannot access the file
+     * because it is being used by another process` on the directory itself after every wait above had passed (c3a898c, 068a90e,
+     * 3e1a60a), so a directory that still cannot go is left in place on the ephemeral runner, with every process started during
+     * the test printed, which is what names the holder next time.
+     */
+    private suspend fun deleteTempDir() {
+        val deadline = System.nanoTime() + 10_000_000_000L
+        var lastError: Throwable? = null
+        while (true) {
+            lastError = runCatching { dir.toFile().deleteRecursively() }.exceptionOrNull()
+            if (!Files.exists(dir)) return
+            if (System.nanoTime() > deadline) break
+            delay(100)
+        }
+        val started = ProcessHandle.allProcesses()
+            .filter { it.info().startInstant().orElse(Instant.EPOCH) >= testStarted }
+            .map { h -> "${h.pid()} ${h.info().command().orElse("?")} parent=${h.parent().map { it.pid() }.orElse(-1)} since=${h.info().startInstant().orElse(null)}" }
+            .toList()
+        println("temp directory $dir still held after 10 s and left in place (${lastError?.message ?: "no error"}); processes started during the test:\n" + started.joinToString("\n"))
     }
 
     private fun manager(
@@ -168,9 +218,14 @@ class SessionManagerTest {
 
     private fun test(block: suspend CoroutineScope.() -> Unit): Unit = runBlocking { withTimeout(30_000, block) }
 
-    /** Writes the [fixture] transcript (by default `history-reply`) as session [id]'s, through [edit]. */
+    /**
+     * Writes the [fixture] transcript (by default `history-reply`) as session [id]'s, through [edit], with the fixture's redacted
+     * `<uuid-N>` placeholders as `uuid-N`: a fork passes a line's uuid on the command line (`--resume-session-at`), and on Windows
+     * the fake CLI's `.cmd` shim runs through `cmd.exe`, which reads `<` and `>` as redirections. Real uuids have no such characters.
+     */
     private fun seed(id: String, fixture: String = "history-reply", edit: (String) -> String = { it }) {
-        folder.resolve("$id.jsonl").writeText(edit(Fixtures.transcript(fixture).readText()))
+        val text = Fixtures.transcript(fixture).readText().replace(Regex("<(uuid-\\d+)>"), "$1")
+        folder.resolve("$id.jsonl").writeText(edit(text))
     }
 
     /** The complete lines of the fake's log: a `__spawn__` line per process, then each frame the host wrote to that process. */
@@ -1164,10 +1219,10 @@ class SessionManagerTest {
         val history = original.state.value
         assertEquals(3, history.prompts().size)
         val x = assertNotNull(history.entries.filterIsInstance<ChatEntry.Assistant>().first().lastUuid)
-        assertEquals("<uuid-14>", x)
+        assertEquals("uuid-14", x)
 
         val fork = assertNotNull(manager.fork(seeded, x))
-        val tail = listOf("--resume", seeded, "--fork-session", "--session-id", fork.id, "--resume-session-at", "<uuid-14>")
+        val tail = listOf("--resume", seeded, "--fork-session", "--session-id", fork.id, "--resume-session-at", "uuid-14")
         assertEquals(tail, forkTail(fork.id))
         assertEquals(listOf("Remember the word ALPHA. Reply with exactly one word: OK"), fork.state.value.prompts())
         assertEquals("Remember word ALPHA (fork)", fork.title.value)
@@ -1210,7 +1265,7 @@ class SessionManagerTest {
         val created = manager.create(NewSessionOptions())
         awaitLog { spawns().size == 1 }
         assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id))
-        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id, "<uuid-14>"))
+        assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult(created.id, "uuid-14"))
         assertEquals(ForkResult.Refused.NO_TRANSCRIPT, manager.forkResult("not-a-session-id"))
         assertEquals(listOf(original, created), manager.sessions.value)
         assertNull(manager.selected.value)
@@ -1223,13 +1278,13 @@ class SessionManagerTest {
         seed(seeded, fixture = "fork-at-origin")
         val manager = manager(maxLive = 8)
         val f = assertNotNull(manager.fork(seeded)) // no prompt: no transcript of its own
-        val g = assertNotNull(manager.fork(f.id, "<uuid-14>"))
-        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", g.id, "--resume-session-at", "<uuid-14>"), forkTail(g.id))
+        val g = assertNotNull(manager.fork(f.id, "uuid-14"))
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", g.id, "--resume-session-at", "uuid-14"), forkTail(g.id))
         assertEquals(listOf("Remember the word ALPHA. Reply with exactly one word: OK"), g.state.value.prompts())
 
-        val h = assertNotNull(manager.fork(seeded, "<uuid-14>"))
+        val h = assertNotNull(manager.fork(seeded, "uuid-14"))
         val i = assertNotNull(manager.fork(h.id))
-        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", i.id, "--resume-session-at", "<uuid-14>"), forkTail(i.id))
+        assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", i.id, "--resume-session-at", "uuid-14"), forkTail(i.id))
         assertEquals(h.state.value.entries, i.state.value.entries)
         assertEquals(listOf("--resume", seeded, "--fork-session", "--session-id", f.id), forkTail(f.id))
     }
@@ -1292,6 +1347,9 @@ class SessionManagerTest {
         // Both processes are up and known to their sessions.
         while (handles.any { it.liveSession()?.process == null }) delay(20)
         val processes = handles.map { it.liveSession()!!.process!! }
+        // Both fakes run (the fake logs `__spawn__` first): on Windows the process is the fake's `.cmd` shim, and killNow lists its
+        // descendants to kill them with it, so a fake whose shim is killed while it is being spawned would outlive its session.
+        awaitLog { spawns().size == 2 }
 
         // What a JVM shutdown hook does: it cannot wait for coroutines, so the processes go while the manager's scope still runs.
         manager.killAllNow()
@@ -1313,7 +1371,9 @@ class SessionManagerTest {
         manager.sessions.first { it.isEmpty() } // only the close still knows the session now
 
         manager.killAllNow()
-        assertEquals(137, runInterruptible(Dispatchers.IO) { process.waitFor() }, "killed (SIGKILL), not ended by the close")
+        // SIGKILL's 137; on Windows TerminateProcess's 1, which a close's own end would not give either (it waits ~2 s first).
+        val killed = if (System.getProperty("os.name").startsWith("Windows")) 1 else 137
+        assertEquals(killed, runInterruptible(Dispatchers.IO) { process.waitFor() }, "killed (SIGKILL), not ended by the close")
         closing.join()
     }
 
@@ -1502,7 +1562,7 @@ class SessionManagerTest {
     fun `a turn that goes from waiting for a permission straight to idle asks for attention`() = test {
         // The status is a state, which conflates: the RUNNING between an answered request and the end of the turn may never be
         // seen. Here there is none: the turn's result comes while the request is still pending.
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val process = ScriptedProcess(Processes.sink())
         val index = SessionIndex({ listOf(folder) }, "/project")
         val manager = SessionManager(scope, index, { _, _ -> process }, { "claude" }, dir, maxLive = { 4 })
         val handle = manager.create(NewSessionOptions())
@@ -1510,7 +1570,9 @@ class SessionManagerTest {
             handle.status.first { it == SessionStatus.IDLE }
             process.script.println(Fixtures.lines("permission").first { "\"can_use_tool\"" in it })
             handle.status.first { it == SessionStatus.WAITING }
-            // The user looks at the request, which clears the attention it asked for, then at no session.
+            // The request asks for attention from the manager's own collector of the status, so wait for it: a select before it
+            // lands would be undone by it. The user looks at the request, which clears the attention, then at no session.
+            handle.attention.first { it }
             manager.select(handle.id)
             manager.select(null)
             assertFalse(handle.attention.value)
@@ -1533,7 +1595,7 @@ class SessionManagerTest {
 
     @Test
     fun `a permission answered outside a turn does not ask for attention as a finished turn`() = test {
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val process = ScriptedProcess(Processes.sink())
         val (manager, handle) = scripted(process)
         try {
             // A request while no turn runs: it asks for attention as a request, and the user looks at it.
@@ -1555,7 +1617,7 @@ class SessionManagerTest {
     fun `a process that fails during a turn asks for attention, and a Stop does not`() = test {
         // The process exits with code 3 once the test lets it, in the middle of the turn.
         val gate = dir.resolve("exit-now")
-        val failing = ScriptedProcess(ProcessBuilder("sh", "-c", "while [ ! -e '$gate' ]; do sleep 0.05; done; exit 3").start())
+        val failing = ScriptedProcess(Processes.exitAfterGate(gate, 3).start())
         val (manager, handle) = scripted(failing)
         try {
             manager.send(handle.id, "Count to a hundred")
@@ -1570,7 +1632,7 @@ class SessionManagerTest {
             manager.close(handle.id)
         }
 
-        val stopped = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val stopped = ScriptedProcess(Processes.sink())
         val (other, second) = scripted(stopped)
         try {
             other.send(second.id, "Count to a hundred")
@@ -1594,7 +1656,7 @@ class SessionManagerTest {
 
     @Test
     fun `a turn that ends while a resumed-as-new session is taken over asks for attention`() = test {
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > /dev/null").start())
+        val process = ScriptedProcess(Processes.sink())
         val (manager, handle) = scripted(process)
         val resumedAs = UUID.randomUUID().toString()
         // Between the new row taking the process and the manager adding it, the turn in progress ends.
@@ -2336,7 +2398,7 @@ class SessionManagerTest {
     fun `two actions run one after the other`() = test {
         // A process whose input the test reads, and whose answers the test writes.
         val written = dir.resolve("host-frames.log")
-        val process = ScriptedProcess(ProcessBuilder("sh", "-c", "cat > '$written'").start())
+        val process = ScriptedProcess(Processes.recorder(written).start())
         val (manager, handle) = scripted(process)
         fun mcpRequests(): List<JsonObject> =
             if (!written.exists()) emptyList()
@@ -2999,9 +3061,9 @@ class SessionManagerTest {
         val manager = manager()
         manager.open(seeded, spawn = false)
         manager.addFolder(seeded, extra)
-        val fork = assertNotNull(manager.fork(seeded, "<uuid-14>"))
+        val fork = assertNotNull(manager.fork(seeded, "uuid-14"))
         assertEquals(listOf(AddedFolder(extra, FolderState.PENDING)), fork.folders.value)
-        assertEquals(listOf("--resume-session-at", "<uuid-14>", "--add-dir", extra), forkTail(fork.id).takeLast(4))
+        assertEquals(listOf("--resume-session-at", "uuid-14", "--add-dir", extra), forkTail(fork.id).takeLast(4))
     }
 
     // spec: removing a folder respawns without it
