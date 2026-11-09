@@ -95,6 +95,9 @@ class SessionManagerTest {
 
     private val ownProcesses = OwnFakeCliProcesses()
 
+    /** The JVM's descendants before this test: whatever appears later (the fakes and, on Windows, their `cmd.exe` shims) is this test's. */
+    private val earlierDescendants: Set<Long> = ProcessHandle.current().descendants().map { it.pid() }.toList().toSet()
+
     /** A session with a recorded transcript (`history-reply`, whose own title is "Pong"). */
     private val seeded = "44444444-4444-4444-8444-444444444444"
 
@@ -115,6 +118,11 @@ class SessionManagerTest {
         // Cancelling the manager's scope ends every process it started.
         val deadline = System.nanoTime() + 10_000_000_000L
         while (ownFakeProcesses().isNotEmpty() && System.nanoTime() < deadline) delay(20)
+        // On Windows the fake runs under a `cmd.exe` shim whose working directory is the temp directory, and the shim exits a moment
+        // after its python: wait for every process this test started, or JUnit's delete of the directory meets `The process cannot
+        // access the file because it is being used by another process` (Build and test (Windows) on b60dda7, job 128962723063).
+        fun started(): List<ProcessHandle> = ProcessHandle.current().descendants().filter { it.isAlive && it.pid() !in earlierDescendants }.toList()
+        while (started().isNotEmpty() && System.nanoTime() < deadline) delay(20)
         val leaked = ownFakeProcesses()
         leaked.forEach { it.destroyForcibly() } // so that the next test starts clean
         assertEquals(emptyList(), leaked.map { it.pid() }, "fake CLI processes outlived the manager's scope")

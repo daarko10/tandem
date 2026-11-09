@@ -34,6 +34,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -43,7 +44,6 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.Timeout
@@ -185,11 +185,6 @@ class ClaudeSessionTest {
 
     @Test
     fun `cancelling the owning scope leaves no process or child process behind`() = runBlocking {
-        // On Windows this test hangs in the cancelAndJoin about one run in two: the first run with a per-test timeout failed it after
-        // 300 s in both the probe (42554461130) and Build and test (Windows) (job 128957123712), the test's thread in runBlocking,
-        // while the 84 other tests here passed. The root cause is not found (the full JVM thread dump needs a Jupiter test);
-        // until it is, the test is Unix-only, and `killNow stops the process tree synchronously` still covers the tree kill there.
-        assumeTrue("hangs on Windows about one run in two: see the comment", !System.getProperty("os.name").startsWith("Windows"))
         // Ignores stdin and spawns a grandchild: the worst case for cleanup.
         val launcher = fakeCli(sleepers)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -202,7 +197,11 @@ class ClaudeSessionTest {
         val handles = listOf(process.toHandle()) + process.descendants().toList()
         assertTrue(handles.all { it.isAlive })
 
-        scope.coroutineContext.job.cancelAndJoin()
+        // On Windows this join did not return about one run in two (the probe 42554461130 and `Build and test (Windows)` job
+        // 128957123712 timed the test out at 300 s with only this thread's stack to read): bounded, and a miss fails with every
+        // thread's stack and the processes still alive, which names what the cancel waits for.
+        withTimeoutOrNull(60_000) { scope.coroutineContext.job.cancelAndJoin() }
+            ?: fail("cancelAndJoin did not return in 60 s; alive: ${handles.filter { it.isAlive }.map { it.info().command().orElse("?") + "#" + it.pid() }}\n${threadDump()}")
 
         withTimeout(10_000) { while (handles.any { it.isAlive }) kotlinx.coroutines.delay(20) }
         assertFalse(handles.any { it.isAlive })
@@ -2186,4 +2185,8 @@ class ClaudeSessionTest {
         failing.close()
     }
 
+    /** Every thread's stack, for a wait that did not end: what the report shows instead of one parked test thread. */
+    private fun threadDump(): String = Thread.getAllStackTraces().entries.joinToString("\n\n") { (thread, stack) ->
+        "\"${thread.name}\" ${thread.state}\n" + stack.joinToString("\n") { "    at $it" }
+    }
 }
