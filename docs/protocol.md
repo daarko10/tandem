@@ -258,10 +258,24 @@ an inherited id was not measured.
   of the login shell's `PATH` (section 1.2); then the usual install locations `~/.local/bin` (the native installer),
   `~/.claude/local` (the older local install), and outside Windows `/opt/homebrew/bin` and `/usr/local/bin` (Homebrew,
   and npm's global bin for a Node from Homebrew or nodejs.org), `~/.npm-global/bin`, `~/.bun/bin` and `~/.volta/bin`
-  (inferred locations). On Windows it looks for `claude.exe`, `claude.cmd`, then `claude`. The settings page shows what
-  it found and where. Spawn the native binary directly. When the binary's directory is not on the `PATH`, it goes to the
-  end of the child's `PATH`: a `claude` that npm, Volta or Bun installed is `#!/usr/bin/env node`, with `node` beside it.
-  At the end, so that the user's own `node` and system tools still come first.
+  (inferred locations). The settings page shows what it found and where. Spawn the native binary directly. When the
+  binary's directory is not on the `PATH`, it goes to the end of the child's `PATH`: a `claude` that npm, Volta or Bun
+  installed is `#!/usr/bin/env node`, with `node` beside it. At the end, so that the user's own `node` and system tools
+  still come first.
+- Windows (CLI 2.1.319, probe run on `windows-latest`; the Windows spec `docs/superpowers/specs/2026-11-08-windows-support-design.md`
+  R1 to R5). There is no login shell: the environment is the IDE's own (the registry's user and system variables as the IDE
+  started), and the variable is `Path`, read under whatever name it has. The names are `claude.exe` then `claude.cmd`, never the
+  bare `claude`: npm writes `claude`, `claude.cmd` and `claude.ps1` into its prefix, and the bare one is a `#!/bin/sh` shim
+  that `CreateProcess` refuses with `error=193` (measured). The install locations are `%USERPROFILE%\.local\bin` (the native
+  installer's `claude.exe`, 345 MB; the installer does not put the folder on the `Path`, measured), `%USERPROFILE%\.claude\local`
+  and `%APPDATA%\npm` (npm's documented default prefix, `<home>\AppData\Roaming\npm` when `APPDATA` is empty; the runner's
+  own prefix was `C:\npm\prefix`). A `Path` entry loses the double quotes an installer may have written around it. The npm
+  package is not a Node script: it ships `node_modules\@anthropic-ai\claude-code\bin\claude.exe` and the three shims only
+  call it (measured), so a found `claude.cmd` is run as that `.exe` when it exists beside it; a `.cmd` without one runs as it
+  is, through the `cmd.exe` the JDK arranges (the process held is `cmd.exe`, with `claude.exe` and `conhost.exe` as children,
+  which a stop kills after closing stdin: `destroy()` is `TerminateProcess` there, measured). A saved path must end in an
+  extension of `PATHEXT` (`.COM;.EXE;.BAT;.CMD` when unset, compared ignoring case): `canExecute` is true for every file on
+  Windows (measured).
 
 ### 1.4 Startup sequence
 
@@ -1415,6 +1429,14 @@ where noted.
   cut to 200 characters: `/home/u/my proj.v2` gives `-home-u-my-proj-v2`, `C:\Users\dev\app` gives `C--Users-dev-app`.
 - The path is the CLI's physical working directory (`/private/tmp/…` for `/tmp/…` on macOS), so Tandem resolves the
   project path's links before computing the key, off the EDT.
+- On Windows the key carries the drive letter in the case the CLI's `process.cwd()` has it, which is the case its parent
+  gave it: CLI 2.1.319 started in `D:\a\tandem\tandem` wrote `projects\D--a-tandem-tandem` and names that folder in
+  `init.memory_paths.auto` (measured, probe run on `windows-latest`); its `init.additional_directories` spelt the same
+  directory `D:/a/tandem/tandem`, so a path from the CLI comes with either separator and Tandem compares through `Path`,
+  never strings. `toRealPath()` gives the drive letter upper-case; a lower-case `c:\…` from a shell would key as
+  `c--Users-dev-app`, which NTFS, ignoring case, opens as the same folder, and a `cwd` in other case is the project by
+  `Files.isSameFile`, as on macOS (inferred; the tester questions of the Windows spec, section 9). `user.home` is
+  `%USERPROFILE%` (measured), so the config directory is `%USERPROFILE%\.claude` unless `CLAUDE_CONFIG_DIR` says otherwise.
 - A key cut at 200 characters gets `-<hash>` appended, from the CLI's own hash, which Tandem does not reproduce. For such
   a project Tandem lists every folder whose name starts with the 200-character key and keeps the transcripts whose `cwd`
   is the project path (or that name none).
@@ -1430,7 +1452,10 @@ where noted.
   a 2.1.301 recording) and, per the SDK, subagent transcripts and tool results.
 - The file appears with the session's first prompt (section 1.1). A running CLI may be appending to it while Tandem
   reads: a last line the CLI is still writing is not a JSON object yet and is skipped.
-- Tandem watches the folders, so a session started elsewhere shows up within a few seconds on Linux and Windows. On
+- Tandem watches the folders, so a session started elsewhere shows up within a few seconds on Linux and Windows (the
+  JDK's `WatchService` is native on both: `inotify`, `ReadDirectoryChangesW`; on Windows it reports deletions too, measured
+  by `SessionIndexTest` on `windows-latest`, and a file another process holds open cannot be deleted there, so deleting a
+  session whose CLI is mid-write is the `IOException` the sidebar shows). On
   macOS the JDK's `WatchService` polls, by default every 10 s; Tandem registers the folders with the JDK's
   `SensitivityWatchEventModifier.HIGH` (looked up by name, since it is deprecated for removal), which makes it poll every
   2 s, so a session shows up within about 3 s there. A runtime without that modifier, or a watch service that rejects
