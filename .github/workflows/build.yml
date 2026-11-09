@@ -207,6 +207,9 @@ jobs:
       # Git Bash runs the wrapper script; the fake runs through fake-claude.cmd, which calls `python`, the runner image's Python 3.
       - name: Test
         shell: bash
+        # A step timeout fails the step and the uploads below run; the job's own timeout cancels the job and skips them (the run of
+        # 746e4b4 ended that way at 40 minutes with the thread dump written and never uploaded).
+        timeout-minutes: 30
         run: |
           # If the tests are still running after 20 minutes, something hangs: print the test JVM's threads into this log and into
           # build/hang-watch/, which the failure's test-ide-logs artifact collects (a lost runner uploads no log).

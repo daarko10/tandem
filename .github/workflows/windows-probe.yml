@@ -165,6 +165,9 @@ jobs:
       # produced no test result at all is tried again, up to eight times; a build that ran tests is final, red or green.
       - name: Tests
         shell: bash
+        # A step timeout fails the step and the steps below run, the artifact with the thread dump among them; the job's own
+        # timeout would cancel the job and skip them.
+        timeout-minutes: 30
         env:
           CI: "true"
         run: |
