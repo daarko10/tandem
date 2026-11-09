@@ -21,7 +21,8 @@ jobs:
   probe:
     name: Windows probe
     runs-on: windows-latest
-    timeout-minutes: 90
+    # Under the 50 minutes at which hung runs lost their hosted runner: a cancel here still uploads the thread dump below.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
@@ -167,6 +168,9 @@ jobs:
         env:
           CI: "true"
         run: |
+          # If the tests are still running after 20 minutes, something hangs: the test JVM's threads go into this log and into
+          # build/hang-watch/, which the artifact below collects whatever the outcome.
+          ( sleep 1200; mkdir -p build/hang-watch; for pid in $(jcmd -l | awk '/Gradle Test Executor/{print $1}'); do echo "::group::jstack $pid"; jstack "$pid" | tee "build/hang-watch/jstack-$pid.txt"; echo "::endgroup::"; done ) &
           status=1
           for i in $(seq 1 8); do
             status=0
@@ -202,6 +206,7 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/hang-watch
             probe-prompt.ndjson
             probe-prompt.stderr
           if-no-files-found: ignore

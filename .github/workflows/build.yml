@@ -184,7 +184,8 @@ jobs:
     needs: [ changes ]
     if: needs.changes.outputs.gradle == 'true'
     runs-on: windows-latest
-    timeout-minutes: 60
+    # Under the 50 minutes at which six hung runs lost their hosted runner (nothing uploaded): a cancel here still runs the uploads.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
@@ -210,13 +211,13 @@ jobs:
             | sort -u | head -n 40 \
             | while IFS= read -r line; do echo "::error title=Build (Windows)::${line}"; done
       - name: Upload test reports
-        if: ${{ failure() }}
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: test-reports-windows
           path: ./build/reports/tests
       - name: Upload test IDE logs
-        if: ${{ failure() }}
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: test-ide-logs-windows

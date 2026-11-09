@@ -229,6 +229,10 @@ tasks {
         // and lifecycle method; the JUnit 4 classes are pure decoders, except ClaudeSessionTest, which carries its own rule.
         systemProperty("junit.jupiter.execution.timeout.default", "5m")
         systemProperty("junit.jupiter.execution.timeout.threaddump.enabled", "true")
+        // In its default mode the timeout only interrupts the test's thread, which ends no native pipe read and no other wait that
+        // ignores interrupts (the probe of 042c02d lost its runner with the timeout in place); in a separate thread the test is
+        // failed and the suite goes on while the stuck thread stays parked. The JUnit 4 Timeout rule has always done the same.
+        systemProperty("junit.jupiter.execution.timeout.thread.mode.default", "separate_thread")
         // On CI, name each test as it starts, so a test that hangs (as one did on macOS) is the last name in the log.
         if (providers.environmentVariable("CI").isPresent) testLogging { events("started", "skipped", "failed") }
     }
