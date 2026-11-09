@@ -193,6 +193,23 @@ jobs:
           distribution: zulu
           java-version: 21
       - uses: gradle/actions/setup-gradle@v6
+      # A pull request's job has no Gradle cache to restore, so the wrapper downloads the distribution every run: fetched with retries,
+      # as the probe does, since services.gradle.org and the GitHub release behind it have timed out for an hour at a time.
+      # (b) The whole unit, fixture and platform suite (what `gradlew test` runs), failing the job on red. --continue: every class
+      # runs and the report is uploaded whatever is red.
+      # The wrapper's own download of the distribution times out after 10 s with no retry (gradle-wrapper.properties), and four
+      # runs in a row died there before a single test started (a timeout, then 504s from the GitHub release that
+      # services.gradle.org redirects to). Fetch it first, up to 24 times 30 s apart, so an outage costs minutes and not the run.
+      - name: Fetch the Gradle distribution
+        shell: bash
+        run: |
+          for i in $(seq 1 24); do
+            cmd //c "gradlew.bat --version --no-daemon" && exit 0
+            echo "attempt $i failed"; sleep 30
+          done
+          exit 1
+      # The same outage hit the build's own downloads (kotlin-compiler-embeddable from a GitHub release: 504), so a build that
+      # produced no test result at all is tried again, up to eight times; a build that ran tests is final, red or green.
       # Git Bash runs the wrapper script; the fake runs through fake-claude.cmd, which calls `python`, the runner image's Python 3.
       - name: Test
         shell: bash
