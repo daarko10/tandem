@@ -43,7 +43,9 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.Timeout
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -63,6 +65,11 @@ import kotlin.test.fail
 
 /** Runs [ClaudeSession] against a fake CLI (a Python snippet), so no real `claude` is needed. */
 class ClaudeSessionTest {
+    // A JUnit 4 class, so the test task's junit.jupiter timeout does not reach it: the same five minutes as a rule, since these
+    // tests wait on processes and could hang (the test's thread's stack goes into the report).
+    @get:Rule
+    val timeout: Timeout = Timeout.seconds(300)
+
     private val fixtures = File(System.getProperty("tandem.fixtures") ?: "src/test/resources/fixtures")
     private val tmp: Path = File(System.getProperty("java.io.tmpdir")).toPath()
     private val newSessionId = "11111111-1111-4111-8111-111111111111"

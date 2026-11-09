@@ -118,6 +118,7 @@ jobs:
           path: |
             ./.intellijPlatform/sandbox/*/*/log-test/
             ./build/test-gc.log*
+            ./build/hang-watch/
           include-hidden-files: true
           if-no-files-found: ignore
 
@@ -142,8 +143,9 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          # If the tests are still running after 20 minutes, something hangs: print the test JVM's threads into this log.
-          ( sleep 1200; for pid in $(pgrep -f 'Gradle Test Executor'); do echo "::group::jstack $pid"; jstack "$pid"; echo "::endgroup::"; done ) &
+          # If the tests are still running after 20 minutes, something hangs: print the test JVM's threads into this log and into
+          # build/hang-watch/, which the failure's test-ide-logs artifact collects (a lost runner uploads no log).
+          ( sleep 1200; mkdir -p build/hang-watch; for pid in $(pgrep -f 'Gradle Test Executor'); do echo "::group::jstack $pid"; jstack "$pid" | tee "build/hang-watch/jstack-$pid.txt"; echo "::endgroup::"; done ) &
           python3 --version && set -o pipefail && ./gradlew check 2>&1 | tee check.log
       - name: Report build problems
         if: ${{ failure() }}
@@ -168,6 +170,7 @@ jobs:
           path: |
             ./.intellijPlatform/sandbox/*/*/log-test/
             ./build/test-gc.log*
+            ./build/hang-watch/
           include-hidden-files: true
           if-no-files-found: ignore
 
@@ -193,8 +196,9 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          # If the tests are still running after 20 minutes, something hangs: print the test JVM's threads into this log.
-          ( sleep 1200; for pid in $(jcmd -l | awk '/Gradle Test Executor/{print $1}'); do echo "::group::jstack $pid"; jstack "$pid"; echo "::endgroup::"; done ) &
+          # If the tests are still running after 20 minutes, something hangs: print the test JVM's threads into this log and into
+          # build/hang-watch/, which the failure's test-ide-logs artifact collects (a lost runner uploads no log).
+          ( sleep 1200; mkdir -p build/hang-watch; for pid in $(jcmd -l | awk '/Gradle Test Executor/{print $1}'); do echo "::group::jstack $pid"; jstack "$pid" | tee "build/hang-watch/jstack-$pid.txt"; echo "::endgroup::"; done ) &
           python --version && set -o pipefail && ./gradlew check 2>&1 | tee check.log
       - name: Report build problems
         if: ${{ failure() }}
@@ -219,6 +223,7 @@ jobs:
           path: |
             ./.intellijPlatform/sandbox/*/*/log-test/
             ./build/test-gc.log*
+            ./build/hang-watch/
           include-hidden-files: true
           if-no-files-found: ignore
 
