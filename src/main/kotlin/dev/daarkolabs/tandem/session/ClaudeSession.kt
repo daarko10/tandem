@@ -1108,6 +1108,17 @@ class ClaudeSession(
             if (!p.waitFor(2, TimeUnit.SECONDS)) p.destroyForcibly().waitFor(2, TimeUnit.SECONDS)
         }
         children.filter { it.isAlive }.forEach { it.destroyForcibly() }
+        // A kill returns before the process is gone (TerminateProcess on Windows): wait for the listed descendants too, bounded, so
+        // that a close returns with the whole tree over. Until then a descendant whose parent has already exited is an orphan the
+        // JVM's process tree no longer reaches, still holding its working directory: on Windows that directory cannot be deleted
+        // (JUnit's temp directory in `SessionManagerTest`, `The process cannot access the file because it is being used by another
+        // process`), and a user who deletes a session's folder right after closing it would meet the same.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        for (child in children) {
+            val left = deadline - System.nanoTime()
+            if (left <= 0) break
+            runCatching { child.onExit().get(left, TimeUnit.NANOSECONDS) }
+        }
         LOG.info("claude stopped")
     }
 
