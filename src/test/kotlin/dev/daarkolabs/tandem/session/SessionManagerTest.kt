@@ -1520,7 +1520,9 @@ class SessionManagerTest {
             handle.status.first { it == SessionStatus.IDLE }
             process.script.println(Fixtures.lines("permission").first { "\"can_use_tool\"" in it })
             handle.status.first { it == SessionStatus.WAITING }
-            // The user looks at the request, which clears the attention it asked for, then at no session.
+            // The request asks for attention from the manager's own collector of the status, so wait for it: a select before it
+            // lands would be undone by it. The user looks at the request, which clears the attention, then at no session.
+            handle.attention.first { it }
             manager.select(handle.id)
             manager.select(null)
             assertFalse(handle.attention.value)
