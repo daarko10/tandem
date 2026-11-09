@@ -977,7 +977,7 @@ class ClaudeSession(
     private suspend fun readLoop(p: Process) {
         val reader = p.inputStream.bufferedReader(Charsets.UTF_8)
         while (true) {
-            val line = readOutput(p) { runInterruptible { reader.readLine() } } ?: return
+            val line = readOutput(p) { abandonable { reader.readLine() } } ?: return
             val at = clock()
             _lastFrameAtMillis.value = at
             if (line.isBlank()) continue
@@ -1033,9 +1033,7 @@ class ClaudeSession(
      * Tandem ended the process, or it is over within [CUT_OFF_GRACE_MILLIS], its output is over and the exit code tells the rest. A
      * failure while it runs on, and Tandem did not end it, is one, and is thrown.
      *
-     * Cancelling a read in [runInterruptible] interrupts the reading thread: a stream that can be interrupted then throws
-     * `InterruptedIOException`, an [IOException], and runInterruptible interrupts only once the cancellation has begun. While this is
-     * being cancelled, that, or any I/O failure, is the cancellation, never a failure to show.
+     * While this is being cancelled, an I/O failure of the read is the cancellation, never a failure to show.
      */
     private suspend fun <T> readOutput(p: Process, read: suspend () -> T): T? =
         try {
@@ -1044,6 +1042,16 @@ class ClaudeSession(
             currentCoroutineContext().ensureActive() // being cancelled: this is the cancellation, thrown as such
             if (stopping || runInterruptible { p.waitFor(CUT_OFF_GRACE_MILLIS, TimeUnit.MILLISECONDS) }) null else throw e
         }
+
+    /**
+     * Runs [read], a blocking read of one of [p]'s pipes, on a thread of [Dispatchers.IO] that a cancellation abandons rather than
+     * waits for. A read of a pipe can be neither interrupted nor closed from under it, and on Windows the JDK does not close the
+     * pipes when the process is destroyed (on Unix it does): a process the CLI started that still holds them, such as one spawned
+     * after the kill listed the descendants, would otherwise hold the cancel of the session's scope until it exits (a
+     * `cancelAndJoin` that never returned on `windows-latest`, `ClaudeSessionTest`'s scope-cancel test). The thread ends when the
+     * last holder of the pipe does; `Dispatchers.IO`'s threads are daemon threads.
+     */
+    private suspend fun <T> abandonable(read: () -> T): T = CompletableFuture.supplyAsync(read, Dispatchers.IO.asExecutor()).await()
 
     /**
      * Reads [p]'s stderr to its end into [stderrTail], on a thread of [Dispatchers.IO] that this waits for only until it is cancelled.
