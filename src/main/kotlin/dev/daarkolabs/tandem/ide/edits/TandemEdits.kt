@@ -6,6 +6,7 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import dev.daarkolabs.tandem.ide.TandemSessions
+import dev.daarkolabs.tandem.ide.cliConfigDir
 import dev.daarkolabs.tandem.protocol.PermissionMode
 import dev.daarkolabs.tandem.protocol.ToolReply
 import dev.daarkolabs.tandem.session.ChatState
@@ -69,6 +70,7 @@ internal interface EditSessions {
  * at a time ([EditQueue], [EditDiff]) and reports each call's review to its session as [SessionEvent.EditPhase] events. A call
  * applies without a diff when its session's mode is `acceptEdits` or `bypassPermissions`, or when `Accept all` was pressed in that
  * session during the turn ([acceptAll], which the session's chat confirms: its turn's `result` ends it); `plan` refuses every edit.
+ * One of the CLI's own files (under its config directory, [ownFiles]) applies without a diff in every mode, `plan` included.
  * A call the CLI withdraws (Stop) or whose session's process ends is decided `Stopped`, which closes its diff and sends no reply.
  */
 @Service(Service.Level.PROJECT)
@@ -88,6 +90,14 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
     @Volatile
     @set:TestOnly
     internal var presenter: DiffPresenter = EditDiff(project)
+
+    /**
+     * The CLI's config directory, under which its own files (its auto-memory, for one) are applied without a diff in every mode:
+     * [cliConfigDir] as the sessions see it, read when a path lies under no root (off the EDT: it may load the shell's environment).
+     */
+    @Volatile
+    @set:TestOnly
+    internal var ownFiles: () -> Path? = { cliConfigDir() }
 
     /** Orders the phase events of the calls with the queue's moves, so that a late `QUEUED` never follows an `OPEN` or `DONE`. */
     private val phaseLock = Any()
@@ -116,6 +126,7 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
                 review(proposal).also { reviewed.set(proposal to it) }
             },
             { session, text -> sessions.notice(session, text) },
+            ownFiles,
         )
         val reply = try {
             tools.call(call, auto, planMode = mode == PermissionMode.PLAN)
@@ -128,7 +139,8 @@ class TandemEdits(private val project: Project, private val scope: CoroutineScop
             decided != null -> done(call, outcomeOf(decided.first, decided.second, reply))
             // The review was entered but ended without a decision (the diff could not be opened): the row leaves OPEN.
             inReview.get() -> done(call, null)
-            auto != null && !reply.isError -> done(call, EditOutcome.AUTO)
+            // Applied with no review: the mode, `Accept all`, or one of the CLI's own files (every success without a review is one).
+            !reply.isError -> done(call, EditOutcome.AUTO)
         }
         return reply
     }

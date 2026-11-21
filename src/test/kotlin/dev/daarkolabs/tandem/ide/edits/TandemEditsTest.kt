@@ -271,6 +271,33 @@ class TandemEditsTest {
     }
 
     @Test
+    fun `one of the CLI's own files applies without a diff in every mode and its row reports auto`() = timeoutRunBlocking(30.seconds) {
+        val own = Files.createTempDirectory("tandem-own").toRealPath()
+        edits.ownFiles = { own }
+        try {
+            chats["s1"] = ChatState(permissionMode = PermissionMode.DEFAULT)
+            val memory = own.resolve("projects/-p/memory/notes.md")
+            Files.createDirectories(memory.parent)
+            Files.writeString(memory, HELLO)
+            val reply = start(editCall(memory, "t1")).await()
+            assertFalse(reply.isError, reply.text)
+            assertEquals("beta\nline two\n", Files.readString(memory))
+            assertEquals(listOf(EditReview("notes.md", EditPhase.DONE, EditOutcome.AUTO)), phases("t1"))
+            assertTrue(shows.isEmpty)
+
+            chats["s2"] = ChatState(permissionMode = PermissionMode.PLAN)
+            val other = memory.resolveSibling("more.md").also { Files.writeString(it, HELLO) }
+            val planned = start(editCall(other, "t2", "s2")).await()
+            assertFalse(planned.isError, planned.text)
+            assertEquals("beta\nline two\n", Files.readString(other))
+            assertEquals(listOf(EditReview("more.md", EditPhase.DONE, EditOutcome.AUTO)), phases("t2"))
+            assertTrue(shows.isEmpty)
+        } finally {
+            own.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `a diff that cannot be opened refuses the call, says so and lets the next one open`() = timeoutRunBlocking(30.seconds) {
         chats["s1"] = ChatState()
         failing["t1"] = IllegalStateException("the IDE opened no editor for it")

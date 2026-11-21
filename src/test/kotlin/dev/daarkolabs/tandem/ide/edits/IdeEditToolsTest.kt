@@ -64,8 +64,10 @@ class IdeEditToolsTest {
 
     private val notices = CopyOnWriteArrayList<Pair<SessionId, String>>()
     private var review: suspend (EditProposal) -> Decision = { Decision.Accepted(it.proposed, all = false) }
+    /** The CLI's config directory of this test, as [IdeEditTools.ownFiles] gives it: made by the tests that use it. */
+    private val own: Path by lazy { Files.createTempDirectory("tandem-own").toRealPath() }
     private val tools: IdeEditTools by lazy {
-        IdeEditTools(project, { emptyList() }, { review(it) }, { session, text -> notices += session to text })
+        IdeEditTools(project, { emptyList() }, { review(it) }, { session, text -> notices += session to text }, { own })
     }
 
     private fun write(name: String, text: String): Path {
@@ -251,6 +253,58 @@ class IdeEditToolsTest {
             tools.openFiles = { emptyList() }
             Files.deleteIfExists(outside)
             Files.deleteIfExists(outside.parent)
+        }
+    }
+
+    @Test
+    fun `one of the CLI's own files is created with its directories, without a review, in plan mode too`() {
+        review = { error("no review for ${it.path}") }
+        try {
+            val memory = own.resolve("projects/-Users-u-dev-p/memory/project-notes.md")
+            assertReply(EditResults.created(memory.toString(), "# Notes\n", changed = false), run(writeCall(memory, "# Notes\n")))
+            assertEquals("# Notes\n", Files.readString(memory))
+            val planned = own.resolve("projects/-Users-u-dev-p/memory/MEMORY.md")
+            assertReply(EditResults.created(planned.toString(), "- a\n", changed = false), run(writeCall(planned, "- a\n"), planMode = true))
+            assertEquals("- a\n", Files.readString(planned))
+        } finally {
+            own.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `an edit of one of the CLI's own files applies without a review and the reply says so`() {
+        review = { error("no review for ${it.path}") }
+        try {
+            val memory = own.resolve("projects/-p/memory/notes.md")
+            Files.createDirectories(memory.parent)
+            Files.writeString(memory, HELLO)
+            val reply = run(editCall(memory, "alpha", "beta"))
+            assertFalse(reply.isError, reply.text)
+            assertTrue(
+                reply.text.startsWith("Applied the edit to $memory and saved the file (a file of your own under your config directory: no review)."),
+                reply.text,
+            )
+            assertEquals("beta\nline two\n", Files.readString(memory))
+            val replaced = run(writeCall(memory, "gamma\n"), planMode = true)
+            assertReply(EditResults.replaced(memory.toString(), "gamma\n", "beta\nline two\n", changed = false), replaced)
+            assertEquals("gamma\n", Files.readString(memory))
+        } finally {
+            own.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a file beside the CLI's config directory is still outside`() {
+        val beside = Files.createTempDirectory("tandem-own-beside").toRealPath().resolve("notes.md")
+        try {
+            assertReply(EditResults.outside(beside.toString()), run(writeCall(beside, "x")))
+            assertFalse(Files.exists(beside))
+            val prefixed = Path.of(own.toString() + "-not/notes.md")
+            assertReply(EditResults.outside(prefixed.toString()), run(writeCall(prefixed, "x")))
+            assertFalse(Files.exists(prefixed))
+        } finally {
+            Files.deleteIfExists(beside.parent)
+            own.toFile().deleteRecursively()
         }
     }
 
