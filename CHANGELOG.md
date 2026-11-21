@@ -4,6 +4,8 @@ All notable changes to Tandem. The newest version's section becomes the plugin's
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-21
+
 ### Fixed
 - Claude's own memory works again: the CLI writes its auto-memory (`~/.claude/projects/<key>/memory/`, or under
   `$CLAUDE_CONFIG_DIR`) through Tandem's edit tools, and Tandem refused those files as outside the project. Files under the
