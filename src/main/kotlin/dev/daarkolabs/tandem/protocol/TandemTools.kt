@@ -48,7 +48,7 @@ object TandemTools {
                 putJsonObject("properties") {
                     putJsonObject("file_path") {
                         put("type", "string")
-                        put("description", "Absolute path, inside the project or an added folder")
+                        put("description", "Absolute path, inside the project or an added folder, or one of your own files under your config directory")
                     }
                     putJsonObject("old_string") { put("type", "string") }
                     putJsonObject("new_string") { put("type", "string") }

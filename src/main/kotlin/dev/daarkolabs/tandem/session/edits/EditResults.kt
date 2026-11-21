@@ -2,8 +2,11 @@ package dev.daarkolabs.tandem.session.edits
 
 import dev.daarkolabs.tandem.protocol.ToolReply
 
-/** How an applied edit was accepted (spec 4.3): in the diff as proposed, in the diff after a hand change, by the mode, by `Accept all`. */
-enum class AcceptMode { USER, USER_CHANGED, AUTO_MODE, ACCEPT_ALL }
+/**
+ * How an applied edit was accepted (spec 4.3): in the diff as proposed, in the diff after a hand change, by the mode, by `Accept all`,
+ * or without any review because the file is one of the CLI's own ([OWN]: under its config directory, such as its auto-memory).
+ */
+enum class AcceptMode { USER, USER_CHANGED, AUTO_MODE, ACCEPT_ALL, OWN }
 
 /**
  * The texts the model gets from Tandem's tools: every row of spec 4.3's table, verbatim. `path` is the absolute path as the model gave
@@ -48,6 +51,7 @@ object EditResults {
             val head = when (mode) {
                 AcceptMode.AUTO_MODE -> "Applied the edit to $path and saved the file (auto-accepted by the user's mode)."
                 AcceptMode.ACCEPT_ALL -> "Applied the edit to $path and saved the file (accepted with Accept all)."
+                AcceptMode.OWN -> "Applied the edit to $path and saved the file (a file of your own under your config directory: no review)."
                 else -> "Applied the edit to $path and saved the file."
             }
             val middle = if (whole) {
@@ -94,7 +98,10 @@ object EditResults {
     fun directory(path: String): ToolReply = error("$path is a directory.")
 
     fun outside(path: String): ToolReply =
-        error("$path is outside the project, its added folders and the files open in the editor; Tandem edits files there only.")
+        error(
+            "$path is outside the project, its added folders, the files open in the editor and your own files under your config " +
+                "directory; Tandem edits files there only.",
+        )
 
     fun binary(path: String): ToolReply = error("$path is a binary file; Tandem edits text files only.")
 

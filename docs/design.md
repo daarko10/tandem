@@ -167,7 +167,12 @@ Key choices:
    the answer carries the file as it now is, hand changes included. In `acceptEdits` and `bypassPermissions`, or after Accept
    all (for the rest of the turn), edits apply without a diff, and the checks (the project's folders and the files open in an
    editor, binary, size, plan mode) never widen. A file open in an editor tab counts as part of the workspace, wherever it
-   lives: one opened from outside the project (File | Open) is listed by `@` by its absolute path and can be edited. Pending edits queue one diff at a time across the project's sessions; the chat rows say where each is, and
+   lives: one opened from outside the project (File | Open) is listed by `@` by its absolute path and can be edited. The CLI's
+   own files are the one exception to the diff: with its built-in `Write` off, the CLI writes its auto-memory
+   (`<config>/projects/<key>/memory/`) and anything else under its config directory (`$CLAUDE_CONFIG_DIR`, else `~/.claude`)
+   through Tandem's tools, and those are no edit of the user's workspace, so they apply at once in every mode, plan included,
+   with a row in the chat and the reply `(a file of your own under your config directory: no review)`; through 0.5.0 Tandem
+   refused them as outside the project, which broke the CLI's memory. Pending edits queue one diff at a time across the project's sessions; the chat rows say where each is, and
    Stop withdraws a waiting call. A CLI that did not take the server shows the notice `Edits are off in this session`. `@` in
    the composer opens a file palette that inserts the CLI's own `@path` mention (a file with unsaved changes goes as a text
    block of the editor's buffer instead), and the editor's selection travels with the prompt as a chip the user can remove.

@@ -13,7 +13,8 @@ import java.nio.file.Path
  * document's text when the proposal was built; empty for a new file), the [proposed] text on the right, the matched [ranges] in
  * [original] (empty for `write_file`), whether the file [isNew] and the [tool]'s name. [markers] follow [ranges] in the live
  * document while the diff is open (spec 3.1), read by [IdeEditTools.apply] inside the write command. [outside]: the path lies under
- * no root and was admitted because the file is open in an editor.
+ * no root and was admitted because the file is open in an editor. [own]: the file is one of the CLI's own, under its config
+ * directory (its auto-memory, for one): applied without a diff in every mode, since it is no edit of the user's workspace.
  */
 data class EditProposal(
     val call: ToolCall,
@@ -27,15 +28,16 @@ data class EditProposal(
     val tool: String,
     val markers: List<RangeMarker> = emptyList(),
     val outside: Boolean = false,
+    val own: Boolean = false,
 ) {
     /** The file's name, as the write command and the notices show it. */
     val fileName: String get() = path.fileName?.toString() ?: path.toString()
 
     /**
      * The file as the diff names it: its [fileName], or its whole [path] when it is [outside] the roots (an open editor's file from
-     * elsewhere, which the rule of spec 4.3 admits), so it never reads as a project file.
+     * elsewhere, which the rule of spec 4.3 admits) or one of the CLI's [own], so it never reads as a project file.
      */
-    val shownName: String get() = if (outside) path.toString() else fileName
+    val shownName: String get() = if (outside || own) path.toString() else fileName
 
     /** The path as the model gave it: what the result texts quote (spec 4.3). */
     val givenPath: String get() = (call.arguments["file_path"] as? JsonPrimitive)?.content ?: path.toString()

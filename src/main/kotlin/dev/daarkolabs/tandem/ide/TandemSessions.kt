@@ -75,7 +75,7 @@ class TandemSessions(private val project: Project, private val scope: CoroutineS
     private val projectPath: Lazy<String> = lazy { physical(directory).toString() }
 
     /** Where the CLI keeps its transcript folders, one per project. Read off the EDT, like [projectPath]. */
-    private val projectsDir: Lazy<Path> = lazy { TranscriptFolder.projectsDir(configDir()) }
+    private val projectsDir: Lazy<Path> = lazy { TranscriptFolder.projectsDir(cliConfigDir()) }
 
     private val index: SessionIndex =
         SessionIndex({ TranscriptFolder.candidates(projectsDir.value, projectPath.value) }, { projectPath.value })
@@ -314,9 +314,10 @@ private fun physical(path: Path): Path =
 /**
  * The `tandem.configDir` test hook when it is set, else the CLI's config directory ([TranscriptFolder.configDir]) as the CLI sees it:
  * from the login shell's environment, which sessions start with, since a `CLAUDE_CONFIG_DIR` may be exported only in the shell
- * profile. May block while the platform loads that environment: call off the EDT.
+ * profile. May block while the platform loads that environment: call off the EDT. The transcripts are read under it, and the edit
+ * tools apply the CLI's own files under it without a diff (`TandemEdits.ownFiles`).
  */
-private fun configDir(): Path =
+internal fun cliConfigDir(): Path =
     System.getProperty(CONFIG_DIR_PROPERTY)?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
         ?: TranscriptFolder.configDir(ShellEnvironment.get())
 

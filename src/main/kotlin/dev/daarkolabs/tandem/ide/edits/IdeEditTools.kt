@@ -43,33 +43,39 @@ import java.nio.file.Path
  * Tandem's `edit_file` and `write_file` in the IDE (spec 4.3): checks the call, builds the [EditProposal], has it reviewed ([review],
  * the diff) unless an auto-accept mode applies, and applies the accepted text to the file's `Document` in one write command, saved to
  * disk before the reply is returned (spec 3.2). Paths must resolve, after `toRealPath()`, under the project's base path or one of the
- * session's added folders ([roots]), or to a file open in an editor ([openFiles]), wherever it lives. Every failure the user did not
- * choose is told in the session's chat through [notify] (`Could not apply the edit to <file>: <reason>`, hard rule 5). Only the write
- * command and the save run on the EDT; the file lookup and the matching run on `Dispatchers.IO`, the result text on
- * `Dispatchers.Default`.
+ * session's added folders ([roots]), under the CLI's own config directory ([ownFiles]: the CLI writes its auto-memory and the rest
+ * of its own files there through these tools too, since its built-in `Write` is off; they are applied without a diff in every
+ * mode, as they are no edit of the user's workspace), or to a file open in an editor ([openFiles]), wherever it lives. Every
+ * failure the user did not choose is told in the session's chat through [notify] (`Could not apply the edit to <file>: <reason>`,
+ * hard rule 5). Only the write command and the save run on the EDT; the file lookup and the matching run on `Dispatchers.IO`, the
+ * result text on `Dispatchers.Default`.
  */
 class IdeEditTools(
     private val project: Project,
     private val roots: (SessionId) -> List<Path>,
     private val review: suspend (EditProposal) -> Decision,
     private val notify: (SessionId, String) -> Unit,
+    private val ownFiles: () -> Path? = { null },
 ) {
+    /** Where a path resolved: under a root, under the CLI's own config directory, or to a file open in an editor outside both. */
+    private enum class Where { ROOT, OWN, OPEN }
+
     /**
      * Answers [call]: the checks, the proposal, then [autoAccept] (the mode or `Accept all` applied: no diff) or [review], then
-     * [apply]. [planMode] refuses every edit (spec 7.9). A [Decision.Stopped] review throws a [CancellationException]: the CLI
-     * withdrew the call and no reply is sent.
+     * [apply]. [planMode] refuses every edit (spec 7.9) but one of the CLI's own files, which no mode reviews. A [Decision.Stopped]
+     * review throws a [CancellationException]: the CLI withdrew the call and no reply is sent.
      */
     suspend fun call(call: ToolCall, autoAccept: AcceptMode?, planMode: Boolean = false): ToolReply {
         LOG.debug { "tools/call ${call.name} request ${call.requestId} tool use ${call.toolUseId}" }
         val args = parse(call) ?: return EditResults.malformed(call.name)
-        if (planMode) return EditResults.planMode()
+        if (planMode && !isOwn(args.filePath, call.session)) return EditResults.planMode()
         if (args is Args.Edit && EditMatcher.normalizeNewlines(args.oldString) == EditMatcher.normalizeNewlines(args.newString)) {
             return EditResults.same()
         }
         return try {
             when (val checked = propose(call, args)) {
                 is Checked.Refusal -> checked.reply
-                is Checked.Ready -> decide(checked.proposal, autoAccept)
+                is Checked.Ready -> decide(checked.proposal, if (checked.proposal.own) AcceptMode.OWN else autoAccept)
             }
         } catch (e: CancellationException) {
             throw e
@@ -253,12 +259,14 @@ class IdeEditTools(
             val size = args.content.toByteArray(Charsets.UTF_8).size.toLong()
             if (size > MAX_CONTENT_BYTES) return@withContext Checked.Refusal(EditResults.tooLarge(given, StringUtil.formatFileSize(size)))
         }
-        val (path, outside) = resolve(given, call.session) ?: return@withContext Checked.Refusal(EditResults.outside(given))
+        val (path, where) = resolve(given, call.session) ?: return@withContext Checked.Refusal(EditResults.outside(given))
+        val outside = where == Where.OPEN
+        val own = where == Where.OWN
         if (Files.isDirectory(path)) return@withContext Checked.Refusal(EditResults.directory(given))
         if (!Files.exists(path)) {
             return@withContext when (args) {
                 is Args.Edit -> Checked.Refusal(EditResults.missing(given))
-                is Args.Write -> newFile(call, path, args)
+                is Args.Write -> newFile(call, path, args, own)
             }
         }
         val file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path)
@@ -269,19 +277,21 @@ class IdeEditTools(
             return@withContext Checked.Refusal(EditResults.tooLarge(given, StringUtil.formatFileSize(file.length)))
         }
         if (isBinary(file, path)) return@withContext Checked.Refusal(EditResults.binary(given))
-        readAction { existingFile(call, path, file, args, outside) }
+        readAction { existingFile(call, path, file, args, outside, own) }
     }
 
-    private fun newFile(call: ToolCall, path: Path, args: Args.Write): Checked {
+    private fun newFile(call: ToolCall, path: Path, args: Args.Write, own: Boolean): Checked {
         val type = FileTypeRegistry.getInstance().getFileTypeByFileName(path.fileName.toString())
         val binary = if (type == UnknownFileType.INSTANCE) '\u0000' in args.content.take(BINARY_PROBE_BYTES) else type.isBinary
         if (binary) return Checked.Refusal(EditResults.binary(args.filePath))
         val proposed = EditMatcher.normalizeNewlines(args.content)
-        return Checked.Ready(EditProposal(call, null, path, null, "", proposed, emptyList(), isNew = true, tool = TandemTools.WRITE_FILE))
+        return Checked.Ready(
+            EditProposal(call, null, path, null, "", proposed, emptyList(), isNew = true, tool = TandemTools.WRITE_FILE, own = own),
+        )
     }
 
     /** In a read action: the document, the match and its range markers, or the refusal. */
-    private fun existingFile(call: ToolCall, path: Path, file: VirtualFile, args: Args, outside: Boolean): Checked {
+    private fun existingFile(call: ToolCall, path: Path, file: VirtualFile, args: Args, outside: Boolean, own: Boolean): Checked {
         val document: Document = FileDocumentManager.getInstance().getDocument(file)
             ?: return Checked.Refusal(EditResults.binary(args.filePath))
         val text = document.immutableCharSequence.toString()
@@ -289,7 +299,7 @@ class IdeEditTools(
             is Args.Write -> Checked.Ready(
                 EditProposal(
                     call, file, path, document, text, EditMatcher.normalizeNewlines(args.content), emptyList(), false, TandemTools.WRITE_FILE,
-                    outside = outside,
+                    outside = outside, own = own,
                 ),
             )
             is Args.Edit -> when (val match = EditMatcher.match(text, args.oldString, args.replaceAll)) {
@@ -299,7 +309,7 @@ class IdeEditTools(
                     val markers = match.ranges.map { document.createRangeMarker(it.first, it.last + 1) }
                     val proposed = EditMatcher.apply(text, match, args.newString)
                     Checked.Ready(
-                        EditProposal(call, file, path, document, text, proposed, match.ranges, false, TandemTools.EDIT_FILE, markers, outside),
+                        EditProposal(call, file, path, document, text, proposed, match.ranges, false, TandemTools.EDIT_FILE, markers, outside, own),
                     )
                 }
             }
@@ -307,11 +317,12 @@ class IdeEditTools(
     }
 
     /**
-     * [given] as a real path under one of the roots (the project's base path, the session's added folders), or, outside them, the
-     * real path of a file open in an editor (spec 4.3: a file open in an editor tab counts as part of the workspace, wherever it
-     * lives), with whether it is that outside one; null for any other path.
+     * [given] as a real path under one of the roots (the project's base path, the session's added folders), else under the CLI's
+     * own config directory ([ownFiles]; it need not exist yet), else, outside them, the real path of a file open in an editor
+     * (spec 4.3: a file open in an editor tab counts as part of the workspace, wherever it lives), with [Where] it was found;
+     * null for any other path.
      */
-    private suspend fun resolve(given: String, session: SessionId): Pair<Path, Boolean>? {
+    private suspend fun resolve(given: String, session: SessionId): Pair<Path, Where>? {
         val raw = try {
             Path.of(given)
         } catch (_: InvalidPathException) {
@@ -321,10 +332,16 @@ class IdeEditTools(
         val real = realPath(raw.normalize()) ?: return null
         val rootPaths = (listOfNotNull(project.basePath?.let { Path.of(it) }) + roots(session))
             .mapNotNull { runCatching { it.toRealPath() }.getOrNull() }
-        if (rootPaths.any { real.startsWith(it) }) return real to false
+        if (rootPaths.any { real.startsWith(it) }) return real to Where.ROOT
+        val own = ownFiles()?.takeIf { it.isAbsolute }?.let { realPath(it.normalize()) }
+        if (own != null && real.startsWith(own)) return real to Where.OWN
         val open = readAction { openFiles().filter { it.isInLocalFileSystem && !it.isDirectory }.map { it.path } }
-        return if (open.any { realPathOf(it) == real }) real to true else null
+        return if (open.any { realPathOf(it) == real }) real to Where.OPEN else null
     }
+
+    /** Whether [given] is one of the CLI's own files (the [Where.OWN] rule of [resolve]), which plan mode does not refuse. */
+    private suspend fun isOwn(given: String, session: SessionId): Boolean =
+        withContext(Dispatchers.IO) { resolve(given, session)?.second == Where.OWN }
 
     /** The real path of the open editor's file at the VFS path [vfsPath], or null when it is gone or cannot be read. */
     private fun realPathOf(vfsPath: String): Path? = try {
